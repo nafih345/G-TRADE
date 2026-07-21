@@ -6,8 +6,8 @@
       "destination": "https://g-trade-backend.vercel.app/api/:path*"
     },
     {
-      "source": "/(.*)",
-      "destination": "/$1"
+      "source": "/((?!api/).*)",
+      "destination": "/index.html"
     }
   ]
 }
