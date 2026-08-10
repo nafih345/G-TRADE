@@ -61,17 +61,88 @@ export default function Settings() {
     }
   });
 
+  const [doctorsList, setDoctorsList] = useState([]);
+
+  useEffect(() => {
+    const loadDocs = () => {
+      try {
+        const saved = JSON.parse(localStorage.getItem('optical_doctors_db') || '[]');
+        setDoctorsList(saved.filter(d => d.status === 'Active'));
+      } catch (e) {}
+    };
+    loadDocs();
+    window.addEventListener('optical_doctors_updated', loadDocs);
+    return () => window.removeEventListener('optical_doctors_updated', loadDocs);
+  }, []);
+
+  // Fetch Company Settings from Backend Database API on Mount
+  useEffect(() => {
+    const fetchCompanySettings = async () => {
+      try {
+        const res = await axios.get('/api/company/profile/');
+        if (res.data && Array.isArray(res.data) && res.data.length > 0) {
+          const profile = res.data[0];
+          setSettings(prev => ({
+            ...prev,
+            storeName: profile.name || prev.storeName,
+            storePhone: profile.phone || prev.storePhone,
+            storeEmail: profile.email || prev.storeEmail,
+            address: profile.address || prev.address,
+            gstin: profile.gstin || prev.gstin,
+            currency: profile.currency || prev.currency
+          }));
+        }
+      } catch (e) {}
+    };
+    fetchCompanySettings();
+  }, []);
+
   const [savedAlert, setSavedAlert] = useState(false);
 
-  const handleSaveSettings = () => {
+  // Save Settings Handler (Database API Sync)
+  const handleSaveSettings = async () => {
+    // 1. Save locally
     try {
       localStorage.setItem('optical_app_settings', JSON.stringify(settings));
-      setSavedAlert(true);
-      setTimeout(() => setSavedAlert(false), 4000);
-    } catch (e) {
-      alert("Settings saved successfully!");
-    }
+    } catch (e) {}
+
+    // 2. Synchronize Main Branch in Administration & Header with updated store details
+    try {
+      const savedBranches = JSON.parse(localStorage.getItem('optical_branches') || '[]');
+      const updatedBranches = savedBranches.map(b => {
+        if (b.id === 'main' || b.name === 'Main Branch') {
+          return {
+            ...b,
+            phone: settings.storePhone || b.phone || '—',
+            email: settings.storeEmail || b.email || '—',
+            gstin: settings.gstin || b.gstin || '—',
+            address: settings.address || b.address || '—'
+          };
+        }
+        return b;
+      });
+      localStorage.setItem('optical_branches', JSON.stringify(updatedBranches));
+      window.dispatchEvent(new Event('optical_branches_updated'));
+    } catch (e) {}
+
+    // 3. Save to Backend Database API
+    try {
+      await axios.post('/api/company/profile/', {
+        name: settings.storeName || 'Main Optical Store',
+        email: settings.storeEmail,
+        phone: settings.storePhone,
+        gstin: settings.gstin,
+        address: settings.address,
+        currency: settings.currency || '₹',
+        fiscal_year_start: '2026-04-01',
+        fiscal_year_end: '2027-03-31'
+      });
+    } catch (e) {}
+
+    setSavedAlert(true);
+    setTimeout(() => setSavedAlert(false), 4000);
   };
+
 
   return (
     <Box sx={{ p: 4, pb: 8 }}>
@@ -309,11 +380,19 @@ export default function Settings() {
           <Grid container spacing={2}>
             <Grid item xs={12} sm={6}>
               <TextField 
+                select 
                 label="Default Attending Optometrist Doctor" 
                 fullWidth 
-                value={settings.defaultDoctor}
+                value={settings.defaultDoctor || ''}
                 onChange={(e) => setSettings({ ...settings, defaultDoctor: e.target.value })}
-              />
+              >
+                <MenuItem value="">-- Select Default Doctor --</MenuItem>
+                {doctorsList.map(doc => (
+                  <MenuItem key={doc.id || doc.name} value={doc.name}>
+                    {doc.name} ({doc.qualification || 'Optometrist'})
+                  </MenuItem>
+                ))}
+              </TextField>
             </Grid>
             <Grid item xs={12} sm={6}>
               <TextField 

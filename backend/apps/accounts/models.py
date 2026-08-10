@@ -10,12 +10,21 @@ class Account(BaseUUIDModel):
         ('EXPENSE', 'Expense'),
     ]
 
-    name = models.CharField(max_length=150)
+    STATUS_CHOICES = [
+        ('ACTIVE', 'Active'),
+        ('INACTIVE', 'Inactive'),
+    ]
+
     code = models.CharField(max_length=50, unique=True)
+    name = models.CharField(max_length=150)
     account_type = models.CharField(max_length=20, choices=ACCOUNT_TYPES)
+    account_group = models.CharField(max_length=100, blank=True, null=True)
     parent = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, related_name='children')
-    description = models.TextField(blank=True, null=True)
+    opening_balance = models.DecimalField(max_digits=15, decimal_places=2, default=0.0)
     balance = models.DecimalField(max_digits=15, decimal_places=2, default=0.0)
+    branch_name = models.CharField(max_length=100, default='Main Branch')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='ACTIVE')
+    description = models.TextField(blank=True, null=True)
 
     def __str__(self):
         return f"{self.code} - {self.name}"

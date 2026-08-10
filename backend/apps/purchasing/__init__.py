@@ -1,1 +1,1 @@
-# Supplier management and purchase ordering app
+default_app_config = 'apps.purchasing.apps.PurchasingConfig'

@@ -16,6 +16,87 @@ body {
   background-color: #f8fafc;
   color: #0f172a;
   overflow-x: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+}
+
+/* ---------------------------------------------------- */
+/* Strict Cursor Control Rules                          */
+/* ---------------------------------------------------- */
+
+/* 1. Default arrow cursor for general layout containers */
+*, *::before, *::after {
+  cursor: default;
+}
+
+/* 2. Pointer cursor for clickable buttons, links, controls, chips, tabs */
+a, 
+button, 
+[role="button"], 
+input[type="button"], 
+input[type="submit"], 
+input[type="reset"],
+input[type="checkbox"],
+input[type="radio"],
+.MuiButtonBase-root, 
+.MuiButton-root, 
+.MuiIconButton-root, 
+.MuiChip-root,
+.MuiTab-root, 
+.MuiMenuItem-root, 
+.MuiListItemButton-root, 
+.MuiCheckbox-root,
+.MuiRadio-root, 
+.MuiSwitch-root, 
+.MuiSelect-select, 
+.MuiTableSortLabel-root,
+.MuiAccordionSummary-root,
+label {
+  cursor: pointer !important;
+}
+
+/* 3. Text I-Beam cursor strictly ONLY for editable inputs & textareas */
+input[type="text"],
+input[type="number"],
+input[type="password"],
+input[type="email"],
+input[type="tel"],
+input[type="search"],
+input[type="url"],
+input[type="date"],
+input[type="time"],
+input[type="datetime-local"],
+textarea,
+[contenteditable="true"],
+.MuiInputBase-input,
+.MuiOutlinedInput-input,
+.MuiInput-input {
+  cursor: text !important;
+  user-select: text !important;
+}
+
+/* 4. Prevent text selection carets when clicking headings, cards, tables & UI controls */
+.MuiButtonBase-root, 
+.MuiCard-root, 
+.MuiPaper-root, 
+.MuiTableCell-head, 
+.MuiChip-root, 
+.MuiTab-root, 
+.MuiMenuItem-root, 
+.MuiTypography-root,
+.MuiTableHead-root,
+.MuiTableSortLabel-root,
+.MuiBox-root {
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+}
+
+/* Allow text selection inside table body cells for copy-pasting values if needed */
+.MuiTableCell-body {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 /* Custom Scrollbar for premium feel */
@@ -78,10 +159,12 @@ body {
   body * {
     visibility: hidden;
   }
-  #prescription-print-area, #prescription-print-area * {
-    visibility: visible;
+  #prescription-print-area, #prescription-print-area *,
+  #sales-invoice-print-area, #sales-invoice-print-area * {
+    visibility: visible !important;
   }
-  #prescription-print-area {
+  #prescription-print-area,
+  #sales-invoice-print-area {
     position: absolute;
     left: 0;
     top: 0;
@@ -91,10 +174,12 @@ body {
     padding: 20px !important;
     box-shadow: none !important;
     border: none !important;
+    z-index: 999999 !important;
   }
-  /* Disable page headers/footers default margins if possible */
+  .no-print {
+    display: none !important;
+  }
   @page {
-    margin: 1.5cm;
+    margin: 1cm;
   }
 }
-

@@ -2,12 +2,11 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { 
-  Box, Card, CardContent, Typography, Grid, TextField, 
-  Button, MenuItem, Tabs, Tab, Table, TableBody, 
-  TableCell, TableContainer, TableHead, TableRow, Paper, 
-  Divider, Stack, Checkbox, FormControlLabel, FormGroup, 
-  Chip, Autocomplete, Tooltip, Alert, Accordion, AccordionSummary, AccordionDetails,
-  InputAdornment
+  Box, Card, Typography, Grid, TextField, Button, 
+  MenuItem, Table, TableBody, TableCell, TableContainer, 
+  TableHead, TableRow, Paper, Divider, Stack, Chip, 
+  IconButton, Tooltip, Alert, Dialog, DialogTitle, 
+  DialogContent, DialogActions 
 } from '@mui/material';
 import { 
   Visibility as EyeIcon, 
@@ -15,1439 +14,1029 @@ import {
   AssignmentTurnedIn as SaveIcon,
   NavigateNext as NextIcon,
   NavigateBefore as BackIcon,
+  Search as SearchIcon,
+  PersonAdd as AddPersonIcon,
+  CompareArrows as CompareIcon,
   History as HistoryIcon,
-  Healing as HealthIcon,
-  ContactPage as ContactIcon,
-  LocalShippingOutlined as RecommendationIcon,
-  ExpandMore as ExpandMoreIcon,
-  Warning as WarningIcon,
-  Search as SearchIcon
+  Keyboard as KeyboardIcon,
+  ShoppingCartOutlined as SalesIcon,
+  MedicalServices as MedicalIcon
 } from '@mui/icons-material';
 
-const chiefComplaints = [
-  'Blurred Distance Vision', 'Blurred Near Vision', 'Headache', 'Eye Strain', 
-  'Redness', 'Watering Eyes', 'Itching', 'Burning Sensation', 
-  'Double Vision', 'Light Sensitivity', 'Broken Glasses', 'Contact Lens Problem', 'Routine Check-up'
-];
-
-const normalSevereOptions = ['Normal', 'Mild', 'Moderate', 'Severe'];
+// Import Optical Sub-components
+import ExaminationStepper, { stepsList } from '../components/optical/ExaminationStepper';
+import ExaminationSummarySidebar from '../components/optical/ExaminationSummarySidebar';
+import PatientSearchModal from '../components/optical/PatientSearchModal';
+import RxCompareModal from '../components/optical/RxCompareModal';
+import PrintPrescriptionCard from '../components/optical/PrintPrescriptionCard';
+import Step1PatientInfo from '../components/optical/Step1PatientInfo';
+import Step2MedicalHistory from '../components/optical/Step2MedicalHistory';
+import Step3VisualAcuity from '../components/optical/Step3VisualAcuity';
+import Step4ObjectiveRefraction from '../components/optical/Step4ObjectiveRefraction';
+import Step5SubjectiveRefraction from '../components/optical/Step5SubjectiveRefraction';
+import Step6BinocularVision from '../components/optical/Step6BinocularVision';
+import Step7EyeHealth from '../components/optical/Step7EyeHealth';
+import Step8Diagnosis from '../components/optical/Step8Diagnosis';
+import Step9Prescription from '../components/optical/Step9Prescription';
+import SingleScreenEyeTestForm from '../components/optical/SingleScreenEyeTestForm';
 
 export default function OpticalServices() {
+  const navigate = useNavigate();
   const location = useLocation();
-  const [viewMode, setViewMode] = useState('list'); // 'list' or 'form'
-  const [testPatients, setTestPatients] = useState([]);
 
-  const [searchQuery, setSearchQuery] = useState('');
-  const [filterBranch, setFilterBranch] = useState('All');
-  const [filterOptometrist, setFilterOptometrist] = useState('All');
-
+  const [layoutMode, setLayoutMode] = useState('single'); // 'single' (Image 3 ERP view) or 'wizard'
+  const [viewMode, setViewMode] = useState('form'); // 'form' or 'list'
   const [activeStep, setActiveStep] = useState(0);
+
+  // Modals state
+  const [searchModalOpen, setSearchModalOpen] = useState(false);
+  const [compareModalOpen, setCompareModalOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+
+  // Database Integration State
+  const [pastExaminations, setPastExaminations] = useState([]);
+  const [dbPatients, setDbPatients] = useState([]);
+  const [doctorsList, setDoctorsList] = useState([]);
+
+  // Core Examination State
   const [patientData, setPatientData] = useState({
-    id: `P-${Math.floor(1000 + Math.random() * 9000)}`, 
-    name: '', 
-    age: '', 
-    gender: 'Male', 
-    phone: '', 
-    email: '', 
-    address: '', 
+    id: '',
+    name: '',
+    age: '',
+    gender: 'Male',
+    phone: '',
+    email: '',
+    address: '',
     occupation: '',
-    assignedOptometrist: 'Dr. Sarah Connor', 
-    branch: 'Main Branch', 
-    appointmentNum: `APT-${Math.floor(1000 + Math.random() * 9000)}`, 
-    visitNum: `VIS-${Math.floor(100 + Math.random() * 900)}`,
-    lastVisitDate: '', 
-    previousPrescription: 'No previous prescription records available.',
+    branch: 'Main Branch',
+    appointmentNum: '',
+    visitNum: '',
+    assignedOptometrist: '',
+    lastVisitDate: '',
+    previousPrescription: '',
     visitHistory: []
   });
 
-  const [companyInfo, setCompanyInfo] = useState({
-    name: 'GREENSOL VISION CLINIC',
-    logo: null,
-    address: '',
-    phone: '',
-    email: ''
+  const [medicalHistory, setMedicalHistory] = useState({
+    chiefComplaints: [],
+    medicalHistory: '',
+    familyHistory: '',
+    ocularHistory: '',
+    previousSurgery: '',
+    previousGlasses: '',
+    currentMedication: '',
+    allergy: '',
+    contactLensHistory: '',
+    lifestyle: '',
+    hasDiabetes: false,
+    hasHypertension: false,
+    notes: ''
   });
 
-  const [registeredDoctors, setRegisteredDoctors] = useState([]);
+  const [visualAcuity, setVisualAcuity] = useState({
+    distance: { odWo: '', odWith: '', osWo: '', osWith: '', odPinhole: '', osPinhole: '' },
+    near: { odWo: '', odWith: '', osWo: '', osWith: '' },
+    colorVision: 'Normal',
+    contrastSensitivity: 'Normal',
+    dominantEye: 'Right (OD)'
+  });
 
-  // Fetch Registered Doctors from Administration Module / Users Database
+  const [objectiveRefraction, setObjectiveRefraction] = useState({
+    autoRefraction: {
+      od: { sph: '', cyl: '', axis: '', va: '', pd: '' },
+      os: { sph: '', cyl: '', axis: '', va: '', pd: '' }
+    },
+    retinoscopy: {
+      od: { sph: '', cyl: '', axis: '', va: '' },
+      os: { sph: '', cyl: '', axis: '', va: '' }
+    },
+    kReading: {
+      odK1: '', odK2: '', osK1: '', osK2: '', cornealRadius: '', streakNotes: ''
+    }
+  });
+
+  const [subjectiveRefraction, setSubjectiveRefraction] = useState({
+    od: { sph: '', cyl: '', axis: '', va: '' },
+    os: { sph: '', cyl: '', axis: '', va: '' },
+    nearAdd: '',
+    pd: '',
+    prism: '',
+    balanceTest: '',
+    fogging: '',
+    duochrome: '',
+    crossCylinder: ''
+  });
+
+  const [binocularVision, setBinocularVision] = useState({
+    npc: '',
+    coverTest: '',
+    phoria: '',
+    vergence: '',
+    accommodation: '',
+    worthFourDot: '',
+    stereoVision: '',
+    eyeDominance: ''
+  });
+
+  const [eyeHealth, setEyeHealth] = useState({
+    anterior: { lids: '', lashes: '', conjunctiva: '', cornea: '', iris: '', lens: '', anteriorChamber: '' },
+    posterior: { disc: '', macula: '', retina: '', vessels: '' },
+    iop: { od: '', os: '', method: '' },
+    cupDiscRatio: { od: '', os: '' },
+    dilatedExam: ''
+  });
+
+  const [diagnosis, setDiagnosis] = useState({
+    primary: '',
+    icdCode: '',
+    remarks: '',
+    procedure: '',
+    medicine: '',
+    advice: '',
+    nextReview: ''
+  });
+
+  const [prescription, setPrescription] = useState({
+    selectedLenses: [],
+    frameRecommendation: '',
+    lensRecommendation: ''
+  });
+
+  // Sync Patients, Examinations, and Registered Doctors from Database / LocalStorage / API
   useEffect(() => {
-    const fetchRegisteredDoctors = async () => {
-      let docList = [];
+    const fetchDatabaseRecords = async () => {
+      let patientsList = [];
+      let testsList = [];
+      let docsList = [];
+
       try {
-        const savedUsers = JSON.parse(localStorage.getItem('optical_users_db') || '[]');
-        savedUsers.forEach(u => {
-          if (u.name) docList.push(u.name);
-        });
+        const localCust = JSON.parse(localStorage.getItem('optical_sales_customers') || '[]');
+        const localTests = JSON.parse(localStorage.getItem('optical_eye_tests') || '[]');
+        const localDocs = JSON.parse(localStorage.getItem('optical_doctors') || '[]');
+        
+        // Purge legacy demo records (e.g. Mohammed, P-7375) from localStorage
+        const cleanCust = localCust.filter(c => c.name && c.name !== 'Mohammed' && c.id !== 'P-7375');
+        const cleanTests = localTests.filter(t => t.name && t.name !== 'Mohammed' && t.patientId !== 'P-7375' && t.id !== 'P-7375');
+        
+        localStorage.setItem('optical_sales_customers', JSON.stringify(cleanCust));
+        localStorage.setItem('optical_eye_tests', JSON.stringify(cleanTests));
+
+        patientsList = cleanCust;
+        testsList = cleanTests;
+        docsList = [...localDocs];
       } catch (e) {}
 
       try {
-        const res = await axios.get('/api/auth/users/');
-        if (res.data && Array.isArray(res.data)) {
-          res.data.forEach(u => {
-            const name = u.first_name ? `${u.first_name} ${u.last_name || ''}`.trim() : u.username;
-            if (name) docList.push(name);
-          });
+        const resCust = await axios.get('/api/sales/customers/');
+        if (resCust.data && Array.isArray(resCust.data)) {
+          const apiCust = resCust.data.filter(c => c.name && c.name !== 'Mohammed' && c.id !== 'P-7375');
+          patientsList = [...patientsList, ...apiCust];
         }
       } catch (e) {}
 
-      const uniqueDocs = Array.from(new Set(docList));
-      setRegisteredDoctors(uniqueDocs);
-      if (uniqueDocs.length > 0 && (!patientData.assignedOptometrist || patientData.assignedOptometrist === 'Dr. Sarah Connor')) {
-        setPatientData(prev => ({ ...prev, assignedOptometrist: uniqueDocs[0] }));
-      }
-    };
-
-    fetchRegisteredDoctors();
-  }, [viewMode]);
-
-  useEffect(() => {
-    const fetchCompany = async () => {
       try {
-        const res = await axios.get('/api/company/profile/');
-        if (res.data && res.data.length > 0) {
-          setCompanyInfo(res.data[0]);
+        const resTests = await axios.get('/api/sales/eye-examinations/');
+        if (resTests.data && Array.isArray(resTests.data)) {
+          const apiTests = resTests.data.map(item => item.raw_data || {
+            id: item.visit_number || item.id,
+            date: item.examination_date ? item.examination_date.split('T')[0] : '',
+            patientId: item.patient_id,
+            name: item.patient_name,
+            doctor: item.optometrist,
+            diagnosis: item.primary_diagnosis || item.diagnosis,
+            rx: item.rx_summary || item.rx,
+            subjectiveRefraction: {
+              od: { sph: item.sub_sph_od, cyl: item.sub_cyl_od, axis: item.sub_axis_od, va: item.sub_va_od },
+              os: { sph: item.sub_sph_os, cyl: item.sub_cyl_os, axis: item.sub_axis_os, va: item.sub_va_os },
+              nearAdd: item.sub_add_od || item.sub_add_os,
+              odNv: { sph: item.sub_add_od, va: item.sub_add_va_od },
+              osNv: { sph: item.sub_add_os, va: item.sub_add_va_os }
+            },
+            medicalHistory: {
+              pgpOdSph: item.pgp_od_sph,
+              pgpOdCyl: item.pgp_od_cyl,
+              pgpOdAxis: item.pgp_od_axis,
+              pgpOdVa: item.pgp_od_va,
+              pgpOdAdd: item.pgp_od_add,
+              pgpOdAddVa: item.pgp_od_add_va,
+              pgpOsSph: item.pgp_os_sph,
+              pgpOsCyl: item.pgp_os_cyl,
+              pgpOsAxis: item.pgp_os_axis,
+              pgpOsVa: item.pgp_os_va,
+              pgpOsAdd: item.pgp_os_add,
+              pgpOsAddVa: item.pgp_os_add_va,
+              previousGlassesDate: item.previous_glasses_date
+            }
+          }).filter(t => t.name && t.name !== 'Mohammed' && t.patientId !== 'P-7375');
+          testsList = [...testsList, ...apiTests];
         }
-      } catch (err) {
-        console.error('Failed to load company profile:', err);
-      }
+      } catch (e) {}
+
+      try {
+        const resUsers = await axios.get('/api/admin/users/');
+        if (resUsers.data && Array.isArray(resUsers.data)) {
+          const apiDocNames = resUsers.data
+            .filter(u => u.role === 'DOCTOR' || u.role === 'OPTOMETRIST' || (u.designation && u.designation.toLowerCase().includes('doc')))
+            .map(u => u.name || `Dr. ${u.first_name} ${u.last_name}`)
+            .filter(Boolean);
+          docsList = [...docsList, ...apiDocNames];
+        }
+      } catch (e) {}
+
+      // Sync registered doctors from Doctor Master (optical_doctors_db)
+      try {
+        const adminDocs = JSON.parse(localStorage.getItem('optical_doctors_db') || '[]');
+        const adminDocNames = adminDocs.filter(d => d.status === 'Active').map(d => d.name);
+        docsList = [...docsList, ...adminDocNames];
+      } catch (e) {}
+
+      // Deduplicate patients by ID or Phone
+      const uniquePatients = Array.from(
+        new Map(patientsList.map(item => [item.id || item.phone, item])).values()
+      );
+
+      setDbPatients(uniquePatients);
+      setDoctorsList(Array.from(new Set(docsList.filter(Boolean))));
+      setPastExaminations(testsList);
     };
-    fetchCompany();
+
+    fetchDatabaseRecords();
+
+    window.addEventListener('optical_doctors_updated', fetchDatabaseRecords);
+    return () => window.removeEventListener('optical_doctors_updated', fetchDatabaseRecords);
   }, []);
 
-  useEffect(() => {
-    if (location.state) {
-      if (location.state.appointment) {
-        const apt = location.state.appointment;
-        setPatientData({
-          id: `P-${Math.floor(1000 + Math.random() * 9000)}`, 
-          name: apt.name, 
-          age: '', 
-          gender: 'Male', 
-          phone: apt.phone || '', 
-          email: '', 
-          address: '', 
-          occupation: '',
-          assignedOptometrist: apt.optometrist || 'Dr. Sarah Connor', 
-          branch: 'Main Branch', 
-          appointmentNum: apt.id, 
-          visitNum: `VIS-${Math.floor(100 + Math.random() * 900)}`,
-          lastVisitDate: apt.date || '', 
-          previousPrescription: 'No previous prescription records available.',
-          visitHistory: []
-        });
-        setActiveStep(0);
-        setViewMode('form');
-      } else if (location.state.newTest || location.state.fromSales) {
-        handleAddNewTest();
-      }
-    }
-  }, [location.state]);
-
-  // Tab 2: Complaints & History
-  const [selectedComplaints, setSelectedComplaints] = useState([]);
-  const [complaintDuration, setComplaintDuration] = useState('');
-  const [glassesUsage, setGlassesUsage] = useState('');
-  const [clUsage, setClUsage] = useState('');
-  const [medicalHistory, setMedicalHistory] = useState('');
-  const [familyHistory, setFamilyHistory] = useState('');
-  const [allergies, setAllergies] = useState('');
-  const [medications, setMedications] = useState('');
-  const [surgeryHistory, setSurgeryHistory] = useState('');
-
-  // Tab 3: Visual Acuity
-  const [vaODDistanceUnaided, setVaODDistanceUnaided] = useState('');
-  const [vaODDistanceCorrected, setVaODDistanceCorrected] = useState('');
-  const [vaODPinhole, setVaODPinhole] = useState('');
-  const [vaODNear, setVaODNear] = useState('');
-  const [vaODColour, setVaODColour] = useState('');
-  const [vaODContrast, setVaODContrast] = useState('');
-
-  const [vaOSDistanceUnaided, setVaOSDistanceUnaided] = useState('');
-  const [vaOSDistanceCorrected, setVaOSDistanceCorrected] = useState('');
-  const [vaOSPinhole, setVaOSPinhole] = useState('');
-  const [vaOSNear, setVaOSNear] = useState('');
-  const [vaOSColour, setVaOSColour] = useState('');
-  const [vaOSContrast, setVaOSContrast] = useState('');
-
-  const [vaOUBinocular, setVaOUBinocular] = useState('');
-  const [vaOUStereo, setVaOUStereo] = useState('');
-  const [vaOUDominant, setVaOUDominant] = useState('');
-  const [vaOUFusion, setVaOUFusion] = useState('');
-
-  // Tab 4: Objective Refraction
-  const [arSphOD, setArSphOD] = useState('');
-  const [arCylOD, setArCylOD] = useState('');
-  const [arAxisOD, setArAxisOD] = useState('');
-  const [arVertexOD, setArVertexOD] = useState('');
-  const [arPupilOD, setArPupilOD] = useState('');
-
-  const [arSphOS, setArSphOS] = useState('');
-  const [arCylOS, setArCylOS] = useState('');
-  const [arAxisOS, setArAxisOS] = useState('');
-  const [arVertexOS, setArVertexOS] = useState('');
-  const [arPupilOS, setArPupilOS] = useState('');
-
-  const [k1OD, setK1OD] = useState('');
-  const [k2OD, setK2OD] = useState('');
-  const [kAxisOD, setKAxisOD] = useState('');
-  const [k1OS, setK1OS] = useState('');
-  const [k2OS, setK2OS] = useState('');
-  const [kAxisOS, setKAxisOS] = useState('');
-
-  const [distancePD, setDistancePD] = useState('');
-  const [nearPD, setNearPD] = useState('');
-  const [monoRightPD, setMonoRightPD] = useState('');
-  const [monoLeftPD, setMonoLeftPD] = useState('');
-
-  const [iopRight, setIopRight] = useState('');
-  const [iopLeft, setIopLeft] = useState('');
-
-  // Tab 5: Subjective Refraction
-  const [subSphOD, setSubSphOD] = useState('');
-  const [subCylOD, setSubCylOD] = useState('');
-  const [subAxisOD, setSubAxisOD] = useState('');
-  const [subVaOD, setSubVaOD] = useState('');
-  const [subAddOD, setSubAddOD] = useState('');
-  const [subPrismOD, setSubPrismOD] = useState('');
-  const [subBaseOD, setSubBaseOD] = useState('');
-
-  const [subSphOS, setSubSphOS] = useState('');
-  const [subCylOS, setSubCylOS] = useState('');
-  const [subAxisOS, setSubAxisOS] = useState('');
-  const [subVaOS, setSubVaOS] = useState('');
-  const [subAddOS, setSubAddOS] = useState('');
-  const [subPrismOS, setSubPrismOS] = useState('');
-  const [subBaseOS, setSubBaseOS] = useState('');
-
-  const [binocularBalance, setBinocularBalance] = useState('');
-  const [accommodationRange, setAccommodationRange] = useState('');
-  const [vergenceRange, setVergenceRange] = useState('');
-  const [phoriaTest, setPhoriaTest] = useState('');
-  const [npc, setNpc] = useState('');
-
-  // Tab 6: Eye Health
-  const [eyelids, setEyelids] = useState('Normal');
-  const [conjunctiva, setConjunctiva] = useState('Normal');
-  const [cornea, setCornea] = useState('Normal');
-  const [anteriorChamber, setAnteriorChamber] = useState('Normal');
-  const [iris, setIris] = useState('Normal');
-  const [lensState, setLensState] = useState('Normal');
-  const [eyeHealthNotes, setEyeHealthNotes] = useState('');
-
-  const [opticDisc, setOpticDisc] = useState('');
-  const [retina, setRetina] = useState('');
-  const [macula, setMacula] = useState('');
-  const [vitreous, setVitreous] = useState('');
-  const [bloodVessels, setBloodVessels] = useState('');
-
-  const [pupillaryReflex, setPupillaryReflex] = useState('');
-  const [eyeMovement, setEyeMovement] = useState('');
-  const [coverTest, setCoverTest] = useState('');
-  const [tearFilm, setTearFilm] = useState('');
-
-  // Tab 7: Contact Lens Trial
-  const [clBrand, setClBrand] = useState('');
-  const [clType, setClType] = useState('');
-  const [clPower, setClPower] = useState('');
-  const [clBC, setClBC] = useState('');
-  const [clDIA, setClDIA] = useState('');
-  const [clWearTime, setClWearTime] = useState('');
-  const [clComfort, setClComfort] = useState('');
-  const [clImprovement, setClImprovement] = useState('');
-  const [clRecommend, setClRecommend] = useState('');
-
-  // Tab 9: Recommendations & Details
-  const [recLensType, setRecLensType] = useState('');
-  const [recLensBrand, setRecLensBrand] = useState('');
-  const [recLensCoating, setRecLensCoating] = useState('');
-  const [recFrameShape, setRecFrameShape] = useState('');
-  const [recFrameBrand, setRecFrameBrand] = useState('');
-  const [recFrameSize, setRecFrameSize] = useState('');
-  const [recFrameColor, setRecFrameColor] = useState('');
-  const [recDiagnosis, setRecDiagnosis] = useState([]);
-  const [followUpDate, setFollowUpDate] = useState('');
-  const [followUpInterval, setFollowUpInterval] = useState('');
-
-
-
-  const handleNext = () => {
-    if (activeStep < 8) {
-      setActiveStep(prev => prev + 1);
-    }
-  };
-
-  const handleBack = () => {
-    if (activeStep > 0) {
-      setActiveStep(prev => prev - 1);
-    }
-  };
-
-  const handleComplaintToggle = (complaint) => {
-    setSelectedComplaints(prev => 
-      prev.includes(complaint) ? prev.filter(c => c !== complaint) : [...prev, complaint]
-    );
-  };
-
-  const getHighIopWarning = () => {
-    const r = parseFloat(iopRight) || 0;
-    const l = parseFloat(iopLeft) || 0;
-    if (r > 21 || l > 21) {
-      return `Warning: High Intraocular Pressure detected (Right: ${iopRight} mmHg, Left: ${iopLeft} mmHg).`;
-    }
-    return '';
-  };
-
-  const handleExportToExcel = () => {
-    let csvContent = "data:text/csv;charset=utf-8,";
-    csvContent += "Patient ID,Patient Name,Age,Gender,Phone,Optometrist,Branch,Date\r\n";
-    testPatients.forEach(row => {
-      csvContent += `"${row.id}","${row.name}","${row.age}","${row.gender}","${row.phone}","${row.optometrist}","${row.branch}","${row.date}"\r\n`;
-    });
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", "eye_testing_patients.csv");
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
-  const handleAddNewTest = () => {
+  // Reset all examination fields to 100% blank
+  const handleResetAll = () => {
     setPatientData({
-      id: `P-${Math.floor(1000 + Math.random() * 9000)}`, 
-      name: '', 
-      age: '', 
-      gender: 'Male', 
-      phone: '', 
-      email: '', 
-      address: '', 
+      id: `P-${1001 + (pastExaminations?.length || 0)}`,
+      name: '',
+      age: '',
+      gender: 'Male',
+      phone: '',
+      email: '',
+      address: '',
       occupation: '',
-      assignedOptometrist: 'Dr. Sarah Connor', 
-      branch: 'Main Branch', 
-      appointmentNum: `APT-${Math.floor(1000 + Math.random() * 9000)}`, 
-      visitNum: `VIS-${Math.floor(100 + Math.random() * 900)}`,
-      lastVisitDate: '', 
-      previousPrescription: 'No previous prescription records available.',
+      branch: 'Main Branch',
+      appointmentNum: '',
+      visitNum: '',
+      assignedOptometrist: '',
+      lastVisitDate: '',
+      previousPrescription: '',
       visitHistory: []
     });
-    setActiveStep(0);
-    setViewMode('form');
+
+    setMedicalHistory({
+      chiefComplaints: [],
+      medicalHistory: '',
+      familyHistory: '',
+      ocularHistory: '',
+      previousSurgery: '',
+      previousGlasses: '',
+      previousGlassesDate: '',
+      currentMedication: '',
+      allergy: '',
+      contactLensHistory: '',
+      lifestyle: '',
+      hasDiabetes: false,
+      hasHypertension: false,
+      notes: '',
+      pgpOdSph: '', pgpOdCyl: '', pgpOdAxis: '', pgpOdVa: '', pgpOdAdd: '',
+      pgpOsSph: '', pgpOsCyl: '', pgpOsAxis: '', pgpOsVa: '', pgpOsAdd: ''
+    });
+
+    setVisualAcuity({
+      distance: { odWo: '', odWith: '', osWo: '', osWith: '', odPinhole: '', osPinhole: '' },
+      near: { odWo: '', odWith: '', osWo: '', osWith: '' },
+      colorVision: 'Normal',
+      contrastSensitivity: 'Normal',
+      dominantEye: ''
+    });
+
+    setObjectiveRefraction({
+      autoRefraction: {
+        od: { sph: '', cyl: '', axis: '', va: '', pd: '' },
+        os: { sph: '', cyl: '', axis: '', va: '', pd: '' }
+      },
+      retinoscopy: {
+        od: { sph: '', cyl: '', axis: '', va: '' },
+        os: { sph: '', cyl: '', axis: '', va: '' }
+      },
+      kReading: {
+        odK1: '', odK2: '', osK1: '', osK2: '', cornealRadius: '', streakNotes: ''
+      }
+    });
+
+    setSubjectiveRefraction({
+      od: { sph: '', cyl: '', axis: '', va: '' },
+      os: { sph: '', cyl: '', axis: '', va: '' },
+      nearAdd: '',
+      pd: '',
+      prism: '',
+      balanceTest: '',
+      fogging: '',
+      duochrome: '',
+      crossCylinder: ''
+    });
+
+    setBinocularVision({
+      npc: '',
+      coverTest: '',
+      phoria: '',
+      vergence: '',
+      accommodation: '',
+      worthFourDot: '',
+      stereoVision: '',
+      eyeDominance: '',
+      therapyNotes: ''
+    });
+
+    setEyeHealth({
+      anterior: { lids: '', lashes: '', conjunctiva: '', cornea: '', iris: '', lens: '', anteriorChamber: '' },
+      posterior: { disc: '', macula: '', retina: '', vessels: '' },
+      iop: { od: '', os: '', method: '' },
+      cupDiscRatio: { od: '', os: '' },
+      dilatedExam: ''
+    });
+
+    setDiagnosis({
+      primary: '',
+      icdCode: '',
+      remarks: '',
+      procedure: '',
+      medicine: '',
+      advice: '',
+      nextReview: '',
+      ocularAssessment: '',
+      ergonomicsAdvice: '',
+      dispensingRemarks: '',
+      procedureCharge: '0',
+      medicineCharge: '0',
+      testType: 'FREE EYE TEST',
+      testNo: ''
+    });
+
+    setPrescription({
+      selectedLenses: [],
+      frameRecommendation: '',
+      lensRecommendation: ''
+    });
   };
 
-  const handleSaveExam = () => {
-    if (!patientData.name) {
-      alert("Please enter at least the Patient Name.");
+  // Smart Keyboard Navigation Handler (Enter, ArrowRight, ArrowLeft, ArrowUp, ArrowDown)
+  const handleKeyDownEnter = (e) => {
+    const keys = ['Enter', 'ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown'];
+    if (!keys.includes(e.key)) return;
+
+    const activeEl = document.activeElement;
+    // Do not override if user is inside a multiline textarea
+    if (activeEl && activeEl.tagName === 'TEXTAREA') return;
+
+    const container = document.getElementById('optical-single-form-container') || document.getElementById('optical-step-container');
+    if (!container) return;
+
+    // Filter STRICTLY to interactive inputs (exclude wrapper divs, hidden inputs, disabled inputs)
+    const rawFocusables = Array.from(container.querySelectorAll('input:not([type="hidden"]):not([disabled]), select:not([disabled])'));
+    const focusables = rawFocusables.filter(el => {
+      if (el.tabIndex === -1 || el.offsetParent === null) return false;
+      if (el.type === 'hidden' || el.getAttribute('aria-hidden') === 'true') return false;
+      return true;
+    });
+
+    if (focusables.length === 0) return;
+
+    const currentIndex = focusables.indexOf(activeEl);
+
+    // Enter & ArrowRight: Move to Next Adjacent Field
+    if (e.key === 'Enter' || e.key === 'ArrowRight') {
+      if (e.key === 'ArrowRight' && activeEl && activeEl.tagName === 'INPUT' && (activeEl.type === 'text' || !activeEl.type)) {
+        if (activeEl.selectionStart !== null && activeEl.selectionStart < activeEl.value.length) {
+          return; // Allow cursor movement inside text
+        }
+      }
+
+      if (currentIndex >= 0 && currentIndex < focusables.length - 1) {
+        e.preventDefault();
+        const nextEl = focusables[currentIndex + 1];
+        nextEl.focus();
+        if (nextEl.select) nextEl.select();
+      } else if (currentIndex === focusables.length - 1 && e.key === 'Enter') {
+        e.preventDefault();
+        if (activeStep < stepsList.length - 1) {
+          setActiveStep(prev => prev + 1);
+        }
+      }
+    }
+
+    // ArrowLeft: Move to Previous Field
+    else if (e.key === 'ArrowLeft') {
+      if (activeEl && activeEl.tagName === 'INPUT' && (activeEl.type === 'text' || !activeEl.type)) {
+        if (activeEl.selectionStart !== null && activeEl.selectionStart > 0) {
+          return; // Allow cursor movement inside text
+        }
+      }
+
+      if (currentIndex > 0) {
+        e.preventDefault();
+        const prevEl = focusables[currentIndex - 1];
+        prevEl.focus();
+        if (prevEl.select) prevEl.select();
+      }
+    }
+
+    // ArrowDown: Spatial Navigation to element directly below
+    else if (e.key === 'ArrowDown') {
+      if (currentIndex >= 0 && activeEl) {
+        const currRect = activeEl.getBoundingClientRect();
+        const belowCandidates = focusables.filter(el => {
+          const r = el.getBoundingClientRect();
+          return r.top >= currRect.bottom - 4;
+        });
+
+        if (belowCandidates.length > 0) {
+          e.preventDefault();
+          belowCandidates.sort((a, b) => {
+            const rA = a.getBoundingClientRect();
+            const rB = b.getBoundingClientRect();
+            const distA = Math.hypot((rA.left + rA.width / 2) - (currRect.left + currRect.width / 2), (rA.top - currRect.top));
+            const distB = Math.hypot((rB.left + rB.width / 2) - (currRect.left + currRect.width / 2), (rB.top - currRect.top));
+            return distA - distB;
+          });
+          const target = belowCandidates[0];
+          target.focus();
+          if (target.select) target.select();
+        } else if (currentIndex < focusables.length - 1) {
+          e.preventDefault();
+          const nextEl = focusables[currentIndex + 1];
+          nextEl.focus();
+          if (nextEl.select) nextEl.select();
+        }
+      }
+    }
+
+    // ArrowUp: Spatial Navigation to element directly above
+    else if (e.key === 'ArrowUp') {
+      if (currentIndex >= 0 && activeEl) {
+        const currRect = activeEl.getBoundingClientRect();
+        const aboveCandidates = focusables.filter(el => {
+          const r = el.getBoundingClientRect();
+          return r.bottom <= currRect.top + 4;
+        });
+
+        if (aboveCandidates.length > 0) {
+          e.preventDefault();
+          aboveCandidates.sort((a, b) => {
+            const rA = a.getBoundingClientRect();
+            const rB = b.getBoundingClientRect();
+            const distA = Math.hypot((rA.left + rA.width / 2) - (currRect.left + currRect.width / 2), (currRect.top - rA.top));
+            const distB = Math.hypot((rB.left + rB.width / 2) - (currRect.left + currRect.width / 2), (currRect.top - rB.top));
+            return distA - distB;
+          });
+          const target = aboveCandidates[0];
+          target.focus();
+          if (target.select) target.select();
+        } else if (currentIndex > 0) {
+          e.preventDefault();
+          const prevEl = focusables[currentIndex - 1];
+          prevEl.focus();
+          if (prevEl.select) prevEl.select();
+        }
+      }
+    }
+  };
+
+  // Handle Keyboard Shortcuts (Alt+N: Next, Alt+P: Prev, Alt+S: Save, Alt+F: Search Patient)
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.altKey && e.key.toLowerCase() === 'n') {
+        e.preventDefault();
+        if (activeStep < stepsList.length - 1) setActiveStep(prev => prev + 1);
+      }
+      if (e.altKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        if (activeStep > 0) setActiveStep(prev => prev - 1);
+      }
+      if (e.altKey && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        setSearchModalOpen(true);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeStep]);
+
+  const handleSelectPatient = (selected) => {
+    setPatientData(prev => ({
+      ...prev,
+      ...selected,
+      visitNum: `VIS-${Math.floor(100 + Math.random() * 900)}`,
+      appointmentNum: `APT-${Math.floor(1000 + Math.random() * 9000)}`
+    }));
+  };
+
+  const handleRegisterNewPatient = (newP) => {
+    setPatientData(newP);
+    setDbPatients(prev => [newP, ...prev]);
+  };
+
+  const handleSaveDraft = async () => {
+    if (!patientData?.name || patientData.name.trim() === '') {
+      alert("Please enter Patient Name before saving clinical record.");
       return;
     }
-    const newTestRecord = {
-      id: patientData.id,
-      name: patientData.name,
-      age: patientData.age,
-      gender: patientData.gender,
-      phone: patientData.phone || '9876543210',
-      optometrist: patientData.assignedOptometrist,
-      branch: patientData.branch,
+
+    const examRecord = {
+      id: patientData?.visitNum || `VIS-${Math.floor(100 + Math.random() * 900)}`,
       date: new Date().toISOString().split('T')[0],
-      points: 120,
-      tier: 'Silver',
-      sphRight: subSphOD || '-1.25',
-      cylRight: subCylOD || '-0.50',
-      axisRight: subAxisOD || '90',
-      sphLeft: subSphOS || '-1.00',
-      cylLeft: subCylOS || '-0.75',
-      axisLeft: subAxisOS || '180',
-      doctor: patientData.assignedOptometrist || 'Dr. Sarah Connor',
-      balance: 0,
+      patientId: patientData?.id || '',
+      name: patientData?.name || '',
+      doctor: patientData?.assignedOptometrist || '',
+      diagnosis: diagnosis?.primary || 'Routine Refraction',
+      rx: `OD: ${subjectiveRefraction?.od?.sph || ''} SPH / ${subjectiveRefraction?.od?.cyl || ''} CYL @ ${subjectiveRefraction?.od?.axis || ''}° | OS: ${subjectiveRefraction?.os?.sph || ''} SPH / ${subjectiveRefraction?.os?.cyl || ''} CYL @ ${subjectiveRefraction?.os?.axis || ''}°`,
+      patientData,
+      subjectiveRefraction,
+      medicalHistory,
+      prescription
+    };
+
+    const customerRecord = {
+      id: patientData?.id || '',
+      name: patientData?.name || '',
+      phone: patientData?.phone || '',
+      email: patientData?.email || '',
+      age: patientData?.age || '',
+      gender: patientData?.gender || '',
+      sphRight: subjectiveRefraction?.od?.sph || '',
+      cylRight: subjectiveRefraction?.od?.cyl || '',
+      axisRight: subjectiveRefraction?.od?.axis || '',
+      vaOD: subjectiveRefraction?.od?.va || '',
+      sphLeft: subjectiveRefraction?.os?.sph || '',
+      cylLeft: subjectiveRefraction?.os?.cyl || '',
+      axisLeft: subjectiveRefraction?.os?.axis || '',
+      vaOS: subjectiveRefraction?.os?.va || '',
+      nearAdd: subjectiveRefraction?.nearAdd || '',
+      distancePD: subjectiveRefraction?.pd || '',
+      diagnosis: diagnosis?.primary || '',
       hasSpecBooking: true,
       specDetails: {
         bookingId: `SPEC-${Math.floor(1000 + Math.random() * 9000)}`,
-        date: new Date().toISOString().split('T')[0],
-        frameRec: recFrameBrand || 'RayBan Wayfarer Classic (Black)',
-        lensRec: recLensBrand ? `${recLensBrand} ${recLensType}` : 'Essilor Crizal Prevencia 1.56 Anti-Glare',
-        status: 'Booked for Spectacles (Optical Exam Completed)'
+        status: 'Booked for Spectacles',
+        frameRec: prescription.frameRecommendation || 'RayBan Wayfarer Classic',
+        lensRec: prescription.lensRecommendation || '1.56 Blue Cut Anti-Glare Lens'
       }
     };
-    setTestPatients(prev => [newTestRecord, ...prev]);
 
-    if (location.state && location.state.fromSales) {
-      alert("Eye Test examination & spectacle booking saved successfully! Transferring patient details to Sales POS...");
-      navigate('/sales/new', { state: { newPatient: newTestRecord } });
-    } else {
-      alert("Examination record & spectacle booking saved successfully to system database!");
-      setViewMode('list');
+    // Save locally
+    try {
+      const existingTests = JSON.parse(localStorage.getItem('optical_eye_tests') || '[]');
+      const updatedTests = [examRecord, ...existingTests.filter(t => t.id !== examRecord.id)];
+      localStorage.setItem('optical_eye_tests', JSON.stringify(updatedTests));
+
+      const existingCust = JSON.parse(localStorage.getItem('optical_sales_customers') || '[]');
+      const updatedCust = [customerRecord, ...existingCust.filter(c => c.id !== customerRecord.id)];
+      localStorage.setItem('optical_sales_customers', JSON.stringify(updatedCust));
+      
+      if (patientData.assignedOptometrist) {
+        const localDocs = JSON.parse(localStorage.getItem('optical_doctors') || '[]');
+        if (!localDocs.includes(patientData.assignedOptometrist)) {
+          const updatedDocs = [...localDocs, patientData.assignedOptometrist];
+          localStorage.setItem('optical_doctors', JSON.stringify(updatedDocs));
+          setDoctorsList(prev => Array.from(new Set([...prev, patientData.assignedOptometrist])));
+        }
+      }
+
+      setPastExaminations(updatedTests);
+      setDbPatients(updatedCust);
+    } catch (e) {}
+
+    // Send to API Database
+    try {
+      await axios.post('/api/sales/customers/', customerRecord).catch(() => null);
+
+      const dbPayload = {
+        patient_id: patientData?.id || '',
+        patient_name: patientData?.name || '',
+        age: String(patientData?.age || ''),
+        gender: patientData?.gender || '',
+        phone: patientData?.phone || '',
+        email: patientData?.email || '',
+        address: patientData?.address || '',
+        occupation: patientData?.occupation || '',
+        visit_number: patientData?.visitNum || `VIS-${Math.floor(100 + Math.random() * 900)}`,
+        appointment_id: patientData?.appointmentNum || '',
+        branch: patientData?.branch || 'Main Branch',
+        optometrist: patientData?.assignedOptometrist || '',
+        
+        complaints: Array.isArray(medicalHistory?.complaints) ? medicalHistory.complaints.join(', ') : (medicalHistory?.complaints || ''),
+        complaint_duration: medicalHistory?.complaintDuration || '',
+        glasses_usage: medicalHistory?.glassesUsage || '',
+        medical_history: Array.isArray(medicalHistory?.systemicConditions) ? medicalHistory.systemicConditions.join(', ') : (medicalHistory?.systemicConditions || ''),
+        allergies: medicalHistory?.allergies || '',
+        family_history: medicalHistory?.familyHistory || '',
+
+        pgp_od_sph: medicalHistory?.pgpOdSph || '',
+        pgp_od_cyl: medicalHistory?.pgpOdCyl || '',
+        pgp_od_axis: medicalHistory?.pgpOdAxis || '',
+        pgp_od_va: medicalHistory?.pgpOdVa || '',
+        pgp_od_add: medicalHistory?.pgpOdAdd || '',
+        pgp_od_add_va: medicalHistory?.pgpOdAddVa || '',
+        pgp_os_sph: medicalHistory?.pgpOsSph || '',
+        pgp_os_cyl: medicalHistory?.pgpOsCyl || '',
+        pgp_os_axis: medicalHistory?.pgpOsAxis || '',
+        pgp_os_va: medicalHistory?.pgpOsVa || '',
+        pgp_os_add: medicalHistory?.pgpOsAdd || '',
+        pgp_os_add_va: medicalHistory?.pgpOsAddVa || '',
+        previous_glasses_date: medicalHistory?.previousGlassesDate || '',
+
+        sub_sph_od: subjectiveRefraction?.od?.sph || '',
+        sub_cyl_od: subjectiveRefraction?.od?.cyl || '',
+        sub_axis_od: subjectiveRefraction?.od?.axis || '',
+        sub_va_od: subjectiveRefraction?.od?.va || '',
+        sub_add_od: subjectiveRefraction?.nearAdd || subjectiveRefraction?.odNv?.sph || '',
+        sub_add_va_od: subjectiveRefraction?.odNv?.va || '',
+        sub_sph_os: subjectiveRefraction?.os?.sph || '',
+        sub_cyl_os: subjectiveRefraction?.os?.cyl || '',
+        sub_axis_os: subjectiveRefraction?.os?.axis || '',
+        sub_va_os: subjectiveRefraction?.os?.va || '',
+        sub_add_os: subjectiveRefraction?.nearAdd || subjectiveRefraction?.osNv?.sph || '',
+        sub_add_va_os: subjectiveRefraction?.osNv?.va || '',
+
+        ar_sph_od: objectiveRefraction?.odAr?.sph || '',
+        ar_cyl_od: objectiveRefraction?.odAr?.cyl || '',
+        ar_axis_od: objectiveRefraction?.odAr?.axis || '',
+        ar_sph_os: objectiveRefraction?.osAr?.sph || '',
+        ar_cyl_os: objectiveRefraction?.osAr?.cyl || '',
+        ar_axis_os: objectiveRefraction?.osAr?.axis || '',
+
+        primary_diagnosis: diagnosis?.primary || 'Routine Refraction',
+        rx_summary: `OD: ${subjectiveRefraction?.od?.sph || ''} SPH / ${subjectiveRefraction?.od?.cyl || ''} CYL @ ${subjectiveRefraction?.od?.axis || ''}° | OS: ${subjectiveRefraction?.os?.sph || ''} SPH / ${subjectiveRefraction?.os?.cyl || ''} CYL @ ${subjectiveRefraction?.os?.axis || ''}°`,
+
+        raw_data: examRecord
+      };
+
+      await axios.post('/api/sales/eye-examinations/', dbPayload);
+    } catch (e) {
+      console.warn("API database save notice:", e);
     }
+
+    alert(`Clinical Examination & Prescription for ${patientData.name} (${patientData.id}) saved to database!`);
   };
 
-  if (viewMode === 'list') {
-    const filteredPatients = testPatients.filter(p => {
-      const matchesSearch = p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                            p.id.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                            (p.phone && p.phone.toLowerCase().includes(searchQuery.toLowerCase()));
-      const matchesBranch = filterBranch === 'All' || p.branch === filterBranch;
-      const matchesOptometrist = filterOptometrist === 'All' || p.optometrist === filterOptometrist;
-      return matchesSearch && matchesBranch && matchesOptometrist;
+  const handleNavigateToSales = () => {
+    handleSaveDraft();
+    navigate('/sales/new', {
+      state: {
+        patient: patientData,
+        prescription: subjectiveRefraction,
+        lenses: prescription.selectedLenses
+      }
     });
-
-    return (
-      <Box sx={{ p: 4 }}>
-        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3, flexWrap: 'wrap', gap: 2 }}>
-          <Box>
-            <Typography variant="h4" sx={{ fontWeight: 800 }}>VisionERP Eye Testing Queue</Typography>
-            <Typography variant="body2" color="text.secondary">Review list of patients scheduled for clinical eye assessment tests</Typography>
-          </Box>
-          <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap">
-            <TextField 
-              placeholder="Search by Phone or Patient ID..."
-              variant="outlined"
-              size="small"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              InputProps={{
-                startAdornment: (
-                  <InputAdornment position="start">
-                    <SearchIcon color="action" />
-                  </InputAdornment>
-                ),
-                sx: { borderRadius: 3, backgroundColor: 'background.paper', width: 280 }
-              }}
-            />
-            <Button variant="outlined" startIcon={<PrintIcon />} onClick={handleExportToExcel}>
-              Export Queue to Excel
-            </Button>
-            <Button variant="contained" startIcon={<EyeIcon />} sx={{ backgroundColor: '#2563EB' }} onClick={handleAddNewTest}>
-              + Add Eye Test
-            </Button>
-          </Stack>
-        </Box>
-
-        {/* Filters Setup Under the Search Option */}
-        <Box sx={{ mb: 4, display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
-          <Typography variant="body2" sx={{ fontWeight: 700, color: 'text.secondary' }}>Filter By:</Typography>
-          <TextField
-            select
-            size="small"
-            label="Branch"
-            value={filterBranch}
-            onChange={(e) => setFilterBranch(e.target.value)}
-            sx={{ minWidth: 150 }}
-            InputProps={{ sx: { borderRadius: 2 } }}
-          >
-            <MenuItem value="All">All Branches</MenuItem>
-            <MenuItem value="Main Branch">Main Branch</MenuItem>
-            <MenuItem value="Downtown Outlet">Downtown Outlet</MenuItem>
-            <MenuItem value="East Wing Clinic">East Wing Clinic</MenuItem>
-          </TextField>
-
-          <TextField
-            select
-            size="small"
-            label="Optometrist"
-            value={filterOptometrist}
-            onChange={(e) => setFilterOptometrist(e.target.value)}
-            sx={{ minWidth: 180 }}
-            InputProps={{ sx: { borderRadius: 2 } }}
-          >
-            <MenuItem value="All">All Optometrists</MenuItem>
-            {registeredDoctors.map(doc => (
-              <MenuItem key={doc} value={doc}>{doc}</MenuItem>
-            ))}
-          </TextField>
-
-          {(filterBranch !== 'All' || filterOptometrist !== 'All' || searchQuery) && (
-            <Button variant="text" size="small" color="secondary" onClick={() => {
-              setFilterBranch('All');
-              setFilterOptometrist('All');
-              setSearchQuery('');
-            }}>
-              Clear Filters
-            </Button>
-          )}
-        </Box>
-
-        <Card sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 4 }}>
-          <CardContent sx={{ p: 0 }}>
-            <TableContainer component={Paper} elevation={0} sx={{ backgroundColor: 'transparent' }}>
-              <Table size="small">
-                <TableHead sx={{ backgroundColor: 'action.hover' }}>
-                  <TableRow>
-                    <TableCell sx={{ fontWeight: 700 }}>Patient ID</TableCell>
-                    <TableCell sx={{ fontWeight: 700 }}>Patient Name</TableCell>
-                    <TableCell sx={{ fontWeight: 700 }}>Age</TableCell>
-                    <TableCell sx={{ fontWeight: 700 }}>Gender</TableCell>
-                    <TableCell sx={{ fontWeight: 700 }}>Phone Number</TableCell>
-                    <TableCell sx={{ fontWeight: 700 }}>Optometrist</TableCell>
-                    <TableCell sx={{ fontWeight: 700 }}>Branch Location</TableCell>
-                    <TableCell sx={{ fontWeight: 700 }}>Date Scheduled</TableCell>
-                    <TableCell sx={{ fontWeight: 700 }}>Action</TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {filteredPatients.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={9} align="center" sx={{ py: 6 }}>
-                        <Typography variant="body2" color="text.secondary" fontWeight={500}>
-                          {searchQuery ? "No matching patients found." : "No patients currently in the testing queue."}
-                        </Typography>
-                        <Typography variant="caption" color="text.secondary">
-                          {searchQuery ? "Try refining your search query." : "Click '+ Add Eye Test' above to register a patient manually."}
-                        </Typography>
-                      </TableCell>
-                    </TableRow>
-                  ) : (
-                    filteredPatients.map((row) => (
-                      <TableRow key={row.id} hover>
-                        <TableCell sx={{ fontWeight: 700, color: 'primary.main' }}>{row.id}</TableCell>
-                        <TableCell sx={{ fontWeight: 600 }}>{row.name}</TableCell>
-                        <TableCell>{row.age}</TableCell>
-                        <TableCell>{row.gender}</TableCell>
-                        <TableCell>{row.phone}</TableCell>
-                        <TableCell>{row.optometrist}</TableCell>
-                        <TableCell>{row.branch}</TableCell>
-                        <TableCell>{row.date}</TableCell>
-                        <TableCell>
-                          <Stack direction="row" spacing={1}>
-                            <Button size="small" variant="text" onClick={() => {
-                              setPatientData({
-                                id: row.id,
-                                name: row.name,
-                                age: row.age,
-                                gender: row.gender,
-                                phone: row.phone,
-                                email: '',
-                                address: '',
-                                occupation: '',
-                                assignedOptometrist: row.optometrist,
-                                branch: row.branch,
-                                appointmentNum: `APT-${Math.floor(1000 + Math.random() * 9000)}`,
-                                visitNum: `VIS-${Math.floor(100 + Math.random() * 900)}`,
-                                lastVisitDate: '',
-                                previousPrescription: '',
-                                visitHistory: []
-                              });
-                              setActiveStep(0);
-                              setViewMode('form');
-                            }}>
-                              Examine
-                            </Button>
-                            <Button 
-                              size="small" 
-                              variant="text" 
-                              color="error" 
-                              onClick={() => {
-                                if (window.confirm(`Are you sure you want to delete patient "${row.name}" from the queue?`)) {
-                                  setTestPatients(prev => prev.filter(p => p.id !== row.id));
-                                }
-                              }}
-                            >
-                              Delete
-                            </Button>
-                          </Stack>
-                        </TableCell>
-                      </TableRow>
-                    ))
-                  )}
-                </TableBody>
-              </Table>
-            </TableContainer>
-          </CardContent>
-        </Card>
-      </Box>
-    );
-  }
+  };
 
   return (
-    <Box sx={{ p: 4 }}>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
+    <Box sx={{ p: 4, pb: 8 }}>
+      {/* Module Header */}
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3, flexWrap: 'wrap', gap: 2 }}>
         <Box>
-          <Typography variant="h4" sx={{ fontWeight: 800 }}>VisionERP Eye Examination System</Typography>
-          <Typography variant="body2" color="text.secondary">Professional optometry workflow and diagnostic refraction manager</Typography>
+          <Typography variant="h4" sx={{ fontWeight: 800, color: 'primary.main', display: 'flex', alignItems: 'center', gap: 1.5 }}>
+            <EyeIcon sx={{ fontSize: 36 }} /> Greensol Optical Eye Examination System
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            Enterprise Ophthalmic Refraction & Clinical Workflow Manager • Powered by Greensol ERP
+          </Typography>
         </Box>
-        <Button variant="outlined" onClick={() => setViewMode('list')}>
-          Back to Queue
-        </Button>
-      </Box>
 
-      {/* Main Grid: Forms & Sidebar */}
-      <Grid container spacing={3} sx={{ position: 'relative', pb: 10 }}>
-        {/* Left Side: Exam content Stepper */}
-        <Grid item xs={12} md={8.5}>
-          <Tabs 
-            value={activeStep} 
-            onChange={(e, v) => setActiveStep(v)} 
-            variant="scrollable"
-            scrollButtons="auto"
-            sx={{ borderBottom: 1, borderColor: 'divider', mb: 3 }}
-          >
-            <Tab label="1. Patient Info" />
-            <Tab label="2. History" />
-            <Tab label="3. Visual Acuity" />
-            <Tab label="4. Objective Refraction" />
-            <Tab label="5. Subjective Refraction" />
-            <Tab label="6. Eye Health" />
-            <Tab label="7. CL Trial" />
-            <Tab label="8. Final Rx" />
-            <Tab label="9. Recommendation" />
-          </Tabs>
-
-          <Card sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 4, mb: 4 }}>
-            <CardContent sx={{ p: 3 }}>
-              {/* Tab 1: Patient Information */}
-              {activeStep === 0 && (
-                <Stack spacing={3}>
-                  <Box>
-                    <Typography variant="h6" fontWeight={700}>Patient Profile & Demographics</Typography>
-                    <Typography variant="caption" color="text.secondary">Enter patient profile details manually to save in the system</Typography>
-                  </Box>
-                  <Grid container spacing={2}>
-                    <Grid item xs={12} sm={3}>
-                      <TextField 
-                        label="Patient ID" 
-                        fullWidth 
-                        value={patientData.id || ''} 
-                        onChange={(e) => setPatientData({ ...patientData, id: e.target.value })} 
-                      />
-                    </Grid>
-                    <Grid item xs={12} sm={5}>
-                      <TextField 
-                        label="Patient Name" 
-                        fullWidth 
-                        value={patientData.name || ''} 
-                        onChange={(e) => setPatientData({ ...patientData, name: e.target.value })} 
-                      />
-                    </Grid>
-
-                    <Grid item xs={6} sm={2}>
-                      <TextField 
-                        label="Age" 
-                        fullWidth 
-                        value={patientData.age || ''} 
-                        onChange={(e) => setPatientData({ ...patientData, age: e.target.value })} 
-                      />
-                    </Grid>
-                    <Grid item xs={6} sm={2}>
-                      <TextField 
-                        select
-                        label="Gender" 
-                        fullWidth 
-                        value={patientData.gender || 'Male'} 
-                        onChange={(e) => setPatientData({ ...patientData, gender: e.target.value })} 
-                      >
-                        <MenuItem value="Male">Male</MenuItem>
-                        <MenuItem value="Female">Female</MenuItem>
-                        <MenuItem value="Other">Other</MenuItem>
-                      </TextField>
-                    </Grid>
-                    <Grid item xs={6} sm={4}>
-                      <TextField 
-                        label="Phone Number" 
-                        fullWidth 
-                        value={patientData.phone || ''} 
-                        onChange={(e) => setPatientData({ ...patientData, phone: e.target.value })} 
-                      />
-                    </Grid>
-                    <Grid item xs={6} sm={4}>
-                      <TextField 
-                        label="Email" 
-                        fullWidth 
-                        value={patientData.email || ''} 
-                        onChange={(e) => setPatientData({ ...patientData, email: e.target.value })} 
-                      />
-                    </Grid>
-                    <Grid item xs={12} sm={4}>
-                      <TextField 
-                        label="Occupation" 
-                        fullWidth 
-                        value={patientData.occupation || ''} 
-                        onChange={(e) => setPatientData({ ...patientData, occupation: e.target.value })} 
-                      />
-                    </Grid>
-                    <Grid item xs={12}>
-                      <TextField 
-                        label="Address" 
-                        fullWidth 
-                        value={patientData.address || ''} 
-                        onChange={(e) => setPatientData({ ...patientData, address: e.target.value })} 
-                      />
-                    </Grid>
-                  </Grid>
-
-                  <Divider />
-
-                  <Typography variant="subtitle1" fontWeight={700} color="primary">Clinic Metadata</Typography>
-                  <Grid container spacing={2}>
-                    <Grid item xs={6} sm={3}>
-                      <TextField 
-                        label="Appointment ID" 
-                        fullWidth 
-                        value={patientData.appointmentNum || ''} 
-                        onChange={(e) => setPatientData({ ...patientData, appointmentNum: e.target.value })} 
-                      />
-                    </Grid>
-                    <Grid item xs={6} sm={3}>
-                      <TextField 
-                        label="Visit Number" 
-                        fullWidth 
-                        value={patientData.visitNum || ''} 
-                        onChange={(e) => setPatientData({ ...patientData, visitNum: e.target.value })} 
-                      />
-                    </Grid>
-                    <Grid item xs={6} sm={3}>
-                      <TextField 
-                        select
-                        label="Branch" 
-                        fullWidth 
-                        value={patientData.branch || 'Main Branch'} 
-                        onChange={(e) => setPatientData({ ...patientData, branch: e.target.value })} 
-                      >
-                        <MenuItem value="Main Branch">Main Branch</MenuItem>
-                        <MenuItem value="Downtown Outlet">Downtown Outlet</MenuItem>
-                        <MenuItem value="East Wing Clinic">East Wing Clinic</MenuItem>
-                      </TextField>
-                    </Grid>
-                    <Grid item xs={6} sm={3}>
-                      <TextField 
-                        select
-                        label="Optometrist / Doctor" 
-                        fullWidth 
-                        value={patientData.assignedOptometrist || (registeredDoctors[0] || '')} 
-                        onChange={(e) => setPatientData({ ...patientData, assignedOptometrist: e.target.value })} 
-                      >
-                        {registeredDoctors.length === 0 ? (
-                          <MenuItem value="" disabled>-- No Doctors Added Yet (Add in Admin -&gt; Users) --</MenuItem>
-                        ) : (
-                          registeredDoctors.map(doc => (
-                            <MenuItem key={doc} value={doc}>{doc}</MenuItem>
-                          ))
-                        )}
-                      </TextField>
-                    </Grid>
-                  </Grid>
-                </Stack>
-              )}
-
-              {/* Tab 2: Chief Complaint & History */}
-              {activeStep === 1 && (
-                <Stack spacing={3}>
-                  <Box>
-                    <Typography variant="h6" fontWeight={700}>Chief Complaint & Patient History</Typography>
-                    <Typography variant="caption" color="text.secondary">Record active visual impairments and patient medical logs</Typography>
-                  </Box>
-                  
-                  <Box>
-                    <Typography variant="subtitle2" fontWeight={700} gutterBottom>Select Complaints</Typography>
-                    <FormGroup row sx={{ gap: 1 }}>
-                      {chiefComplaints.map(complaint => (
-                        <FormControlLabel 
-                          key={complaint}
-                          control={
-                            <Checkbox 
-                              checked={selectedComplaints.includes(complaint)}
-                              onChange={() => handleComplaintToggle(complaint)} 
-                            />
-                          } 
-                          label={complaint} 
-                        />
-                      ))}
-                    </FormGroup>
-                  </Box>
-
-                  <Grid container spacing={2}>
-                    <Grid item xs={6}>
-                      <TextField label="Complaint Duration" fullWidth value={complaintDuration} onChange={(e) => setComplaintDuration(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6}>
-                      <TextField label="Current Glasses Usage" fullWidth value={glassesUsage} onChange={(e) => setGlassesUsage(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={12}>
-                      <TextField label="Ophthalmic Medical History" multiline rows={2} fullWidth value={medicalHistory} onChange={(e) => setMedicalHistory(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6}>
-                      <TextField label="Allergies" fullWidth value={allergies} onChange={(e) => setAllergies(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6}>
-                      <TextField label="Family History" fullWidth value={familyHistory} onChange={(e) => setFamilyHistory(e.target.value)} />
-                    </Grid>
-                  </Grid>
-                </Stack>
-              )}
-
-              {/* Tab 3: Visual Acuity */}
-              {activeStep === 2 && (
-                <Stack spacing={3}>
-                  <Box>
-                    <Typography variant="h6" fontWeight={700}>Visual Acuity Measurements</Typography>
-                    <Typography variant="caption" color="text.secondary">Check distance and near vision parameters</Typography>
-                  </Box>
-
-                  <Grid container spacing={3}>
-                    <Grid item xs={12} sm={6}>
-                      <Typography variant="subtitle2" fontWeight={700} color="primary" gutterBottom>Right Eye (OD)</Typography>
-                      <Stack spacing={2}>
-                        <TextField label="Unaided Distance Vision" fullWidth value={vaODDistanceUnaided} onChange={(e) => setVaODDistanceUnaided(e.target.value)} />
-                        <TextField label="Corrected Distance Vision" fullWidth value={vaODDistanceCorrected} onChange={(e) => setVaODDistanceCorrected(e.target.value)} />
-                        <TextField label="Pinhole Vision" fullWidth value={vaODPinhole} onChange={(e) => setVaODPinhole(e.target.value)} />
-                        <TextField label="Near Vision" fullWidth value={vaODNear} onChange={(e) => setVaODNear(e.target.value)} />
-                      </Stack>
-                    </Grid>
-
-                    <Grid item xs={12} sm={6}>
-                      <Typography variant="subtitle2" fontWeight={700} color="primary" gutterBottom>Left Eye (OS)</Typography>
-                      <Stack spacing={2}>
-                        <TextField label="Unaided Distance Vision" fullWidth value={vaOSDistanceUnaided} onChange={(e) => setVaOSDistanceUnaided(e.target.value)} />
-                        <TextField label="Corrected Distance Vision" fullWidth value={vaOSDistanceCorrected} onChange={(e) => setVaOSDistanceCorrected(e.target.value)} />
-                        <TextField label="Pinhole Vision" fullWidth value={vaOSPinhole} onChange={(e) => setVaOSPinhole(e.target.value)} />
-                        <TextField label="Near Vision" fullWidth value={vaOSNear} onChange={(e) => setVaOSNear(e.target.value)} />
-                      </Stack>
-                    </Grid>
-
-                    <Grid item xs={12}>
-                      <Divider />
-                      <Typography variant="subtitle2" fontWeight={700} color="primary" sx={{ mt: 2, mb: 2 }}>Binocular OU Vision</Typography>
-                      <Grid container spacing={2}>
-                        <Grid item xs={6} sm={3}>
-                          <TextField label="Binocular Vision" fullWidth value={vaOUBinocular} onChange={(e) => setVaOUBinocular(e.target.value)} />
-                        </Grid>
-                        <Grid item xs={6} sm={3}>
-                          <TextField label="Stereo Vision" fullWidth value={vaOUStereo} onChange={(e) => setVaOUStereo(e.target.value)} />
-                        </Grid>
-                        <Grid item xs={6} sm={3}>
-                          <TextField label="Dominant Eye" fullWidth value={vaOUDominant} onChange={(e) => setVaOUDominant(e.target.value)} />
-                        </Grid>
-                        <Grid item xs={6} sm={3}>
-                          <TextField label="Fusion Test" fullWidth value={vaOUFusion} onChange={(e) => setVaOUFusion(e.target.value)} />
-                        </Grid>
-                      </Grid>
-                    </Grid>
-                  </Grid>
-                </Stack>
-              )}
-
-              {/* Tab 4: Objective Refraction */}
-              {activeStep === 3 && (
-                <Stack spacing={3}>
-                  <Box>
-                    <Typography variant="h6" fontWeight={700}>Objective Refraction Parameters</Typography>
-                    <Typography variant="caption" color="text.secondary">Record Auto-Refractometer and Keratometry measurements</Typography>
-                  </Box>
-
-                  {/* Auto Refraction Table */}
-                  <Typography variant="subtitle2" fontWeight={700} gutterBottom>Auto Refraction</Typography>
-                  <TableContainer component={Paper} variant="outlined">
-                    <Table size="small">
-                      <TableHead sx={{ backgroundColor: 'action.hover' }}>
-                        <TableRow>
-                          <TableCell sx={{ fontWeight: 700 }}>EYE</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>Sphere (SPH)</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>Cylinder (CYL)</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>Axis</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>Vertex Dist.</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>Pupil Size</TableCell>
-                        </TableRow>
-                      </TableHead>
-                      <TableBody>
-                        <TableRow>
-                          <TableCell sx={{ fontWeight: 700 }}>OD (Right)</TableCell>
-                          <TableCell><TextField size="small" variant="standard" value={arSphOD} onChange={(e) => setArSphOD(e.target.value)} /></TableCell>
-                          <TableCell><TextField size="small" variant="standard" value={arCylOD} onChange={(e) => setArCylOD(e.target.value)} /></TableCell>
-                          <TableCell><TextField size="small" variant="standard" value={arAxisOD} onChange={(e) => setArAxisOD(e.target.value)} /></TableCell>
-                          <TableCell><TextField size="small" variant="standard" value={arVertexOD} onChange={(e) => setArVertexOD(e.target.value)} /></TableCell>
-                          <TableCell><TextField size="small" variant="standard" value={arPupilOD} onChange={(e) => setArPupilOD(e.target.value)} /></TableCell>
-                        </TableRow>
-                        <TableRow>
-                          <TableCell sx={{ fontWeight: 700 }}>OS (Left)</TableCell>
-                          <TableCell><TextField size="small" variant="standard" value={arSphOS} onChange={(e) => setArSphOS(e.target.value)} /></TableCell>
-                          <TableCell><TextField size="small" variant="standard" value={arCylOS} onChange={(e) => setArCylOS(e.target.value)} /></TableCell>
-                          <TableCell><TextField size="small" variant="standard" value={arAxisOS} onChange={(e) => setArAxisOS(e.target.value)} /></TableCell>
-                          <TableCell><TextField size="small" variant="standard" value={arVertexOS} onChange={(e) => setArVertexOS(e.target.value)} /></TableCell>
-                          <TableCell><TextField size="small" variant="standard" value={arPupilOS} onChange={(e) => setArPupilOS(e.target.value)} /></TableCell>
-                        </TableRow>
-                      </TableBody>
-                    </Table>
-                  </TableContainer>
-
-                  <Divider />
-
-                  <Typography variant="subtitle2" fontWeight={700}>Keratometry & PD Readings</Typography>
-                  <Grid container spacing={2}>
-                    <Grid item xs={6} sm={3}>
-                      <TextField label="K1 OD (Diopters)" fullWidth value={k1OD} onChange={(e) => setK1OD(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6} sm={3}>
-                      <TextField label="K2 OD" fullWidth value={k2OD} onChange={(e) => setK2OD(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6} sm={3}>
-                      <TextField label="K1 OS" fullWidth value={k1OS} onChange={(e) => setK1OS(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6} sm={3}>
-                      <TextField label="K2 OS" fullWidth value={k2OS} onChange={(e) => setK2OS(e.target.value)} />
-                    </Grid>
-
-                    <Grid item xs={6} sm={3}>
-                      <TextField label="Distance PD (mm)" fullWidth value={distancePD} onChange={(e) => setDistancePD(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6} sm={3}>
-                      <TextField label="Near PD (mm)" fullWidth value={nearPD} onChange={(e) => setNearPD(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6} sm={3}>
-                      <TextField label="IOP OD (mmHg)" fullWidth value={iopRight} onChange={(e) => setIopRight(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6} sm={3}>
-                      <TextField label="IOP OS (mmHg)" fullWidth value={iopLeft} onChange={(e) => setIopLeft(e.target.value)} />
-                    </Grid>
-                  </Grid>
-                  
-                  {getHighIopWarning() && <Alert severity="warning" icon={<WarningIcon />}>{getHighIopWarning()}</Alert>}
-                </Stack>
-              )}
-
-              {/* Tab 5: Subjective Refraction */}
-              {activeStep === 4 && (
-                <Stack spacing={3}>
-                  <Box>
-                    <Typography variant="h6" fontWeight={700}>Subjective Refraction Card</Typography>
-                    <Typography variant="caption" color="text.secondary">Enter final subjective trial lens measurements</Typography>
-                  </Box>
-
-                  <TableContainer component={Paper} variant="outlined">
-                    <Table size="small">
-                      <TableHead sx={{ backgroundColor: 'action.hover' }}>
-                        <TableRow>
-                          <TableCell sx={{ fontWeight: 700 }}>EYE</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>SPH</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>CYL</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>AXIS</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>VA</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>ADD</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>Prism</TableCell>
-                        </TableRow>
-                      </TableHead>
-                      <TableBody>
-                        <TableRow>
-                          <TableCell sx={{ fontWeight: 700 }}>OD (Right)</TableCell>
-                          <TableCell><TextField size="small" variant="standard" value={subSphOD} onChange={(e) => setSubSphOD(e.target.value)} /></TableCell>
-                          <TableCell><TextField size="small" variant="standard" value={subCylOD} onChange={(e) => setSubCylOD(e.target.value)} /></TableCell>
-                          <TableCell><TextField size="small" variant="standard" value={subAxisOD} onChange={(e) => setSubAxisOD(e.target.value)} /></TableCell>
-                          <TableCell><TextField size="small" variant="standard" value={subVaOD} onChange={(e) => setSubVaOD(e.target.value)} /></TableCell>
-                          <TableCell><TextField size="small" variant="standard" value={subAddOD} onChange={(e) => setSubAddOD(e.target.value)} /></TableCell>
-                          <TableCell><TextField size="small" variant="standard" value={subPrismOD} onChange={(e) => setSubPrismOD(e.target.value)} /></TableCell>
-                        </TableRow>
-                        <TableRow>
-                          <TableCell sx={{ fontWeight: 700 }}>OS (Left)</TableCell>
-                          <TableCell><TextField size="small" variant="standard" value={subSphOS} onChange={(e) => setSubSphOS(e.target.value)} /></TableCell>
-                          <TableCell><TextField size="small" variant="standard" value={subCylOS} onChange={(e) => setSubCylOS(e.target.value)} /></TableCell>
-                          <TableCell><TextField size="small" variant="standard" value={subAxisOS} onChange={(e) => setSubAxisOS(e.target.value)} /></TableCell>
-                          <TableCell><TextField size="small" variant="standard" value={subVaOS} onChange={(e) => setSubVaOS(e.target.value)} /></TableCell>
-                          <TableCell><TextField size="small" variant="standard" value={subAddOS} onChange={(e) => setSubAddOS(e.target.value)} /></TableCell>
-                          <TableCell><TextField size="small" variant="standard" value={subPrismOS} onChange={(e) => setSubPrismOS(e.target.value)} /></TableCell>
-                        </TableRow>
-                      </TableBody>
-                    </Table>
-                  </TableContainer>
-
-                  <Divider />
-
-                  <Typography variant="subtitle2" fontWeight={700}>Binocular Accommodative Balances</Typography>
-                  <Grid container spacing={2}>
-                    <Grid item xs={6} sm={4}>
-                      <TextField label="Binocular Balance" fullWidth value={binocularBalance} onChange={(e) => setBinocularBalance(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6} sm={4}>
-                      <TextField label="Phoria Test" fullWidth value={phoriaTest} onChange={(e) => setPhoriaTest(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={12} sm={4}>
-                      <TextField label="Near Point Convergence (NPC)" fullWidth value={npc} onChange={(e) => setNpc(e.target.value)} />
-                    </Grid>
-                  </Grid>
-                </Stack>
-              )}
-
-              {/* Tab 6: Eye Health Examination */}
-              {activeStep === 5 && (
-                <Stack spacing={3}>
-                  <Box>
-                    <Typography variant="h6" fontWeight={700}>Ophthalmic Slit Lamp & Fundus Exam</Typography>
-                    <Typography variant="caption" color="text.secondary">Assess anterior segment physiology and optic health</Typography>
-                  </Box>
-
-                  <Typography variant="subtitle2" fontWeight={700} color="primary">Anterior Segment (Slit Lamp)</Typography>
-                  <Grid container spacing={2}>
-                    <Grid item xs={6} sm={4}>
-                      <TextField select label="Eyelids" fullWidth value={eyelids} onChange={(e) => setEyelids(e.target.value)}>
-                        {normalSevereOptions.map(o => <MenuItem key={o} value={o}>{o}</MenuItem>)}
-                      </TextField>
-                    </Grid>
-                    <Grid item xs={6} sm={4}>
-                      <TextField select label="Conjunctiva" fullWidth value={conjunctiva} onChange={(e) => setConjunctiva(e.target.value)}>
-                        {normalSevereOptions.map(o => <MenuItem key={o} value={o}>{o}</MenuItem>)}
-                      </TextField>
-                    </Grid>
-                    <Grid item xs={6} sm={4}>
-                      <TextField select label="Cornea" fullWidth value={cornea} onChange={(e) => setCornea(e.target.value)}>
-                        {normalSevereOptions.map(o => <MenuItem key={o} value={o}>{o}</MenuItem>)}
-                      </TextField>
-                    </Grid>
-                    <Grid item xs={6} sm={4}>
-                      <TextField select label="Anterior Chamber" fullWidth value={anteriorChamber} onChange={(e) => setAnteriorChamber(e.target.value)}>
-                        {normalSevereOptions.map(o => <MenuItem key={o} value={o}>{o}</MenuItem>)}
-                      </TextField>
-                    </Grid>
-                    <Grid item xs={6} sm={4}>
-                      <TextField select label="Lens State" fullWidth value={lensState} onChange={(e) => setLensState(e.target.value)}>
-                        {normalSevereOptions.map(o => <MenuItem key={o} value={o}>{o}</MenuItem>)}
-                      </TextField>
-                    </Grid>
-                  </Grid>
-
-                  <Divider />
-
-                  <Typography variant="subtitle2" fontWeight={700} color="primary">Posterior Segment (Fundusoscopy)</Typography>
-                  <Grid container spacing={2}>
-                    <Grid item xs={6}>
-                      <TextField label="Optic Disc" fullWidth value={opticDisc} onChange={(e) => setOpticDisc(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6}>
-                      <TextField label="Retina" fullWidth value={retina} onChange={(e) => setRetina(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6}>
-                      <TextField label="Pupillary Reflex" fullWidth value={pupillaryReflex} onChange={(e) => setPupillaryReflex(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6}>
-                      <TextField label="Tear Film Assessment" fullWidth value={tearFilm} onChange={(e) => setTearFilm(e.target.value)} />
-                    </Grid>
-                  </Grid>
-                </Stack>
-              )}
-
-              {/* Tab 7: Contact Lens Trial */}
-              {activeStep === 6 && (
-                <Stack spacing={3}>
-                  <Box>
-                    <Typography variant="h6" fontWeight={700}>Contact Lens Fitting Log</Typography>
-                    <Typography variant="caption" color="text.secondary">Log diagnostics and lens tolerance trial reports</Typography>
-                  </Box>
-
-                  <Grid container spacing={2}>
-                    <Grid item xs={6} sm={4}>
-                      <TextField label="Trial Brand" fullWidth value={clBrand} onChange={(e) => setClBrand(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6} sm={4}>
-                      <TextField label="Lens Type" fullWidth value={clType} onChange={(e) => setClType(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6} sm={4}>
-                      <TextField label="Power (SPH)" fullWidth value={clPower} onChange={(e) => setClPower(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6} sm={3}>
-                      <TextField label="Base Curve (BC)" fullWidth value={clBC} onChange={(e) => setClBC(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6} sm={3}>
-                      <TextField label="Diameter (DIA)" fullWidth value={clDIA} onChange={(e) => setClDIA(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6} sm={3}>
-                      <TextField label="Wearing Time" fullWidth value={clWearTime} onChange={(e) => setClWearTime(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6} sm={3}>
-                      <TextField label="Comfort Rating" fullWidth value={clComfort} onChange={(e) => setClComfort(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={12}>
-                      <TextField label="Trial Fitting Recommendation" fullWidth multiline rows={2} value={clRecommend} onChange={(e) => setClRecommend(e.target.value)} />
-                    </Grid>
-                  </Grid>
-                </Stack>
-              )}
-
-              {/* Tab 8: Final Prescription */}
-              {activeStep === 7 && (
-                <Stack spacing={3}>
-                  <Box>
-                    <Typography variant="h6" fontWeight={700}>Prescription card generation</Typography>
-                    <Typography variant="caption" color="text.secondary">Automatically generated visual layout ready to print</Typography>
-                  </Box>
-
-                  <Paper variant="outlined" sx={{ p: 4, backgroundColor: '#ffffff', color: 'black', borderRadius: 4, fontFamily: 'monospace' }}>
-                    <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 3, flexWrap: 'wrap', gap: 2 }}>
-                      <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
-                        {companyInfo.logo && (
-                          <img 
-                            src={companyInfo.logo} 
-                            alt="Logo" 
-                            style={{ maxHeight: '50px', maxWidth: '120px', objectFit: 'contain' }} 
-                          />
-                        )}
-                        <Box>
-                          <Typography variant="h5" sx={{ fontWeight: 900, color: '#2563EB', textTransform: 'uppercase' }}>
-                            {companyInfo.name}
-                          </Typography>
-                          <Typography variant="caption" sx={{ color: 'gray', display: 'block' }}>
-                            Visit No: {patientData.visitNum} | Optometrist: {patientData.assignedOptometrist}
-                          </Typography>
-                        </Box>
-                      </Box>
-                      <Box sx={{ textAlign: 'right' }}>
-                        <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>DATE: {new Date().toLocaleDateString()}</Typography>
-                        <Typography variant="caption" sx={{ color: 'gray' }}>Patient: {patientData.name}</Typography>
-                      </Box>
-                    </Box>
-
-                    <Divider sx={{ my: 2, borderColor: 'black' }} />
-
-                    <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1, textDecoration: 'underline' }}>Final Correction Prescription (Rx)</Typography>
-                    <Table size="small" sx={{ mb: 3 }}>
-                      <TableHead>
-                        <TableRow>
-                          <th style={{ textAlign: 'left', fontWeight: 'bold' }}>Eye</th>
-                          <th style={{ textAlign: 'left', fontWeight: 'bold' }}>SPH</th>
-                          <th style={{ textAlign: 'left', fontWeight: 'bold' }}>CYL</th>
-                          <th style={{ textAlign: 'left', fontWeight: 'bold' }}>AXIS</th>
-                          <th style={{ textAlign: 'left', fontWeight: 'bold' }}>ADD</th>
-                          <th style={{ textAlign: 'left', fontWeight: 'bold' }}>PD</th>
-                        </TableRow>
-                      </TableHead>
-                      <TableBody>
-                        <TableRow>
-                          <TableCell sx={{ color: 'black', borderBottom: '1px solid black' }}><strong>OD (Right)</strong></TableCell>
-                          <TableCell sx={{ color: 'black', borderBottom: '1px solid black' }}>{subSphOD}</TableCell>
-                          <TableCell sx={{ color: 'black', borderBottom: '1px solid black' }}>{subCylOD}</TableCell>
-                          <TableCell sx={{ color: 'black', borderBottom: '1px solid black' }}>{subAxisOD}</TableCell>
-                          <TableCell sx={{ color: 'black', borderBottom: '1px solid black' }}>{subAddOD}</TableCell>
-                          <TableCell sx={{ color: 'black', borderBottom: '1px solid black' }}>{monoRightPD} mm</TableCell>
-                        </TableRow>
-                        <TableRow>
-                          <TableCell sx={{ color: 'black', borderBottom: '1px solid black' }}><strong>OS (Left)</strong></TableCell>
-                          <TableCell sx={{ color: 'black', borderBottom: '1px solid black' }}>{subSphOS}</TableCell>
-                          <TableCell sx={{ color: 'black', borderBottom: '1px solid black' }}>{subCylOS}</TableCell>
-                          <TableCell sx={{ color: 'black', borderBottom: '1px solid black' }}>{subAxisOS}</TableCell>
-                          <TableCell sx={{ color: 'black', borderBottom: '1px solid black' }}>{subAddOS}</TableCell>
-                          <TableCell sx={{ color: 'black', borderBottom: '1px solid black' }}>{monoLeftPD} mm</TableCell>
-                        </TableRow>
-                      </TableBody>
-                    </Table>
-
-                    <Typography variant="body2" sx={{ mb: 4 }}>
-                      <strong>Remarks:</strong> {glassesUsage === 'Full Time' ? 'Continuous wear recommended.' : 'For computer and reading distance only.'}
-                    </Typography>
-
-                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
-                      <Box>
-                        <Typography variant="caption" sx={{ color: 'gray', display: 'block' }}>VisionERP Certified Refraction Card</Typography>
-                        <Typography variant="caption" sx={{ color: 'gray' }}>Powered by Greensol Ophthalmic Suite</Typography>
-                      </Box>
-                      <Box sx={{ textAlign: 'center' }}>
-                        <Typography variant="caption" sx={{ fontStyle: 'italic', borderBottom: '1px solid black', display: 'block', px: 2 }}>
-                          {patientData.assignedOptometrist}
-                        </Typography>
-                        <Typography variant="caption" sx={{ fontWeight: 600 }}>Optometrist Signature</Typography>
-                      </Box>
-                    </Box>
-                  </Paper>
-                </Stack>
-              )}
-
-              {/* Tab 9: Recommendations & Details */}
-              {activeStep === 8 && (
-                <Stack spacing={3}>
-                  <Box>
-                    <Typography variant="h6" fontWeight={700}>Ophthalmic Products Recommendation</Typography>
-                    <Typography variant="caption" color="text.secondary">Suggest matching frames, lens brands, and coatings</Typography>
-                  </Box>
-
-                  <Typography variant="subtitle2" fontWeight={700} color="primary">Ophthalmic Lens Recommendation</Typography>
-                  <Grid container spacing={2}>
-                    <Grid item xs={6} sm={4}>
-                      <TextField select label="Lens Type" fullWidth value={recLensType} onChange={(e) => setRecLensType(e.target.value)}>
-                        <MenuItem value="Single Vision">Single Vision</MenuItem>
-                        <MenuItem value="Bifocal">Bifocal</MenuItem>
-                        <MenuItem value="Progressive">Progressive</MenuItem>
-                        <MenuItem value="Workspace">Workspace</MenuItem>
-                      </TextField>
-                    </Grid>
-                    <Grid item xs={6} sm={4}>
-                      <TextField select label="Lens Brand" fullWidth value={recLensBrand} onChange={(e) => setRecLensBrand(e.target.value)}>
-                        <MenuItem value="Essilor">Essilor</MenuItem>
-                        <MenuItem value="Zeiss">Zeiss</MenuItem>
-                        <MenuItem value="Hoya">Hoya</MenuItem>
-                        <MenuItem value="Kodak">Hoya</MenuItem>
-                      </TextField>
-                    </Grid>
-                    <Grid item xs={12} sm={4}>
-                      <TextField label="Coatings Suggested" fullWidth value={recLensCoating} onChange={(e) => setRecLensCoating(e.target.value)} />
-                    </Grid>
-                  </Grid>
-
-                  <Divider />
-
-                  <Typography variant="subtitle2" fontWeight={700} color="primary">Frame Suggestions</Typography>
-                  <Grid container spacing={2}>
-                    <Grid item xs={6} sm={3}>
-                      <TextField label="Frame Shape" fullWidth value={recFrameShape} onChange={(e) => setRecFrameShape(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6} sm={3}>
-                      <TextField label="Frame Brand" fullWidth value={recFrameBrand} onChange={(e) => setRecFrameBrand(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6} sm={3}>
-                      <TextField label="Frame Color" fullWidth value={recFrameColor} onChange={(e) => setRecFrameColor(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6} sm={3}>
-                      <TextField label="Frame Size" fullWidth value={recFrameSize} onChange={(e) => setRecFrameSize(e.target.value)} />
-                    </Grid>
-                  </Grid>
-
-                  <Divider />
-
-                  <Typography variant="subtitle2" fontWeight={700} color="primary">Follow-up schedule</Typography>
-                  <Grid container spacing={2}>
-                    <Grid item xs={6}>
-                      <TextField label="Next Review Date" type="date" InputLabelProps={{ shrink: true }} fullWidth value={followUpDate} onChange={(e) => setFollowUpDate(e.target.value)} />
-                    </Grid>
-                    <Grid item xs={6}>
-                      <TextField select label="Follow-up Interval" fullWidth value={followUpInterval} onChange={(e) => setFollowUpInterval(e.target.value)}>
-                        <MenuItem value="3 Months">3 Months</MenuItem>
-                        <MenuItem value="6 Months">6 Months</MenuItem>
-                        <MenuItem value="1 Year">1 Year</MenuItem>
-                      </TextField>
-                    </Grid>
-                  </Grid>
-                </Stack>
-              )}
-            </CardContent>
-          </Card>
-        </Grid>
-
-        {/* Right Side: Quick Exam Summary Sidebar */}
-        <Grid item xs={12} md={3.5}>
-          <Box sx={{ position: 'sticky', top: 84 }}>
-            {/* Patient Visit History Accordion */}
-            <Accordion sx={{ mb: 2, borderRadius: 3, border: '1px solid', borderColor: 'divider', boxShadow: 'none' }}>
-              <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-                <Typography variant="subtitle2" sx={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: 1 }}>
-                  <HistoryIcon color="primary" fontSize="small" /> Visit History & Previous Rx
-                </Typography>
-              </AccordionSummary>
-              <AccordionDetails sx={{ p: 2 }}>
-                <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1, fontWeight: 700 }}>
-                  PREVIOUS PRESCRIPTION:
-                </Typography>
-                <Typography variant="body2" sx={{ mb: 2, fontStyle: 'italic' }}>
-                  {patientData.previousPrescription}
-                </Typography>
-                <Divider sx={{ my: 1 }} />
-                <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1, fontWeight: 700 }}>
-                  VISIT LOGS:
-                </Typography>
-                {patientData.visitHistory?.map((log, idx) => (
-                  <Typography key={idx} variant="caption" display="block" sx={{ mb: 0.5 }}>
-                    • {log}
-                  </Typography>
-                ))}
-              </AccordionDetails>
-            </Accordion>
-
-            {/* Right Summary Card */}
-            <Card sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 4, boxShadow: 'none' }}>
-              <CardContent sx={{ p: 3 }}>
-                <Typography variant="subtitle1" fontWeight={700} color="primary" gutterBottom>
-                  Live Examination Summary
-                </Typography>
-                <Divider sx={{ mb: 2 }} />
-
-                <Stack spacing={2.5}>
-                  <Box>
-                    <Typography variant="caption" color="text.secondary" display="block" sx={{ fontWeight: 700 }}>PATIENT</Typography>
-                    <Typography variant="body2" fontWeight={600}>{patientData.name} ({patientData.age} yr, {patientData.gender})</Typography>
-                    <Typography variant="caption" color="text.secondary">ID: {patientData.id}</Typography>
-                  </Box>
-
-                  <Box>
-                    <Typography variant="caption" color="text.secondary" display="block" sx={{ fontWeight: 700 }}>CHIEF COMPLAINTS</Typography>
-                    {selectedComplaints.length === 0 ? (
-                      <Typography variant="caption" color="text.secondary">No complaints selected</Typography>
-                    ) : (
-                      <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap sx={{ mt: 0.5 }}>
-                        {selectedComplaints.map(c => (
-                          <Chip key={c} label={c} size="small" sx={{ fontSize: '0.7rem' }} />
-                        ))}
-                      </Stack>
-                    )}
-                  </Box>
-
-                  <Box>
-                    <Typography variant="caption" color="text.secondary" display="block" sx={{ fontWeight: 700 }}>SUBJECTIVE RX REFRACTION</Typography>
-                    <Typography variant="caption" display="block">OD: {subSphOD} SPH / {subCylOD} CYL x {subAxisOD}</Typography>
-                    <Typography variant="caption" display="block">OS: {subSphOS} SPH / {subCylOS} CYL x {subAxisOS}</Typography>
-                  </Box>
-
-                  <Box>
-                    <Typography variant="caption" color="text.secondary" display="block" sx={{ fontWeight: 700 }}>RECOMMENDATION</Typography>
-                    <Typography variant="caption" display="block">Lens: {recLensBrand} {recLensType}</Typography>
-                    <Typography variant="caption" display="block">Frame: {recFrameBrand} ({recFrameColor})</Typography>
-                  </Box>
-
-                  <Box>
-                    <Typography variant="caption" color="text.secondary" display="block" sx={{ fontWeight: 700 }}>DIAGNOSIS CHIPS</Typography>
-                    <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap sx={{ mt: 0.5 }}>
-                      {recDiagnosis.map(d => (
-                        <Chip key={d} label={d} size="small" color="primary" sx={{ fontSize: '0.7rem' }} />
-                      ))}
-                    </Stack>
-                  </Box>
-                  
-                  <Box>
-                    <Typography variant="caption" color="text.secondary" display="block" sx={{ fontWeight: 700 }}>NEXT REVIEW</Typography>
-                    <Typography variant="body2" fontWeight={600}>{followUpDate} ({followUpInterval})</Typography>
-                  </Box>
-                </Stack>
-              </CardContent>
-            </Card>
-          </Box>
-        </Grid>
-      </Grid>
-
-      {/* Bottom Sticky Action Bar */}
-      <Box sx={{ 
-        position: 'fixed', 
-        bottom: 0, 
-        left: { xs: 0, sm: 280 }, 
-        right: 0, 
-        backgroundColor: 'background.paper', 
-        borderTop: '1px solid',
-        borderColor: 'divider',
-        p: 2, 
-        zIndex: 1000,
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        flexWrap: 'wrap',
-        gap: 1
-      }}>
-        <Stack direction="row" spacing={1}>
-          <Button variant="outlined" startIcon={<BackIcon />} onClick={handleBack} disabled={activeStep === 0}>
-            Back
-          </Button>
-          <Button variant="outlined" startIcon={<NextIcon />} onClick={handleNext} disabled={activeStep === 8} sx={{ mr: 2 }}>
-            Next
-          </Button>
-          <Button variant="text" size="small" onClick={() => alert('Draft saved successfully')}>Save Draft</Button>
-          <Button variant="text" color="error" size="small" onClick={() => { if(confirm("Are you sure you want to cancel and return to the queue? Unsaved details will be lost.")) setViewMode('list'); }}>Cancel & Exit</Button>
-        </Stack>
-        
         <Stack direction="row" spacing={1.5} flexWrap="wrap">
-          <Button variant="outlined" startIcon={<PrintIcon />} onClick={() => window.print()}>
-            Print Exam
+          <Button 
+            variant={layoutMode === 'single' ? 'contained' : 'outlined'} 
+            color="primary" 
+            onClick={() => setLayoutMode(prev => prev === 'single' ? 'wizard' : 'single')}
+            sx={{ borderRadius: 2, textTransform: 'none', fontWeight: 800 }}
+          >
+            {layoutMode === 'single' ? '📋 Switch to 10-Step Wizard' : '🖥️ Switch to Single-Screen Master View'}
           </Button>
-          <Button variant="contained" startIcon={<SaveIcon />} sx={{ backgroundColor: '#2563EB', '&:hover': { backgroundColor: '#1d4ed8' } }} onClick={handleSaveExam}>
-            Save Examination
+
+          <Button 
+            variant="outlined" 
+            color="primary" 
+            startIcon={<SearchIcon />} 
+            onClick={() => setSearchModalOpen(true)}
+            sx={{ borderRadius: 2, textTransform: 'none', fontWeight: 700 }}
+          >
+            Smart Patient Search
+          </Button>
+
+          <Button 
+            variant="outlined" 
+            color="secondary" 
+            startIcon={<KeyboardIcon />} 
+            onClick={() => setShortcutsOpen(true)}
+            sx={{ borderRadius: 2, textTransform: 'none' }}
+          >
+            Shortcuts
+          </Button>
+
+          <Button 
+            variant={viewMode === 'list' ? 'contained' : 'outlined'} 
+            color="inherit" 
+            onClick={() => setViewMode(prev => prev === 'list' ? 'form' : 'list')}
+            sx={{ borderRadius: 2, textTransform: 'none', fontWeight: 600 }}
+          >
+            {viewMode === 'list' ? 'Back to Active Exam' : 'Past Visit History Queue'}
+          </Button>
+
+          <Button 
+            variant="contained" 
+            color="success" 
+            startIcon={<AddPersonIcon />}
+            onClick={handleResetAll}
+            sx={{ borderRadius: 2, textTransform: 'none', fontWeight: 700 }}
+          >
+            + Start New Examination
           </Button>
         </Stack>
       </Box>
 
-      {/* Hidden Print-Only Prescription & Recommendation Card */}
-      <Box id="prescription-print-area" sx={{ display: 'none', '@media print': { display: 'block !important' } }}>
-        <Paper variant="outlined" sx={{ p: 4, backgroundColor: '#ffffff', color: 'black', fontFamily: 'monospace' }}>
-          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 3 }}>
-            <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
-              {companyInfo.logo && (
-                <img 
-                  src={companyInfo.logo} 
-                  alt="Company Logo" 
-                  style={{ maxHeight: '60px', maxWidth: '150px', objectFit: 'contain' }} 
+      {viewMode === 'list' ? (
+        /* Queue & Visit History View */
+        <Card elevation={0} sx={{ p: 3, border: '1px solid', borderColor: 'divider', borderRadius: 3 }}>
+          <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>
+            Recent Optical Eye Examination Records
+          </Typography>
+          <TableContainer component={Paper} elevation={0} sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
+            <Table>
+              <TableHead sx={{ bgcolor: 'action.hover' }}>
+                <TableRow>
+                  <TableCell sx={{ fontWeight: 800 }}>Visit ID</TableCell>
+                  <TableCell sx={{ fontWeight: 800 }}>Date</TableCell>
+                  <TableCell sx={{ fontWeight: 800 }}>Patient ID & Name</TableCell>
+                  <TableCell sx={{ fontWeight: 800 }}>Optometrist</TableCell>
+                  <TableCell sx={{ fontWeight: 800 }}>Primary Diagnosis</TableCell>
+                  <TableCell sx={{ fontWeight: 800 }}>Prescription Summary</TableCell>
+                  <TableCell sx={{ fontWeight: 800, textAlign: 'right' }}>Actions</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {pastExaminations.map((exam) => (
+                  <TableRow key={exam.id} hover>
+                    <TableCell sx={{ fontWeight: 700 }}>{exam.id}</TableCell>
+                    <TableCell>{exam.date}</TableCell>
+                    <TableCell>
+                      <Typography variant="subtitle2" fontWeight={700}>{exam.name}</Typography>
+                      <Typography variant="caption" color="text.secondary">{exam.patientId}</Typography>
+                    </TableCell>
+                    <TableCell>{exam.doctor}</TableCell>
+                    <TableCell><Chip label={exam.diagnosis} size="small" color="primary" variant="outlined" /></TableCell>
+                    <TableCell sx={{ fontWeight: 600 }}>{exam.rx}</TableCell>
+                    <TableCell align="right">
+                      <Stack direction="row" spacing={1} justifyContent="flex-end">
+                        <Button size="small" variant="outlined" onClick={() => { setViewMode('form'); setActiveStep(9); }}>
+                          View Rx
+                        </Button>
+                        <Button size="small" variant="contained" color="secondary" onClick={handleNavigateToSales}>
+                          POS Bill
+                        </Button>
+                      </Stack>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        </Card>
+      ) : layoutMode === 'single' ? (
+        /* Single Screen Master ERP Eye Test Form (Matching Uploaded Image 3) */
+        <Box id="optical-single-form-container" onKeyDown={handleKeyDownEnter}>
+          <SingleScreenEyeTestForm
+            patientData={patientData}
+            setPatientData={setPatientData}
+            medicalHistory={medicalHistory}
+            setMedicalHistory={setMedicalHistory}
+            visualAcuity={visualAcuity}
+            setVisualAcuity={setVisualAcuity}
+            objectiveRefraction={objectiveRefraction}
+            setObjectiveRefraction={setObjectiveRefraction}
+            subjectiveRefraction={subjectiveRefraction}
+            setSubjectiveRefraction={setSubjectiveRefraction}
+            binocularVision={binocularVision}
+            setBinocularVision={setBinocularVision}
+            eyeHealth={eyeHealth}
+            setEyeHealth={setEyeHealth}
+            diagnosis={diagnosis}
+            setDiagnosis={setDiagnosis}
+            prescription={prescription}
+            setPrescription={setPrescription}
+            doctorsList={doctorsList}
+            onOpenSearchModal={() => setSearchModalOpen(true)}
+            onSaveDraft={handleSaveDraft}
+            onPrint={() => setActiveStep(9)}
+            onClearAll={handleResetAll}
+            savedExams={pastExaminations}
+            onSelectExamFromHistory={(exam) => {
+              if (exam.patientData) setPatientData(exam.patientData);
+              if (exam.subjectiveRefraction) setSubjectiveRefraction(exam.subjectiveRefraction);
+              if (exam.medicalHistory) setMedicalHistory(exam.medicalHistory);
+            }}
+          />
+        </Box>
+      ) : (
+        /* Stepper & Live Clinical Workspace Layout */
+        <Box>
+          {/* Horizontal 10-Step Bar */}
+          <ExaminationStepper 
+            activeStep={activeStep} 
+            setActiveStep={setActiveStep} 
+            completedSteps={[]} 
+          />
+
+          <Grid container spacing={3}>
+            {/* Left 75% Column: Current Step Content */}
+            <Grid item xs={12} lg={8.5} id="optical-step-container" onKeyDown={handleKeyDownEnter}>
+              {activeStep === 0 && (
+                <Step1PatientInfo 
+                  patientData={patientData} 
+                  setPatientData={setPatientData} 
+                  onOpenSearchModal={() => setSearchModalOpen(true)}
+                  doctorsList={doctorsList}
                 />
               )}
-              <Box>
-                <Typography variant="h5" sx={{ fontWeight: 900, color: '#1E3A8A', textTransform: 'uppercase', fontFamily: 'monospace' }}>
-                  {companyInfo.name}
-                </Typography>
-                {companyInfo.phone && <Typography variant="caption" sx={{ color: 'black', display: 'block', fontFamily: 'monospace' }}>Tel: {companyInfo.phone}</Typography>}
-                {companyInfo.address && <Typography variant="caption" sx={{ color: 'black', display: 'block', fontFamily: 'monospace' }}>Address: {companyInfo.address}</Typography>}
+
+              {activeStep === 1 && (
+                <Step2MedicalHistory 
+                  medicalHistory={medicalHistory} 
+                  setMedicalHistory={setMedicalHistory} 
+                />
+              )}
+
+              {activeStep === 2 && (
+                <Step3VisualAcuity 
+                  visualAcuity={visualAcuity} 
+                  setVisualAcuity={setVisualAcuity} 
+                />
+              )}
+
+              {activeStep === 3 && (
+                <Step4ObjectiveRefraction 
+                  objectiveRefraction={objectiveRefraction} 
+                  setObjectiveRefraction={setObjectiveRefraction} 
+                />
+              )}
+
+              {activeStep === 4 && (
+                <Step5SubjectiveRefraction 
+                  subjectiveRefraction={subjectiveRefraction} 
+                  setSubjectiveRefraction={setSubjectiveRefraction} 
+                />
+              )}
+
+              {activeStep === 5 && (
+                <Step6BinocularVision 
+                  binocularVision={binocularVision} 
+                  setBinocularVision={setBinocularVision} 
+                />
+              )}
+
+              {activeStep === 6 && (
+                <Step7EyeHealth 
+                  eyeHealth={eyeHealth} 
+                  setEyeHealth={setEyeHealth} 
+                />
+              )}
+
+              {activeStep === 7 && (
+                <Step8Diagnosis 
+                  diagnosis={diagnosis} 
+                  setDiagnosis={setDiagnosis} 
+                />
+              )}
+
+              {activeStep === 8 && (
+                <Step9Prescription 
+                  subjectiveRefraction={subjectiveRefraction} 
+                  prescription={prescription} 
+                  setPrescription={setPrescription} 
+                />
+              )}
+
+              {activeStep === 9 && (
+                <PrintPrescriptionCard 
+                  patientData={patientData}
+                  subjectiveRefraction={subjectiveRefraction}
+                  diagnosis={diagnosis}
+                  prescription={prescription}
+                  medicalHistory={medicalHistory}
+                  onNavigateToSales={handleNavigateToSales}
+                />
+              )}
+
+              {/* Bottom Navigation Buttons */}
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', mt: 3, pt: 2, borderTop: '1px solid', borderColor: 'divider' }}>
+                <Button 
+                  disabled={activeStep === 0} 
+                  onClick={() => setActiveStep(prev => prev - 1)}
+                  variant="outlined" 
+                  startIcon={<BackIcon />}
+                  sx={{ borderRadius: 2, textTransform: 'none', px: 3 }}
+                >
+                  Previous Step
+                </Button>
+
+                <Box sx={{ display: 'flex', gap: 1.5 }}>
+                  <Button 
+                    variant="outlined" 
+                    color="inherit"
+                    onClick={handleSaveDraft}
+                    startIcon={<SaveIcon />}
+                    sx={{ borderRadius: 2, textTransform: 'none' }}
+                  >
+                    Save Draft
+                  </Button>
+
+                  {activeStep < 9 ? (
+                    <Button 
+                      variant="contained" 
+                      onClick={() => setActiveStep(prev => prev + 1)}
+                      endIcon={<NextIcon />}
+                      sx={{ borderRadius: 2, textTransform: 'none', px: 3, fontWeight: 700 }}
+                    >
+                      Next Step
+                    </Button>
+                  ) : (
+                    <Button 
+                      variant="contained" 
+                      color="success"
+                      onClick={() => alert(`Eye Examination completed for ${patientData.name}!`)}
+                      startIcon={<PrintIcon />}
+                      sx={{ borderRadius: 2, textTransform: 'none', px: 3, fontWeight: 700 }}
+                    >
+                      Complete & Print Rx
+                    </Button>
+                  )}
+                </Box>
               </Box>
-            </Box>
-            <Box sx={{ textAlign: 'right' }}>
-              <Typography variant="subtitle2" sx={{ fontWeight: 700, fontFamily: 'monospace' }}>DATE: {new Date().toLocaleDateString()}</Typography>
-              <Typography variant="caption" sx={{ color: 'black', display: 'block', fontFamily: 'monospace' }}>Visit No: {patientData.visitNum}</Typography>
-              <Typography variant="caption" sx={{ color: 'black', display: 'block', fontFamily: 'monospace' }}>Optometrist: {patientData.assignedOptometrist}</Typography>
-            </Box>
-          </Box>
-
-          <Divider sx={{ my: 2, borderColor: 'black' }} />
-
-          {/* Patient Info */}
-          <Grid container spacing={2} sx={{ mb: 3 }}>
-            <Grid item xs={6}>
-              <Typography variant="body2" sx={{ fontFamily: 'monospace' }}><strong>Patient Name:</strong> {patientData.name}</Typography>
-              <Typography variant="body2" sx={{ fontFamily: 'monospace' }}><strong>Age / Gender:</strong> {patientData.age} yrs / {patientData.gender}</Typography>
             </Grid>
-            <Grid item xs={6} sx={{ textAlign: 'right' }}>
-              <Typography variant="body2" sx={{ fontFamily: 'monospace' }}><strong>Phone:</strong> {patientData.phone || 'N/A'}</Typography>
-              <Typography variant="body2" sx={{ fontFamily: 'monospace' }}><strong>Email:</strong> {patientData.email || 'N/A'}</Typography>
+
+            {/* Right 25% Column: Sticky Examination Live Summary */}
+            <Grid item xs={12} lg={3.5}>
+              <ExaminationSummarySidebar
+                patientData={patientData}
+                medicalHistory={medicalHistory}
+                subjectiveRefraction={subjectiveRefraction}
+                diagnosis={diagnosis}
+                prescription={prescription}
+                eyeHealth={eyeHealth}
+                activeStep={activeStep}
+                setActiveStep={setActiveStep}
+                onOpenCompareModal={() => setCompareModalOpen(true)}
+                onSaveDraft={handleSaveDraft}
+                onPrint={() => setActiveStep(9)}
+              />
             </Grid>
           </Grid>
+        </Box>
+      )}
 
-          <Divider sx={{ my: 2, borderColor: 'black' }} />
+      {/* Smart Patient Search & Registration Modal */}
+      <PatientSearchModal 
+        open={searchModalOpen}
+        onClose={() => setSearchModalOpen(false)}
+        onSelectPatient={handleSelectPatient}
+        onRegisterNewPatient={handleRegisterNewPatient}
+        dbPatients={dbPatients}
+      />
 
-          {/* Rx Table */}
-          <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1, textDecoration: 'underline', fontFamily: 'monospace' }}>Correction Prescription (Rx)</Typography>
-          <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: '20px', fontFamily: 'monospace', fontSize: '12px' }}>
-            <thead>
-              <tr style={{ borderBottom: '2px solid black' }}>
-                <th style={{ textAlign: 'left', padding: '8px' }}>Eye</th>
-                <th style={{ textAlign: 'left', padding: '8px' }}>SPH</th>
-                <th style={{ textAlign: 'left', padding: '8px' }}>CYL</th>
-                <th style={{ textAlign: 'left', padding: '8px' }}>AXIS</th>
-                <th style={{ textAlign: 'left', padding: '8px' }}>ADD</th>
-                <th style={{ textAlign: 'left', padding: '8px' }}>PD</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr style={{ borderBottom: '1px solid #ddd' }}>
-                <td style={{ padding: '8px' }}><strong>OD (Right)</strong></td>
-                <td style={{ padding: '8px' }}>{subSphOD || '0.00'}</td>
-                <td style={{ padding: '8px' }}>{subCylOD || '0.00'}</td>
-                <td style={{ padding: '8px' }}>{subAxisOD || '-'}</td>
-                <td style={{ padding: '8px' }}>{subAddOD || '-'}</td>
-                <td style={{ padding: '8px' }}>{monoRightPD ? `${monoRightPD} mm` : '-'}</td>
-              </tr>
-              <tr style={{ borderBottom: '1px solid #ddd' }}>
-                <td style={{ padding: '8px' }}><strong>OS (Left)</strong></td>
-                <td style={{ padding: '8px' }}>{subSphOS || '0.00'}</td>
-                <td style={{ padding: '8px' }}>{subCylOS || '0.00'}</td>
-                <td style={{ padding: '8px' }}>{subAxisOS || '-'}</td>
-                <td style={{ padding: '8px' }}>{subAddOS || '-'}</td>
-                <td style={{ padding: '8px' }}>{monoLeftPD ? `${monoLeftPD} mm` : '-'}</td>
-              </tr>
-            </tbody>
-          </table>
+      {/* Prescription Delta Comparison Modal */}
+      <RxCompareModal 
+        open={compareModalOpen}
+        onClose={() => setCompareModalOpen(false)}
+        previousRx={{ od: { sph: '-1.00', cyl: '-0.50' }, os: { sph: '-1.25', cyl: '-0.50' }, nearAdd: '+1.00' }}
+        currentRx={subjectiveRefraction}
+        patientName={patientData.name}
+      />
 
-          {/* Recommendations */}
-          <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1, textDecoration: 'underline', fontFamily: 'monospace' }}>Ophthalmic Recommendations</Typography>
-          <Grid container spacing={2} sx={{ mb: 3 }}>
-            <Grid item xs={6}>
-              <Typography variant="body2" sx={{ fontFamily: 'monospace' }}><strong>Lens Type:</strong> {recLensType || 'N/A'}</Typography>
-              <Typography variant="body2" sx={{ fontFamily: 'monospace' }}><strong>Lens Brand:</strong> {recLensBrand || 'N/A'}</Typography>
-              <Typography variant="body2" sx={{ fontFamily: 'monospace' }}><strong>Suggested Coating:</strong> {recLensCoating || 'N/A'}</Typography>
-            </Grid>
-            <Grid item xs={6}>
-              <Typography variant="body2" sx={{ fontFamily: 'monospace' }}><strong>Frame Shape/Brand:</strong> {recFrameShape || 'N/A'} / {recFrameBrand || 'N/A'}</Typography>
-              <Typography variant="body2" sx={{ fontFamily: 'monospace' }}><strong>Frame Color/Size:</strong> {recFrameColor || 'N/A'} / {recFrameSize || 'N/A'}</Typography>
-              <Typography variant="body2" sx={{ fontFamily: 'monospace' }}><strong>Remarks/Diagnosis:</strong> {recDiagnosis?.join(', ') || 'N/A'}</Typography>
-            </Grid>
-          </Grid>
-
-          <Divider sx={{ my: 2, borderColor: 'black' }} />
-
-          {/* Review Details & Signatures */}
-          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', mt: 4 }}>
-            <Box>
-              <Typography variant="body2" sx={{ fontFamily: 'monospace' }}><strong>Next Review Date:</strong> {followUpDate || 'As advised'}</Typography>
-              <Typography variant="caption" sx={{ color: 'gray', display: 'block', mt: 1, fontFamily: 'monospace' }}>Powered by Greensol Ophthalmic Suite</Typography>
+      {/* Keyboard Shortcuts Dialog */}
+      <Dialog open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} PaperProps={{ sx: { borderRadius: 3 } }}>
+        <DialogTitle sx={{ fontWeight: 800 }}>Clinical Keyboard Shortcuts</DialogTitle>
+        <DialogContent>
+          <Stack spacing={1.5} sx={{ mt: 1 }}>
+            <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+              <Typography variant="body2">Next Examination Step</Typography>
+              <Chip label="Alt + N" size="small" color="primary" />
             </Box>
-            <Box sx={{ textAlign: 'center' }}>
-              <Typography variant="caption" sx={{ fontStyle: 'italic', borderBottom: '1px solid black', display: 'block', px: 4, mb: 0.5, fontFamily: 'monospace' }}>
-                {patientData.assignedOptometrist}
-              </Typography>
-              <Typography variant="caption" sx={{ fontWeight: 600, fontFamily: 'monospace' }}>Authorized Optometrist Signature</Typography>
+            <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+              <Typography variant="body2">Previous Step</Typography>
+              <Chip label="Alt + P" size="small" color="primary" />
             </Box>
-          </Box>
-        </Paper>
-      </Box>
+            <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+              <Typography variant="body2">Smart Patient Search</Typography>
+              <Chip label="Alt + F" size="small" color="primary" />
+            </Box>
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button onClick={() => setShortcutsOpen(false)} variant="contained">Close</Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }

@@ -149,6 +149,33 @@ class EyeExamination(BaseUUIDModel):
     pupillary_reflex = models.CharField(max_length=100, blank=True, null=True)
     tear_film = models.CharField(max_length=100, blank=True, null=True)
 
+    # PGP (Previous Glasses Prescription)
+    pgp_od_sph = models.CharField(max_length=20, blank=True, null=True)
+    pgp_od_cyl = models.CharField(max_length=20, blank=True, null=True)
+    pgp_od_axis = models.CharField(max_length=20, blank=True, null=True)
+    pgp_od_va = models.CharField(max_length=20, blank=True, null=True)
+    pgp_od_add = models.CharField(max_length=20, blank=True, null=True)
+    pgp_od_add_va = models.CharField(max_length=20, blank=True, null=True)
+
+    pgp_os_sph = models.CharField(max_length=20, blank=True, null=True)
+    pgp_os_cyl = models.CharField(max_length=20, blank=True, null=True)
+    pgp_os_axis = models.CharField(max_length=20, blank=True, null=True)
+    pgp_os_va = models.CharField(max_length=20, blank=True, null=True)
+    pgp_os_add = models.CharField(max_length=20, blank=True, null=True)
+    pgp_os_add_va = models.CharField(max_length=20, blank=True, null=True)
+    previous_glasses_date = models.CharField(max_length=50, blank=True, null=True)
+
+    # Near VA for Subjective Refraction
+    sub_add_va_od = models.CharField(max_length=20, blank=True, null=True)
+    sub_add_va_os = models.CharField(max_length=20, blank=True, null=True)
+
+    # Diagnosis & Rx Summary
+    primary_diagnosis = models.CharField(max_length=255, blank=True, null=True)
+    rx_summary = models.TextField(blank=True, null=True)
+
+    # Complete raw state payload for single-screen form
+    raw_data = models.JSONField(blank=True, null=True)
+
     # Tab 7: Contact Lens Trial
     cl_brand = models.CharField(max_length=100, blank=True, null=True)
     cl_type = models.CharField(max_length=100, blank=True, null=True)
@@ -171,4 +198,138 @@ class EyeExamination(BaseUUIDModel):
     follow_up_interval = models.CharField(max_length=50, blank=True, null=True)
 
     def __str__(self):
-        return f"Exam for {self.patient_name} on {self.examination_date.date()}"
+        return f"Exam for {self.patient_name} on {self.examination_date.date() if self.examination_date else 'N/A'}"
+
+
+# ==========================================
+# WHOLESALE SALES MODULE MODELS
+# ==========================================
+
+class Dealer(BaseUUIDModel):
+    dealer_code = models.CharField(max_length=50, unique=True)
+    business_name = models.CharField(max_length=200)
+    owner_name = models.CharField(max_length=150, blank=True, null=True)
+    gstin = models.CharField(max_length=20, blank=True, null=True)
+    license_number = models.CharField(max_length=100, blank=True, null=True)
+    contact_person = models.CharField(max_length=150, blank=True, null=True)
+    phone = models.CharField(max_length=20)
+    whatsapp_number = models.CharField(max_length=20, blank=True, null=True)
+    email = models.EmailField(blank=True, null=True)
+    address = models.TextField(blank=True, null=True)
+    city = models.CharField(max_length=100, blank=True, null=True)
+    state = models.CharField(max_length=100, blank=True, null=True)
+    pincode = models.CharField(max_length=20, blank=True, null=True)
+    credit_limit = models.DecimalField(max_digits=12, decimal_places=2, default=50000.00)
+    credit_days = models.IntegerField(default=30)
+    opening_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    outstanding_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    category = models.CharField(max_length=50, default='Optical Shop')
+    sales_executive = models.CharField(max_length=100, blank=True, null=True)
+    status = models.CharField(max_length=20, default='Active')
+
+    def __str__(self):
+        return f"{self.business_name} ({self.dealer_code})"
+
+WholesaleCustomer = Dealer
+
+
+class WholesalePriceList(BaseUUIDModel):
+    dealer = models.ForeignKey(Dealer, on_delete=models.CASCADE, related_name='price_overrides', blank=True, null=True)
+    dealer_category = models.CharField(max_length=50, blank=True, null=True)
+    product_name = models.CharField(max_length=200)
+    brand = models.CharField(max_length=100, blank=True, null=True)
+    category = models.CharField(max_length=100, blank=True, null=True)
+    min_quantity = models.IntegerField(default=1)
+    wholesale_price = models.DecimalField(max_digits=12, decimal_places=2)
+    discount_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
+
+    def __str__(self):
+        return f"{self.product_name} - ₹{self.wholesale_price}"
+
+
+class WholesaleQuotation(BaseUUIDModel):
+    quotation_number = models.CharField(max_length=50, unique=True)
+    dealer = models.ForeignKey(Dealer, on_delete=models.CASCADE, related_name='quotations')
+    date = models.DateField()
+    expiry_date = models.DateField()
+    subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    tax_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    transport_charges = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    grand_total = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    status = models.CharField(max_length=20, default='Draft')
+    terms = models.TextField(blank=True, null=True)
+
+    def __str__(self):
+        return f"Quote {self.quotation_number} - {self.dealer.business_name}"
+
+
+class WholesaleOrder(BaseUUIDModel):
+    order_number = models.CharField(max_length=50, unique=True)
+    dealer = models.ForeignKey(Dealer, on_delete=models.CASCADE, related_name='wholesale_orders')
+    quotation_ref = models.CharField(max_length=50, blank=True, null=True)
+    order_date = models.DateField()
+    expected_delivery = models.DateField(blank=True, null=True)
+    total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    status = models.CharField(max_length=30, default='Draft')
+    payment_terms = models.CharField(max_length=50, default='Credit Net 30')
+
+    def __str__(self):
+        return f"WO {self.order_number} - {self.dealer.business_name}"
+
+
+class WholesaleDeliveryChallan(BaseUUIDModel):
+    challan_number = models.CharField(max_length=50, unique=True)
+    order = models.ForeignKey(WholesaleOrder, on_delete=models.CASCADE, related_name='challans')
+    dealer = models.ForeignKey(Dealer, on_delete=models.CASCADE, related_name='challans')
+    dispatch_date = models.DateField()
+    vehicle_number = models.CharField(max_length=50, blank=True, null=True)
+    driver_name = models.CharField(max_length=100, blank=True, null=True)
+    driver_phone = models.CharField(max_length=20, blank=True, null=True)
+    delivery_status = models.CharField(max_length=30, default='In Transit')
+
+    def __str__(self):
+        return f"Challan {self.challan_number}"
+
+
+class WholesaleInvoice(BaseUUIDModel):
+    invoice_number = models.CharField(max_length=50, unique=True)
+    dealer = models.ForeignKey(Dealer, on_delete=models.CASCADE, related_name='wholesale_invoices')
+    order_ref = models.CharField(max_length=50, blank=True, null=True)
+    invoice_date = models.DateField()
+    due_date = models.DateField()
+    grand_total = models.DecimalField(max_digits=12, decimal_places=2)
+    paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    due_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    status = models.CharField(max_length=20, default='Unpaid')
+
+    def __str__(self):
+        return f"W-Inv {self.invoice_number} - {self.dealer.business_name}"
+
+
+class WholesalePaymentCollection(BaseUUIDModel):
+    receipt_number = models.CharField(max_length=50, unique=True)
+    dealer = models.ForeignKey(Dealer, on_delete=models.CASCADE, related_name='payments')
+    invoice_number = models.CharField(max_length=50, blank=True, null=True)
+    payment_date = models.DateField()
+    payment_method = models.CharField(max_length=50)
+    amount_paid = models.DecimalField(max_digits=12, decimal_places=2)
+    reference_note = models.CharField(max_length=200, blank=True, null=True)
+
+    def __str__(self):
+        return f"Coll {self.receipt_number} - ₹{self.amount_paid}"
+
+
+class WholesaleReturn(BaseUUIDModel):
+    return_number = models.CharField(max_length=50, unique=True)
+    invoice_number = models.CharField(max_length=50)
+    dealer = models.ForeignKey(Dealer, on_delete=models.CASCADE, related_name='returns')
+    return_date = models.DateField()
+    reason = models.CharField(max_length=200)
+    return_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    action_taken = models.CharField(max_length=50, default='Credit Note Issued')
+
+    def __str__(self):
+        return f"Return {self.return_number} - {self.dealer.business_name}"
+
+

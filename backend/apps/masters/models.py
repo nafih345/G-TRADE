@@ -5,9 +5,13 @@ class ProductCategory(BaseUUIDModel):
     name = models.CharField(max_length=100)
     code = models.CharField(max_length=50, unique=True)
     description = models.TextField(blank=True, null=True)
+    gst_percentage = models.CharField(max_length=20, default='18%')
+    hsn_code = models.CharField(max_length=50, default='90031100')
+    status = models.CharField(max_length=20, default='Active')
+    display_order = models.IntegerField(default=1)
 
     def __str__(self):
-        return self.name
+        return f"{self.name} ({self.code})"
 
 
 class Brand(BaseUUIDModel):

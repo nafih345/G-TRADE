@@ -1,0 +1,7 @@
+{
+  "backup_dir": "backups",
+  "auto_backup_on_exit": true,
+  "compress_zip": true,
+  "include_media": true,
+  "retention_days": 30
+}

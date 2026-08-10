@@ -1,0 +1,832 @@
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import axios from 'axios';
+import {
+  Box, Grid, Card, Typography, TextField, Button, MenuItem,
+  Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
+  Paper, IconButton, Stack, Divider, Dialog, DialogTitle, DialogContent,
+  DialogActions, Chip, Autocomplete, Alert, Tooltip
+} from '@mui/material';
+import {
+  Add as AddIcon,
+  Delete as DeleteIcon,
+  Search as SearchIcon,
+  Business as SupplierIcon,
+  Print as PrintIcon,
+  Save as SaveIcon,
+  Close as CloseIcon,
+  AttachFile as AttachFileIcon,
+  Inbox as EmptyIcon,
+  NoteAdd as DraftIcon
+} from '@mui/icons-material';
+import QuickDatePickerField from '../common/QuickDatePickerField';
+import { useDebounce } from '../../hooks/useDebounce';
+import { printPurchaseReceipt } from '../../utils/printPurchase';
+
+const todayStr = () => new Date().toISOString().split('T')[0];
+const genInvoiceNumber = () => `PINV-${Date.now().toString().slice(-8)}`;
+
+const EDIT_ORDER = ['batchNumber', 'expiryDate', 'quantity', 'freeQuantity', 'purchaseRate', 'discountPercent', 'discountAmount', 'gstPercent', 'mrp', 'sellingPrice'];
+
+const blankRow = (product, overrides = {}) => {
+  const rate = parseFloat(overrides.purchaseRate ?? product.costPrice ?? product.price ?? 0) || 0;
+  const gstPercent = parseFloat(overrides.gstPercent ?? product.taxRate) || 18;
+  const mrp = +(rate * 1.4).toFixed(2);
+  return {
+    rowId: `row-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+    productId: product.id,
+    productName: product.name,
+    barcode: product.barcode || product.sku || '',
+    currentStock: parseFloat(product.stock) || 0,
+    lastRate: null,
+    batchNumber: '',
+    expiryDate: '',
+    quantity: overrides.quantity ?? 1,
+    freeQuantity: 0,
+    purchaseRate: rate,
+    discountPercent: 0,
+    discountAmount: 0,
+    gstPercent,
+    gstAmount: 0,
+    mrp,
+    sellingPrice: mrp,
+    marginPercent: rate > 0 ? +(((mrp - rate) / rate) * 100).toFixed(2) : 0,
+    lineTotal: 0
+  };
+};
+
+// Keeps discount/gst/margin/total consistent regardless of which cell was just edited
+function recalcRow(row, changedField, gstType) {
+  const r = { ...row };
+  const qty = parseFloat(r.quantity) || 0;
+  const rate = parseFloat(r.purchaseRate) || 0;
+  const base = qty * rate;
+
+  if (changedField === 'discountAmount') {
+    r.discountPercent = base > 0 ? +((r.discountAmount / base) * 100).toFixed(2) : 0;
+  } else {
+    r.discountAmount = +((base * (parseFloat(r.discountPercent) || 0)) / 100).toFixed(2);
+  }
+
+  const taxable = Math.max(0, base - (parseFloat(r.discountAmount) || 0));
+  const gstPercent = parseFloat(r.gstPercent) || 0;
+
+  if (gstType === 'INCLUSIVE') {
+    r.gstAmount = +((taxable - taxable / (1 + gstPercent / 100))).toFixed(2);
+    r.lineTotal = +taxable.toFixed(2);
+  } else {
+    r.gstAmount = +((taxable * gstPercent) / 100).toFixed(2);
+    r.lineTotal = +(taxable + r.gstAmount).toFixed(2);
+  }
+
+  if (changedField === 'marginPercent') {
+    r.sellingPrice = rate > 0 ? +(rate * (1 + (parseFloat(r.marginPercent) || 0) / 100)).toFixed(2) : r.sellingPrice;
+  } else if (changedField === 'sellingPrice' || changedField === 'purchaseRate' || changedField === 'quantity') {
+    r.marginPercent = rate > 0 ? +((((parseFloat(r.sellingPrice) || 0) - rate) / rate) * 100).toFixed(2) : 0;
+  }
+
+  return r;
+}
+
+export default function PurchaseEntryView({ suppliers = [], products = [], initialSupplierId = '', initialPurchaseOrderId = '', onSaveComplete }) {
+  const supplierInputRef = useRef(null);
+  const dateInputRef = useRef(null);
+  const productSearchRef = useRef(null);
+  const paidAmountRef = useRef(null);
+  const cellRefs = useRef({});
+
+  // Header
+  const [invoiceNumber, setInvoiceNumber] = useState(genInvoiceNumber());
+  const [supplierInvoiceNumber, setSupplierInvoiceNumber] = useState('');
+  const [selectedSupplierId, setSelectedSupplierId] = useState('');
+  const [localSuppliers, setLocalSuppliers] = useState([]);
+  const [purchaseDate, setPurchaseDate] = useState(todayStr());
+  const [dueDate, setDueDate] = useState('');
+  const [purchaseType, setPurchaseType] = useState('CASH');
+  const [warehouseId, setWarehouseId] = useState('');
+  const [branchId, setBranchId] = useState('');
+  const [gstType, setGstType] = useState('EXCLUSIVE');
+  const [status, setStatus] = useState('CONFIRMED');
+  const [notes, setNotes] = useState('');
+  const [poRef, setPoRef] = useState('');
+  const [returnRef, setReturnRef] = useState('');
+  const [attachment, setAttachment] = useState(null);
+  const [duplicateWarning, setDuplicateWarning] = useState(null);
+
+  const [warehouses, setWarehouses] = useState([]);
+  const [branches, setBranches] = useState([]);
+
+  const [addSupplierOpen, setAddSupplierOpen] = useState(false);
+  const [newSupplier, setNewSupplier] = useState({ name: '', phone: '', gstin: '', email: '' });
+
+  // Purchase Order conversion (PO -> goods received -> Purchase Entry)
+  const [openPOs, setOpenPOs] = useState([]);
+  const [linkedPO, setLinkedPO] = useState(null);
+
+  // Product search
+  const [productSearch, setProductSearch] = useState('');
+  const debouncedSearch = useDebounce(productSearch, 150);
+
+  // Grid
+  const [rows, setRows] = useState([]);
+
+  // Summary / Payment
+  const [otherCharges, setOtherCharges] = useState(0);
+  const [paymentMethod, setPaymentMethod] = useState('CASH');
+  const [paidAmount, setPaidAmount] = useState(0);
+
+  const [saving, setSaving] = useState(false);
+
+  const allSuppliers = useMemo(() => {
+    const map = new Map();
+    [...suppliers, ...localSuppliers].forEach(s => map.set(s.id, s));
+    return Array.from(map.values());
+  }, [suppliers, localSuppliers]);
+
+  const selectedSupplier = allSuppliers.find(s => String(s.id) === String(selectedSupplierId));
+
+  useEffect(() => {
+    if (initialSupplierId) {
+      setSelectedSupplierId(initialSupplierId);
+      setTimeout(() => productSearchRef.current?.focus(), 50);
+    }
+  }, [initialSupplierId]);
+
+  const fetchOpenPOs = useCallback(() => {
+    axios.get('/api/purchase/orders/', { params: { status: 'SENT' } })
+      .then(res => setOpenPOs(res.data?.results || res.data || []))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => { fetchOpenPOs(); }, [fetchOpenPOs]);
+
+  // Pulls in a supplier + item lines from an existing Purchase Order (goods now received);
+  // the grid stays fully editable so qty/rate can be corrected against what actually arrived.
+  const applyPurchaseOrder = useCallback((po) => {
+    if (!po) return;
+    setLinkedPO(po);
+    setSelectedSupplierId(po.supplier);
+    setPoRef(po.order_number);
+    const newRows = (po.items || []).map(item => {
+      const product = products.find(p => String(p.id) === String(item.product)) || {
+        id: item.product, name: 'Unknown Product (removed from catalog)', costPrice: item.unit_price, stock: 0, taxRate: item.tax_rate
+      };
+      return recalcRow(blankRow(product, { quantity: item.quantity, purchaseRate: item.unit_price, gstPercent: item.tax_rate }), 'quantity', gstType);
+    });
+    if (newRows.length) setRows(newRows);
+  }, [products, gstType]);
+
+  useEffect(() => {
+    if (initialPurchaseOrderId) {
+      axios.get(`/api/purchase/orders/${initialPurchaseOrderId}/`).then(res => applyPurchaseOrder(res.data)).catch(() => {});
+    }
+  }, [initialPurchaseOrderId]);
+
+  useEffect(() => {
+    Promise.all([
+      axios.get('/api/company/warehouses/').catch(() => null),
+      axios.get('/api/company/branches/').catch(() => null)
+    ]).then(([whRes, brRes]) => {
+      const wh = whRes?.data?.results || whRes?.data || [];
+      const br = brRes?.data?.results || brRes?.data || [];
+      if (Array.isArray(wh)) setWarehouses(wh);
+      if (Array.isArray(br)) setBranches(br);
+    });
+  }, []);
+
+  // --- Totals ---
+  const totals = useMemo(() => {
+    const totalItems = rows.length;
+    const totalQty = rows.reduce((s, r) => s + (parseFloat(r.quantity) || 0), 0);
+    const gross = rows.reduce((s, r) => s + ((parseFloat(r.quantity) || 0) * (parseFloat(r.purchaseRate) || 0)), 0);
+    const discount = rows.reduce((s, r) => s + (parseFloat(r.discountAmount) || 0), 0);
+    const tax = rows.reduce((s, r) => s + (parseFloat(r.gstAmount) || 0), 0);
+    const preRound = gross - discount + tax + (parseFloat(otherCharges) || 0);
+    const grandTotal = Math.round(preRound);
+    const roundOff = +(grandTotal - preRound).toFixed(2);
+    return { totalItems, totalQty, gross, discount, tax, roundOff, grandTotal };
+  }, [rows, otherCharges]);
+
+  const balanceAmount = Math.max(0, +(totals.grandTotal - (parseFloat(paidAmount) || 0)).toFixed(2));
+  const dueAmount = purchaseType === 'CREDIT' ? balanceAmount : 0;
+
+  useEffect(() => {
+    if (paymentMethod !== 'CREDIT' && purchaseType === 'CASH') {
+      setPaidAmount(totals.grandTotal);
+    }
+  }, [totals.grandTotal, paymentMethod, purchaseType]);
+
+  // --- Product search & add ---
+  const filteredProducts = useMemo(() => {
+    const q = (debouncedSearch || '').toLowerCase().trim();
+    if (!q) return [];
+    return products.filter(p =>
+      (p.barcode && p.barcode.toLowerCase().includes(q)) ||
+      (p.name && p.name.toLowerCase().includes(q)) ||
+      (p.sku && p.sku.toLowerCase().includes(q))
+    ).slice(0, 30);
+  }, [products, debouncedSearch]);
+
+  const addProductToGrid = useCallback((product) => {
+    if (!product) return;
+    const existingIdx = rows.findIndex(r => r.productId === product.id);
+    if (existingIdx !== -1) {
+      setRows(prev => prev.map((r, i) => i === existingIdx ? recalcRow({ ...r, quantity: (parseFloat(r.quantity) || 0) + 1 }, 'quantity', gstType) : r));
+      setTimeout(() => focusCell(existingIdx, 'quantity'), 50);
+      return;
+    }
+    const newRow = recalcRow(blankRow(product), 'quantity', gstType);
+    setRows(prev => {
+      const next = [...prev, newRow];
+      setTimeout(() => focusCell(next.length - 1, 'quantity'), 50);
+      return next;
+    });
+
+    axios.get('/api/purchase/invoices/last-rate/', { params: { product: product.id, supplier: selectedSupplierId || undefined } })
+      .then(res => {
+        if (res.data?.found) {
+          setRows(prev => prev.map(r => r.productId === product.id ? { ...r, lastRate: res.data.purchase_rate } : r));
+        }
+      }).catch(() => {});
+  }, [rows, gstType, selectedSupplierId]);
+
+  const processBarcodeCode = useCallback((codeStr) => {
+    const code = (codeStr || '').toLowerCase().trim();
+    if (!code) return;
+    const matched = products.find(p => (p.barcode || '').toLowerCase() === code || (p.sku || '').toLowerCase() === code);
+    if (matched) addProductToGrid(matched);
+    setProductSearch('');
+  }, [products, addProductToGrid]);
+
+  // Hardware barcode scanner listener (rapid keystrokes ending in Enter)
+  useEffect(() => {
+    let buffer = '';
+    let lastTime = Date.now();
+    const handleKeyDown = (e) => {
+      const tag = e.target.tagName;
+      const isInput = (tag === 'INPUT' || tag === 'TEXTAREA') && e.target !== productSearchRef.current;
+      const now = Date.now();
+      if (now - lastTime > 120) buffer = '';
+      lastTime = now;
+      if (e.key === 'Enter') {
+        if (buffer.length >= 4 && !isInput) {
+          e.preventDefault();
+          processBarcodeCode(buffer.trim());
+          buffer = '';
+        }
+      } else if (e.key.length === 1 && !isInput) {
+        buffer += e.key;
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [processBarcodeCode]);
+
+  // --- Grid cell helpers ---
+  const registerCellRef = (rowIndex, field) => (el) => {
+    if (!cellRefs.current[rowIndex]) cellRefs.current[rowIndex] = {};
+    cellRefs.current[rowIndex][field] = el;
+  };
+
+  const focusCell = (rowIndex, field) => {
+    const el = cellRefs.current[rowIndex]?.[field];
+    if (el) { el.focus(); if (el.select) el.select(); }
+  };
+
+  const updateRowField = (rowIndex, field, value) => {
+    setRows(prev => prev.map((r, i) => {
+      if (i !== rowIndex) return r;
+      const updated = { ...r, [field]: value };
+      return recalcRow(updated, field, gstType);
+    }));
+  };
+
+  const deleteRow = (rowIndex) => {
+    setRows(prev => prev.filter((_, i) => i !== rowIndex));
+    delete cellRefs.current[rowIndex];
+  };
+
+  const handleCellKeyDown = (e, rowIndex, field) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const pos = EDIT_ORDER.indexOf(field);
+      const nextField = EDIT_ORDER[pos + 1];
+      if (nextField) {
+        focusCell(rowIndex, nextField);
+      } else if (rows[rowIndex + 1]) {
+        focusCell(rowIndex + 1, EDIT_ORDER[0]);
+      } else {
+        productSearchRef.current?.focus();
+      }
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (rows[rowIndex + 1]) focusCell(rowIndex + 1, field);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (rows[rowIndex - 1]) focusCell(rowIndex - 1, field);
+    }
+  };
+
+  // --- Duplicate detection ---
+  const checkDuplicate = () => {
+    if (!selectedSupplierId || !supplierInvoiceNumber) { setDuplicateWarning(null); return; }
+    axios.get('/api/purchase/invoices/check-duplicate/', { params: { supplier: selectedSupplierId, supplier_invoice_number: supplierInvoiceNumber } })
+      .then(res => setDuplicateWarning(res.data?.duplicate ? res.data : null))
+      .catch(() => {});
+  };
+
+  // --- Add supplier (quick, non-modal-heavy — occasional action) ---
+  const handleAddSupplier = () => {
+    if (!newSupplier.name) { alert('Please enter supplier name.'); return; }
+    axios.post('/api/purchase/suppliers/', newSupplier).then(res => {
+      const created = res.data;
+      setLocalSuppliers(prev => [created, ...prev]);
+      setSelectedSupplierId(created.id);
+      setAddSupplierOpen(false);
+      setNewSupplier({ name: '', phone: '', gstin: '', email: '' });
+      window.dispatchEvent(new Event('optical_suppliers_updated'));
+    }).catch(() => {
+      const fallback = { id: `SUP-LOC-${Date.now()}`, name: newSupplier.name, phone: newSupplier.phone, gstin: newSupplier.gstin, balance: 0 };
+      setLocalSuppliers(prev => [fallback, ...prev]);
+      setSelectedSupplierId(fallback.id);
+      setAddSupplierOpen(false);
+      setNewSupplier({ name: '', phone: '', gstin: '', email: '' });
+    });
+  };
+
+  // --- Reset form ---
+  const resetForm = () => {
+    setInvoiceNumber(genInvoiceNumber());
+    setSupplierInvoiceNumber('');
+    setSelectedSupplierId('');
+    setPurchaseDate(todayStr());
+    setDueDate('');
+    setPurchaseType('CASH');
+    setWarehouseId('');
+    setBranchId('');
+    setGstType('EXCLUSIVE');
+    setStatus('CONFIRMED');
+    setNotes('');
+    setPoRef('');
+    setReturnRef('');
+    setAttachment(null);
+    setDuplicateWarning(null);
+    setProductSearch('');
+    setRows([]);
+    setOtherCharges(0);
+    setPaymentMethod('CASH');
+    setPaidAmount(0);
+    setLinkedPO(null);
+    cellRefs.current = {};
+  };
+
+  // --- Save ---
+  const buildPayload = (saveStatus) => ({
+    invoice_number: invoiceNumber,
+    supplier_invoice_number: supplierInvoiceNumber || null,
+    supplier: selectedSupplierId,
+    purchase_date: purchaseDate,
+    due_date: dueDate || null,
+    purchase_type: purchaseType,
+    warehouse: warehouseId || null,
+    branch: branchId || null,
+    gst_type: gstType,
+    status: saveStatus,
+    purchase_order_ref: poRef || null,
+    purchase_return_ref: returnRef || null,
+    notes: notes || null,
+    gross_amount: totals.gross,
+    discount_amount: totals.discount,
+    tax_amount: totals.tax,
+    other_charges: parseFloat(otherCharges) || 0,
+    round_off: totals.roundOff,
+    grand_total: totals.grandTotal,
+    payment_method: paymentMethod,
+    paid_amount: parseFloat(paidAmount) || 0,
+    balance_amount: balanceAmount,
+    items: rows.map(r => ({
+      product: r.productId,
+      barcode: r.barcode,
+      batch_number: r.batchNumber || null,
+      expiry_date: r.expiryDate || null,
+      quantity: r.quantity,
+      free_quantity: r.freeQuantity,
+      purchase_rate: r.purchaseRate,
+      discount_percent: r.discountPercent,
+      discount_amount: r.discountAmount,
+      gst_percent: r.gstPercent,
+      gst_amount: r.gstAmount,
+      mrp: r.mrp,
+      selling_price: r.sellingPrice,
+      margin_percent: r.marginPercent,
+      line_total: r.lineTotal
+    }))
+  });
+
+  const syncLegacyStores = (savedInvoice) => {
+    try {
+      const existingPOs = JSON.parse(localStorage.getItem('optical_purchase_orders') || '[]');
+      const poEntry = {
+        id: savedInvoice.invoice_number,
+        supplier: selectedSupplier?.name || selectedSupplier?.company_name || 'Supplier',
+        item: `${rows.length} item(s)`,
+        qty: totals.totalQty,
+        total: totals.grandTotal,
+        status: status === 'DRAFT' ? 'Draft' : 'Completed',
+        paid: balanceAmount <= 0,
+        date: purchaseDate
+      };
+      localStorage.setItem('optical_purchase_orders', JSON.stringify([poEntry, ...existingPOs]));
+
+      if (status !== 'DRAFT') {
+        const existingItems = JSON.parse(localStorage.getItem('optical_inventory_items') || '[]');
+        rows.forEach(r => {
+          const idx = existingItems.findIndex(i => i.id === r.productId || i.barcode === r.barcode || i.name === r.productName);
+          if (idx !== -1) {
+            existingItems[idx].stock = (parseInt(existingItems[idx].stock) || 0) + (parseFloat(r.quantity) || 0) + (parseFloat(r.freeQuantity) || 0);
+          }
+        });
+        localStorage.setItem('optical_inventory_items', JSON.stringify(existingItems));
+        window.dispatchEvent(new Event('optical_stock_updated'));
+      }
+
+      window.dispatchEvent(new Event('optical_accounts_updated'));
+    } catch (e) {}
+  };
+
+  const doSave = async (saveStatus, { print = false, andNew = false } = {}) => {
+    if (!selectedSupplierId) { alert('Please select a supplier.'); supplierInputRef.current?.focus(); return; }
+    if (saveStatus !== 'DRAFT' && rows.length === 0) { alert('Please add at least one product line.'); productSearchRef.current?.focus(); return; }
+
+    setSaving(true);
+    try {
+      const payload = buildPayload(saveStatus);
+      const res = await axios.post('/api/purchase/invoices/', payload);
+      let saved = res.data;
+
+      if (attachment) {
+        try {
+          const fd = new FormData();
+          fd.append('attachment', attachment);
+          const patchRes = await axios.patch(`/api/purchase/invoices/${saved.id}/`, fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+          saved = patchRes.data;
+        } catch (e) {}
+      }
+
+      syncLegacyStores(saved);
+
+      if (linkedPO && saveStatus !== 'DRAFT') {
+        axios.post(`/api/purchase/orders/${linkedPO.id}/mark-converted/`).then(fetchOpenPOs).catch(() => {});
+      }
+
+      const printable = {
+        ...saved,
+        supplierName: selectedSupplier?.name || selectedSupplier?.company_name,
+        items: rows.map(r => ({ ...r, productName: r.productName }))
+      };
+
+      if (print) printPurchaseReceipt(printable);
+
+      onSaveComplete?.(printable);
+
+      alert(`Purchase Entry ${saved.invoice_number} saved successfully!${saveStatus === 'DRAFT' ? ' (Draft)' : ''}`);
+
+      if (andNew || saveStatus !== 'DRAFT') resetForm();
+    } catch (err) {
+      alert('Failed to save purchase entry. Please check the required fields and try again.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // --- Keyboard shortcuts ---
+  useEffect(() => {
+    const handleShortcut = (e) => {
+      if (e.key === 'F2') { e.preventDefault(); dateInputRef.current?.focus(); }
+      else if (e.key === 'F3') { e.preventDefault(); supplierInputRef.current?.focus(); }
+      else if (e.key === 'F4') { e.preventDefault(); setAddSupplierOpen(true); }
+      else if (e.key === 'F5') { e.preventDefault(); setProductSearch(''); productSearchRef.current?.focus(); }
+      else if (e.key === 'F6') { e.preventDefault(); productSearchRef.current?.focus(); }
+      else if (e.key === 'F7') { e.preventDefault(); if (rows.length) focusCell(rows.length - 1, 'batchNumber'); }
+      else if (e.key === 'F8') { e.preventDefault(); if (rows.length) focusCell(rows.length - 1, 'discountPercent'); }
+      else if (e.key === 'F9') { e.preventDefault(); if (rows.length) focusCell(rows.length - 1, 'gstPercent'); }
+      else if (e.key === 'F10') { e.preventDefault(); paidAmountRef.current?.focus(); }
+      else if (e.ctrlKey && (e.key === 's' || e.key === 'S')) { e.preventDefault(); doSave(status); }
+      else if (e.ctrlKey && (e.key === 'p' || e.key === 'P')) { e.preventDefault(); doSave(status, { print: true }); }
+      else if (e.ctrlKey && (e.key === 'n' || e.key === 'N')) { e.preventDefault(); resetForm(); }
+      else if (e.key === 'Escape') { e.preventDefault(); resetForm(); }
+    };
+    window.addEventListener('keydown', handleShortcut);
+    return () => window.removeEventListener('keydown', handleShortcut);
+  });
+
+  const numCell = (rowIndex, field, opts = {}) => (
+    <TextField
+      inputRef={registerCellRef(rowIndex, field)}
+      size="small"
+      type={opts.type || 'number'}
+      value={rows[rowIndex][field]}
+      onChange={(e) => updateRowField(rowIndex, field, e.target.value)}
+      onKeyDown={(e) => handleCellKeyDown(e, rowIndex, field)}
+      sx={{ width: opts.width || 80, '& input': { py: 0.6, px: 0.8, fontSize: '0.8rem', textAlign: opts.type === 'text' ? 'left' : 'right' } }}
+    />
+  );
+
+  return (
+    <Box>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, flexWrap: 'wrap', gap: 1 }}>
+        <Box>
+          <Typography variant="h5" sx={{ fontWeight: 800, color: 'primary.main' }}>
+            Purchase Entry
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            Single-screen supplier purchase entry with live GST, discount & margin calculation
+          </Typography>
+        </Box>
+        {selectedSupplier && (
+          <Chip
+            icon={<SupplierIcon />}
+            label={`Outstanding Balance: ₹${parseFloat(selectedSupplier.balance ?? selectedSupplier.outstanding_balance ?? 0).toFixed(2)}`}
+            color={parseFloat(selectedSupplier.balance ?? selectedSupplier.outstanding_balance ?? 0) > 0 ? 'error' : 'success'}
+            variant="outlined"
+            sx={{ fontWeight: 700 }}
+          />
+        )}
+      </Box>
+
+      {duplicateWarning && (
+        <Alert severity="warning" sx={{ mb: 2, borderRadius: 2 }} onClose={() => setDuplicateWarning(null)}>
+          Possible duplicate: Supplier Invoice already recorded as <strong>{duplicateWarning.invoice_number}</strong> on {duplicateWarning.purchase_date} for ₹{duplicateWarning.grand_total}.
+        </Alert>
+      )}
+
+      {/* 1. Header */}
+      <Card variant="outlined" sx={{ p: 2, mb: 2, borderRadius: 3 }}>
+        <Grid container spacing={1.5}>
+          <Grid item xs={12} sm={6} md={3}>
+            <Autocomplete
+              options={allSuppliers}
+              getOptionLabel={(o) => o.name || o.company_name || ''}
+              value={selectedSupplier || null}
+              onChange={(e, val) => setSelectedSupplierId(val ? val.id : '')}
+              renderInput={(params) => (
+                <TextField {...params} label="Supplier" size="small" inputRef={supplierInputRef}
+                  InputProps={{ ...params.InputProps, endAdornment: (
+                    <>
+                      <Tooltip title="Add Supplier (F4)">
+                        <IconButton size="small" onClick={() => setAddSupplierOpen(true)}><AddIcon fontSize="small" /></IconButton>
+                      </Tooltip>
+                      {params.InputProps.endAdornment}
+                    </>
+                  ) }}
+                />
+              )}
+            />
+          </Grid>
+          <Grid item xs={6} sm={3} md={1.5}>
+            <TextField fullWidth size="small" label="Invoice No." value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} />
+          </Grid>
+          <Grid item xs={6} sm={3} md={1.5}>
+            <TextField fullWidth size="small" label="Supplier Inv. No." value={supplierInvoiceNumber}
+              onChange={(e) => setSupplierInvoiceNumber(e.target.value)} onBlur={checkDuplicate} />
+          </Grid>
+          <Grid item xs={6} sm={3} md={1.5}>
+            <QuickDatePickerField label="Purchase Date" value={purchaseDate} onChange={setPurchaseDate} sx={{}} />
+          </Grid>
+          <Grid item xs={6} sm={3} md={1.5}>
+            <QuickDatePickerField label="Due Date" value={dueDate} onChange={setDueDate} />
+          </Grid>
+          <Grid item xs={6} sm={3} md={1.5}>
+            <TextField select fullWidth size="small" label="Purchase Type" value={purchaseType} onChange={(e) => setPurchaseType(e.target.value)}>
+              <MenuItem value="CASH">Cash</MenuItem>
+              <MenuItem value="CREDIT">Credit</MenuItem>
+            </TextField>
+          </Grid>
+
+          <Grid item xs={6} sm={3} md={1.5}>
+            <TextField select fullWidth size="small" label="Warehouse" value={warehouseId} onChange={(e) => setWarehouseId(e.target.value)}>
+              <MenuItem value="">Default</MenuItem>
+              {warehouses.map(w => <MenuItem key={w.id} value={w.id}>{w.name}</MenuItem>)}
+            </TextField>
+          </Grid>
+          <Grid item xs={6} sm={3} md={1.5}>
+            <TextField select fullWidth size="small" label="Branch" value={branchId} onChange={(e) => setBranchId(e.target.value)}>
+              <MenuItem value="">Default</MenuItem>
+              {branches.map(b => <MenuItem key={b.id} value={b.id}>{b.name}</MenuItem>)}
+            </TextField>
+          </Grid>
+          <Grid item xs={6} sm={3} md={1.5}>
+            <TextField select fullWidth size="small" label="GST Type" value={gstType} onChange={(e) => setGstType(e.target.value)}>
+              <MenuItem value="EXCLUSIVE">Exclusive</MenuItem>
+              <MenuItem value="INCLUSIVE">Inclusive</MenuItem>
+            </TextField>
+          </Grid>
+          <Grid item xs={6} sm={3} md={1.5}>
+            <TextField select fullWidth size="small" label="Status" value={status} onChange={(e) => setStatus(e.target.value)}>
+              <MenuItem value="CONFIRMED">Confirmed</MenuItem>
+              <MenuItem value="DRAFT">Draft</MenuItem>
+            </TextField>
+          </Grid>
+          <Grid item xs={6} sm={3} md={1.5}>
+            <Autocomplete
+              freeSolo
+              options={openPOs}
+              getOptionLabel={(o) => (typeof o === 'string' ? o : `${o.order_number} (${o.items?.length || 0} items)`)}
+              inputValue={poRef}
+              onInputChange={(e, val) => setPoRef(val)}
+              onChange={(e, val) => { if (val && typeof val !== 'string') applyPurchaseOrder(val); }}
+              renderInput={(params) => <TextField {...params} size="small" label="Convert Purchase Order" placeholder="Select an open PO to convert" />}
+            />
+            {linkedPO && (
+              <Chip size="small" label={`Converting ${linkedPO.order_number}`} onDelete={() => setLinkedPO(null)} color="primary" variant="outlined" sx={{ mt: 0.5, fontWeight: 700 }} />
+            )}
+          </Grid>
+          <Grid item xs={6} sm={3} md={1.5}>
+            <TextField fullWidth size="small" label="Return Reference" value={returnRef} onChange={(e) => setReturnRef(e.target.value)} />
+          </Grid>
+          <Grid item xs={12} sm={6} md={3}>
+            <TextField fullWidth size="small" label="Notes" value={notes} onChange={(e) => setNotes(e.target.value)} />
+          </Grid>
+          <Grid item xs={12} sm={6} md={3}>
+            <Button component="label" variant="outlined" size="small" startIcon={<AttachFileIcon />} sx={{ height: 40, textTransform: 'none' }}>
+              {attachment ? attachment.name.slice(0, 22) : 'Attach Invoice (PDF/Image)'}
+              <input type="file" hidden accept=".pdf,image/*" onChange={(e) => setAttachment(e.target.files?.[0] || null)} />
+            </Button>
+          </Grid>
+        </Grid>
+      </Card>
+
+      {/* 2. Product Search */}
+      <Paper elevation={0} sx={{ p: '5px 8px 5px 20px', mb: 2, display: 'flex', alignItems: 'center', gap: 1.5, border: '1px solid', borderColor: '#cbd5e1', borderRadius: '32px', bgcolor: '#fff', boxShadow: '0 2px 8px rgba(0,0,0,0.02)' }}>
+        <SearchIcon color="primary" />
+        <Autocomplete
+          fullWidth
+          freeSolo
+          options={filteredProducts}
+          getOptionLabel={(o) => (typeof o === 'string' ? o : o.name || '')}
+          inputValue={productSearch}
+          onInputChange={(e, val) => setProductSearch(val)}
+          onChange={(e, val) => { if (val && typeof val !== 'string') addProductToGrid(val); }}
+          renderOption={(props, option) => (
+            <li {...props} key={option.id}>
+              <Box>
+                <Typography variant="body2" fontWeight={700}>{option.name}</Typography>
+                <Typography variant="caption" color="text.secondary">SKU: {option.sku || '-'} | Barcode: {option.barcode || '-'} | Stock: {option.stock ?? 0}</Typography>
+              </Box>
+            </li>
+          )}
+          renderInput={(params) => (
+            <TextField {...params} inputRef={productSearchRef} variant="standard" placeholder="Scan Barcode or Search Product by Name / SKU / Batch (F6)"
+              InputProps={{ ...params.InputProps, disableUnderline: true }} />
+          )}
+          sx={{ flexGrow: 1 }}
+        />
+      </Paper>
+
+      <Grid container spacing={2}>
+        {/* 3. Item Grid */}
+        <Grid item xs={12} lg={8.5}>
+          <Card variant="outlined" sx={{ borderRadius: 3, overflow: 'hidden' }}>
+            <TableContainer sx={{ maxHeight: 480 }}>
+              <Table size="small" stickyHeader>
+                <TableHead>
+                  <TableRow sx={{ '& th': { fontWeight: 700, fontSize: '0.72rem', bgcolor: 'action.hover', whiteSpace: 'nowrap' } }}>
+                    <TableCell>#</TableCell>
+                    <TableCell>Product</TableCell>
+                    <TableCell>Batch</TableCell>
+                    <TableCell>Expiry</TableCell>
+                    <TableCell align="right">Qty</TableCell>
+                    <TableCell align="right">Free</TableCell>
+                    <TableCell align="right">Rate</TableCell>
+                    <TableCell align="right">Disc %</TableCell>
+                    <TableCell align="right">Disc Amt</TableCell>
+                    <TableCell align="right">GST %</TableCell>
+                    <TableCell align="right">GST Amt</TableCell>
+                    <TableCell align="right">MRP</TableCell>
+                    <TableCell align="right">Selling</TableCell>
+                    <TableCell align="right">Margin %</TableCell>
+                    <TableCell align="right">Line Total</TableCell>
+                    <TableCell />
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {rows.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={16} align="center" sx={{ py: 6 }}>
+                        <EmptyIcon sx={{ fontSize: 32, color: 'text.disabled', mb: 1 }} />
+                        <Typography variant="body2" color="text.secondary">Scan a barcode or search a product above to add it here.</Typography>
+                      </TableCell>
+                    </TableRow>
+                  ) : rows.map((row, idx) => (
+                    <TableRow key={row.rowId} hover>
+                      <TableCell sx={{ fontSize: '0.75rem' }}>{idx + 1}</TableCell>
+                      <TableCell sx={{ minWidth: 150 }}>
+                        <Typography variant="body2" fontWeight={700} noWrap>{row.productName}</Typography>
+                        <Typography variant="caption" color="text.secondary" noWrap sx={{ display: 'block' }}>
+                          Stock: {row.currentStock} → {row.currentStock + (parseFloat(row.quantity) || 0) + (parseFloat(row.freeQuantity) || 0)}
+                          {row.lastRate != null && ` | Last Rate: ₹${row.lastRate}`}
+                        </Typography>
+                      </TableCell>
+                      <TableCell>{numCell(idx, 'batchNumber', { type: 'text', width: 90 })}</TableCell>
+                      <TableCell>{numCell(idx, 'expiryDate', { type: 'date', width: 130 })}</TableCell>
+                      <TableCell align="right">{numCell(idx, 'quantity', { width: 65 })}</TableCell>
+                      <TableCell align="right">{numCell(idx, 'freeQuantity', { width: 60 })}</TableCell>
+                      <TableCell align="right">{numCell(idx, 'purchaseRate', { width: 80 })}</TableCell>
+                      <TableCell align="right">{numCell(idx, 'discountPercent', { width: 65 })}</TableCell>
+                      <TableCell align="right">{numCell(idx, 'discountAmount', { width: 75 })}</TableCell>
+                      <TableCell align="right">{numCell(idx, 'gstPercent', { width: 60 })}</TableCell>
+                      <TableCell align="right" sx={{ fontSize: '0.78rem', fontWeight: 600 }}>₹{row.gstAmount}</TableCell>
+                      <TableCell align="right">{numCell(idx, 'mrp', { width: 75 })}</TableCell>
+                      <TableCell align="right">{numCell(idx, 'sellingPrice', { width: 80 })}</TableCell>
+                      <TableCell align="right">{numCell(idx, 'marginPercent', { width: 65 })}</TableCell>
+                      <TableCell align="right" sx={{ fontWeight: 800, fontSize: '0.8rem' }}>₹{row.lineTotal}</TableCell>
+                      <TableCell>
+                        <IconButton size="small" color="error" onClick={() => deleteRow(idx)}><DeleteIcon fontSize="small" /></IconButton>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          </Card>
+        </Grid>
+
+        {/* 4 & 5. Summary + Payment */}
+        <Grid item xs={12} lg={3.5}>
+          <Card elevation={0} sx={{ p: 2.5, border: '1px solid', borderColor: 'divider', borderRadius: 3, position: 'sticky', top: 20 }}>
+            <Typography variant="subtitle1" fontWeight={800} sx={{ mb: 1.5 }}>Purchase Summary</Typography>
+            <Stack spacing={0.8} sx={{ mb: 1.5 }}>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="body2" color="text.secondary">Total Items</Typography><Typography variant="body2" fontWeight={700}>{totals.totalItems}</Typography></Box>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="body2" color="text.secondary">Total Qty</Typography><Typography variant="body2" fontWeight={700}>{totals.totalQty}</Typography></Box>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="body2" color="text.secondary">Gross Amount</Typography><Typography variant="body2" fontWeight={700}>₹{totals.gross.toFixed(2)}</Typography></Box>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="body2" color="text.secondary">Discount</Typography><Typography variant="body2" fontWeight={700} color="error.main">-₹{totals.discount.toFixed(2)}</Typography></Box>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="body2" color="text.secondary">Tax (GST)</Typography><Typography variant="body2" fontWeight={700}>₹{totals.tax.toFixed(2)}</Typography></Box>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <Typography variant="body2" color="text.secondary">Other Charges</Typography>
+                <TextField size="small" type="number" value={otherCharges} onChange={(e) => setOtherCharges(e.target.value)} sx={{ width: 90, '& input': { py: 0.4, textAlign: 'right' } }} />
+              </Box>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="body2" color="text.secondary">Round Off</Typography><Typography variant="body2" fontWeight={700}>₹{totals.roundOff.toFixed(2)}</Typography></Box>
+            </Stack>
+            <Divider sx={{ my: 1 }} />
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', mb: 2 }}>
+              <Typography variant="subtitle1" fontWeight={800}>Grand Total</Typography>
+              <Typography variant="h4" fontWeight={900} color="primary.main">₹{totals.grandTotal.toFixed(2)}</Typography>
+            </Box>
+
+            <Typography variant="subtitle2" fontWeight={800} sx={{ mb: 1 }}>Payment</Typography>
+            <Box sx={{ display: 'flex', gap: 0.75, flexWrap: 'wrap', mb: 1.5 }}>
+              {['CASH', 'BANK', 'UPI', 'CARD', 'CREDIT'].map(m => (
+                <Chip key={m} label={m} clickable size="small"
+                  color={paymentMethod === m ? 'primary' : 'default'}
+                  variant={paymentMethod === m ? 'filled' : 'outlined'}
+                  onClick={() => setPaymentMethod(m)}
+                  sx={{ fontWeight: paymentMethod === m ? 800 : 500 }}
+                />
+              ))}
+            </Box>
+            <TextField fullWidth size="small" type="number" label="Paid Amount" inputRef={paidAmountRef}
+              value={paidAmount} onChange={(e) => setPaidAmount(e.target.value)} sx={{ mb: 1.5 }} />
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
+              <Typography variant="body2" color="text.secondary">Balance</Typography>
+              <Typography variant="body2" fontWeight={700} color={balanceAmount > 0 ? 'error.main' : 'success.main'}>₹{balanceAmount.toFixed(2)}</Typography>
+            </Box>
+            {(paymentMethod !== 'CASH' && dueAmount > 0) && (
+              <>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
+                  <Typography variant="body2" color="text.secondary">Due Amount</Typography>
+                  <Typography variant="body2" fontWeight={700} color="error.main">₹{dueAmount.toFixed(2)}</Typography>
+                </Box>
+                <QuickDatePickerField label="Due Date" value={dueDate} onChange={setDueDate} size="small" />
+              </>
+            )}
+          </Card>
+        </Grid>
+      </Grid>
+
+      {/* 6. Sticky Action Bar */}
+      <Box sx={{ position: 'sticky', bottom: 0, mt: 2, py: 1.5, px: 2, bgcolor: 'background.paper', borderTop: '1px solid', borderColor: 'divider', display: 'flex', justifyContent: 'flex-end', gap: 1.5, zIndex: 10 }}>
+        <Button variant="outlined" color="inherit" startIcon={<CloseIcon />} onClick={resetForm} disabled={saving}>Cancel (Esc)</Button>
+        <Button variant="outlined" startIcon={<DraftIcon />} onClick={() => doSave('DRAFT')} disabled={saving}>Draft</Button>
+        <Button variant="outlined" color="primary" startIcon={<SaveIcon />} onClick={() => doSave(status, { andNew: true })} disabled={saving}>Save & New</Button>
+        <Button variant="outlined" color="primary" startIcon={<PrintIcon />} onClick={() => doSave(status, { print: true })} disabled={saving}>Save & Print (Ctrl+P)</Button>
+        <Button variant="contained" color="primary" startIcon={<SaveIcon />} onClick={() => doSave(status)} disabled={saving} sx={{ fontWeight: 800 }}>Save Purchase (Ctrl+S)</Button>
+      </Box>
+
+      {/* Add Supplier Dialog (occasional action, not the main data-entry loop) */}
+      <Dialog open={addSupplierOpen} onClose={() => setAddSupplierOpen(false)} maxWidth="xs" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
+        <DialogTitle sx={{ fontWeight: 800 }}>Add New Supplier</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField label="Supplier / Company Name" fullWidth required autoFocus value={newSupplier.name} onChange={(e) => setNewSupplier({ ...newSupplier, name: e.target.value })} />
+            <TextField label="Phone" fullWidth value={newSupplier.phone} onChange={(e) => setNewSupplier({ ...newSupplier, phone: e.target.value })} />
+            <TextField label="GSTIN" fullWidth value={newSupplier.gstin} onChange={(e) => setNewSupplier({ ...newSupplier, gstin: e.target.value })} />
+            <TextField label="Email" fullWidth value={newSupplier.email} onChange={(e) => setNewSupplier({ ...newSupplier, email: e.target.value })} />
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button onClick={() => setAddSupplierOpen(false)}>Cancel</Button>
+          <Button variant="contained" onClick={handleAddSupplier}>Add Supplier</Button>
+        </DialogActions>
+      </Dialog>
+    </Box>
+  );
+}

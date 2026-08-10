@@ -1,0 +1,8 @@
+{
+  "thermal_printer_name": "",
+  "a4_printer_name": "",
+  "paper_width_mm": 80,
+  "auto_print_receipt": true,
+  "silent_printing": false,
+  "pdf_export_path": "reports/"
+}

@@ -1,0 +1,39 @@
+node_modules
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+*/venv/
+.venv/
+
+# Django
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+static/
+
+# Secrets / env
+.env
+*.env
+!*.env.example
+config/database.json
+config/settings.json
+
+# Logs
+logs/
+*.log
+
+# Build / dist artifacts
+dist/
+build/
+backend/dist/
+backend/build/
+backend_dist/
+
+# Editor / OS
+.DS_Store
+Thumbs.db

@@ -38,6 +38,13 @@ import {
   BookOnline as AppointmentIcon
 } from '@mui/icons-material';
 
+import SalesDashboardView from '../components/sales/SalesDashboardView';
+import NewSaleWizard from '../components/sales/NewSaleWizard';
+import PosBillingView from '../components/sales/PosBillingView';
+import OrdersManagerView from '../components/sales/OrdersManagerView';
+import PaymentsManagerView from '../components/sales/PaymentsManagerView';
+import PrintInvoiceModal from '../components/sales/PrintInvoiceModal';
+
 // --- MASTER DATABASE ARRAYS (Starts blank until entered/fetched from DB) ---
 const initialProducts = [];
 const initialCustomers = [];
@@ -47,19 +54,25 @@ const initialPayments = [];
 export default function SalesInvoice() {
   const location = useLocation();
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState('dashboard');
+
+  const [printModalOpen, setPrintModalOpen] = useState(false);
+  const [printableInvoice, setPrintableInvoice] = useState(null);
+  const getTabFromPath = (path = '') => {
+    if (path.includes('dashboard')) return 'dashboard';
+    if (path.includes('new')) return 'new-sale';
+    if (path.includes('pos')) return 'pos-billing';
+    if (path.includes('orders')) return 'orders';
+    if (path.includes('customers')) return 'customers';
+    if (path.includes('payments')) return 'payments';
+    if (path.includes('reports')) return 'reports';
+    return 'dashboard';
+  };
+
+  const [activeTab, setActiveTab] = useState(() => getTabFromPath(location.pathname || window.location.hash || ''));
   
   // Tab-state routing logic
   useEffect(() => {
-    const path = location.pathname;
-    if (path.includes('dashboard')) setActiveTab('dashboard');
-    else if (path.includes('new')) setActiveTab('new-sale');
-    else if (path.includes('pos')) setActiveTab('pos-billing');
-    else if (path.includes('orders')) setActiveTab('orders');
-    else if (path.includes('customers')) setActiveTab('customers');
-    else if (path.includes('payments')) setActiveTab('payments');
-    else if (path.includes('reports')) setActiveTab('reports');
-    else setActiveTab('dashboard');
+    setActiveTab(getTabFromPath(location.pathname));
   }, [location.pathname]);
 
   // Master states
@@ -68,9 +81,32 @@ export default function SalesInvoice() {
   const [orders, setOrders] = useState(initialOrders);
   const [payments, setPayments] = useState(initialPayments);
 
-  // Fetch optical services, inventory products & sales database from API
+  // Fetch optical services, inventory products & sales database from API / localStorage
   useEffect(() => {
     const fetchOpticalDbData = async () => {
+      let localInvoices = [];
+      let localPayments = [];
+      let localProds = [];
+      try {
+        localInvoices = JSON.parse(localStorage.getItem('optical_sales_invoices') || '[]');
+        localPayments = JSON.parse(localStorage.getItem('optical_payments') || '[]');
+        localProds = JSON.parse(localStorage.getItem('optical_inventory_items') || '[]');
+      } catch (e) {}
+
+      if (localProds.length > 0) {
+        setProducts(localProds.map(p => ({
+          id: String(p.id || p.code || p.barcode),
+          name: p.name,
+          brand: p.brand || 'Generic',
+          type: p.category || 'Frame',
+          price: parseFloat(p.sellingPrice || p.price || 0),
+          taxRate: parseFloat(p.tax || 18),
+          stock: p.stock || 0,
+          image: (p.category || '').toLowerCase().includes('lens') ? '🔍' : '👓'
+        })));
+      }
+
+      let apiInvoices = [];
       try {
         const [custRes, eyeExamRes, prodRes, invRes] = await Promise.all([
           axios.get('/api/sales/customers/').catch(() => null),
@@ -79,34 +115,39 @@ export default function SalesInvoice() {
           axios.get('/api/sales/invoices/').catch(() => null)
         ]);
 
-        // Products DB integration
         if (prodRes && prodRes.data && prodRes.data.length > 0) {
-          setProducts(prodRes.data.map(p => ({
+          const apiFormatted = prodRes.data.map(p => ({
             id: String(p.id || p.product_id),
             name: p.name || p.product_name,
             brand: p.brand || 'Generic',
             type: p.category_name || (p.type || 'Frame'),
             price: parseFloat(p.unit_price || p.price || 0),
             taxRate: parseFloat(p.tax_rate || 18),
+            stock: p.stock || 0,
             image: (p.category_name || p.type || '').toLowerCase().includes('lens') ? '🔍' : '👓'
-          })));
-        } else {
-          setProducts([]);
+          }));
+          setProducts(prev => {
+            const map = new Map();
+            [...prev, ...apiFormatted].forEach(item => map.set(item.id || item.name, item));
+            return Array.from(map.values());
+          });
         }
 
-        // Invoices / Orders DB integration
         if (invRes && invRes.data && invRes.data.length > 0) {
-          setOrders(invRes.data.map(inv => ({
+          apiInvoices = invRes.data.map(inv => ({
             id: inv.invoice_number || `INV-${inv.id}`,
             date: inv.created_at ? inv.created_at.split('T')[0] : new Date().toISOString().split('T')[0],
             customer: inv.customer_name || 'Walk-in Customer',
-            amount: parseFloat(inv.total_amount || 0),
+            total: parseFloat(inv.total_amount || 0),
+            paidAmount: parseFloat(inv.paid_amount || inv.total_amount || 0),
+            payment: parseFloat(inv.paid_amount || 0) >= parseFloat(inv.total_amount || 0) ? 'Paid' : 'Partial',
             status: inv.status || 'Completed',
-            paymentMethod: inv.payment_method || 'Cash'
-          })));
+            paymentMethod: inv.payment_method || 'Cash',
+            frame: inv.frame_name || 'Prescribed Frame',
+            lens: inv.lens_name || 'Prescribed Lens'
+          }));
         }
 
-        // Customers & Eye Exams DB integration
         if (custRes && custRes.data && custRes.data.length > 0) {
           const eyeExams = (eyeExamRes && eyeExamRes.data) || [];
           const mergedCusts = custRes.data.map(c => {
@@ -139,14 +180,24 @@ export default function SalesInvoice() {
             };
           });
           setCustomers(mergedCusts);
-        } else {
-          setCustomers([]);
         }
       } catch (err) {
-        console.warn('Sales & Optical Services DB fetch error:', err);
+        console.warn('Sales DB fetch error:', err);
+      }
+
+      // Combine API & local storage orders into database state
+      const allOrders = [...apiInvoices, ...localInvoices];
+      const uniqueOrders = Array.from(new Map(allOrders.map(o => [o.id, o])).values());
+      setOrders(uniqueOrders);
+
+      if (localPayments.length > 0) {
+        setPayments(localPayments);
       }
     };
     fetchOpticalDbData();
+
+    window.addEventListener('optical_stock_updated', fetchOpticalDbData);
+    return () => window.removeEventListener('optical_stock_updated', fetchOpticalDbData);
   }, []);
 
   // Handle auto-population when returning from Eye Test section
@@ -421,683 +472,94 @@ export default function SalesInvoice() {
   return (
     <Box sx={{ p: 4, pb: 8 }}>
       {/* 1. SALES DASHBOARD */}
-      {activeTab === 'dashboard' && null}
+      {activeTab === 'dashboard' && (
+        <SalesDashboardView
+          orders={orders}
+          payments={payments}
+          customers={customers}
+          onNavigateToNewSale={() => { setActiveTab('new-sale'); navigate('/sales/new'); }}
+          onNavigateToPos={() => { setActiveTab('pos-billing'); navigate('/sales/pos'); }}
+          onOpenRecordPayment={() => setRecordPaymentDialogOpen(true)}
+          onViewOrderDetails={(ord) => { setSelectedOrder(ord); setOrderDetailTab(0); }}
+          onPrintInvoice={(inv) => { setPrintableInvoice(inv); setPrintModalOpen(true); }}
+        />
+      )}
 
       {/* 2. NEW SALE WIZARD */}
       {activeTab === 'new-sale' && (
-        <Stack spacing={3}>
-          <Stepper activeStep={activeStep} alternativeLabel>
-            {['Customer', 'Prescription', 'Select Frame', 'Select Lens', 'Checkout'].map((lbl) => (
-              <Step key={lbl}><StepLabel>{lbl}</StepLabel></Step>
-            ))}
-          </Stepper>
-
-          <Card sx={{ p: 3, borderRadius: 4, border: '1px solid', borderColor: 'divider' }}>
-            {activeStep === 0 && (() => {
-              const currentCust = customers.find(c => c.id === selectedCustomerId);
-              return (
-                <Stack spacing={3}>
-                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 2 }}>
-                    <Typography variant="h6" fontWeight={700}>Step 1: Registered Patient Details</Typography>
-                    <Stack direction="row" spacing={1.5}>
-                      <Button 
-                        variant="contained" 
-                        startIcon={<AddIcon />} 
-                        onClick={() => navigate('/optical/eyetest', { state: { newTest: true, fromSales: true } })}
-                        sx={{ backgroundColor: '#2563EB' }}
-                      >
-                        + Enter Patient & Eye Details (Eye Test Module)
-                      </Button>
-                      <Button 
-                        variant="outlined" 
-                        onClick={() => setAddPatientDialogOpen(true)}
-                      >
-                        Quick Manual Entry
-                      </Button>
-                    </Stack>
-                  </Box>
-
-                  <Grid container spacing={3}>
-                    <Grid item xs={12}>
-                      <TextField 
-                        select 
-                        label="Select Registered Patient" 
-                        fullWidth 
-                        value={selectedCustomerId} 
-                        onChange={(e) => handleCustomerSelect(e.target.value)}
-                      >
-                        <MenuItem value="">-- Select Registered Patient --</MenuItem>
-                        {customers.map(c => (
-                          <MenuItem key={c.id} value={c.id}>
-                            {c.name} ({c.phone}) {c.hasSpecBooking ? '• [Booked for Specs]' : ''}
-                          </MenuItem>
-                        ))}
-                      </TextField>
-                    </Grid>
-                  </Grid>
-
-                  {!currentCust ? (
-                    <Card variant="outlined" sx={{ p: 4, borderRadius: 3, textAlign: 'center', bgcolor: '#f8fafc', borderStyle: 'dashed' }}>
-                      <Typography variant="subtitle1" fontWeight={700} color="text.secondary" gutterBottom>
-                        No Patient Selected / Database Empty
-                      </Typography>
-                      <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 540, mx: 'auto', mb: 3 }}>
-                        All patient details are currently blank. Click "+ Enter Patient & Eye Details" below to open the Eye Test Section and record eye examination details for booking spectacles.
-                      </Typography>
-                      <Stack direction="row" spacing={2} justifyContent="center" flexWrap="wrap">
-                        <Button 
-                          variant="contained" 
-                          startIcon={<AddIcon />} 
-                          onClick={() => navigate('/optical/eyetest', { state: { newTest: true, fromSales: true } })}
-                          sx={{ backgroundColor: '#2563EB' }}
-                        >
-                          + Enter Patient Details in Eye Test Section
-                        </Button>
-                        <Button 
-                          variant="outlined" 
-                          onClick={() => setAddPatientDialogOpen(true)}
-                        >
-                          Quick Manual Entry
-                        </Button>
-                      </Stack>
-                    </Card>
-                  ) : (
-                    <Stack spacing={3}>
-                      {/* Loyalty & Account Info */}
-                      <Box sx={{ p: 2, bgcolor: 'action.hover', borderRadius: 3, border: '1px solid', borderColor: 'divider' }}>
-                        <Stack direction="row" justifyContent="space-between" alignItems="center" mb={1}>
-                          <Typography variant="subtitle2" fontWeight={700}>Loyalty & Account Info — {currentCust.name}</Typography>
-                          <Chip label={`${currentCust?.tier || 'Silver'} Tier`} color="primary" size="small" variant="outlined" />
-                        </Stack>
-                        <Grid container spacing={1}>
-                          <Grid item xs={4}>
-                            <Typography variant="caption" color="text.secondary">Phone Number:</Typography>
-                            <Typography variant="body2" fontWeight={700}>{currentCust?.phone || 'N/A'}</Typography>
-                          </Grid>
-                          <Grid item xs={4}>
-                            <Typography variant="caption" color="text.secondary">Rewards Balance:</Typography>
-                            <Typography variant="body2" fontWeight={700}>{currentCust?.points || 0} Points</Typography>
-                          </Grid>
-                          <Grid item xs={4}>
-                            <Typography variant="caption" color="text.secondary">Outstanding Due:</Typography>
-                            <Typography variant="body2" fontWeight={700} color={currentCust?.balance > 0 ? 'error.main' : 'success.main'}>
-                              ₹{currentCust?.balance || 0}
-                            </Typography>
-                          </Grid>
-                        </Grid>
-                      </Box>
-
-                      {/* OPTICAL SERVICES DATABASE - SPECTACLE BOOKING RECORD */}
-                      <Card variant="outlined" sx={{ p: 2.5, borderRadius: 3, bgcolor: '#f0fdf4', borderColor: '#86efac' }}>
-                        <Stack spacing={2}>
-                          <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" gap={1}>
-                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                              <Typography variant="h6" sx={{ fontSize: '1.2rem' }}>👓</Typography>
-                              <Typography variant="subtitle1" fontWeight={800} color="success.dark">
-                                Optical Services Database — Spectacle Booking Record
-                              </Typography>
-                            </Box>
-                            <Chip 
-                              label={currentCust.specDetails?.status || 'Booked for Spectacles'} 
-                              color="success" 
-                              size="small" 
-                              sx={{ fontWeight: 700 }}
-                            />
-                          </Stack>
-
-                          <Divider sx={{ borderColor: '#bbf7d0' }} />
-
-                          <Grid container spacing={2}>
-                            <Grid item xs={12} sm={4}>
-                              <Typography variant="caption" color="text.secondary">Booking Reference:</Typography>
-                              <Typography variant="body2" fontWeight={700}>{currentCust.specDetails?.bookingId || 'SPEC-8947'}</Typography>
-                            </Grid>
-                            <Grid item xs={12} sm={4}>
-                              <Typography variant="caption" color="text.secondary">Exam Date & Doctor:</Typography>
-                              <Typography variant="body2" fontWeight={700}>{currentCust.date || new Date().toISOString().split('T')[0]} ({currentCust.doctor})</Typography>
-                            </Grid>
-                            <Grid item xs={12} sm={4}>
-                              <Typography variant="caption" color="text.secondary">Patient Phone:</Typography>
-                              <Typography variant="body2" fontWeight={700}>{currentCust.phone}</Typography>
-                            </Grid>
-
-                            <Grid item xs={12} sm={6}>
-                              <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 2, bgcolor: '#ffffff', borderColor: '#bbf7d0' }}>
-                                <Typography variant="caption" color="text.secondary" fontWeight={700}>PRESCRIBED FRAME RECOMMENDATION</Typography>
-                                <Typography variant="body2" fontWeight={800} color="primary.main">
-                                  {currentCust.specDetails?.frameRec || 'RayBan Wayfarer Classic (Black)'}
-                                </Typography>
-                              </Paper>
-                            </Grid>
-                            <Grid item xs={12} sm={6}>
-                              <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 2, bgcolor: '#ffffff', borderColor: '#bbf7d0' }}>
-                                <Typography variant="caption" color="text.secondary" fontWeight={700}>PRESCRIBED LENS RECOMMENDATION</Typography>
-                                <Typography variant="body2" fontWeight={800} color="primary.main">
-                                  {currentCust.specDetails?.lensRec || 'Essilor Crizal Prevencia 1.56 Anti-Glare'}
-                                </Typography>
-                              </Paper>
-                            </Grid>
-                          </Grid>
-
-                          {/* Prescribed Power Table */}
-                          <Box sx={{ mt: 1 }}>
-                            <Typography variant="caption" color="text.secondary" fontWeight={700} sx={{ mb: 1, display: 'block' }}>
-                              PRESCRIBED OPTICAL POWER (OD / OS)
-                            </Typography>
-                            <TableContainer component={Paper} variant="outlined" sx={{ borderRadius: 2 }}>
-                              <Table size="small">
-                                <TableHead sx={{ bgcolor: '#f8fafc' }}>
-                                  <TableRow>
-                                    <TableCell sx={{ fontWeight: 700 }}>Eye</TableCell>
-                                    <TableCell sx={{ fontWeight: 700 }}>SPH</TableCell>
-                                    <TableCell sx={{ fontWeight: 700 }}>CYL</TableCell>
-                                    <TableCell sx={{ fontWeight: 700 }}>AXIS</TableCell>
-                                  </TableRow>
-                                </TableHead>
-                                <TableBody>
-                                  <TableRow>
-                                    <TableCell sx={{ fontWeight: 700 }}>Right Eye (OD)</TableCell>
-                                    <TableCell>{currentCust.sphRight || 'Plano'}</TableCell>
-                                    <TableCell>{currentCust.cylRight || 'Plano'}</TableCell>
-                                    <TableCell>{currentCust.axisRight || '0'}°</TableCell>
-                                  </TableRow>
-                                  <TableRow>
-                                    <TableCell sx={{ fontWeight: 700 }}>Left Eye (OS)</TableCell>
-                                    <TableCell>{currentCust.sphLeft || 'Plano'}</TableCell>
-                                    <TableCell>{currentCust.cylLeft || 'Plano'}</TableCell>
-                                    <TableCell>{currentCust.axisLeft || '0'}°</TableCell>
-                                  </TableRow>
-                                </TableBody>
-                              </Table>
-                            </TableContainer>
-                          </Box>
-                        </Stack>
-                      </Card>
-                    </Stack>
-                  )}
-
-                  <Box sx={{ display: 'flex', justifyContent: 'flex-end', mt: 2 }}>
-                    <Button 
-                      variant="contained" 
-                      disabled={!currentCust}
-                      onClick={() => setActiveStep(1)} 
-                      sx={{ backgroundColor: '#2563EB', px: 4 }}
-                    >
-                      Continue to Prescription & Billing
-                    </Button>
-                  </Box>
-                </Stack>
-              );
-            })()}
-
-            {activeStep === 1 && (
-              <Stack spacing={3}>
-                <Typography variant="h6" fontWeight={700}>Step 2: Prescription Loader</Typography>
-                <Grid container spacing={2}>
-                  <Grid item xs={4}><TextField label="SPH (OD)" fullWidth value={rxSphOD} onChange={(e) => setRxSphOD(e.target.value)} /></Grid>
-                  <Grid item xs={4}><TextField label="CYL (OD)" fullWidth value={rxCylOD} onChange={(e) => setRxCylOD(e.target.value)} /></Grid>
-                  <Grid item xs={4}><TextField label="AXIS (OD)" fullWidth value={rxAxisOD} onChange={(e) => setRxAxisOD(e.target.value)} /></Grid>
-                  <Grid item xs={4}><TextField label="SPH (OS)" fullWidth value={rxSphOS} onChange={(e) => setRxSphOS(e.target.value)} /></Grid>
-                  <Grid item xs={4}><TextField label="CYL (OS)" fullWidth value={rxCylOS} onChange={(e) => setRxCylOS(e.target.value)} /></Grid>
-                  <Grid item xs={4}><TextField label="AXIS (OS)" fullWidth value={rxAxisOS} onChange={(e) => setRxAxisOS(e.target.value)} /></Grid>
-                  <Grid item xs={12}><TextField label="Prescribed by Doctor" fullWidth value={presDoctor} onChange={(e) => setPresDoctor(e.target.value)} /></Grid>
-                </Grid>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', mt: 3 }}>
-                  <Button variant="outlined" onClick={() => setActiveStep(0)}>Back</Button>
-                  <Button variant="contained" onClick={() => setActiveStep(2)} sx={{ backgroundColor: '#2563EB' }}>Continue</Button>
-                </Box>
-              </Stack>
-            )}
-
-            {activeStep === 2 && (
-              <Stack spacing={3}>
-                <Typography variant="h6" fontWeight={700}>Step 3: Frame Selection</Typography>
-                <TextField select size="small" label="Frame Brand" value={frameFilter} onChange={(e) => setFrameFilter(e.target.value)} sx={{ width: 160 }}>
-                  <MenuItem value="All">All Brands</MenuItem>
-                  <MenuItem value="RayBan">RayBan</MenuItem>
-                  <MenuItem value="Oakley">Oakley</MenuItem>
-                  <MenuItem value="Titan">Titan</MenuItem>
-                </TextField>
-                <Grid container spacing={2}>
-                  {products.filter(p => p.type === 'Frame' && (frameFilter === 'All' || p.brand === frameFilter)).length === 0 ? (
-                    <Grid item xs={12}>
-                      <Card variant="outlined" sx={{ p: 4, textAlign: 'center', bgcolor: '#f8fafc', borderRadius: 3, borderStyle: 'dashed' }}>
-                        <Typography variant="body2" color="text.secondary">
-                          No frame products available in the database.
-                        </Typography>
-                      </Card>
-                    </Grid>
-                  ) : (
-                    products.filter(p => p.type === 'Frame' && (frameFilter === 'All' || p.brand === frameFilter)).map(prod => (
-                      <Grid item xs={12} sm={6} md={4} key={prod.id}>
-                        <Card variant="outlined" sx={{ p: 2, borderRadius: 3, border: cart.some(item => item.product.id === prod.id) ? '2px solid #2563EB' : '1px solid #ddd' }}>
-                          <Typography variant="h4" align="center">{prod.image}</Typography>
-                          <Typography variant="subtitle2" fontWeight={700} align="center">{prod.name}</Typography>
-                          <Typography variant="body2" fontWeight={800} align="center" sx={{ mt: 1 }}>₹{prod.price}</Typography>
-                          <Button variant="contained" fullWidth sx={{ mt: 2, backgroundColor: '#2563EB' }} onClick={() => addToCart(prod)}>
-                            {cart.some(item => item.product.id === prod.id) ? 'Selected' : 'Pick Frame'}
-                          </Button>
-                        </Card>
-                      </Grid>
-                    ))
-                  )}
-                </Grid>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', mt: 3 }}>
-                  <Button variant="outlined" onClick={() => setActiveStep(1)}>Back</Button>
-                  <Button variant="contained" onClick={() => setActiveStep(3)} sx={{ backgroundColor: '#2563EB' }}>Continue</Button>
-                </Box>
-              </Stack>
-            )}
-
-            {activeStep === 3 && (
-              <Stack spacing={3}>
-                <Typography variant="h6" fontWeight={700}>Step 4: Lens Selection</Typography>
-                <Grid container spacing={2}>
-                  {products.filter(p => p.type === 'Lens').length === 0 ? (
-                    <Grid item xs={12}>
-                      <Card variant="outlined" sx={{ p: 4, textAlign: 'center', bgcolor: '#f8fafc', borderRadius: 3, borderStyle: 'dashed' }}>
-                        <Typography variant="body2" color="text.secondary">
-                          No lens products available in the database.
-                        </Typography>
-                      </Card>
-                    </Grid>
-                  ) : (
-                    products.filter(p => p.type === 'Lens').map(prod => (
-                      <Grid item xs={12} sm={6} md={4} key={prod.id}>
-                        <Card variant="outlined" sx={{ p: 2, borderRadius: 3, border: cart.some(item => item.product.id === prod.id) ? '2px solid #2563EB' : '1px solid #ddd' }}>
-                          <Typography variant="h4" align="center">{prod.image}</Typography>
-                          <Typography variant="subtitle2" fontWeight={700} align="center">{prod.name}</Typography>
-                          <Typography variant="body2" fontWeight={800} align="center" sx={{ mt: 1 }}>₹{prod.price}</Typography>
-                          <Button variant="contained" fullWidth sx={{ mt: 2, backgroundColor: '#2563EB' }} onClick={() => addToCart(prod)}>
-                            {cart.some(item => item.product.id === prod.id) ? 'Selected' : 'Pick Lens'}
-                          </Button>
-                        </Card>
-                      </Grid>
-                    ))
-                  )}
-                </Grid>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', mt: 3 }}>
-                  <Button variant="outlined" onClick={() => setActiveStep(2)}>Back</Button>
-                  <Button variant="contained" onClick={() => setActiveStep(4)} sx={{ backgroundColor: '#2563EB' }}>Continue</Button>
-                </Box>
-              </Stack>
-            )}
-
-            {activeStep === 4 && (
-              <Stack spacing={3}>
-                <Typography variant="h6" fontWeight={700}>Step 5: Checkout Summary</Typography>
-                <Grid container spacing={3}>
-                  <Grid item xs={12} md={7}>
-                    <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 2 }}>Selected Items</Typography>
-                    {cart.map((item, i) => (
-                      <Box key={i} sx={{ display: 'flex', justifyContent: 'space-between', mb: 2 }}>
-                        <Typography variant="body2">{item.product.name} (x{item.qty})</Typography>
-                        <Typography variant="body2" fontWeight={700}>₹{item.product.price * item.qty}</Typography>
-                      </Box>
-                    ))}
-                    <Divider sx={{ my: 2 }} />
-                    <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 1 }}>Checklist Add-ons (Accessories)</Typography>
-                    <FormGroup row>
-                      <FormControlLabel control={<Checkbox checked={accessories.cloth} onChange={() => handleAccessoryChange('cloth', 150)} />} label="Cloth (+₹150)" />
-                      <FormControlLabel control={<Checkbox checked={accessories.spray} onChange={() => handleAccessoryChange('spray', 250)} />} label="Spray (+₹250)" />
-                      <FormControlLabel control={<Checkbox checked={accessories.hardCase} onChange={() => handleAccessoryChange('hardCase', 450)} />} label="Hard Case (+₹450)" />
-                    </FormGroup>
-                  </Grid>
-
-                  <Grid item xs={12} md={5}>
-                    <Card variant="outlined" sx={{ p: 2, borderRadius: 3 }}>
-                      <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 2 }}>Payment Configuration</Typography>
-                      <Stack spacing={1}>
-                        <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="caption">Subtotal</Typography><Typography variant="body2">₹{subtotal}</Typography></Box>
-                        <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="caption">GST / Taxes</Typography><Typography variant="body2">₹{tax}</Typography></Box>
-                        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <Typography variant="caption">Discount (₹)</Typography>
-                          <TextField size="small" type="number" value={discount} onChange={(e) => setDiscount(e.target.value)} sx={{ width: 80 }} />
-                        </Box>
-                        <Divider />
-                        <Box sx={{ display: 'flex', justifyContent: 'space-between', pt: 1 }}>
-                          <Typography variant="body1" fontWeight={700}>Total Payable</Typography>
-                          <Typography variant="body1" fontWeight={700} color="primary">₹{total}</Typography>
-                        </Box>
-                      </Stack>
-                      <Button variant="contained" fullWidth onClick={() => setPrintOpen(true)} sx={{ mt: 3, backgroundColor: '#2563EB' }}>
-                        Generate & Print Invoice
-                      </Button>
-                    </Card>
-                  </Grid>
-                </Grid>
-                <Box sx={{ display: 'flex', justifyContent: 'flex-start', mt: 3 }}>
-                  <Button variant="outlined" onClick={() => setActiveStep(3)}>Back</Button>
-                </Box>
-              </Stack>
-            )}
-          </Card>
-        </Stack>
+        <NewSaleWizard
+          customers={customers}
+          products={products}
+          onNavigateToEyeTest={() => navigate('/optical/eyetest')}
+          onCheckoutComplete={(completedOrder) => {
+            const newOrd = {
+              id: completedOrder.id || `INV-${Math.floor(1000 + Math.random() * 9000)}`,
+              customer: completedOrder.customerName || completedOrder.customer || 'CASH CUSTOMER',
+              phone: completedOrder.customerPhone || '+91 98470 12345',
+              date: completedOrder.date || new Date().toISOString().split('T')[0],
+              total: parseFloat(completedOrder.netTotal || completedOrder.total || 0),
+              paidAmount: parseFloat(completedOrder.netTotal || completedOrder.total || 0) - (parseFloat(completedOrder.balanceDue) || 0),
+              payment: (parseFloat(completedOrder.balanceDue) || 0) === 0 ? 'Paid' : 'Partial',
+              status: 'Ready for Collection',
+              frame: completedOrder.items?.find(i => i.category === 'FRAME')?.item || 'Prescribed Frame',
+              lens: completedOrder.items?.find(i => i.category === 'LENS')?.item || 'Prescribed Lens',
+              paymentMethod: completedOrder.paymentMode || 'Cash'
+            };
+            setOrders(prev => [newOrd, ...prev]);
+            setPrintableInvoice(newOrd);
+            setPrintModalOpen(true);
+          }}
+        />
       )}
+
 
       {/* 3. POS BILLING */}
       {activeTab === 'pos-billing' && (
-        <Grid container spacing={3}>
-          <Grid item xs={12} md={7}>
-            <Card sx={{ borderRadius: 4, border: '1px solid', borderColor: 'divider', p: 3 }}>
-              <Typography variant="h6" fontWeight={700} sx={{ mb: 2 }}>Barcode & QR Scanner Billing Panel</Typography>
-              <Stack direction="row" spacing={2} sx={{ mb: 3 }}>
-                <TextField 
-                  fullWidth 
-                  size="small" 
-                  placeholder="Scan Frame Barcode or Search Products..." 
-                  InputProps={{
-                    startAdornment: <ScannerIcon color="action" sx={{ mr: 1 }} />
-                  }}
-                />
-                <Button variant="contained" startIcon={<AddIcon />} sx={{ backgroundColor: '#2563EB' }} onClick={() => setQrOpen(true)}>Scan QR</Button>
-              </Stack>
-              <Grid container spacing={2}>
-                {products.length === 0 ? (
-                  <Grid item xs={12}>
-                    <Card variant="outlined" sx={{ p: 4, textAlign: 'center', bgcolor: '#f8fafc', borderRadius: 3, borderStyle: 'dashed' }}>
-                      <Typography variant="subtitle1" fontWeight={700} color="text.secondary" gutterBottom>
-                        No Products Registered in Database
-                      </Typography>
-                      <Typography variant="body2" color="text.secondary">
-                        All product details are currently blank. Data will appear here once frames, lenses, or contact lenses are entered into the database.
-                      </Typography>
-                    </Card>
-                  </Grid>
-                ) : (
-                  products.map(prod => (
-                    <Grid item xs={6} key={prod.id}>
-                      <Card variant="outlined" sx={{ p: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderRadius: 3 }}>
-                        <Box>
-                          <Typography variant="subtitle2" fontWeight={700}>{prod.name}</Typography>
-                          <Typography variant="caption" color="text.secondary">₹{prod.price}</Typography>
-                        </Box>
-                        <Button size="small" variant="contained" sx={{ backgroundColor: '#2563EB' }} onClick={() => addToCart(prod)}>Add</Button>
-                      </Card>
-                    </Grid>
-                  ))
-                )}
-              </Grid>
-            </Card>
-          </Grid>
-
-          <Grid item xs={12} md={5}>
-            <Card sx={{ borderRadius: 4, border: '1px solid', borderColor: 'divider', p: 3 }}>
-              <Typography variant="h6" fontWeight={700} sx={{ mb: 2 }}>Shopping Cart</Typography>
-              <Stack spacing={2} sx={{ maxH: 250, overflowY: 'auto', mb: 2 }}>
-                {cart.length === 0 ? (
-                  <Typography variant="body2" color="text.secondary" align="center">Cart is empty.</Typography>
-                ) : (
-                  cart.map((item, idx) => (
-                    <Box key={idx} sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <Typography variant="body2" sx={{ maxWidth: '60%' }}>{item.product.name}</Typography>
-                      <Stack direction="row" spacing={1} alignItems="center">
-                        <IconButton size="small" onClick={() => updateQty(item.product.id, item.qty - 1)}><RemoveIcon fontSize="small" /></IconButton>
-                        <Typography variant="body2">{item.qty}</Typography>
-                        <IconButton size="small" onClick={() => addToCart(item.product)}><AddIcon fontSize="small" /></IconButton>
-                        <Typography variant="body2" fontWeight={700}>₹{item.product.price * item.qty}</Typography>
-                      </Stack>
-                    </Box>
-                  ))
-                )}
-              </Stack>
-              <Divider sx={{ my: 2 }} />
-              <Stack spacing={1.5}>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="body2">Subtotal</Typography><Typography variant="body2" fontWeight={700}>₹{subtotal}</Typography></Box>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="body2">GST/Tax</Typography><Typography variant="body2" fontWeight={700}>₹{tax}</Typography></Box>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <Typography variant="body2">Discount (₹)</Typography>
-                  <TextField size="small" type="number" value={discount} onChange={(e) => setDiscount(e.target.value)} sx={{ width: 100 }} />
-                </Box>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', pt: 1 }}><Typography variant="subtitle1" fontWeight={850}>Total Payable</Typography><Typography variant="subtitle1" fontWeight={850} color="primary">₹{total}</Typography></Box>
-              </Stack>
-
-              <TextField select label="Payment Mode" fullWidth value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)} sx={{ mt: 3, mb: 2 }}>
-                <MenuItem value="Cash">Cash</MenuItem>
-                <MenuItem value="Card">Card</MenuItem>
-                <MenuItem value="UPI (GPay/PhonePe)">UPI (GPay/PhonePe)</MenuItem>
-                <MenuItem value="Split Payment">Split (Cash + UPI)</MenuItem>
-              </TextField>
-
-              <Button variant="contained" fullWidth size="large" sx={{ backgroundColor: '#2563EB', py: 1.5 }} onClick={() => setPrintOpen(true)} disabled={cart.length === 0}>
-                Quick Pay & Print Receipt
-              </Button>
-            </Card>
-          </Grid>
-        </Grid>
+        <PosBillingView
+          products={products}
+          customers={customers}
+          onOpenRecordPayment={() => setRecordPaymentDialogOpen(true)}
+          onCheckoutComplete={(completedOrder) => {
+            const newOrd = {
+              id: `INV-${Math.floor(1000 + Math.random() * 9000)}`,
+              customer: completedOrder.customer,
+              phone: completedOrder.phone || '+91 98470 12345',
+              date: new Date().toISOString().split('T')[0],
+              total: completedOrder.total,
+              paidAmount: completedOrder.total,
+              payment: 'Paid',
+              status: 'Ready for Collection',
+              frame: completedOrder.frame,
+              lens: completedOrder.lens,
+              paymentMethod: 'UPI / PhonePe'
+            };
+            setOrders(prev => [newOrd, ...prev]);
+            try {
+              const existing = JSON.parse(localStorage.getItem('optical_sales_invoices') || '[]');
+              localStorage.setItem('optical_sales_invoices', JSON.stringify([newOrd, ...existing]));
+            } catch(e) {}
+            navigate('/sales/dashboard');
+          }}
+        />
       )}
 
       {/* 4. ORDERS */}
-      {activeTab === 'orders' && (() => {
-        const filteredOrders = orders.filter(ord => {
-          const searchLower = orderSearchQuery.toLowerCase();
-          const matchesSearch = (ord.id && ord.id.toLowerCase().includes(searchLower)) ||
-                                (ord.customer && ord.customer.toLowerCase().includes(searchLower)) ||
-                                (ord.frame && ord.frame.toLowerCase().includes(searchLower)) ||
-                                (ord.lens && ord.lens.toLowerCase().includes(searchLower));
-          const matchesStatus = orderStatusFilter === 'All' || ord.status === orderStatusFilter;
-          return matchesSearch && matchesStatus;
-        });
-
-        const totalOrderValue = orders.reduce((sum, o) => sum + (parseFloat(o.total) || 0), 0);
-        const inLabCount = orders.filter(o => o.status !== 'Delivered').length;
-        const readyCount = orders.filter(o => o.status === 'Ready' || o.status === 'Ready for Delivery').length;
-
-        return (
-          <Stack spacing={3}>
-            {/* Orders Header & KPI Cards */}
-            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 2 }}>
-              <Box>
-                <Typography variant="h5" fontWeight={800}>Spectacle Sales & Lab Orders</Typography>
-                <Typography variant="body2" color="text.secondary">Track optical lab processing, lens fitting, and customer spectacle deliveries</Typography>
-              </Box>
-              <Stack direction="row" spacing={1.5}>
-                <Button 
-                  variant="contained" 
-                  startIcon={<AddIcon />} 
-                  onClick={() => navigate('/sales/new')}
-                  sx={{ backgroundColor: '#2563EB' }}
-                >
-                  + New Sale Order
-                </Button>
-                <Button 
-                  variant="outlined" 
-                  startIcon={<AddIcon />} 
-                  onClick={() => navigate('/optical/eyetest', { state: { newTest: true, fromSales: true } })}
-                >
-                  Enter Eye Test & Booking
-                </Button>
-              </Stack>
-            </Box>
-
-            {/* KPI Metrics */}
-            <Grid container spacing={2}>
-              <Grid item xs={12} sm={6} md={3}>
-                <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: '4px solid #2563eb', bgcolor: '#ffffff' }}>
-                  <Typography variant="caption" color="text.secondary" fontWeight={700}>TOTAL ORDERS</Typography>
-                  <Typography variant="h4" fontWeight={850} color="primary">{orders.length}</Typography>
-                  <Typography variant="caption" color="text.secondary">Active order records</Typography>
-                </Paper>
-              </Grid>
-              <Grid item xs={12} sm={6} md={3}>
-                <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: '4px solid #f59e0b', bgcolor: '#ffffff' }}>
-                  <Typography variant="caption" color="text.secondary" fontWeight={700}>IN LAB QUEUE</Typography>
-                  <Typography variant="h4" fontWeight={850} sx={{ color: '#d97706' }}>{inLabCount}</Typography>
-                  <Typography variant="caption" color="text.secondary">Lens cutting & fitting</Typography>
-                </Paper>
-              </Grid>
-              <Grid item xs={12} sm={6} md={3}>
-                <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: '4px solid #10b981', bgcolor: '#ffffff' }}>
-                  <Typography variant="caption" color="text.secondary" fontWeight={700}>READY FOR PICKUP</Typography>
-                  <Typography variant="h4" fontWeight={850} color="success.main">{readyCount}</Typography>
-                  <Typography variant="caption" color="text.secondary">Quality pass completed</Typography>
-                </Paper>
-              </Grid>
-              <Grid item xs={12} sm={6} md={3}>
-                <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: '4px solid #8b5cf6', bgcolor: '#ffffff' }}>
-                  <Typography variant="caption" color="text.secondary" fontWeight={700}>TOTAL ORDERS REVENUE</Typography>
-                  <Typography variant="h4" fontWeight={850} sx={{ color: '#7c3aed' }}>₹{totalOrderValue.toFixed(2)}</Typography>
-                  <Typography variant="caption" color="text.secondary">Accumulated order total</Typography>
-                </Paper>
-              </Grid>
-            </Grid>
-
-            {/* Filter & Search Toolbar */}
-            <Card variant="outlined" sx={{ p: 2, borderRadius: 3 }}>
-              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems="center">
-                <TextField 
-                  fullWidth 
-                  size="small" 
-                  placeholder="Search Order ID, Customer Name, or Lens/Frame..."
-                  value={orderSearchQuery}
-                  onChange={(e) => setOrderSearchQuery(e.target.value)}
-                  InputProps={{
-                    startAdornment: <ScannerIcon color="action" sx={{ mr: 1, fontSize: 20 }} />
-                  }}
-                />
-                <TextField 
-                  select 
-                  size="small" 
-                  label="Filter Status" 
-                  value={orderStatusFilter} 
-                  onChange={(e) => setOrderStatusFilter(e.target.value)}
-                  sx={{ minWidth: 180 }}
-                >
-                  <MenuItem value="All">All Statuses</MenuItem>
-                  <MenuItem value="Pending Lab">Pending Lab</MenuItem>
-                  <MenuItem value="In Fitting">In Fitting</MenuItem>
-                  <MenuItem value="Ready">Ready for Delivery</MenuItem>
-                  <MenuItem value="Delivered">Delivered</MenuItem>
-                </TextField>
-                {(orderSearchQuery || orderStatusFilter !== 'All') && (
-                  <Button variant="text" size="small" onClick={() => { setOrderSearchQuery(''); setOrderStatusFilter('All'); }}>
-                    Reset
-                  </Button>
-                )}
-              </Stack>
-            </Card>
-
-            {/* Main Orders Table */}
-            <Card sx={{ borderRadius: 4, border: '1px solid', borderColor: 'divider' }}>
-              <TableContainer>
-                <Table size="medium">
-                  <TableHead sx={{ backgroundColor: 'action.hover' }}>
-                    <TableRow>
-                      <TableCell sx={{ fontWeight: 700 }}>Order ID</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }}>Customer Name</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }}>Prescribed Items</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }}>Delivery Date</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }}>Total Payable</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }}>Workflow Status</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }}>Progress</TableCell>
-                      <TableCell align="right" sx={{ fontWeight: 700 }}>Actions</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {filteredOrders.length === 0 ? (
-                      <TableRow>
-                        <TableCell colSpan={8} align="center" sx={{ py: 6 }}>
-                          <Typography variant="body2" color="text.secondary" fontWeight={500}>
-                            {orderSearchQuery ? "No matching orders found." : "No sales orders recorded in the database."}
-                          </Typography>
-                          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
-                            {orderSearchQuery ? "Try refining your search keyword or clearing filters." : "Orders created through POS Billing or New Sale will appear here automatically."}
-                          </Typography>
-                          {!orderSearchQuery && (
-                            <Stack direction="row" spacing={2} justifyContent="center" sx={{ mt: 2 }}>
-                              <Button 
-                                size="small" 
-                                variant="contained" 
-                                startIcon={<AddIcon />} 
-                                onClick={() => navigate('/sales/new')} 
-                                sx={{ backgroundColor: '#2563EB' }}
-                              >
-                                Create First Order
-                              </Button>
-                              <Button 
-                                size="small" 
-                                variant="outlined" 
-                                onClick={() => navigate('/optical/eyetest', { state: { newTest: true, fromSales: true } })}
-                              >
-                                Enter Eye Test & Booking
-                              </Button>
-                            </Stack>
-                          )}
-                        </TableCell>
-                      </TableRow>
-                    ) : (
-                      filteredOrders.map((ord) => (
-                        <TableRow key={ord.id} hover>
-                          <TableCell sx={{ fontWeight: 700, color: 'primary.main' }}>{ord.id}</TableCell>
-                          <TableCell sx={{ fontWeight: 600 }}>{ord.customer}</TableCell>
-                          <TableCell>
-                            <Typography variant="body2" fontWeight={600}>{ord.frame || 'Optical Frame'}</Typography>
-                            <Typography variant="caption" color="text.secondary">{ord.lens || 'Anti-Reflective Lens'}</Typography>
-                          </TableCell>
-                          <TableCell>{ord.deliveryDate || 'Standard (3 Days)'}</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>₹{ord.total}</TableCell>
-                          <TableCell>
-                            <Chip 
-                              label={ord.status} 
-                              size="small" 
-                              color={
-                                ord.status === 'Delivered' ? 'success' : 
-                                ord.status === 'Ready' || ord.status === 'Ready for Delivery' ? 'info' : 
-                                ord.status === 'In Fitting' ? 'warning' : 'primary'
-                              } 
-                              sx={{ fontWeight: 700 }}
-                            />
-                          </TableCell>
-                          <TableCell sx={{ width: 140 }}>
-                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                              <LinearProgress 
-                                variant="determinate" 
-                                value={ord.progress || (ord.status === 'Delivered' ? 100 : ord.status === 'Ready' ? 80 : ord.status === 'In Fitting' ? 50 : 20)} 
-                                sx={{ width: 70, height: 6, borderRadius: 3 }} 
-                              />
-                              <Typography variant="caption" fontWeight={700}>
-                                {ord.progress || (ord.status === 'Delivered' ? 100 : ord.status === 'Ready' ? 80 : ord.status === 'In Fitting' ? 50 : 20)}%
-                              </Typography>
-                            </Box>
-                          </TableCell>
-                          <TableCell align="right">
-                            <Stack direction="row" spacing={1} justifyContent="flex-end">
-                              <Button 
-                                size="small" 
-                                variant="outlined" 
-                                onClick={() => { setSelectedOrder(ord); setOrderDetailTab(0); }}
-                              >
-                                Job Card
-                              </Button>
-                              <Button 
-                                size="small" 
-                                variant="text" 
-                                color="secondary"
-                                onClick={() => {
-                                  const nextStatus = ord.status === 'Pending Lab' ? 'In Fitting' : 
-                                                     ord.status === 'In Fitting' ? 'Ready' : 
-                                                     ord.status === 'Ready' ? 'Delivered' : 'Pending Lab';
-                                  setOrders(orders.map(o => o.id === ord.id ? { 
-                                    ...o, 
-                                    status: nextStatus,
-                                    progress: nextStatus === 'Delivered' ? 100 : nextStatus === 'Ready' ? 80 : nextStatus === 'In Fitting' ? 50 : 20
-                                  } : o));
-                                }}
-                              >
-                                Advance Stage
-                              </Button>
-                            </Stack>
-                          </TableCell>
-                        </TableRow>
-                      ))
-                    )}
-                  </TableBody>
-                </Table>
-              </TableContainer>
-            </Card>
-          </Stack>
-        );
-      })()}
+      {activeTab === 'orders' && (
+        <OrdersManagerView
+          orders={orders}
+          onNavigateToNewSale={() => { setActiveTab('new-sale'); navigate('/sales/new'); }}
+          onNavigateToEyeTest={() => navigate('/optical/eyetest')}
+          onOpenRecordPayment={() => setRecordPaymentDialogOpen(true)}
+          onPrintInvoice={(inv) => { setPrintableInvoice(inv); setPrintModalOpen(true); }}
+          onUpdateOrderStatus={(orderId, newStatus) => {
+            const updated = orders.map(o => o.id === orderId ? { ...o, status: newStatus } : o);
+            setOrders(updated);
+            try {
+              localStorage.setItem('optical_sales_invoices', JSON.stringify(updated));
+            } catch(e) {}
+          }}
+        />
+      )}
 
       {/* 5. CUSTOMERS */}
       {activeTab === 'customers' && (() => {
@@ -1315,159 +777,19 @@ export default function SalesInvoice() {
       })()}
 
       {/* 6. PAYMENTS */}
-      {activeTab === 'payments' && (() => {
-        const outstandingCusts = customers.filter(c => parseFloat(c.balance || 0) > 0);
-        const totalCollectedAmt = payments.reduce((sum, p) => sum + (parseFloat(p.amount) || 0), 0);
-        const totalOutstandingAmt = customers.reduce((sum, c) => sum + (parseFloat(c.balance) || 0), 0);
-
-        return (
-          <Stack spacing={3}>
-            {/* Header & Record Payment Action Bar */}
-            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 2 }}>
-              <Box>
-                <Typography variant="h5" fontWeight={800}>Payment Collections & Ledger</Typography>
-                <Typography variant="body2" color="text.secondary">Audit payment receipts, cash logs, UPI collections, and outstanding customer dues</Typography>
-              </Box>
-              <Button 
-                variant="contained" 
-                startIcon={<AddIcon />} 
-                onClick={() => setRecordPaymentDialogOpen(true)}
-                sx={{ backgroundColor: '#2563EB', px: 3, py: 1, borderRadius: 2.5, fontWeight: 700 }}
-              >
-                + Record Payment Collection
-              </Button>
-            </Box>
-
-            {/* KPI Summary Banner */}
-            <Grid container spacing={2}>
-              <Grid item xs={12} sm={6} md={4}>
-                <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: '4px solid #10b981', bgcolor: '#ffffff' }}>
-                  <Typography variant="caption" color="text.secondary" fontWeight={700}>TOTAL PAYMENTS COLLECTED</Typography>
-                  <Typography variant="h4" fontWeight={850} color="success.main">₹{totalCollectedAmt.toFixed(2)}</Typography>
-                  <Typography variant="caption" color="text.secondary">{payments.length} receipt transactions</Typography>
-                </Paper>
-              </Grid>
-              <Grid item xs={12} sm={6} md={4}>
-                <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: '4px solid #ef4444', bgcolor: '#ffffff' }}>
-                  <Typography variant="caption" color="text.secondary" fontWeight={700}>OUTSTANDING CUSTOMER DUES</Typography>
-                  <Typography variant="h4" fontWeight={850} color="error.main">₹{totalOutstandingAmt.toFixed(2)}</Typography>
-                  <Typography variant="caption" color="text.secondary">{outstandingCusts.length} accounts pending payment</Typography>
-                </Paper>
-              </Grid>
-              <Grid item xs={12} sm={6} md={4}>
-                <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: '4px solid #2563eb', bgcolor: '#ffffff' }}>
-                  <Typography variant="caption" color="text.secondary" fontWeight={700}>COLLECTION RECEIPTS</Typography>
-                  <Typography variant="h4" fontWeight={850} color="primary">{payments.length}</Typography>
-                  <Typography variant="caption" color="text.secondary">100% verified settlement</Typography>
-                </Paper>
-              </Grid>
-            </Grid>
-
-            {/* Main Dual Card Layout: Left Payment Collections & Right Outstanding Balances */}
-            <Grid container spacing={3}>
-              {/* Left Card: Payment Collections & Log */}
-              <Grid item xs={12} md={8}>
-                <Card sx={{ borderRadius: 4, border: '1px solid', borderColor: 'divider', p: 3, minHeight: 420 }}>
-                  <Typography variant="h6" fontWeight={800} sx={{ mb: 2.5 }}>Payment Collections & Log</Typography>
-                  <TableContainer>
-                    <Table size="small">
-                      <TableHead sx={{ backgroundColor: 'action.hover' }}>
-                        <TableRow>
-                          <TableCell sx={{ fontWeight: 700 }}>Date</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>Receipt ID</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>Customer</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>Amount Collected</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>Method</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>Status</TableCell>
-                        </TableRow>
-                      </TableHead>
-                      <TableBody>
-                        {payments.length === 0 ? (
-                          <TableRow>
-                            <TableCell colSpan={6} align="center" sx={{ py: 8 }}>
-                              <Typography variant="body2" color="text.secondary" fontWeight={500}>
-                                No payment collection logs recorded in the database.
-                              </Typography>
-                              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
-                                Payments recorded during POS Billing or manual entry will appear here.
-                              </Typography>
-                            </TableCell>
-                          </TableRow>
-                        ) : (
-                          payments.map((p, idx) => (
-                            <TableRow key={idx} hover>
-                              <TableCell>{p.date}</TableCell>
-                              <TableCell sx={{ fontWeight: 700, color: 'primary.main' }}>{p.id}</TableCell>
-                              <TableCell sx={{ fontWeight: 600 }}>{p.customer}</TableCell>
-                              <TableCell sx={{ fontWeight: 700, color: 'success.main' }}>₹{p.amount}</TableCell>
-                              <TableCell>{p.method}</TableCell>
-                              <TableCell><Chip label={p.status} color="success" size="small" sx={{ fontWeight: 700 }} /></TableCell>
-                            </TableRow>
-                          ))
-                        )}
-                      </TableBody>
-                    </Table>
-                  </TableContainer>
-                </Card>
-              </Grid>
-
-              {/* Right Card: Outstanding Balances */}
-              <Grid item xs={12} md={4}>
-                <Card sx={{ borderRadius: 4, border: '1px solid', borderColor: 'divider', p: 3, minHeight: 420 }}>
-                  <Typography variant="h6" fontWeight={800} sx={{ mb: 2.5 }}>Outstanding Balances</Typography>
-                  <Stack spacing={2}>
-                    {outstandingCusts.length === 0 ? (
-                      <Box sx={{ py: 8, textAlign: 'center' }}>
-                        <Typography variant="body2" color="text.secondary" fontWeight={500}>
-                          No outstanding customer balances found in database.
-                        </Typography>
-                        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
-                          All patient customer accounts are currently fully settled.
-                        </Typography>
-                      </Box>
-                    ) : (
-                      outstandingCusts.map(c => (
-                        <Paper key={c.id} variant="outlined" sx={{ p: 2, borderRadius: 2.5, bgcolor: '#fff' }}>
-                          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <Box>
-                              <Typography variant="subtitle2" fontWeight={700}>{c.name}</Typography>
-                              <Typography variant="caption" color="text.secondary">{c.phone || 'No phone'}</Typography>
-                            </Box>
-                            <Box sx={{ textAlign: 'right' }}>
-                              <Typography variant="subtitle2" fontWeight={850} color="error.main">₹{c.balance}</Typography>
-                              <Stack direction="row" spacing={0.5} sx={{ mt: 0.5 }}>
-                                <Button 
-                                  size="small" 
-                                  variant="text" 
-                                  color="secondary"
-                                  onClick={() => alert(`Payment reminder notification sent to ${c.name} (${c.phone})!`)}
-                                >
-                                  Remind
-                                </Button>
-                                <Button 
-                                  size="small" 
-                                  variant="contained" 
-                                  sx={{ backgroundColor: '#2563EB', fontSize: '0.7rem' }}
-                                  onClick={() => {
-                                    setPayRecordInput({ customerId: c.id, amount: String(c.balance), method: 'Cash' });
-                                    setRecordPaymentDialogOpen(true);
-                                  }}
-                                >
-                                  Collect
-                                </Button>
-                              </Stack>
-                            </Box>
-                          </Box>
-                        </Paper>
-                      ))
-                    )}
-                  </Stack>
-                </Card>
-              </Grid>
-            </Grid>
-          </Stack>
-        );
-      })()}
+      {activeTab === 'payments' && (
+        <PaymentsManagerView
+          payments={payments}
+          customers={customers}
+          orders={orders}
+          onRecordPaymentSubmit={(newPayment, custId, payAmt) => {
+            setPayments(prev => [newPayment, ...prev]);
+            if (custId) {
+              setCustomers(customers.map(c => c.id === custId ? { ...c, balance: Math.max(0, (c.balance || 0) - payAmt) } : c));
+            }
+          }}
+        />
+      )}
 
       {/* 7. REPORTS */}
       {activeTab === 'reports' && (() => {
@@ -2427,6 +1749,13 @@ export default function SalesInvoice() {
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* 🖨️ PRINT INVOICE MODAL */}
+      <PrintInvoiceModal 
+        open={printModalOpen} 
+        onClose={() => setPrintModalOpen(false)} 
+        invoice={printableInvoice} 
+      />
     </Box>
   );
 }

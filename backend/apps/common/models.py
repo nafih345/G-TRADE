@@ -31,14 +31,14 @@ class BaseUUIDModel(models.Model):
         null=True,
         blank=True,
         on_delete=models.SET_NULL,
-        related_name="%(class)s_created"
+        related_name="%(app_label)s_%(class)s_created"
     )
     updated_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,
         blank=True,
         on_delete=models.SET_NULL,
-        related_name="%(class)s_updated"
+        related_name="%(app_label)s_%(class)s_updated"
     )
     is_deleted = models.BooleanField(default=False)
 
@@ -50,8 +50,10 @@ class BaseUUIDModel(models.Model):
         abstract = True
 
     def delete(self, using=None, keep_parents=False):
-        self.is_deleted = True
+        self.is_deleted = True  # type: ignore
         self.save(using=using)
+        label = self._meta.label if hasattr(self, '_meta') else 'object'
+        return (1, {label: 1})
 
     def hard_delete(self, using=None, keep_parents=False):
         super().delete(using=using, keep_parents=keep_parents)

@@ -1,0 +1,15 @@
+{
+  "extraPaths": [
+    "backend"
+  ],
+  "exclude": [
+    "**/__pyrefly_virtual__/**",
+    "**/venv/**",
+    "**/migrations/**",
+    "**/clear_all_database.py"
+  ],
+  "reportMissingTypeStubs": false,
+  "reportMissingImports": false,
+  "reportIncompatibleVariableOverride": false,
+  "reportAttributeAccessIssue": false
+}

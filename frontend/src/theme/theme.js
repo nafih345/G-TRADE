@@ -47,6 +47,20 @@ export const getTheme = (mode) => {
   return createTheme({
     ...tokens,
     components: {
+      MuiCssBaseline: {
+        styleOverrides: `
+          *, *::before, *::after {
+            cursor: default;
+          }
+          a, button, [role="button"], .MuiButtonBase-root, .MuiChip-root, .MuiTab-root, .MuiMenuItem-root, label {
+            cursor: pointer !important;
+          }
+          input, textarea, .MuiInputBase-input {
+            cursor: text !important;
+            user-select: text !important;
+          }
+        `,
+      },
       MuiButton: {
         styleOverrides: {
           root: {

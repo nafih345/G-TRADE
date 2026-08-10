@@ -1,5 +1,15 @@
 {
-  "json.schemaDownload.trustedDomains": {
-    "https://static.ampcode.com": true
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/backend"
+  ],
+  "python.analysis.ignore": [
+    "**/__pyrefly_virtual__/**"
+  ],
+  "python.autoComplete.extraPaths": [
+    "${workspaceFolder}/backend"
+  ],
+  "python.analysis.diagnosticSeverityOverrides": {
+    "reportMissingTypeStubs": "none",
+    "reportIncompatibleVariableOverride": "none"
   }
 }

@@ -1,19 +1,27 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { useDebounce } from '../hooks/useDebounce';
 import { 
   Box, Card, CardContent, Typography, Button, Tab, Tabs,
   Grid, Table, TableBody, TableCell, TableContainer, 
   TableHead, TableRow, Paper, Chip, Dialog, 
   DialogTitle, DialogContent, DialogActions, TextField, 
-  MenuItem, Stack, IconButton, Autocomplete 
+  MenuItem, Stack, IconButton, Autocomplete, Alert
 } from '@mui/material';
 import {
   Add as AddIcon,
   QrCode as BarcodeIcon,
   Search as SearchIcon,
   SwapHoriz as TransferIcon,
-  Tune as AdjustIcon
+  Tune as AdjustIcon,
+  Delete as DeleteIcon,
+  AutoAwesome as SparkleIcon
 } from '@mui/icons-material';
 import axios from 'axios';
+import CategoryManagementView from '../components/inventory/CategoryManagementView';
+import BrandManagementView from '../components/inventory/BrandManagementView';
+import LensManagementView from '../components/inventory/LensManagementView';
+import ConfirmActionDialog from '../components/common/ConfirmActionDialog';
 
 const initialProducts = [];
 
@@ -28,11 +36,32 @@ const opticalBrands = [
   'Kodak', 'Bausch + Lomb', 'Johnson & Johnson'
 ];
 
-const opticalSuppliers = [];
-
 export default function Products() {
   const [products, setProducts] = useState(initialProducts);
   const [currentTab, setCurrentTab] = useState(0);
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    const path = (location.pathname || '').toLowerCase();
+    if (path.includes('categories')) {
+      setCurrentTab(1);
+    } else if (path.includes('brands')) {
+      setCurrentTab(2);
+    } else if (path.includes('lenses') || path.includes('lens')) {
+      setCurrentTab(3);
+    } else {
+      setCurrentTab(0);
+    }
+  }, [location.pathname]);
+
+  const handleTabChange = (event, newValue) => {
+    setCurrentTab(newValue);
+    if (newValue === 1) navigate('/inventory/categories');
+    else if (newValue === 2) navigate('/inventory/brands');
+    else if (newValue === 3) navigate('/inventory/lenses');
+    else navigate('/inventory/products');
+  };
   const [open, setOpen] = useState(false);
   const [adjustOpen, setAdjustOpen] = useState(false);
   const [barcodeDialog, setBarcodeDialog] = useState(false);
@@ -42,14 +71,17 @@ export default function Products() {
   
   const [newProduct, setNewProduct] = useState({
     code: '', barcode: '', name: '', brand: '', supplier: '', category: 'Frames',
-    frameType: 'Full Rim', lensType: 'N/A', color: '', material: 'Metal',
-    gender: 'Unisex', size: '', purchasePrice: '', sellingPrice: '',
+    frameType: '', lensType: '', color: '', material: '',
+    gender: '', size: '', purchasePrice: '', sellingPrice: '',
     gst: '18%', stock: '', rack: '', shelf: '', warehouse: 'Main', status: 'Active'
   });
 
   const [adjustStock, setAdjustStock] = useState({ id: '', name: '', current: 0, change: 0, reason: 'Manual audit' });
   const [scanDialogOpen, setScanDialogOpen] = useState(false);
   const [dbSuppliers, setDbSuppliers] = useState([]);
+  const [confirmDialog, setConfirmDialog] = useState({
+    open: false, title: '', message: '', type: 'danger', confirmText: 'Confirm', onConfirm: null
+  });
 
   // Sync Registered Suppliers from Purchases Module / API
   useEffect(() => {
@@ -57,25 +89,41 @@ export default function Products() {
       let suppList = [];
       try {
         const local = JSON.parse(localStorage.getItem('optical_suppliers') || '[]');
-        suppList = [...local];
+        const localDB = JSON.parse(localStorage.getItem('optical_suppliers_db') || '[]');
+        const localNames = localDB.map(s => s.name || s.company_name || s.company).filter(Boolean);
+        suppList = [...local, ...localNames];
       } catch (e) {}
 
       try {
-        const res = await axios.get('/api/purchasing/suppliers/');
-        if (res.data && Array.isArray(res.data)) {
-          const apiNames = res.data.map(s => s.name).filter(Boolean);
+        let res;
+        try {
+          res = await axios.get('/api/purchase/suppliers/');
+        } catch (e1) {
+          res = await axios.get('/api/purchasing/suppliers/');
+        }
+        const raw = res.data?.results || res.data || [];
+        if (Array.isArray(raw)) {
+          const apiNames = raw.map(s => s.name || s.company_name || s.company).filter(Boolean);
           suppList = [...suppList, ...apiNames];
         }
       } catch (e) {}
 
-      setDbSuppliers(Array.from(new Set(suppList)));
+      setDbSuppliers(Array.from(new Set(suppList)).filter(Boolean));
     };
     fetchRegisteredSuppliers();
+    window.addEventListener('optical_suppliers_updated', fetchRegisteredSuppliers);
+    return () => window.removeEventListener('optical_suppliers_updated', fetchRegisteredSuppliers);
   }, [open]);
 
-  // Fetch Inventory Products from Sales/Products Database
+  // Fetch Inventory Products from Sales/Products Database & Local Storage
   useEffect(() => {
     const fetchInventoryProducts = async () => {
+      let itemsList = [];
+      try {
+        const local = JSON.parse(localStorage.getItem('optical_inventory_items') || '[]');
+        itemsList = [...local];
+      } catch (e) {}
+
       try {
         const res = await axios.get('/api/products/items/');
         if (res.data && Array.isArray(res.data) && res.data.length > 0) {
@@ -102,18 +150,30 @@ export default function Products() {
             warehouse: p.warehouse || 'Main',
             status: p.is_active === false ? 'Inactive' : 'Active'
           }));
-          setProducts(formatted);
+          itemsList = [...itemsList, ...formatted];
         }
-      } catch (err) {
-        console.log("Database products check: using standard empty state");
-      }
+      } catch (err) {}
+
+      // Deduplicate by SKU or Name
+      const unique = Array.from(new Map(itemsList.map(item => [item.code || item.barcode || item.name, item])).values());
+      setProducts(unique);
     };
+
     fetchInventoryProducts();
+
+    window.addEventListener('optical_stock_updated', fetchInventoryProducts);
+    return () => window.removeEventListener('optical_stock_updated', fetchInventoryProducts);
   }, []);
 
-  const handleTabChange = (event, newValue) => setCurrentTab(newValue);
-
-  const handleOpen = () => setOpen(true);
+  const handleOpen = () => {
+    setNewProduct({
+      code: '', barcode: '', name: '', brand: '', supplier: '', category: 'Frames',
+      frameType: '', lensType: '', color: '', material: '',
+      gender: '', size: '', purchasePrice: '', sellingPrice: '',
+      gst: '18%', stock: '', rack: '', shelf: '', warehouse: 'Main', status: 'Active'
+    });
+    setOpen(true);
+  };
   const handleClose = () => setOpen(false);
 
   const handleSave = async () => {
@@ -125,7 +185,7 @@ export default function Products() {
       id: String(Date.now()),
       ...newProduct,
       code: newProduct.code || `PRD-${Math.floor(100 + Math.random() * 900)}`,
-      brand: newProduct.brand || 'Generic',
+      brand: newProduct.brand || '',
       purchasePrice: parseFloat(newProduct.purchasePrice) || 0,
       sellingPrice: parseFloat(newProduct.sellingPrice) || 0,
       stock: parseInt(newProduct.stock) || 0,
@@ -140,7 +200,9 @@ export default function Products() {
         cost_price: productToAdd.purchasePrice,
         stock: productToAdd.stock,
         category: productToAdd.category,
-        brand: productToAdd.brand
+        category_name: productToAdd.category,
+        brand: productToAdd.brand,
+        brand_name: productToAdd.brand
       });
     } catch (err) {
       console.log("Local state updated for new product.");
@@ -148,9 +210,9 @@ export default function Products() {
 
     setProducts([productToAdd, ...products]);
     setNewProduct({
-      code: '', barcode: '', name: '', brand: '', category: 'Frames',
-      frameType: 'Full Rim', lensType: 'N/A', color: '', material: 'Metal',
-      gender: 'Unisex', size: '', purchasePrice: '', sellingPrice: '',
+      code: '', barcode: '', name: '', brand: '', supplier: '', category: 'Frames',
+      frameType: '', lensType: '', color: '', material: '',
+      gender: '', size: '', purchasePrice: '', sellingPrice: '',
       gst: '18%', stock: '', rack: '', shelf: '', warehouse: 'Main', status: 'Active'
     });
     handleClose();
@@ -175,8 +237,137 @@ export default function Products() {
       return p;
     }));
     setAdjustOpen(false);
-    alert(`Stock for ${adjustStock.name} updated successfully!`);
   };
+
+  const handleDeleteProduct = (product) => {
+    setConfirmDialog({
+      open: true,
+      title: "Delete Inventory Product",
+      message: `Are you sure you want to permanently delete product '${product.name}' (${product.code}) from database?`,
+      type: 'danger',
+      confirmText: "Delete Product",
+      onConfirm: async () => {
+        try {
+          if (product.id) {
+            await axios.delete(`/api/products/items/${product.id}/`);
+          }
+        } catch (e) {
+          console.warn("API product delete notice:", e);
+        }
+
+        const local = JSON.parse(localStorage.getItem('optical_inventory_items') || '[]');
+        const cleaned = local.filter(p => String(p.id) !== String(product.id) && String(p.code) !== String(product.code));
+        localStorage.setItem('optical_inventory_items', JSON.stringify(cleaned));
+        setProducts(prev => prev.filter(p => String(p.id) !== String(product.id) && String(p.code) !== String(product.code)));
+        window.dispatchEvent(new Event('optical_stock_updated'));
+      }
+    });
+  };
+
+  const handleOpenFastLens = () => {
+    setNewProduct({
+      code: '',
+      barcode: '',
+      name: '',
+      brand: '',
+      supplier: '',
+      category: 'Prescription Lenses',
+      frameType: '',
+      lensType: '',
+      color: '',
+      material: '',
+      gender: '',
+      size: '',
+      purchasePrice: '',
+      sellingPrice: '',
+      gst: '18%',
+      stock: '',
+      rack: '',
+      shelf: '',
+      warehouse: 'Main',
+      status: 'Active'
+    });
+    setOpen(true);
+  };
+
+  const handleClearEntireDatabase = () => {
+    setConfirmDialog({
+      open: true,
+      title: "Clear Entire Project Database",
+      message: "⚠️ ARE YOU SURE? This will permanently wipe ALL products, sales invoices, eye tests, purchase orders, suppliers, accounts, chart of accounts, and stock records across the entire project!",
+      type: 'danger',
+      confirmText: "Wipe Entire Database",
+      onConfirm: async () => {
+        try {
+          await axios.delete('/api/products/items/clear-all/');
+        } catch (e) {
+          try {
+            await axios.post('/api/products/items/clear-all/');
+          } catch (err) {
+            console.warn("Clear database API notice:", err);
+          }
+        }
+        try {
+          localStorage.removeItem('optical_inventory_items');
+          localStorage.removeItem('optical_sales_invoices');
+          localStorage.removeItem('optical_purchase_orders');
+          localStorage.removeItem('optical_suppliers');
+          localStorage.removeItem('optical_suppliers_db');
+          localStorage.removeItem('optical_eye_tests');
+          localStorage.removeItem('optical_customers');
+        } catch (e) {}
+        setProducts([]);
+        window.dispatchEvent(new Event('optical_stock_updated'));
+        window.dispatchEvent(new Event('optical_suppliers_updated'));
+        alert("Entire project database cleared successfully!");
+      }
+    });
+  };
+
+  const debouncedSearchQuery = useDebounce(searchQuery, 150);
+
+  const filteredProducts = useMemo(() => {
+    const searchLower = (debouncedSearchQuery || '').toLowerCase().trim();
+    return products.filter(product => {
+      const matchesSearch = !searchLower ||
+                            (product.name && product.name.toLowerCase().includes(searchLower)) ||
+                            (product.code && product.code.toLowerCase().includes(searchLower)) ||
+                            (product.barcode && product.barcode.toLowerCase().includes(searchLower)) ||
+                            (product.brand && product.brand.toLowerCase().includes(searchLower));
+      if (!matchesSearch) return false;
+      if (categoryFilter === 'All') return true;
+
+      const pCat = String(product.category || product.category_name || '').trim().toLowerCase();
+      const filterCat = String(categoryFilter).trim().toLowerCase();
+
+      if (pCat === filterCat) return true;
+
+      // Category alias matching
+      if (filterCat === 'frames' && (pCat.includes('frame') || pCat.includes('spectacle'))) return true;
+      if (filterCat === 'prescription lenses' && (pCat.includes('lens') || pCat.includes('lenses') || pCat.includes('ophthalmic'))) return true;
+      if (filterCat === 'sunglasses' && pCat.includes('sunglass')) return true;
+      if (filterCat === 'contact lenses' && pCat.includes('contact')) return true;
+      if (filterCat === 'reading glasses' && (pCat.includes('reading') || pCat.includes('reader'))) return true;
+      if (filterCat === 'accessories' && pCat.includes('accessori')) return true;
+      if (filterCat === 'lens solutions' && pCat.includes('solution')) return true;
+      if (filterCat === 'cleaning kits' && (pCat.includes('clean') || pCat.includes('kit'))) return true;
+      if (filterCat === 'cases' && pCat.includes('case')) return true;
+      if (filterCat === 'eye drops' && pCat.includes('drop')) return true;
+
+      // Name fallback matching if product category was not explicitly assigned
+      const pName = String(product.name || '').toLowerCase();
+      if (filterCat === 'sunglasses' && pName.includes('sunglass')) return true;
+      if (filterCat === 'prescription lenses' && (pName.includes('lens') || pName.includes('crizal') || pName.includes('essilor') || pName.includes('hoya') || pName.includes('zeiss') || pName.includes('kodak') || pName.includes('progressive') || pName.includes('bifocal') || pName.includes('single vision'))) return true;
+      if (filterCat === 'contact lenses' && pName.includes('contact')) return true;
+      if (filterCat === 'cases' && pName.includes('case')) return true;
+      if (filterCat === 'eye drops' && pName.includes('drop')) return true;
+      if (filterCat === 'cleaning kits' && (pName.includes('clean') || pName.includes('kit'))) return true;
+      if (filterCat === 'lens solutions' && pName.includes('solution')) return true;
+      if (filterCat === 'reading glasses' && (pName.includes('reading') || pName.includes('reader'))) return true;
+
+      return false;
+    });
+  }, [products, debouncedSearchQuery, categoryFilter]);
 
   return (
     <Box sx={{ p: 4 }}>
@@ -188,10 +379,20 @@ export default function Products() {
         </Box>
         
         <Box sx={{ display: 'flex', gap: 1 }}>
+          <Button variant="outlined" color="error" startIcon={<DeleteIcon />} onClick={handleClearEntireDatabase} sx={{ fontWeight: 800 }}>
+            Clear Database
+          </Button>
           <Button variant="outlined" startIcon={<AdjustIcon />} onClick={() => setAdjustOpen(true)}>
             Stock Adjust
           </Button>
-          <Button variant="contained" startIcon={<AddIcon />} onClick={handleOpen} sx={{ backgroundColor: '#2563EB' }}>
+          <Button 
+            variant="contained" startIcon={<AddIcon />}
+            onClick={handleOpenFastLens} 
+            sx={{ backgroundColor: '#059669', '&:hover': { backgroundColor: '#047857' }, fontWeight: 800 }}
+          >
+            🔬 + Fast Lens Creator
+          </Button>
+          <Button variant="contained" startIcon={<AddIcon />} onClick={handleOpen} sx={{ backgroundColor: '#2563EB', fontWeight: 800 }}>
             Add New Product
           </Button>
         </Box>
@@ -202,20 +403,10 @@ export default function Products() {
         <Tab label="Products List" sx={{ fontWeight: 600 }} />
         <Tab label="Categories" sx={{ fontWeight: 600 }} />
         <Tab label="Brands Management" sx={{ fontWeight: 600 }} />
+        <Tab label="🔬 Lens Options & Catalog Matrix" sx={{ fontWeight: 800, color: '#2563eb' }} />
       </Tabs>
 
-      {currentTab === 0 && (() => {
-        const filteredProducts = products.filter(product => {
-          const searchLower = searchQuery.toLowerCase();
-          const matchesSearch = (product.name && product.name.toLowerCase().includes(searchLower)) ||
-                                (product.code && product.code.toLowerCase().includes(searchLower)) ||
-                                (product.barcode && product.barcode.toLowerCase().includes(searchLower)) ||
-                                (product.brand && product.brand.toLowerCase().includes(searchLower));
-          const matchesCat = categoryFilter === 'All' || product.category === categoryFilter;
-          return matchesSearch && matchesCat;
-        });
-
-        return (
+      {currentTab === 0 && (
           <Stack spacing={2}>
             {/* Search & Category Filter */}
             <Card variant="outlined" sx={{ p: 2, borderRadius: 3 }}>
@@ -316,8 +507,8 @@ export default function Products() {
                                 <Typography variant="caption" color="text.secondary" display="block">{product.size} | {product.gender}</Typography>
                               </TableCell>
                               <TableCell>
-                                <Typography variant="body2">Buy: ₹{product.purchasePrice.toFixed(2)}</Typography>
-                                <Typography variant="body2" fontWeight={600}>Sell: ₹{product.sellingPrice.toFixed(2)} <span style={{fontSize: '0.75rem', color: 'gray'}}>({product.gst} GST)</span></Typography>
+                                <Typography variant="body2">Buy: ₹{(parseFloat(product.purchasePrice) || 0).toFixed(2)}</Typography>
+                                <Typography variant="body2" fontWeight={600}>Sell: ₹{(parseFloat(product.sellingPrice) || 0).toFixed(2)} <span style={{fontSize: '0.75rem', color: 'gray'}}>({product.gst || '18%'} GST)</span></Typography>
                               </TableCell>
                               <TableCell>
                                 <Typography variant="body2" fontWeight={700} color={isLowStock ? 'error.main' : 'success.main'}>
@@ -336,6 +527,9 @@ export default function Products() {
                                   <IconButton color="secondary" onClick={() => handleOpenAdjustment(product)}>
                                     <AdjustIcon fontSize="small" />
                                   </IconButton>
+                                  <IconButton color="error" title="Delete Product" onClick={() => handleDeleteProduct(product)}>
+                                    <DeleteIcon fontSize="small" />
+                                  </IconButton>
                                 </Stack>
                               </TableCell>
                             </TableRow>
@@ -348,39 +542,47 @@ export default function Products() {
               </CardContent>
             </Card>
           </Stack>
-        );
-      })()}
+        )}
 
       {currentTab === 1 && (
-        <Grid container spacing={3}>
-          {opticalCategories.map((cat, index) => (
-            <Grid item xs={12} sm={6} md={4} lg={3} key={index}>
-              <Card sx={{ textAlign: 'center', p: 3, border: '1px solid', borderColor: 'divider' }}>
-                <Typography variant="h6" fontWeight={700} sx={{ mb: 1 }}>{cat}</Typography>
-                <Typography variant="caption" color="text.secondary">VisionERP Modular Category</Typography>
-              </Card>
-            </Grid>
-          ))}
-        </Grid>
+        <CategoryManagementView products={products} />
       )}
 
       {currentTab === 2 && (
-        <Grid container spacing={3}>
-          {opticalBrands.map((brand, index) => (
-            <Grid item xs={12} sm={6} md={4} key={index}>
-              <Card sx={{ p: 3, display: 'flex', justifyContent: 'space-between', alignItems: 'center', border: '1px solid', borderColor: 'divider' }}>
-                <Typography variant="h6" fontWeight={700}>{brand}</Typography>
-                <Chip label="Authorized Supplier" color="primary" size="small" variant="outlined" />
-              </Card>
-            </Grid>
-          ))}
-        </Grid>
+        <BrandManagementView products={products} />
       )}
 
-      {/* Add New Product Dialog */}
-      <Dialog open={open} onClose={handleClose} maxWidth="md" fullWidth>
-        <DialogTitle sx={{ fontWeight: 800, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span>Add Optical Stock / Product</span>
+      {currentTab === 3 && (
+        <LensManagementView onProductAdded={() => window.dispatchEvent(new Event('optical_stock_updated'))} />
+      )}
+
+      {/* Add New Product / Lens Dialog */}
+      <Dialog open={open} onClose={handleClose} maxWidth="md" fullWidth PaperProps={{ sx: { borderRadius: 3.5 } }}>
+        <DialogTitle sx={{ fontWeight: 800, display: 'flex', justifyContent: 'space-between', alignItems: 'center', bgcolor: newProduct.category === 'Prescription Lenses' ? '#0f172a' : '#ffffff', color: newProduct.category === 'Prescription Lenses' ? '#facc15' : 'inherit', transition: 'all 0.3s ease' }}>
+          <Stack direction="row" spacing={1.5} alignItems="center">
+            <Typography variant="h6" fontWeight={900}>
+              {newProduct.category === 'Prescription Lenses' ? '🔬 Add Ophthalmic Lens Product' : '📦 Add Optical Stock / Product'}
+            </Typography>
+            <Paper variant="outlined" sx={{ p: 0.3, display: 'flex', gap: 0.5, bgcolor: '#f1f5f9', borderRadius: 2 }}>
+              <Button 
+                size="small" 
+                variant={newProduct.category !== 'Prescription Lenses' ? 'contained' : 'text'}
+                onClick={() => setNewProduct({ ...newProduct, category: 'Frames' })}
+                sx={{ py: 0.2, px: 1, fontSize: '0.72rem', fontWeight: 800 }}
+              >
+                Frame / General
+              </Button>
+              <Button 
+                size="small" 
+                variant={newProduct.category === 'Prescription Lenses' ? 'contained' : 'text'}
+                onClick={() => setNewProduct({ ...newProduct, category: 'Prescription Lenses', name: newProduct.name || 'BlueControl UV420 Lens 1.56' })}
+                sx={{ py: 0.2, px: 1, fontSize: '0.72rem', fontWeight: 800, bgcolor: newProduct.category === 'Prescription Lenses' ? '#2563eb' : 'transparent', color: newProduct.category === 'Prescription Lenses' ? '#ffffff' : 'inherit' }}
+              >
+                🔬 Lens Mode
+              </Button>
+            </Paper>
+          </Stack>
+
           <Button 
             variant="contained" 
             size="small" 
@@ -388,29 +590,68 @@ export default function Products() {
             onClick={() => setScanDialogOpen(true)}
             sx={{ backgroundColor: '#10B981', color: 'white', fontWeight: 700 }}
           >
-            📷 Scan Arriving Product Barcode
+            📷 Scan Barcode
           </Button>
         </DialogTitle>
+
         <DialogContent dividers>
-          <Box sx={{ mb: 2, p: 1.5, bgcolor: 'action.hover', borderRadius: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <Typography variant="body2" color="text.secondary" fontWeight={500}>
-              💡 <strong>Arriving Stock with Barcode?</strong> Click <strong>"Scan Barcode"</strong> to automatically scan product packaging barcode via USB Scanner or Smartphone camera.
-            </Typography>
-            <Button size="small" variant="outlined" startIcon={<BarcodeIcon />} onClick={() => setScanDialogOpen(true)}>
-              Scan Barcode
-            </Button>
-          </Box>
+          
+          {/* ⚡ FAST LENS PRESET QUICK FILLER BAR WHEN IN LENS MODE */}
+          {newProduct.category === 'Prescription Lenses' && (
+            <Alert severity="info" icon={<SparkleIcon />} sx={{ mb: 2, borderRadius: 2.5, bgcolor: '#eff6ff', borderColor: '#bfdbfe' }}>
+              <Typography variant="subtitle2" fontWeight={900} color="#1e3a8a">
+                ⚡ Fast Lens Quick-Fill Presets (Click to auto-populate lens details):
+              </Typography>
+              <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: 'wrap', gap: 0.8 }}>
+                <Chip 
+                  label="⚡ Essilor Crizal 1.67" size="small" clickable color="primary" 
+                  onClick={() => setNewProduct({ ...newProduct, category: 'Prescription Lenses', name: 'Essilor Crizal Sapphire HR 1.67', brand: 'Essilor', lensType: 'Single Vision', frameType: '1.67', color: 'Anti-Glare (ARC)', purchasePrice: '1800', sellingPrice: '4200' })}
+                  sx={{ fontWeight: 800 }} 
+                />
+                <Chip 
+                  label="⚡ Hoya BlueControl 1.56" size="small" clickable color="success" 
+                  onClick={() => setNewProduct({ ...newProduct, category: 'Prescription Lenses', name: 'Hoya BlueControl UV420 1.56', brand: 'Hoya', lensType: 'Single Vision', frameType: '1.56', color: 'Blue Cut UV420', purchasePrice: '450', sellingPrice: '1450' })}
+                  sx={{ fontWeight: 800 }} 
+                />
+                <Chip 
+                  label="⚡ Zeiss Progressive 1.60" size="small" clickable 
+                  onClick={() => setNewProduct({ ...newProduct, category: 'Prescription Lenses', name: 'Zeiss SmartLife Progressive 1.60', brand: 'Zeiss', lensType: 'Progressive Digital', frameType: '1.60', color: 'Anti-Glare (ARC)', purchasePrice: '2400', sellingPrice: '6800' })}
+                  sx={{ bgcolor: '#ca8a04', color: '#fff', fontWeight: 800 }} 
+                />
+                <Chip 
+                  label="⚡ Kodak Photochromic 1.56" size="small" clickable 
+                  onClick={() => setNewProduct({ ...newProduct, category: 'Prescription Lenses', name: 'Kodak CityLens Photochromic 1.56', brand: 'Kodak', lensType: 'Single Vision', frameType: '1.56', color: 'Photochromic Auto-Tint', purchasePrice: '850', sellingPrice: '2400' })}
+                  sx={{ bgcolor: '#9333ea', color: '#fff', fontWeight: 800 }} 
+                />
+              </Stack>
+            </Alert>
+          )}
 
           <Grid container spacing={2}>
+            
+            {/* ROW 1: Category | Code/SKU | Barcode */}
             <Grid item xs={12} sm={4}>
               <TextField 
-                label="Product Code" 
+                select 
+                label="Product Category" 
                 fullWidth 
-                placeholder="e.g. RF-102"
+                value={newProduct.category} 
+                onChange={(e) => setNewProduct({...newProduct, category: e.target.value})}
+              >
+                {opticalCategories.map(cat => <MenuItem key={cat} value={cat}>{cat}</MenuItem>)}
+              </TextField>
+            </Grid>
+
+            <Grid item xs={12} sm={4}>
+              <TextField 
+                label="Product Code / SKU" 
+                fullWidth 
+                placeholder="e.g. RF-102 or LNS-156"
                 value={newProduct.code} 
                 onChange={(e) => setNewProduct({...newProduct, code: e.target.value})} 
               />
             </Grid>
+
             <Grid item xs={12} sm={4}>
               <TextField 
                 label="Barcode / EAN Code" 
@@ -420,8 +661,8 @@ export default function Products() {
                 onChange={(e) => setNewProduct({...newProduct, barcode: e.target.value})}
                 InputProps={{
                   endAdornment: (
-                    <Stack direction="row" spacing={0.5}>
-                      <IconButton color="primary" size="small" title="Scan Barcode via Camera / Scanner" onClick={() => setScanDialogOpen(true)}>
+                    <Stack direction="row" spacing={0.5} alignItems="center">
+                      <IconButton color="primary" size="small" title="Scan Barcode" onClick={() => setScanDialogOpen(true)}>
                         <BarcodeIcon fontSize="small" />
                       </IconButton>
                       <Button 
@@ -436,22 +677,21 @@ export default function Products() {
                 }}
               />
             </Grid>
-            <Grid item xs={12} sm={4}>
+
+            {/* ROW 2: Product Name (8) | Brand (4) */}
+            <Grid item xs={12} sm={8}>
               <TextField 
-                label="Product Name" 
+                label={newProduct.category === 'Prescription Lenses' ? "Lens Product Name & Specification *" : "Product Name *"} 
                 fullWidth 
                 required
-                placeholder="e.g. Aviator Classic Rimless"
+                placeholder={newProduct.category === 'Prescription Lenses' ? "e.g. Essilor Crizal Sapphire HR 1.67 Blue Cut" : "e.g. Aviator Classic Rimless"}
                 value={newProduct.name} 
                 onChange={(e) => setNewProduct({...newProduct, name: e.target.value})} 
+                inputProps={{ style: { fontWeight: 800 } }}
               />
             </Grid>
-            <Grid item xs={6} sm={4}>
-              <TextField select label="Category" fullWidth value={newProduct.category} onChange={(e) => setNewProduct({...newProduct, category: e.target.value})}>
-                {opticalCategories.map(cat => <MenuItem key={cat} value={cat}>{cat}</MenuItem>)}
-              </TextField>
-            </Grid>
-            <Grid item xs={6} sm={4}>
+
+            <Grid item xs={12} sm={4}>
               <Autocomplete
                 freeSolo
                 options={opticalBrands}
@@ -462,68 +702,149 @@ export default function Products() {
                 renderInput={(params) => (
                   <TextField 
                     {...params} 
-                    label="Brand" 
-                    placeholder="Type or select brand..."
+                    label="Brand / Manufacturer" 
+                    placeholder="e.g. Essilor, Zeiss, RayBan..."
                     fullWidth 
                   />
                 )}
               />
             </Grid>
-            <Grid item xs={6} sm={4}>
+
+            {/* ROW 3: Lens Specs if Prescription Lenses (Refractive Index | Design Type | Coating) */}
+            {newProduct.category === 'Prescription Lenses' && (
+              <>
+                <Grid item xs={12} sm={4}>
+                  <TextField 
+                    select label="Refractive Index" fullWidth 
+                    value={newProduct.frameType || '1.56'} 
+                    onChange={(e) => setNewProduct({...newProduct, frameType: e.target.value})}
+                  >
+                    <MenuItem value="1.50">1.50 Standard CR39</MenuItem>
+                    <MenuItem value="1.56">1.56 Mid Index Blue Cut</MenuItem>
+                    <MenuItem value="1.60">1.60 Hi-Index</MenuItem>
+                    <MenuItem value="1.67">1.67 Ultra Thin</MenuItem>
+                    <MenuItem value="1.74">1.74 Super High Index</MenuItem>
+                  </TextField>
+                </Grid>
+
+                <Grid item xs={12} sm={4}>
+                  <TextField 
+                    select label="Lens Design Type" fullWidth 
+                    value={newProduct.lensType || 'Single Vision'} 
+                    onChange={(e) => setNewProduct({...newProduct, lensType: e.target.value})}
+                  >
+                    <MenuItem value="Single Vision">Single Vision</MenuItem>
+                    <MenuItem value="Progressive Digital">Progressive Digital</MenuItem>
+                    <MenuItem value="Bifocal D-Seg">Bifocal D-Seg</MenuItem>
+                    <MenuItem value="Office / Workspace">Office / Workspace</MenuItem>
+                  </TextField>
+                </Grid>
+
+                <Grid item xs={12} sm={4}>
+                  <TextField 
+                    select label="Coating Technology" fullWidth 
+                    value={newProduct.color || 'Blue Cut UV420'} 
+                    onChange={(e) => setNewProduct({...newProduct, color: e.target.value})}
+                  >
+                    <MenuItem value="Anti-Glare (ARC)">Anti-Glare (ARC)</MenuItem>
+                    <MenuItem value="Blue Cut UV420">Blue Cut UV420</MenuItem>
+                    <MenuItem value="Photochromic Auto-Tint">Photochromic Auto-Tint</MenuItem>
+                    <MenuItem value="Polarized Sun Shield">Polarized Sun Shield</MenuItem>
+                    <MenuItem value="Hard Coated Scratch Resistant">Hard Coated Scratch Resistant</MenuItem>
+                  </TextField>
+                </Grid>
+              </>
+            )}
+
+            {/* ROW 4: Supplier Name | Purchase Price | Selling Price */}
+            <Grid item xs={12} sm={4}>
               <Autocomplete
                 freeSolo
-                options={Array.from(new Set([...dbSuppliers, ...products.map(p => p.supplier).filter(Boolean)]))}
-                value={newProduct.supplier}
+                options={dbSuppliers}
+                value={newProduct.supplier || ''}
                 onInputChange={(event, newInputValue) => {
-                  setNewProduct({ ...newProduct, supplier: newInputValue });
+                  setNewProduct({ ...newProduct, supplier: newInputValue || '' });
+                }}
+                onChange={(event, newValue) => {
+                  setNewProduct({ ...newProduct, supplier: newValue || '' });
                 }}
                 renderInput={(params) => (
                   <TextField 
                     {...params} 
                     label="Supplier Name" 
-                    placeholder="Type supplier name..."
+                    placeholder="Search or select supplier..."
                     fullWidth 
                   />
                 )}
               />
             </Grid>
-            <Grid item xs={6} sm={4}>
-              <TextField select label="Gender Target" fullWidth value={newProduct.gender} onChange={(e) => setNewProduct({...newProduct, gender: e.target.value})}>
-                <MenuItem value="Male">Male</MenuItem>
-                <MenuItem value="Female">Female</MenuItem>
-                <MenuItem value="Kids">Kids</MenuItem>
-                <MenuItem value="Unisex">Unisex</MenuItem>
-              </TextField>
+
+            <Grid item xs={12} sm={4}>
+              <TextField 
+                label="Purchase Cost Price (₹)" 
+                fullWidth 
+                type="number" 
+                value={newProduct.purchasePrice} 
+                onChange={(e) => setNewProduct({...newProduct, purchasePrice: e.target.value})} 
+                inputProps={{ style: { fontWeight: 800 } }} 
+              />
             </Grid>
-            <Grid item xs={6} sm={4}>
-              <TextField label="Purchase Price (₹)" fullWidth type="number" value={newProduct.purchasePrice} onChange={(e) => setNewProduct({...newProduct, purchasePrice: e.target.value})} />
+
+            <Grid item xs={12} sm={4}>
+              <TextField 
+                label="Selling MRP Price (₹)" 
+                fullWidth 
+                type="number" 
+                value={newProduct.sellingPrice} 
+                onChange={(e) => setNewProduct({...newProduct, sellingPrice: e.target.value})} 
+                inputProps={{ style: { fontWeight: 900, color: '#059669' } }} 
+              />
             </Grid>
-            <Grid item xs={6} sm={4}>
-              <TextField label="Selling Price (₹)" fullWidth type="number" value={newProduct.sellingPrice} onChange={(e) => setNewProduct({...newProduct, sellingPrice: e.target.value})} />
-            </Grid>
-            <Grid item xs={6} sm={4}>
-              <TextField select label="GST Tax Rate" fullWidth value={newProduct.gst} onChange={(e) => setNewProduct({...newProduct, gst: e.target.value})}>
+
+            {/* ROW 5: GST Rate | Initial Stock Qty | Rack Location */}
+            <Grid item xs={12} sm={4}>
+              <TextField 
+                select 
+                label="GST Tax Rate" 
+                fullWidth 
+                value={newProduct.gst} 
+                onChange={(e) => setNewProduct({...newProduct, gst: e.target.value})}
+              >
                 <MenuItem value="5%">5% GST</MenuItem>
                 <MenuItem value="12%">12% GST</MenuItem>
                 <MenuItem value="18%">18% GST</MenuItem>
                 <MenuItem value="28%">28% GST</MenuItem>
               </TextField>
             </Grid>
-            <Grid item xs={6} sm={4}>
-              <TextField label="Initial Stock Qty" fullWidth type="number" value={newProduct.stock} onChange={(e) => setNewProduct({...newProduct, stock: e.target.value})} />
+
+            <Grid item xs={12} sm={4}>
+              <TextField 
+                label="Initial Stock Qty" 
+                fullWidth 
+                type="number" 
+                value={newProduct.stock} 
+                onChange={(e) => setNewProduct({...newProduct, stock: e.target.value})} 
+                inputProps={{ style: { fontWeight: 800 } }} 
+              />
             </Grid>
-            <Grid item xs={6} sm={4}>
-              <TextField label="Rack Location" fullWidth placeholder="e.g. Rack A1" value={newProduct.rack} onChange={(e) => setNewProduct({...newProduct, rack: e.target.value})} />
+
+            <Grid item xs={12} sm={4}>
+              <TextField 
+                label="Rack Location" 
+                fullWidth 
+                placeholder="e.g. Rack A1 / Lens Drawer 2" 
+                value={newProduct.rack} 
+                onChange={(e) => setNewProduct({...newProduct, rack: e.target.value})} 
+              />
             </Grid>
-            <Grid item xs={6} sm={4}>
-              <TextField label="Shelf Location" fullWidth placeholder="e.g. Shelf S2" value={newProduct.shelf} onChange={(e) => setNewProduct({...newProduct, shelf: e.target.value})} />
-            </Grid>
+
           </Grid>
         </DialogContent>
-        <DialogActions sx={{ p: 2, justifyContent: 'space-between' }}>
+
+        <DialogActions sx={{ p: 2, justifyContent: 'space-between', bgcolor: '#f8fafc' }}>
           <Button onClick={handleClose}>Cancel</Button>
-          <Button onClick={handleSave} variant="contained" sx={{ backgroundColor: '#2563EB', px: 3, fontWeight: 700 }}>
-            Save Product to Database
+          <Button onClick={handleSave} variant="contained" sx={{ backgroundColor: '#2563EB', px: 3.5, py: 1, fontWeight: 900, borderRadius: 2 }}>
+            Save {newProduct.category === 'Prescription Lenses' ? 'Lens Option' : 'Product'} to Database
           </Button>
         </DialogActions>
       </Dialog>
@@ -628,6 +949,17 @@ export default function Products() {
           <Button variant="contained" onClick={() => window.print()}>Print Label</Button>
         </DialogActions>
       </Dialog>
+
+      {/* Styled MUI Confirm Dialog replacing native browser confirm */}
+      <ConfirmActionDialog 
+        open={confirmDialog.open}
+        title={confirmDialog.title}
+        message={confirmDialog.message}
+        type={confirmDialog.type}
+        confirmText={confirmDialog.confirmText}
+        onClose={() => setConfirmDialog({ ...confirmDialog, open: false })}
+        onConfirm={confirmDialog.onConfirm}
+      />
     </Box>
   );
 }

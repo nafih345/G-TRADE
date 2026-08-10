@@ -1,0 +1,10 @@
+{
+  "ENGINE": "django.db.backends.postgresql",
+  "NAME": "G OPTICALS",
+  "USER": "postgres",
+  "PASSWORD": "changeme",
+  "HOST": "localhost",
+  "PORT": "5432",
+  "POSTGRES_AUTO_CONNECT": true,
+  "COMMENTS": "Copy this file to database.json and fill in real credentials. Set ENGINE to django.db.backends.postgresql for PostgreSQL server connection"
+}

@@ -71,6 +71,21 @@ export default function Dashboard() {
         const savedPos = JSON.parse(localStorage.getItem('optical_purchase_orders') || '[]');
         setPurchaseOrders(savedPos);
       } catch (e) {}
+
+      try {
+        let poRes;
+        try {
+          poRes = await axios.get('/api/purchasing/orders/');
+        } catch (e1) {
+          poRes = await axios.get('/api/purchase/orders/');
+        }
+        if (poRes?.data) {
+          const poList = Array.isArray(poRes.data) ? poRes.data : (poRes.data.results || []);
+          if (poList.length > 0) {
+            setPurchaseOrders(poList);
+          }
+        }
+      } catch (e) {}
     };
 
     fetchDashboardData();
@@ -81,7 +96,7 @@ export default function Dashboard() {
 
   // Dynamic KPI Calculations
   const todaySales = salesInvoices.filter(s => s.date === todayStr || s.created_at?.startsWith(todayStr));
-  const todayRevenue = (todaySales.length > 0 ? todaySales : salesInvoices).reduce((sum, s) => sum + (parseFloat(s.total || s.paidAmount || 0)), 0);
+  const todayRevenue = todaySales.reduce((sum, s) => sum + (parseFloat(s.total || s.paidAmount || 0)), 0);
   
   const todayEyeTestsCount = eyeTests.length;
   const todayAppointmentsCount = appointments.length;
@@ -90,22 +105,55 @@ export default function Dashboard() {
   // Dynamic Low Stock Items
   const lowStockItems = products.filter(p => parseInt(p.stock || 0) < 5);
 
-  // Monthly Analytics Chart Data (Generated from Real Sales)
+  // Monthly Analytics Chart Data (Calculated accurately by Month)
   const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const currentMonthIdx = new Date().getMonth();
   
-  const chartData = monthNames.slice(Math.max(0, currentMonthIdx - 5), currentMonthIdx + 1).map(name => ({
-    name,
-    Sales: salesInvoices.length > 0 ? Math.floor(todayRevenue / (salesInvoices.length || 1)) : 0,
-    Purchases: purchaseOrders.reduce((sum, p) => sum + (parseFloat(p.total) || 0), 0)
-  }));
+  const monthsToShow = [];
+  for (let i = 5; i >= 0; i--) {
+    let m = currentMonthIdx - i;
+    if (m < 0) m += 12;
+    monthsToShow.push(m);
+  }
+
+  const chartData = monthsToShow.map(mIdx => {
+    const name = monthNames[mIdx];
+
+    const monthlySales = salesInvoices.reduce((sum, inv) => {
+      const dateStr = inv.date || inv.created_at || inv.invoice_date || inv.createdAt;
+      if (!dateStr) return sum;
+      const d = new Date(dateStr);
+      if (!isNaN(d.getTime()) && d.getMonth() === mIdx) {
+        const val = parseFloat(inv.total || inv.paidAmount || inv.total_amount || inv.grand_total || 0);
+        return sum + (isNaN(val) ? 0 : val);
+      }
+      return sum;
+    }, 0);
+
+    const monthlyPurchases = purchaseOrders.reduce((sum, po) => {
+      const dateStr = po.date || po.order_date || po.created_at || po.expectedDate || po.createdAt;
+      if (!dateStr) return sum;
+      const d = new Date(dateStr);
+      if (!isNaN(d.getTime()) && d.getMonth() === mIdx) {
+        const val = parseFloat(po.total || po.total_amount || po.net_amount || (po.costPrice && po.qty ? po.costPrice * po.qty : 0) || 0);
+        return sum + (isNaN(val) ? 0 : val);
+      }
+      return sum;
+    }, 0);
+
+    return {
+      name,
+      Sales: Math.round(monthlySales),
+      Purchases: Math.round(monthlyPurchases)
+    };
+  });
 
   return (
     <Box sx={{ p: 4, pb: 8 }}>
       {/* Welcome Heading */}
       <Box sx={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', mb: 4, gap: 2 }}>
         <Box>
-          <Typography variant="h4" sx={{ fontWeight: 800 }}>VisionERP Dashboard</Typography>
+          <Typography variant="h4" sx={{ fontWeight: 800 }}>Optical ERP Dashboard</Typography>
           <Typography variant="body2" color="text.secondary">Real-time status of your optical business and eye clinic</Typography>
         </Box>
         

@@ -35,3 +35,25 @@ class Warehouse(BaseUUIDModel):
 
     def __str__(self):
         return self.name
+
+
+class Notification(BaseUUIDModel):
+    NOTIFICATION_TYPES = (
+        ('ERROR', 'Error / Critical Issue'),
+        ('WARNING', 'Warning / Action Required'),
+        ('INFO', 'Information / Alert'),
+        ('SUCCESS', 'System Event Success'),
+    )
+    title = models.CharField(max_length=200)
+    message = models.TextField()
+    notification_type = models.CharField(max_length=20, choices=NOTIFICATION_TYPES, default='WARNING')
+    is_read = models.BooleanField(default=False)
+    target_link = models.CharField(max_length=200, blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"[{self.notification_type}] {self.title}"
+

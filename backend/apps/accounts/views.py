@@ -21,14 +21,16 @@ class JournalEntrySerializer(ModelSerializer):
         fields = '__all__'
 
 class AccountViewSet(viewsets.ModelViewSet):
-    queryset = Account.objects.all()
+    queryset = Account.objects.all().order_by('code')
     serializer_class = AccountSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
 
 class JournalEntryViewSet(viewsets.ModelViewSet):
-    queryset = JournalEntry.objects.all()
+    queryset = JournalEntry.objects.all().order_by('-date')
     serializer_class = JournalEntrySerializer
-    permission_classes = [permissions.IsAuthenticated]
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
 
     def perform_create(self, serializer):
         with transaction.atomic():
@@ -45,9 +47,6 @@ class JournalEntryViewSet(viewsets.ModelViewSet):
     def _post_journal(self, je):
         for item in je.items.all():
             account = item.account
-            # Update balances based on debit and credit entries
-            # Asset / Expense increases on Debit, decreases on Credit.
-            # Liability / Equity / Income increases on Credit, decreases on Debit.
             if account.account_type in ['ASSET', 'EXPENSE']:
                 account.balance += (item.debit - item.credit)
             else:

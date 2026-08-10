@@ -1,0 +1,12 @@
+{
+  "APP_NAME": "Optical ERP",
+  "PORT": 8000,
+  "HOST": "127.0.0.1",
+  "DEBUG": false,
+  "SECRET_KEY": "changeme-generate-a-new-django-secret-key",
+  "LOG_LEVEL": "INFO",
+  "AUTO_BACKUP_ENABLED": true,
+  "BACKUP_INTERVAL_HOURS": 24,
+  "MAX_BACKUP_FILES": 30,
+  "DISABLE_DEVTOOLS": true
+}

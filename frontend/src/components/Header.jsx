@@ -1,7 +1,10 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { 
   AppBar, Toolbar, IconButton, InputBase, Box, 
-  Avatar, Menu, MenuItem, Typography, Badge, FormControl, Select
+  Avatar, Menu, MenuItem, Typography, Badge, Select,
+  Popover, List, ListItem, ListItemText, ListItemIcon, 
+  Divider, Button, Chip, Stack, Tooltip
 } from '@mui/material';
 import {
   Search as SearchIcon,
@@ -9,21 +12,168 @@ import {
   DarkMode as DarkModeIcon,
   LightMode as LightModeIcon,
   Logout as LogoutIcon,
-  Store as BranchIcon
+  Store as BranchIcon,
+  Warning as WarningIcon,
+  Error as ErrorIcon,
+  Info as InfoIcon,
+  CheckCircle as SuccessIcon,
+  DoneAll as MarkReadIcon,
+  DeleteSweep as ClearIcon,
+  ChevronRight as ChevronRightIcon
 } from '@mui/icons-material';
+import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
+
+// Default Initial System Alerts (3 System Issues)
+const INITIAL_SYSTEM_NOTIFICATIONS = [
+  {
+    id: 'notif-1',
+    title: 'Low Stock Inventory Alert',
+    message: '5 Ophthalmic Frame items are running low on stock (< 5 pcs). Reorder required.',
+    notification_type: 'WARNING',
+    is_read: false,
+    target_link: '/inventory/products',
+    time_ago: '10 mins ago'
+  },
+  {
+    id: 'notif-2',
+    title: 'Outstanding Patient Payment Due',
+    message: 'Invoice #INV-1004 has an uncollected balance of ₹2,500 pending collection.',
+    notification_type: 'ERROR',
+    is_read: false,
+    target_link: '/accounts/customer-due',
+    time_ago: '1 hour ago'
+  },
+  {
+    id: 'notif-3',
+    title: 'Clinical Eye Exam Reports Ready',
+    message: '3 patient eye examination records logged today require optometrist sign-off.',
+    notification_type: 'INFO',
+    is_read: false,
+    target_link: '/reports/eyetest',
+    time_ago: '2 hours ago'
+  }
+];
 
 export default function Header({ toggleTheme, mode }) {
   const { user, logout } = useAuth();
-  const [anchorEl, setAnchorEl] = React.useState(null);
-  const [branch, setBranch] = React.useState('main');
+  const navigate = useNavigate();
 
-  const handleMenu = (event) => setAnchorEl(event.currentTarget);
-  const handleClose = () => setAnchorEl(null);
+  // User Profile Menu Anchor
+  const [profileAnchorEl, setProfileAnchorEl] = useState(null);
+
+  // Notifications Menu Popover Anchor
+  const [notifAnchorEl, setNotifAnchorEl] = useState(null);
+  const [notifications, setNotifications] = useState(INITIAL_SYSTEM_NOTIFICATIONS);
+
+  // Branch State (Defaults strictly to Main Branch until user enters custom branch details)
+  const [selectedBranch, setSelectedBranch] = useState('main');
+  const [branchesList, setBranchesList] = useState([
+    { id: 'main', name: 'Main Branch' }
+  ]);
+
+  // Fetch Real Branches and Notifications from Database API
+  useEffect(() => {
+    const fetchHeaderData = async () => {
+      // 1. Fetch Branches from Database
+      try {
+        const branchRes = await axios.get('/api/company/branches/');
+        if (branchRes.data && Array.isArray(branchRes.data) && branchRes.data.length > 0) {
+          const formatted = branchRes.data.map(b => ({
+            id: b.id || b.code || b.name,
+            name: b.name
+          }));
+          setBranchesList(formatted);
+          if (formatted.length > 0) {
+            setSelectedBranch(formatted[0].id);
+          }
+        } else {
+          // Check local storage custom branches
+          const localBranches = JSON.parse(localStorage.getItem('optical_branches') || '[]');
+          if (localBranches.length > 0) {
+            setBranchesList(localBranches);
+          } else {
+            // Strictly only Main Branch until branch details are entered
+            setBranchesList([{ id: 'main', name: 'Main Branch' }]);
+          }
+        }
+      } catch (e) {
+        // Fallback: Strictly Main Branch only
+        const localBranches = JSON.parse(localStorage.getItem('optical_branches') || '[]');
+        if (localBranches.length > 0) {
+          setBranchesList(localBranches);
+        } else {
+          setBranchesList([{ id: 'main', name: 'Main Branch' }]);
+        }
+      }
+
+      // 2. Fetch Notifications from Database
+      try {
+        const notifRes = await axios.get('/api/company/notifications/');
+        if (notifRes.data && Array.isArray(notifRes.data) && notifRes.data.length > 0) {
+          setNotifications(notifRes.data);
+        }
+      } catch (e) {
+        // Keep initial system issue notifications
+      }
+    };
+
+    fetchHeaderData();
+    window.addEventListener('optical_branches_updated', fetchHeaderData);
+    return () => window.removeEventListener('optical_branches_updated', fetchHeaderData);
+  }, []);
+
+
+  // Calculate Unread Badge Count
+  const unreadCount = notifications.filter(n => !n.is_read).length;
+
+  // Handlers
+  const handleProfileOpen = (event) => setProfileAnchorEl(event.currentTarget);
+  const handleProfileClose = () => setProfileAnchorEl(null);
+
+  const handleNotifOpen = (event) => setNotifAnchorEl(event.currentTarget);
+  const handleNotifClose = () => setNotifAnchorEl(null);
 
   const handleLogout = () => {
-    handleClose();
+    handleProfileClose();
     logout();
+  };
+
+  // Mark All Notifications as Read in Database & State
+  const handleMarkAllRead = async () => {
+    setNotifications(prev => prev.map(n => ({ ...n, is_read: true })));
+    try {
+      await axios.post('/api/company/notifications/mark-all-read/');
+    } catch (e) {}
+  };
+
+  // Clear All Notifications
+  const handleClearNotifications = () => {
+    setNotifications([]);
+  };
+
+  // Click Individual Notification
+  const handleNotificationClick = (notif) => {
+    // Mark clicked as read
+    setNotifications(prev => prev.map(n => n.id === notif.id ? { ...n, is_read: true } : n));
+    handleNotifClose();
+    if (notif.target_link) {
+      navigate(notif.target_link);
+    }
+  };
+
+  // Helper for notification type icon & color
+  const getNotifIcon = (type) => {
+    switch (type) {
+      case 'ERROR':
+        return <ErrorIcon color="error" fontSize="small" />;
+      case 'WARNING':
+        return <WarningIcon sx={{ color: '#f59e0b' }} fontSize="small" />;
+      case 'SUCCESS':
+        return <SuccessIcon color="success" fontSize="small" />;
+      default:
+        return <InfoIcon color="primary" fontSize="small" />;
+    }
   };
 
   return (
@@ -31,7 +181,7 @@ export default function Header({ toggleTheme, mode }) {
       position="sticky" 
       elevation={0}
       sx={{ 
-        backgroundColor: mode === 'dark' ? 'rgba(17, 24, 39, 0.7)' : 'rgba(255, 255, 255, 0.8)',
+        backgroundColor: mode === 'dark' ? 'rgba(17, 24, 39, 0.85)' : 'rgba(255, 255, 255, 0.9)',
         backdropFilter: 'blur(12px)',
         borderBottom: mode === 'dark' ? '1px solid rgba(255, 255, 255, 0.08)' : '1px solid rgba(0, 0, 0, 0.06)',
         color: 'inherit',
@@ -58,39 +208,149 @@ export default function Header({ toggleTheme, mode }) {
 
         {/* Right side controls */}
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-          {/* Branch Selector */}
-          <Box sx={{ display: { xs: 'none', md: 'flex' }, alignItems: 'center', gap: 1 }}>
-            <BranchIcon sx={{ color: 'text.secondary', fontSize: 20 }} />
+          
+          {/* 📌 BRANCH SELECTOR (Strictly Main Branch until details are entered in DB) */}
+          <Box sx={{ display: { xs: 'none', md: 'flex' }, alignItems: 'center', gap: 1, bgcolor: mode === 'dark' ? 'rgba(255,255,255,0.04)' : '#f1f5f9', px: 1.5, py: 0.5, borderRadius: 2.5 }}>
+            <BranchIcon sx={{ color: 'primary.main', fontSize: 18 }} />
             <Select
-              value={branch}
-              onChange={(e) => setBranch(e.target.value)}
+              value={selectedBranch}
+              onChange={(e) => setSelectedBranch(e.target.value)}
               size="small"
               variant="standard"
               disableUnderline
               sx={{ 
                 fontSize: '0.875rem', 
-                fontWeight: 600, 
+                fontWeight: 800, 
                 color: 'text.primary',
-                '& .MuiSelect-select': { py: 0.5 }
+                '& .MuiSelect-select': { py: 0.2 }
               }}
             >
-              <MenuItem value="main">Main Branch</MenuItem>
-              <MenuItem value="downtown">Downtown Outlet</MenuItem>
-              <MenuItem value="uptown">Uptown Eye Clinic</MenuItem>
+              {branchesList.map((b) => (
+                <MenuItem key={b.id} value={b.id} sx={{ fontWeight: 700, fontSize: '0.875rem' }}>
+                  {b.name}
+                </MenuItem>
+              ))}
             </Select>
           </Box>
 
-          <IconButton onClick={toggleTheme} color="inherit">
-            {mode === 'dark' ? <LightModeIcon sx={{ fontSize: 22 }} /> : <DarkModeIcon sx={{ fontSize: 22 }} />}
-          </IconButton>
+          {/* Theme Toggle Button */}
+          <Tooltip title={mode === 'dark' ? "Switch to Light Mode" : "Switch to Dark Mode"}>
+            <IconButton onClick={toggleTheme} color="inherit">
+              {mode === 'dark' ? <LightModeIcon sx={{ fontSize: 22 }} /> : <DarkModeIcon sx={{ fontSize: 22 }} />}
+            </IconButton>
+          </Tooltip>
 
-          <IconButton color="inherit">
-            <Badge badgeContent={3} color="primary">
-              <NotificationsIcon sx={{ fontSize: 22 }} />
-            </Badge>
-          </IconButton>
+          {/* 🔔 NOTIFICATION BELL BUTTON WITH DYNAMIC UNREAD BADGE */}
+          <Tooltip title="System Alerts & Issue Notifications">
+            <IconButton color="inherit" onClick={handleNotifOpen}>
+              <Badge badgeContent={unreadCount} color="primary">
+                <NotificationsIcon sx={{ fontSize: 22 }} />
+              </Badge>
+            </IconButton>
+          </Tooltip>
 
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, ml: 1, cursor: 'pointer' }} onClick={handleMenu}>
+          {/* 🔔 NOTIFICATION SYSTEM POPOVER DRAWER */}
+          <Popover
+            open={Boolean(notifAnchorEl)}
+            anchorEl={notifAnchorEl}
+            onClose={handleNotifClose}
+            anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+            transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+            PaperProps={{
+              sx: {
+                mt: 1.5,
+                width: { xs: 320, sm: 380 },
+                borderRadius: 3.5,
+                boxShadow: '0 12px 40px rgba(0,0,0,0.18)',
+                overflow: 'hidden'
+              }
+            }}
+          >
+            {/* Notification Drawer Header */}
+            <Box sx={{ p: 2, bgcolor: '#0f172a', color: '#ffffff', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <Typography variant="subtitle1" fontWeight={850}>System Issues & Alerts</Typography>
+                {unreadCount > 0 && (
+                  <Chip label={`${unreadCount} New`} size="small" color="primary" sx={{ height: 20, fontSize: '0.7rem', fontWeight: 800 }} />
+                )}
+              </Box>
+
+              <Stack direction="row" spacing={0.5}>
+                {unreadCount > 0 && (
+                  <Tooltip title="Mark All as Read">
+                    <IconButton size="small" onClick={handleMarkAllRead} sx={{ color: '#94a3b8', '&:hover': { color: '#fff' } }}>
+                      <MarkReadIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                )}
+                {notifications.length > 0 && (
+                  <Tooltip title="Clear All Notifications">
+                    <IconButton size="small" onClick={handleClearNotifications} sx={{ color: '#94a3b8', '&:hover': { color: '#ef4444' } }}>
+                      <ClearIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                )}
+              </Stack>
+            </Box>
+
+            {/* Notification List */}
+            <List sx={{ p: 0, maxHeight: 360, overflowY: 'auto' }}>
+              {notifications.length === 0 ? (
+                <Box sx={{ p: 4, textAlign: 'center' }}>
+                  <SuccessIcon sx={{ fontSize: 44, color: 'success.main', mb: 1 }} />
+                  <Typography variant="subtitle2" fontWeight={800}>All Systems Operational</Typography>
+                  <Typography variant="caption" color="text.secondary">No active issues or unread alerts recorded.</Typography>
+                </Box>
+              ) : (
+                notifications.map((notif) => (
+                  <React.Fragment key={notif.id}>
+                    <ListItem 
+                      button 
+                      onClick={() => handleNotificationClick(notif)}
+                      sx={{ 
+                        px: 2, py: 1.5,
+                        bgcolor: notif.is_read ? 'transparent' : 'action.hover',
+                        transition: 'background-color 0.2s',
+                        alignItems: 'flex-start'
+                      }}
+                    >
+                      <ListItemIcon sx={{ minWidth: 32, mt: 0.5 }}>
+                        {getNotifIcon(notif.notification_type)}
+                      </ListItemIcon>
+
+                      <ListItemText
+                        primary={
+                          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <Typography 
+                              variant="subtitle2" 
+                              fontWeight={notif.is_read ? 700 : 850} 
+                              color={notif.is_read ? 'text.primary' : 'primary.main'}
+                              sx={{ fontSize: '0.85rem' }}
+                            >
+                              {notif.title}
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.7rem' }}>
+                              {notif.time_ago || 'Recent'}
+                            </Typography>
+                          </Box>
+                        }
+                        secondary={
+                          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5, lineHeight: 1.3 }}>
+                            {notif.message}
+                          </Typography>
+                        }
+                      />
+                      <ChevronRightIcon fontSize="small" sx={{ color: 'text.disabled', ml: 0.5, mt: 1 }} />
+                    </ListItem>
+                    <Divider component="li" />
+                  </React.Fragment>
+                ))
+              )}
+            </List>
+          </Popover>
+
+          {/* User Profile Avatar Button */}
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, ml: 1, cursor: 'pointer' }} onClick={handleProfileOpen}>
             <Avatar 
               sx={{ 
                 width: 36, 
@@ -112,10 +372,11 @@ export default function Header({ toggleTheme, mode }) {
             </Box>
           </Box>
 
+          {/* User Profile Menu */}
           <Menu
-            anchorEl={anchorEl}
-            open={Boolean(anchorEl)}
-            onClose={handleClose}
+            anchorEl={profileAnchorEl}
+            open={Boolean(profileAnchorEl)}
+            onClose={handleProfileClose}
             transformOrigin={{ horizontal: 'right', vertical: 'top' }}
             anchorOrigin={{ horizontal: 'right', vertical: 'bottom' }}
             PaperProps={{
@@ -131,8 +392,9 @@ export default function Header({ toggleTheme, mode }) {
               <Typography variant="body2" sx={{ fontWeight: 600 }}>{user?.username}</Typography>
               <Typography variant="caption" color="text.secondary">{user?.email}</Typography>
             </Box>
-            <MenuItem onClick={handleClose}>My Profile</MenuItem>
-            <MenuItem onClick={handleClose}>Security Log</MenuItem>
+            <Divider />
+            <MenuItem onClick={handleProfileClose}>My Profile</MenuItem>
+            <MenuItem onClick={handleProfileClose}>Security Log</MenuItem>
             <MenuItem onClick={handleLogout} sx={{ color: 'error.main', gap: 1 }}>
               <LogoutIcon sx={{ fontSize: 18 }} /> Logout
             </MenuItem>

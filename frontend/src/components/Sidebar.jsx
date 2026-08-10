@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { 
   Box, Drawer, List, ListItem, ListItemButton, 
@@ -10,7 +10,9 @@ import {
   Inventory2Outlined as InventoryIcon,
   LocalShippingOutlined as PurchaseIcon,
   ShoppingCartOutlined as SalesIcon,
+  StorefrontOutlined as WholesaleIcon,
   AccountBalanceWalletOutlined as AccountsIcon,
+  AccountBalanceOutlined as FinancialIcon,
   AssessmentOutlined as ReportsIcon,
   AdminPanelSettingsOutlined as AdminIcon,
   SettingsOutlined as SettingsIcon,
@@ -22,6 +24,7 @@ import {
   ExpandMore
 } from '@mui/icons-material';
 import { useAuth } from '../context/AuthContext';
+import GreensolLogo from './GreensolLogo';
 
 const DRAWER_WIDTH = 280;
 
@@ -33,9 +36,11 @@ const menuItems = [
     roles: ['*'],
     subItems: [
       { text: 'Eye Test', path: '/optical/eyetest' },
-      { text: 'Appointment', path: '/optical/appointment' }
+      { text: 'Appointment', path: '/optical/appointment' },
+      { text: 'Patient History', path: '/optical/patient-history' }
     ]
   },
+
   {
     text: 'Sales',
     icon: <SalesIcon />,
@@ -51,13 +56,22 @@ const menuItems = [
     ]
   },
   {
+    text: 'Wholesale Distribution',
+    icon: <WholesaleIcon />,
+    roles: ['*'],
+    subItems: [
+      { text: 'Wholesale POS', path: '/wholesale/pos' }
+    ]
+  },
+  {
     text: 'Inventory',
     icon: <InventoryIcon />,
     roles: ['*'],
     subItems: [
       { text: 'Products', path: '/inventory/products' },
       { text: 'Categories', path: '/inventory/categories' },
-      { text: 'Brands', path: '/inventory/brands' }
+      { text: 'Brands', path: '/inventory/brands' },
+      { text: 'Lens Catalog Matrix', path: '/inventory/lenses' }
     ]
   },
   {
@@ -65,10 +79,36 @@ const menuItems = [
     icon: <PurchaseIcon />,
     roles: ['*'],
     subItems: [
+      { text: 'Purchase Entry', path: '/purchase/entry' },
       { text: 'Suppliers', path: '/purchase/suppliers' },
       { text: 'Purchase Orders', path: '/purchase/orders' },
       { text: 'Stock Receive', path: '/purchase/receive' },
       { text: 'Purchase Return', path: '/purchase/returns' }
+    ]
+  },
+  {
+    text: 'Financial',
+    icon: <FinancialIcon />,
+    roles: ['*'],
+    subItems: [
+      { text: 'Dashboard', path: '/financial/dashboard' },
+      { text: 'Chart of Accounts', path: '/financial/chart-of-accounts' },
+      { 
+        text: 'Vouchers', 
+        path: '/financial/vouchers/receipt',
+        children: [
+          { text: 'Receipt Voucher', path: '/financial/vouchers/receipt' },
+          { text: 'Payment Voucher', path: '/financial/vouchers/payment' },
+          { text: 'Contra Entry', path: '/financial/vouchers/contra' },
+          { text: 'Journal Voucher', path: '/financial/vouchers/journal' },
+          { text: 'View All Vouchers', path: '/financial/vouchers/all' }
+        ]
+      },
+      { text: 'General Ledger', path: '/financial/ledger' },
+      { text: 'Trial Balance', path: '/financial/trial-balance' },
+      { text: 'Profit & Loss', path: '/financial/profit-loss' },
+      { text: 'Balance Sheet', path: '/financial/balance-sheet' },
+      { text: 'Financial Reports', path: '/financial/reports' }
     ]
   },
   {
@@ -89,44 +129,73 @@ const menuItems = [
     roles: ['*'],
     subItems: [
       { text: 'Users', path: '/admin/users' },
+      { text: 'Doctors Master', path: '/admin/doctors' },
+      { text: 'Branch Management (Add Branch)', path: '/admin/branches' },
+      { text: 'Excel Import Management', path: '/admin/excel-import' },
       { text: 'Roles', path: '/admin/roles' },
       { text: 'Permissions', path: '/admin/permissions' },
       { text: 'Audit Logs', path: '/admin/audit' }
     ]
   },
+
   {
     text: 'Reports',
     icon: <ReportsIcon />,
     roles: ['*'],
     subItems: [
-      { text: 'Sales Report', path: '/reports/sales' },
-      { text: 'Purchase Report', path: '/reports/purchase' },
-      { text: 'Stock Report', path: '/reports/stock' },
-      { text: 'Customer Report', path: '/reports/customer' },
-      { text: 'Profit Report', path: '/reports/profit' },
-      { text: 'Eye Test Report', path: '/reports/eyetest' }
+      { text: 'Enterprise Reports Hub', path: '/reports' },
+      { text: 'Sales & Revenue Hub', path: '/reports/sales' },
+      { text: 'Purchases & Inventory Hub', path: '/reports/purchase' },
+      { text: 'Finance & Expenses Hub', path: '/reports/expense' },
+      { text: 'Clinical & Operations Hub', path: '/reports/eyetest' }
     ]
   },
+
   { text: 'Settings', icon: <SettingsIcon />, path: '/settings', roles: ['*'] }
 ];
+
 
 export default function Sidebar({ open, toggleSidebar }) {
   const { user } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const [expanded, setExpanded] = useState({});
+  const [nestedExpanded, setNestedExpanded] = useState({ Vouchers: true });
+
+  useEffect(() => {
+    menuItems.forEach(item => {
+      if (item.subItems && item.subItems.some(sub => {
+        if (sub.children) {
+          return sub.children.some(child => location.pathname.startsWith(child.path));
+        }
+        return location.pathname.startsWith(sub.path);
+      })) {
+        setExpanded(prev => ({ ...prev, [item.text]: true }));
+      }
+    });
+
+    if (location.pathname.includes('/financial/vouchers')) {
+      setNestedExpanded(prev => ({ ...prev, Vouchers: true }));
+    }
+  }, [location.pathname]);
+
+  const handleToggleNestedExpand = (text) => {
+    setNestedExpanded(prev => ({ ...prev, [text]: !prev[text] }));
+  };
 
   const userRole = user?.role || 'SALES_EXECUTIVE';
 
   const permissions = user?.permissions || {
-    optical: true, sales: true, inventory: true, purchase: true, accounts: true, reports: true, admin: true
+    optical: true, sales: true, wholesale: true, inventory: true, purchase: true, financial: true, accounts: true, reports: true, admin: true
   };
 
   const filteredMenu = menuItems.filter(item => {
     if (item.text === 'Optical Services' && permissions.optical === false) return false;
     if (item.text === 'Sales' && permissions.sales === false) return false;
+    if ((item.text === 'Wholesale' || item.text === 'Wholesale Distribution') && permissions.wholesale === false) return false;
     if (item.text === 'Inventory' && permissions.inventory === false) return false;
     if (item.text === 'Purchase' && permissions.purchase === false) return false;
+    if (item.text === 'Financial' && permissions.financial === false) return false;
     if (item.text === 'Accounts' && permissions.accounts === false) return false;
     if (item.text === 'Administration' && permissions.admin === false) return false;
     if (item.text === 'Reports' && permissions.reports === false) return false;
@@ -155,13 +224,13 @@ export default function Sidebar({ open, toggleSidebar }) {
         },
       }}
     >
-      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', p: 2, minHeight: 64 }}>
-        {open && (
-          <Typography variant="h5" sx={{ fontWeight: 800, letterSpacing: '0.05em', color: 'primary.main', display: 'flex', alignItems: 'center', gap: 1 }}>
-            <span style={{ fontSize: '1.4rem' }}>⚡</span> VisionERP
-          </Typography>
+      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: open ? 'space-between' : 'center', px: 2, py: 1.5, minHeight: 64 }}>
+        {open ? (
+          <GreensolLogo iconOnly={false} />
+        ) : (
+          <GreensolLogo iconOnly={true} size="small" />
         )}
-        <IconButton onClick={toggleSidebar} sx={{ color: 'text.secondary', mx: 'auto' }}>
+        <IconButton onClick={toggleSidebar} sx={{ color: 'text.secondary', ml: open ? 1 : 0 }}>
           {open ? <ChevronLeftIcon /> : <MenuIcon />}
         </IconButton>
       </Box>
@@ -216,27 +285,67 @@ export default function Sidebar({ open, toggleSidebar }) {
 
               {hasSubItems && open && (
                 <Collapse in={isExpanded} timeout="auto" unmountOnExit>
-                  <List component="div" disablePadding sx={{ pl: 3 }}>
+                  <List component="div" disablePadding sx={{ pl: 2.5 }}>
                     {item.subItems.map((sub) => {
-                      const isSubActive = location.pathname === sub.path;
+                      const hasChildren = Boolean(sub.children);
+                      const isNestedExpanded = Boolean(nestedExpanded[sub.text]);
+                      const isSubActive = location.pathname === sub.path || (hasChildren && sub.children.some(c => location.pathname === c.path));
+
                       return (
-                        <ListItemButton
-                          key={sub.text}
-                          onClick={() => navigate(sub.path)}
-                          sx={{
-                            minHeight: 36,
-                            borderRadius: 1.5,
-                            mb: 0.5,
-                            backgroundColor: isSubActive ? 'action.selected' : 'transparent',
-                            color: isSubActive ? 'primary.main' : 'text.secondary',
-                            '&:hover': {
-                              backgroundColor: 'action.hover',
-                              color: 'primary.main',
-                            },
-                          }}
-                        >
-                          <ListItemText primary={sub.text} primaryTypographyProps={{ fontSize: '0.8rem', fontWeight: isSubActive ? 600 : 500 }} />
-                        </ListItemButton>
+                        <React.Fragment key={sub.text}>
+                          <ListItemButton
+                            onClick={() => {
+                              if (hasChildren) {
+                                handleToggleNestedExpand(sub.text);
+                              } else {
+                                navigate(sub.path);
+                              }
+                            }}
+                            sx={{
+                              minHeight: 36,
+                              borderRadius: 1.5,
+                              mb: 0.5,
+                              backgroundColor: isSubActive && !hasChildren ? 'action.selected' : 'transparent',
+                              color: isSubActive ? 'primary.main' : 'text.secondary',
+                              '&:hover': {
+                                backgroundColor: 'action.hover',
+                                color: 'primary.main',
+                              },
+                            }}
+                          >
+                            <ListItemText primary={sub.text} primaryTypographyProps={{ fontSize: '0.82rem', fontWeight: isSubActive ? 700 : 500 }} />
+                            {hasChildren && (isNestedExpanded ? <ExpandLess sx={{ fontSize: 16 }} /> : <ExpandMore sx={{ fontSize: 16 }} />)}
+                          </ListItemButton>
+
+                          {hasChildren && (
+                            <Collapse in={isNestedExpanded} timeout="auto" unmountOnExit>
+                              <List component="div" disablePadding sx={{ pl: 2 }}>
+                                {sub.children.map((child) => {
+                                  const isChildActive = location.pathname === child.path;
+                                  return (
+                                    <ListItemButton
+                                      key={child.text}
+                                      onClick={() => navigate(child.path)}
+                                      sx={{
+                                        minHeight: 34,
+                                        borderRadius: 1.5,
+                                        mb: 0.5,
+                                        backgroundColor: isChildActive ? 'action.selected' : 'transparent',
+                                        color: isChildActive ? 'primary.main' : 'text.secondary',
+                                        '&:hover': {
+                                          backgroundColor: 'action.hover',
+                                          color: 'primary.main',
+                                        },
+                                      }}
+                                    >
+                                      <ListItemText primary={child.text} primaryTypographyProps={{ fontSize: '0.78rem', fontWeight: isChildActive ? 700 : 500 }} />
+                                    </ListItemButton>
+                                  );
+                                })}
+                              </List>
+                            </Collapse>
+                          )}
+                        </React.Fragment>
                       );
                     })}
                   </List>
