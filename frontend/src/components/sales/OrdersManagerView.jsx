@@ -66,6 +66,7 @@ export default function OrdersManagerView({
     const custName = o.customer || o.customerName || 'Walk-in Customer';
     const matchesSearch = custName.toLowerCase().includes(searchQuery.toLowerCase()) ||
                           (o.id && o.id.toLowerCase().includes(searchQuery.toLowerCase())) ||
+                          (o.invoiceNumber && o.invoiceNumber.toLowerCase().includes(searchQuery.toLowerCase())) ||
                           (o.frame && o.frame.toLowerCase().includes(searchQuery.toLowerCase())) ||
                           (o.lens && o.lens.toLowerCase().includes(searchQuery.toLowerCase()));
     
@@ -293,7 +294,7 @@ export default function OrdersManagerView({
                   return (
                     <TableRow key={ord.id} hover>
                       <TableCell sx={{ fontWeight: 800, color: 'primary.main' }}>
-                        {ord.id}
+                        {ord.invoiceNumber || ord.id}
                       </TableCell>
                       <TableCell sx={{ fontSize: '0.85rem' }}>{ord.date}</TableCell>
                       <TableCell>
@@ -399,7 +400,7 @@ export default function OrdersManagerView({
         <Dialog open={detailModalOpen} onClose={() => setDetailModalOpen(false)} maxWidth="md" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
           <DialogTitle sx={{ fontWeight: 800, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              <LabIcon color="primary" /> Optical Order Job Slip & Tracking — {selectedOrder.id}
+              <LabIcon color="primary" /> Optical Order Job Slip & Tracking — {selectedOrder.invoiceNumber || selectedOrder.id}
             </Box>
             <Chip label={selectedOrder.status} color="primary" sx={{ fontWeight: 700 }} />
           </DialogTitle>

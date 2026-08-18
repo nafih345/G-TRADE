@@ -1,7 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
-    CustomerViewSet, InvoiceViewSet, EyeExaminationViewSet, send_whatsapp_automated_bg,
+    CustomerViewSet, InvoiceViewSet, PaymentViewSet, EyeExaminationViewSet, AppointmentViewSet, send_whatsapp_automated_bg,
     DealerViewSet, WholesalePriceListViewSet, WholesaleQuotationViewSet, WholesaleOrderViewSet,
     WholesaleDeliveryChallanViewSet, WholesaleInvoiceViewSet, WholesalePaymentCollectionViewSet, WholesaleReturnViewSet
 )
@@ -9,7 +9,9 @@ from .views import (
 router = DefaultRouter()
 router.register('customers', CustomerViewSet)
 router.register('eye-examinations', EyeExaminationViewSet)
+router.register('appointments', AppointmentViewSet)
 router.register('invoices', InvoiceViewSet)
+router.register('payments', PaymentViewSet)
 
 # Wholesale endpoints
 router.register('wholesale/customers', DealerViewSet, basename='wholesale-customer')

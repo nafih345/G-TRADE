@@ -24,37 +24,6 @@ import {
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
 
-// Default Initial System Alerts (3 System Issues)
-const INITIAL_SYSTEM_NOTIFICATIONS = [
-  {
-    id: 'notif-1',
-    title: 'Low Stock Inventory Alert',
-    message: '5 Ophthalmic Frame items are running low on stock (< 5 pcs). Reorder required.',
-    notification_type: 'WARNING',
-    is_read: false,
-    target_link: '/inventory/products',
-    time_ago: '10 mins ago'
-  },
-  {
-    id: 'notif-2',
-    title: 'Outstanding Patient Payment Due',
-    message: 'Invoice #INV-1004 has an uncollected balance of ₹2,500 pending collection.',
-    notification_type: 'ERROR',
-    is_read: false,
-    target_link: '/accounts/customer-due',
-    time_ago: '1 hour ago'
-  },
-  {
-    id: 'notif-3',
-    title: 'Clinical Eye Exam Reports Ready',
-    message: '3 patient eye examination records logged today require optometrist sign-off.',
-    notification_type: 'INFO',
-    is_read: false,
-    target_link: '/reports/eyetest',
-    time_ago: '2 hours ago'
-  }
-];
-
 export default function Header({ toggleTheme, mode }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
@@ -64,7 +33,7 @@ export default function Header({ toggleTheme, mode }) {
 
   // Notifications Menu Popover Anchor
   const [notifAnchorEl, setNotifAnchorEl] = useState(null);
-  const [notifications, setNotifications] = useState(INITIAL_SYSTEM_NOTIFICATIONS);
+  const [notifications, setNotifications] = useState([]);
 
   // Branch State (Defaults strictly to Main Branch until user enters custom branch details)
   const [selectedBranch, setSelectedBranch] = useState('main');
@@ -114,7 +83,7 @@ export default function Header({ toggleTheme, mode }) {
           setNotifications(notifRes.data);
         }
       } catch (e) {
-        // Keep initial system issue notifications
+        // No notifications available — leave the list empty.
       }
     };
 

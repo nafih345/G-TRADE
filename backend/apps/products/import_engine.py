@@ -17,8 +17,10 @@ from openpyxl import load_workbook
 
 from .models import Product, ImportBatch, ImportErrorLog
 from .views import infer_category_name
+from .barcode_utils import reserve_barcodes
 
 CHUNK_SIZE = 500
+NEEDS_BARCODE = '__NEEDS_BARCODE__'
 
 # Same fuzzy column-name matching the previous synchronous importer used,
 # just resolved once per file (against the header row) instead of once per
@@ -267,13 +269,26 @@ def _process_chunk(batch, chunk_rows, resolved, duplicate_strategy,
             continue
 
         is_dup = sku in existing_skus or sku in seen_skus_in_chunk
+
         clean_barcode = barcode[:140] if barcode else None
         if clean_barcode:
-            if clean_barcode in existing_barcodes or clean_barcode in seen_barcodes_in_file:
-                clean_barcode = None
-            else:
-                seen_barcodes_in_file.add(clean_barcode)
-                existing_barcodes.add(clean_barcode)
+            conflict = existing_barcodes.get(clean_barcode) or seen_barcodes_in_file.get(clean_barcode)
+            is_self_reference = conflict is not None and conflict[1] == sku
+            if conflict is not None and not is_self_reference:
+                failed += 1
+                error_logs.append(ImportErrorLog(
+                    batch=batch, sheet_name='Sheet 1', row_number=row_no,
+                    product_code=sku, product_name=name, field_name='Barcode',
+                    error_type='DUPLICATE_BARCODE',
+                    error_message=f"Duplicate Barcode. Barcode: {clean_barcode}. Existing Product: {conflict[0]}",
+                    raw_data=row_dict
+                ))
+                continue
+            seen_barcodes_in_file[clean_barcode] = (name or sku, sku)
+            if not is_self_reference:
+                existing_barcodes[clean_barcode] = (name or sku, sku)
+        else:
+            clean_barcode = NEEDS_BARCODE
 
         row_payload = dict(
             name=(name or sku)[:250],
@@ -301,7 +316,7 @@ def _process_chunk(batch, chunk_rows, resolved, duplicate_strategy,
                 imported += 1
             elif duplicate_strategy == 'DUPLICATE':
                 dup_sku = f"{sku}-DUP{uuid.uuid4().hex[:4].upper()}"[:140]
-                dup_barcode = f"{clean_barcode}-DUP"[:140] if clean_barcode else None
+                dup_barcode = clean_barcode if clean_barcode == NEEDS_BARCODE else f"{clean_barcode}-DUP"[:140]
                 row_payload['name'] = f"{row_payload['name']} (Duplicate)"[:250]
                 new_products.append(Product(
                     sku=dup_sku, barcode=dup_barcode, opening_stock=stock,
@@ -317,24 +332,48 @@ def _process_chunk(batch, chunk_rows, resolved, duplicate_strategy,
             ))
             imported += 1
 
+    # reserve_barcodes() calls below are nested inside this atomic block (joining
+    # it via a savepoint) specifically so that if the chunk write rolls back, any
+    # reserved-but-unused barcode numbers roll back with it instead of being
+    # permanently skipped.
     with transaction.atomic():
+        needs_count = sum(1 for p in new_products if p.barcode == NEEDS_BARCODE)
+        if needs_count:
+            codes = iter(reserve_barcodes(count=needs_count))
+            for p in new_products:
+                if p.barcode == NEEDS_BARCODE:
+                    p.barcode = next(codes)
+
         if replace_skus:
             Product.objects.filter(sku__in=replace_skus).delete()
         if new_products:
             Product.objects.bulk_create(new_products, batch_size=CHUNK_SIZE)
+
         if update_skus:
             existing_objs = {p.sku: p for p in Product.objects.filter(sku__in=[s for s, _, _ in update_skus])}
             to_update = []
+            pending_generation = []
             for sku, clean_barcode, payload in update_skus:
                 p = existing_objs.get(sku)
                 if not p:
                     continue
                 for field, value in payload.items():
                     setattr(p, field, value)
-                if clean_barcode:
+                if clean_barcode == NEEDS_BARCODE:
+                    # Row didn't supply a barcode: only generate one if the existing
+                    # product doesn't already have one — never silently regenerate.
+                    if not p.barcode:
+                        pending_generation.append(p)
+                elif clean_barcode:
                     p.barcode = clean_barcode
                 p.import_batch = batch
                 to_update.append(p)
+
+            if pending_generation:
+                gen_codes = iter(reserve_barcodes(count=len(pending_generation)))
+                for p in pending_generation:
+                    p.barcode = next(gen_codes)
+
             if to_update:
                 Product.objects.bulk_update(
                     to_update,
@@ -344,6 +383,7 @@ def _process_chunk(batch, chunk_rows, resolved, duplicate_strategy,
                     batch_size=CHUNK_SIZE
                 )
             imported += len(to_update)
+
         if error_logs:
             ImportErrorLog.objects.bulk_create(error_logs, batch_size=CHUNK_SIZE)
 
@@ -374,10 +414,14 @@ def run_import_job(batch_id):
         batch.save(update_fields=['total_rows', 'column_headers'])
 
         existing_skus = set(Product.objects.exclude(sku__isnull=True).values_list('sku', flat=True))
-        existing_barcodes = set(
-            Product.objects.exclude(barcode__isnull=True).exclude(barcode='').values_list('barcode', flat=True)
-        )
-        seen_barcodes_in_file = set()
+        # barcode -> (product_name, sku), so a duplicate can both report which
+        # product already owns it AND be recognized as a harmless self-reference
+        # when a row is simply re-supplying its own existing product's barcode.
+        existing_barcodes = {
+            code: (pname, psku) for code, pname, psku in
+            Product.objects.exclude(barcode__isnull=True).exclude(barcode='').values_list('barcode', 'name', 'sku')
+        }
+        seen_barcodes_in_file = {}
 
         processed = imported = failed = duplicate = 0
         chunk = []

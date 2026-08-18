@@ -73,7 +73,13 @@ class JournalEntry(BaseUUIDModel):
     narration = models.TextField(blank=True, null=True)
     voucher_type = models.ForeignKey(VoucherType, on_delete=models.SET_NULL, null=True, blank=True, related_name='journal_entries')
     reference_type = models.CharField(max_length=50, blank=True, null=True) # e.g. SALE, WHOLESALE, PAYMENT, PURCHASE
-    reference_id = models.IntegerField(null=True, blank=True)
+    # UUIDField, not IntegerField: every model linked here (Invoice, PurchaseOrder,
+    # StockAdjustment, StockTransfer, ...) uses a UUID primary key (BaseUUIDModel), so storing
+    # `instance.id` into a 32-bit IntegerField always overflowed ("integer out of range") and
+    # silently dropped the journal entry — apps/sales/signals.py and apps/purchasing/signals.py
+    # both pass `instance.id` straight through. StockLedger.reference_id already uses UUIDField
+    # for the same reason; this brings JournalEntry in line with it.
+    reference_id = models.UUIDField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='POSTED')
     reversed_entry = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, related_name='reversals')
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='financial_journal_entries')

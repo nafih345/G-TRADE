@@ -156,30 +156,55 @@ textarea,
 }
 
 @media print {
+  html, body {
+    background: #ffffff !important;
+  }
+  /* visibility:hidden alone still reserves layout height for every hidden element, so the
+     print engine paginates based on the FULL (very tall) page height and emits extra, mostly
+     blank pages after the one page that actually shows the print area. Collapsing everything
+     to max-height:0 removes that reserved space; overflow:visible keeps the absolutely
+     positioned print area (below) from being clipped by its now-zero-height ancestors. */
   body * {
     visibility: hidden;
+    max-height: 0 !important;
+    overflow: visible !important;
   }
-  #prescription-print-area, #prescription-print-area *,
+  #prescription-print-wrap, #prescription-print-wrap *,
   #sales-invoice-print-area, #sales-invoice-print-area * {
     visibility: visible !important;
+    max-height: none !important;
   }
-  #prescription-print-area,
+  /* #prescription-print-wrap is the positioned/sized page box; #prescription-print-area (its
+     only child) is what actually gets shrunk via transform:scale when content runs long — see
+     PrintPrescriptionCard's handleTriggerPrint for why the split exists (scale affects paint
+     only, so the wrapper's own explicit height is what keeps pagination correct). */
+  #prescription-print-wrap,
   #sales-invoice-print-area {
     position: absolute;
     left: 0;
     top: 0;
-    width: 100%;
+    width: 210mm !important;
+    min-height: 297mm;
     background-color: white !important;
     color: black !important;
-    padding: 20px !important;
     box-shadow: none !important;
     border: none !important;
     z-index: 999999 !important;
+    box-sizing: border-box;
+  }
+  #sales-invoice-print-area {
+    padding: 20px !important;
+  }
+  #prescription-print-area {
+    background-color: white !important;
+    color: black !important;
+    box-sizing: border-box;
   }
   .no-print {
     display: none !important;
   }
   @page {
+    size: A4 portrait;
     margin: 1cm;
   }
 }

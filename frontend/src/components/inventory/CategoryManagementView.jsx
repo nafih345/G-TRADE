@@ -123,6 +123,24 @@ const OPTICAL_CATEGORY_MASTER_DEFAULTS = {
   }
 };
 
+const productMatchesCategory = (product, catName) => {
+  const pCat = String(product.category || product.category_name || '').trim().toLowerCase();
+  const target = String(catName || '').trim().toLowerCase();
+  if (!pCat || !target) return false;
+  if (pCat === target) return true;
+  if (target.includes('frame') && (pCat.includes('frame') || pCat.includes('spectacle'))) return true;
+  if (target.includes('lens') && (pCat.includes('lens') || pCat.includes('lenses') || pCat.includes('ophthalmic'))) return true;
+  if (target.includes('sunglass') && pCat.includes('sunglass')) return true;
+  if (target.includes('contact') && pCat.includes('contact')) return true;
+  if (target.includes('reading') && (pCat.includes('reading') || pCat.includes('reader'))) return true;
+  if (target.includes('accessori') && pCat.includes('accessori')) return true;
+  if (target.includes('solution') && pCat.includes('solution')) return true;
+  if (target.includes('clean') && (pCat.includes('clean') || pCat.includes('kit'))) return true;
+  if (target.includes('case') && pCat.includes('case')) return true;
+  if (target.includes('drop') && pCat.includes('drop')) return true;
+  return false;
+};
+
 const getValidCategoryDefaults = (categoryName) => {
   const nameLower = String(categoryName || '').trim().toLowerCase();
   if (OPTICAL_CATEGORY_MASTER_DEFAULTS[nameLower]) {
@@ -161,6 +179,8 @@ export default function CategoryManagementView({ products = [] }) {
   const [editingCategory, setEditingCategory] = useState(null);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [categoryToDelete, setCategoryToDelete] = useState(null);
+  const [moveToCategoryId, setMoveToCategoryId] = useState('');
+  const [reassigning, setReassigning] = useState(false);
   const [detailDrawerOpen, setDetailDrawerOpen] = useState(false);
   const [viewingCategory, setViewingCategory] = useState(null);
   const [importModalOpen, setImportModalOpen] = useState(false);
@@ -312,21 +332,7 @@ export default function CategoryManagementView({ products = [] }) {
     if (categoryProductMap[target] !== undefined) {
       localCount = categoryProductMap[target];
     } else {
-      localCount = dbProducts.filter(p => {
-        const pCat = String(p.category || p.category_name || '').toLowerCase();
-        if (pCat === target) return true;
-        if (target.includes('frame') && (pCat.includes('frame') || pCat.includes('spectacle'))) return true;
-        if (target.includes('lens') && (pCat.includes('lens') || pCat.includes('lenses') || pCat.includes('ophthalmic'))) return true;
-        if (target.includes('sunglass') && pCat.includes('sunglass')) return true;
-        if (target.includes('contact') && pCat.includes('contact')) return true;
-        if (target.includes('reading') && (pCat.includes('reading') || pCat.includes('reader'))) return true;
-        if (target.includes('accessori') && pCat.includes('accessori')) return true;
-        if (target.includes('solution') && pCat.includes('solution')) return true;
-        if (target.includes('clean') && (pCat.includes('clean') || pCat.includes('kit'))) return true;
-        if (target.includes('case') && pCat.includes('case')) return true;
-        if (target.includes('drop') && pCat.includes('drop')) return true;
-        return false;
-      }).length;
+      localCount = dbProducts.filter(p => productMatchesCategory(p, catName)).length;
     }
 
     return Math.max(apiCount, localCount);
@@ -517,7 +523,64 @@ export default function CategoryManagementView({ products = [] }) {
   const handleRequestDelete = (cat) => {
     const prodCount = getProductCountForCat(cat.name);
     setCategoryToDelete({ ...cat, prodCount });
+    setMoveToCategoryId('');
     setDeleteModalOpen(true);
+  };
+
+  // Reassigns every product in categoryToDelete to the chosen target category, then deletes it.
+  const handleReassignAndDelete = async () => {
+    if (!categoryToDelete || !moveToCategoryId) return;
+    const targetCat = categories.find(c => c.id === moveToCategoryId);
+    if (!targetCat) return;
+
+    const assigned = dbProducts.filter(p => productMatchesCategory(p, categoryToDelete.name));
+    setReassigning(true);
+
+    for (const p of assigned) {
+      try {
+        await axios.patch(`/api/products/items/${p.id}/`, {
+          category_name: targetCat.name,
+          category: targetCat.name
+        });
+      } catch (e) {
+        console.warn(`Category reassignment API sync failed for product ${p.id}, updated locally only:`, e);
+      }
+    }
+
+    try {
+      const assignedIds = new Set(assigned.map(p => String(p.id)));
+      const local = JSON.parse(localStorage.getItem('optical_inventory_items') || '[]');
+      const localUpdated = local.map(p => assignedIds.has(String(p.id)) ? { ...p, category: targetCat.name } : p);
+      localStorage.setItem('optical_inventory_items', JSON.stringify(localUpdated));
+    } catch (e) {}
+
+    try {
+      if (!categoryToDelete.id.startsWith('CAT-DB-')) {
+        await axios.delete(`/api/masters/categories/${categoryToDelete.id}/`);
+      }
+    } catch (e) {}
+
+    const updatedCategories = categories.filter(c => c.id !== categoryToDelete.id);
+    setCategories(updatedCategories);
+    try {
+      localStorage.setItem('optical_categories_db', JSON.stringify(updatedCategories));
+    } catch (e) {}
+
+    setDbProducts(prev => prev.map(p =>
+      assigned.some(a => a.id === p.id) ? { ...p, category: targetCat.name, category_name: targetCat.name } : p
+    ));
+    window.dispatchEvent(new Event('optical_stock_updated'));
+
+    setSnackbar({
+      open: true,
+      message: `Moved ${assigned.length} product(s) to '${targetCat.name}' and deleted category '${categoryToDelete.name}'.`,
+      severity: 'success'
+    });
+
+    setReassigning(false);
+    setDeleteModalOpen(false);
+    setCategoryToDelete(null);
+    setMoveToCategoryId('');
   };
 
   const handleConfirmDelete = async () => {
@@ -634,17 +697,7 @@ export default function CategoryManagementView({ products = [] }) {
 
   // View Category Details Drawer Handler
   const handleOpenDetailDrawer = (cat) => {
-    const assignedProducts = dbProducts.filter(p => {
-      const pCat = String(p.category || p.category_name || '').trim().toLowerCase();
-      const target = cat.name.trim().toLowerCase();
-      if (pCat === target) return true;
-      if (target.includes('frame') && (pCat.includes('frame') || pCat.includes('spectacle'))) return true;
-      if (target.includes('lens') && (pCat.includes('lens') || pCat.includes('lenses') || pCat.includes('ophthalmic'))) return true;
-      if (target.includes('sunglass') && pCat.includes('sunglass')) return true;
-      if (target.includes('contact') && pCat.includes('contact')) return true;
-      return false;
-    });
-
+    const assignedProducts = dbProducts.filter(p => productMatchesCategory(p, cat.name));
     setViewingCategory({ ...cat, assignedProducts });
     setDetailDrawerOpen(true);
   };
@@ -1152,18 +1205,35 @@ export default function CategoryManagementView({ products = [] }) {
       {/* 📌 SECTION 6: DELETE CATEGORY VALIDATION MODAL */}
       <Dialog open={deleteModalOpen} onClose={() => setDeleteModalOpen(false)} maxWidth="xs" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
         <DialogTitle sx={{ fontWeight: 900, color: categoryToDelete?.prodCount > 0 ? 'error.main' : 'text.primary' }}>
-          {categoryToDelete?.prodCount > 0 ? '⚠️ Cannot Delete Category' : '🗑️ Confirm Category Deletion'}
+          {categoryToDelete?.prodCount > 0 ? '⚠️ Category In Use' : '🗑️ Confirm Category Deletion'}
         </DialogTitle>
         <DialogContent>
           {categoryToDelete?.prodCount > 0 ? (
-            <Alert severity="error" icon={<WarningIcon />} sx={{ borderRadius: 2, mt: 1 }}>
-              <Typography variant="subtitle2" fontWeight={800}>
-                This category contains {categoryToDelete.prodCount} product(s) and cannot be deleted.
-              </Typography>
-              <Typography variant="caption" display="block" sx={{ mt: 0.5 }}>
-                Please move or delete the assigned products before removing category <strong>'{categoryToDelete.name}' ({categoryToDelete.code})</strong>.
-              </Typography>
-            </Alert>
+            <>
+              <Alert severity="error" icon={<WarningIcon />} sx={{ borderRadius: 2, mt: 1 }}>
+                <Typography variant="subtitle2" fontWeight={800}>
+                  This category contains {categoryToDelete.prodCount} product(s) and cannot be deleted directly.
+                </Typography>
+                <Typography variant="caption" display="block" sx={{ mt: 0.5 }}>
+                  Choose another category below to move the assigned products into before removing <strong>'{categoryToDelete.name}' ({categoryToDelete.code})</strong>.
+                </Typography>
+              </Alert>
+
+              <TextField
+                select
+                fullWidth
+                required
+                label="Move Products To"
+                value={moveToCategoryId}
+                onChange={(e) => setMoveToCategoryId(e.target.value)}
+                size="small"
+                sx={{ mt: 2.5 }}
+              >
+                {categories.filter(c => c.id !== categoryToDelete.id).map(c => (
+                  <MenuItem key={c.id} value={c.id}>{c.name} ({c.code})</MenuItem>
+                ))}
+              </TextField>
+            </>
           ) : (
             <Typography variant="body2" sx={{ mt: 1 }}>
               Are you sure you want to permanently delete category <strong>'{categoryToDelete?.name}' ({categoryToDelete?.code})</strong> from the database?
@@ -1171,12 +1241,20 @@ export default function CategoryManagementView({ products = [] }) {
           )}
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
-          <Button onClick={() => setDeleteModalOpen(false)}>
-            {categoryToDelete?.prodCount > 0 ? 'Close' : 'Cancel'}
-          </Button>
-          {categoryToDelete?.prodCount === 0 && (
+          <Button onClick={() => setDeleteModalOpen(false)}>Cancel</Button>
+          {categoryToDelete?.prodCount === 0 ? (
             <Button variant="contained" color="error" onClick={handleConfirmDelete} sx={{ fontWeight: 800 }}>
               Delete Category
+            </Button>
+          ) : (
+            <Button
+              variant="contained"
+              color="error"
+              onClick={handleReassignAndDelete}
+              disabled={!moveToCategoryId || reassigning}
+              sx={{ fontWeight: 800 }}
+            >
+              {reassigning ? 'Moving Products...' : 'Move & Delete'}
             </Button>
           )}
         </DialogActions>

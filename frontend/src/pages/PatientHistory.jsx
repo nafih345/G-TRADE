@@ -28,6 +28,35 @@ import {
   DeleteSweep as ClearIcon
 } from '@mui/icons-material';
 
+// Patient IDs are generated client-side and aren't guaranteed globally unique (two different
+// patients can end up with the same "P-1003" from separate sessions) — so a plain `p.id` isn't
+// safe to use as a selection/React key on its own, or selecting one patient also highlights
+// every other patient sharing that id. Combine id+phone+name so each directory row has a truly
+// distinct key even when their displayed Patient ID collides.
+const getPatientKey = (p) => `${p?.id || ''}|${p?.phone || ''}|${p?.name || ''}`.toLowerCase();
+
+// A real backend Customer/Appointment id is a UUID; human-readable "P-1001" codes never
+// look like one — used to tell a real backend link apart from a locally-generated placeholder.
+const isBackendId = (id) => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+
+// Appointment records (local legacy shape uses `.patient`, the real backend Appointment model
+// uses `.patient_name`) reduced to the same shape as a customer stub, so a patient who has only
+// booked an appointment (no eye exam yet) still shows up with their real name in the directory
+// instead of the generic "Patient" placeholder.
+const normalizeAptToPatientStub = (a) => ({
+  id: a.customer || a.customerId || a.patient_id || '',
+  customerId: a.customer || a.customerId || null,
+  name: a.patient_name || a.patient || 'Patient',
+  phone: a.phone || '',
+  email: a.email || '',
+  age: a.age || '30',
+  gender: a.gender || 'Male',
+  occupation: 'Standard',
+  hasDiabetes: false,
+  hasSpecBooking: false,
+  specDetails: null
+});
+
 export default function PatientHistory() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -78,20 +107,20 @@ export default function PatientHistory() {
         const subOs = subRef.os || item.os || {};
         const medHist = item.medicalHistory || raw.medicalHistory || {};
 
-        const sphOD = (item.sub_sph_od !== undefined && item.sub_sph_od !== null && item.sub_sph_od !== '') ? item.sub_sph_od : (subOd.sph || item.sphRight || raw.sphRight || '-1.25');
-        const cylOD = (item.sub_cyl_od !== undefined && item.sub_cyl_od !== null && item.sub_cyl_od !== '') ? item.sub_cyl_od : (subOd.cyl || item.cylRight || raw.cylRight || '-0.50');
-        const axisOD = (item.sub_axis_od !== undefined && item.sub_axis_od !== null && item.sub_axis_od !== '') ? item.sub_axis_od : (subOd.axis || item.axisRight || raw.axisRight || '90');
-        const vaOD = (item.sub_va_od !== undefined && item.sub_va_od !== null && item.sub_va_od !== '') ? item.sub_va_od : (subOd.va || item.vaOD || raw.vaOD || '6/6');
+        const sphOD = (item.sub_sph_od !== undefined && item.sub_sph_od !== null && item.sub_sph_od !== '') ? item.sub_sph_od : (subOd.sph || item.sphRight || raw.sphRight || '');
+        const cylOD = (item.sub_cyl_od !== undefined && item.sub_cyl_od !== null && item.sub_cyl_od !== '') ? item.sub_cyl_od : (subOd.cyl || item.cylRight || raw.cylRight || '');
+        const axisOD = (item.sub_axis_od !== undefined && item.sub_axis_od !== null && item.sub_axis_od !== '') ? item.sub_axis_od : (subOd.axis || item.axisRight || raw.axisRight || '');
+        const vaOD = (item.sub_va_od !== undefined && item.sub_va_od !== null && item.sub_va_od !== '') ? item.sub_va_od : (subOd.va || item.vaOD || raw.vaOD || '');
 
-        const sphOS = (item.sub_sph_os !== undefined && item.sub_sph_os !== null && item.sub_sph_os !== '') ? item.sub_sph_os : (subOs.sph || item.sphLeft || raw.sphLeft || '-1.50');
-        const cylOS = (item.sub_cyl_os !== undefined && item.sub_cyl_os !== null && item.sub_cyl_os !== '') ? item.sub_cyl_os : (subOs.cyl || item.cylLeft || raw.cylLeft || '-0.75');
-        const axisOS = (item.sub_axis_os !== undefined && item.sub_axis_os !== null && item.sub_axis_os !== '') ? item.sub_axis_os : (subOs.axis || item.axisLeft || raw.axisLeft || '85');
-        const vaOS = (item.sub_va_os !== undefined && item.sub_va_os !== null && item.sub_va_os !== '') ? item.sub_va_os : (subOs.va || item.vaOS || raw.vaOS || '6/6');
+        const sphOS = (item.sub_sph_os !== undefined && item.sub_sph_os !== null && item.sub_sph_os !== '') ? item.sub_sph_os : (subOs.sph || item.sphLeft || raw.sphLeft || '');
+        const cylOS = (item.sub_cyl_os !== undefined && item.sub_cyl_os !== null && item.sub_cyl_os !== '') ? item.sub_cyl_os : (subOs.cyl || item.cylLeft || raw.cylLeft || '');
+        const axisOS = (item.sub_axis_os !== undefined && item.sub_axis_os !== null && item.sub_axis_os !== '') ? item.sub_axis_os : (subOs.axis || item.axisLeft || raw.axisLeft || '');
+        const vaOS = (item.sub_va_os !== undefined && item.sub_va_os !== null && item.sub_va_os !== '') ? item.sub_va_os : (subOs.va || item.vaOS || raw.vaOS || '');
 
-        const nearAdd = item.sub_add_od || item.sub_add_os || subRef.nearAdd || subRef.add || item.nearAdd || item.add || raw.nearAdd || '+1.50';
-        const distancePD = item.distance_pd || subRef.pd || item.distancePD || item.pd || raw.distancePD || raw.pd || '64';
-        const diagnosis = item.primary_diagnosis || item.diagnosis || raw.diagnosis || 'Compound Myopic Astigmatism';
-        const optometrist = item.optometrist || item.doctor || raw.doctor || 'Dr. Optometrist';
+        const nearAdd = item.sub_add_od || item.sub_add_os || subRef.nearAdd || subRef.add || item.nearAdd || item.add || raw.nearAdd || '';
+        const distancePD = item.distance_pd || subRef.pd || item.distancePD || item.pd || raw.distancePD || raw.pd || '';
+        const diagnosis = item.primary_diagnosis || item.diagnosis || raw.diagnosis || '';
+        const optometrist = item.optometrist || item.doctor || raw.doctor || '';
 
         return {
           ...item,
@@ -125,26 +154,29 @@ export default function PatientHistory() {
             pd: distancePD
           },
           medicalHistory: {
-            complaints: item.complaints || medHist.complaints || 'Blurry distance vision',
-            medical_history: item.medical_history || medHist.medical_history || 'No systemic diseases',
-            allergies: item.allergies || medHist.allergies || 'None',
-            pgpOdSph: item.pgp_od_sph || medHist.pgpOdSph || '-1.00',
-            pgpOdCyl: item.pgp_od_cyl || medHist.pgpOdCyl || '-0.50',
-            pgpOdAxis: item.pgp_od_axis || medHist.pgpOdAxis || '90',
-            pgpOdVa: item.pgp_od_va || medHist.pgpOdVa || '6/9',
-            pgpOsSph: item.pgp_os_sph || medHist.pgpOsSph || '-1.25',
-            pgpOsCyl: item.pgp_os_cyl || medHist.pgpOsCyl || '-0.50',
-            pgpOsAxis: item.pgp_os_axis || medHist.pgpOsAxis || '85',
-            pgpOsVa: item.pgp_os_va || medHist.pgpOsVa || '6/9',
+            complaints: item.complaints || medHist.complaints || '',
+            medical_history: item.medical_history || medHist.medical_history || '',
+            allergies: item.allergies || medHist.allergies || '',
+            pgpOdSph: item.pgp_od_sph || medHist.pgpOdSph || '',
+            pgpOdCyl: item.pgp_od_cyl || medHist.pgpOdCyl || '',
+            pgpOdAxis: item.pgp_od_axis || medHist.pgpOdAxis || '',
+            pgpOdVa: item.pgp_od_va || medHist.pgpOdVa || '',
+            pgpOsSph: item.pgp_os_sph || medHist.pgpOsSph || '',
+            pgpOsCyl: item.pgp_os_cyl || medHist.pgpOsCyl || '',
+            pgpOsAxis: item.pgp_os_axis || medHist.pgpOsAxis || '',
+            pgpOsVa: item.pgp_os_va || medHist.pgpOsVa || '',
           }
         };
       });
 
-      // Extract patient profiles from all eye examination records as well
+      // Extract patient profiles from all eye examination records as well. Note: e.id here is
+      // the EXAM/visit id (VIS-xxx), not a patient id — falling back to it (as this used to)
+      // made a patient with a missing patientId look like a completely different person from
+      // their other visits. Leave id blank instead; the dedup step below assigns/reuses one.
       normalizedExams.forEach(e => {
         if (e.name || e.patient_name || e.phone || e.patientId) {
           custPool.push({
-            id: e.patientId || e.patient_id || e.id || `P-${1000 + custPool.length + 1}`,
+            id: e.patientId || e.patient_id || '',
             name: e.name || e.patient_name || 'Patient',
             phone: e.phone || '',
             email: e.email || '',
@@ -161,17 +193,40 @@ export default function PatientHistory() {
       try {
         const localPatients = JSON.parse(localStorage.getItem('optical_patients') || '[]');
         const localApts = JSON.parse(localStorage.getItem('optical_appointments') || '[]');
-        custPool = [...custPool, ...localPatients, ...localApts];
+        custPool = [...custPool, ...localPatients, ...localApts.map(normalizeAptToPatientStub)];
       } catch (e) {}
 
-      // Deduplicate and aggregate patient records
+      try {
+        const resApts = await axios.get('/api/sales/appointments/');
+        const aptData = resApts.data?.results || resApts.data || [];
+        if (Array.isArray(aptData)) {
+          custPool = [...custPool, ...aptData.map(normalizeAptToPatientStub)];
+        }
+      } catch (e) {}
+
+      // Deduplicate and aggregate patient records. A real phone number is a far more reliable
+      // "same person" signal than id — id can be missing/malformed on older records (see note
+      // above) — so group by phone first when one is present. Without a phone, id alone isn't
+      // safe either (two different patients with no phone on file can still collide on id), so
+      // fall back to id+name together — that keeps genuinely different people apart while still
+      // merging true duplicates (same id AND same name).
+      const looksLikePatientId = (id) => /^p-?\d/i.test(String(id || '').trim());
       const uniqueCustMap = new Map();
       custPool.forEach(c => {
         if (!c || (!c.name && !c.phone && !c.id)) return;
-        const key = String(c.id || c.phone || c.name).toLowerCase().trim();
+        // Customers fetched from the backend key their id as a UUID and carry the human-readable
+        // "P-1001" code separately in patient_code — resolve whichever field actually looks like
+        // a Patient ID rather than falling straight to a freshly generated placeholder.
+        const humanId = looksLikePatientId(c.id)
+          ? c.id
+          : (looksLikePatientId(c.patient_code) ? c.patient_code : null);
+        const backendId = isBackendId(c.id) ? c.id : (c.customerId || null);
+        const phoneKey = c.phone && c.phone !== 'No Mobile' ? `phone:${String(c.phone).trim().toLowerCase()}` : '';
+        const key = phoneKey || `${String(humanId || c.id || '').toLowerCase().trim()}::${String(c.name || '').toLowerCase().trim()}`;
         if (!uniqueCustMap.has(key)) {
           uniqueCustMap.set(key, {
-            id: c.id || c.patientId || `P-${1000 + uniqueCustMap.size + 1}`,
+            id: humanId || `P-${1000 + uniqueCustMap.size + 1}`,
+            customerId: backendId,
             name: c.name || c.patient_name || 'Patient',
             phone: c.phone || 'No Mobile',
             email: c.email || '',
@@ -188,6 +243,9 @@ export default function PatientHistory() {
           if (c.email && !existing.email) existing.email = c.email;
           if (c.age && !existing.age) existing.age = c.age;
           if (c.gender && !existing.gender) existing.gender = c.gender;
+          // Upgrade to a real Patient ID if the one on file so far was just a generated fallback
+          if (humanId && !looksLikePatientId(existing.id)) existing.id = humanId;
+          if (backendId && !existing.customerId) existing.customerId = backendId;
         }
       });
 
@@ -201,9 +259,10 @@ export default function PatientHistory() {
       // Pre-select patient if passed in location state or auto-select first
       if (location.state?.patientId) {
         const match = uniqueCust.find(p => String(p.id).toLowerCase() === String(location.state.patientId).toLowerCase());
-        setSelectedPatientId(match ? (match.id || match.phone) : (uniqueCust[0].id || uniqueCust[0].phone));
+        if (match) setSelectedPatientId(getPatientKey(match));
+        else if (uniqueCust.length > 0) setSelectedPatientId(getPatientKey(uniqueCust[0]));
       } else if (uniqueCust.length > 0) {
-        setSelectedPatientId(uniqueCust[0].id || uniqueCust[0].phone);
+        setSelectedPatientId(getPatientKey(uniqueCust[0]));
       }
     };
 
@@ -223,7 +282,7 @@ export default function PatientHistory() {
     return matchesQuery;
   });
 
-  const selectedPatient = patients.find(p => String(p.id || p.phone).toLowerCase() === String(selectedPatientId || '').toLowerCase());
+  const selectedPatient = patients.find(p => getPatientKey(p) === String(selectedPatientId || ''));
 
   // Get all past examinations for selected patient
   const rawPatientExams = selectedPatient 
@@ -368,8 +427,8 @@ export default function PatientHistory() {
                 </Box>
               ) : (
                 filteredPatients.map((p) => {
-                  const pKey = p.id || p.phone;
-                  const isSelected = String(pKey || '').toLowerCase() === String(selectedPatientId || '').toLowerCase();
+                  const pKey = getPatientKey(p);
+                  const isSelected = pKey === String(selectedPatientId || '');
                   const rawCount = examinations.filter(e => {
                     const pId = String(p.id || '').toLowerCase().trim();
                     const pPhone = String(p.phone || '').toLowerCase().trim();
@@ -543,7 +602,7 @@ export default function PatientHistory() {
                             </Typography>
                           </Box>
                           <Typography variant="caption" fontWeight={700} color="primary.main">
-                            Optometrist: {exam.assignedOptometrist || exam.optometrist || 'Assigned Doctor'}
+                            Optometrist: {exam.assignedOptometrist || exam.optometrist || '—'}
                           </Typography>
                         </Box>
 
@@ -573,10 +632,10 @@ export default function PatientHistory() {
                                   </TableHead>
                                   <TableBody>
                                     <TableRow>
-                                      <TableCell align="center" sx={{ fontWeight: 800, color: '#2563eb' }}>{exam.sphRight || exam.od?.sph || '0.00'}</TableCell>
-                                      <TableCell align="center" sx={{ fontWeight: 700 }}>{exam.cylRight || exam.od?.cyl || '0.00'}</TableCell>
-                                      <TableCell align="center" sx={{ fontWeight: 700 }}>{exam.axisRight || exam.od?.axis || '0'}°</TableCell>
-                                      <TableCell align="center" sx={{ fontWeight: 700 }}>{exam.vaOD || exam.od?.va || '6/6'}</TableCell>
+                                      <TableCell align="center" sx={{ fontWeight: 800, color: '#2563eb' }}>{exam.sphRight || exam.od?.sph || '—'}</TableCell>
+                                      <TableCell align="center" sx={{ fontWeight: 700 }}>{exam.cylRight || exam.od?.cyl || '—'}</TableCell>
+                                      <TableCell align="center" sx={{ fontWeight: 700 }}>{(exam.axisRight || exam.od?.axis) ? `${exam.axisRight || exam.od?.axis}°` : '—'}</TableCell>
+                                      <TableCell align="center" sx={{ fontWeight: 700 }}>{exam.vaOD || exam.od?.va || '—'}</TableCell>
                                     </TableRow>
                                   </TableBody>
                                 </Table>
@@ -600,10 +659,10 @@ export default function PatientHistory() {
                                   </TableHead>
                                   <TableBody>
                                     <TableRow>
-                                      <TableCell align="center" sx={{ fontWeight: 800, color: '#059669' }}>{exam.sphLeft || exam.os?.sph || '0.00'}</TableCell>
-                                      <TableCell align="center" sx={{ fontWeight: 700 }}>{exam.cylLeft || exam.os?.cyl || '0.00'}</TableCell>
-                                      <TableCell align="center" sx={{ fontWeight: 700 }}>{exam.axisLeft || exam.os?.axis || '0'}°</TableCell>
-                                      <TableCell align="center" sx={{ fontWeight: 700 }}>{exam.vaOS || exam.os?.va || '6/6'}</TableCell>
+                                      <TableCell align="center" sx={{ fontWeight: 800, color: '#059669' }}>{exam.sphLeft || exam.os?.sph || '—'}</TableCell>
+                                      <TableCell align="center" sx={{ fontWeight: 700 }}>{exam.cylLeft || exam.os?.cyl || '—'}</TableCell>
+                                      <TableCell align="center" sx={{ fontWeight: 700 }}>{(exam.axisLeft || exam.os?.axis) ? `${exam.axisLeft || exam.os?.axis}°` : '—'}</TableCell>
+                                      <TableCell align="center" sx={{ fontWeight: 700 }}>{exam.vaOS || exam.os?.va || '—'}</TableCell>
                                     </TableRow>
                                   </TableBody>
                                 </Table>
@@ -670,7 +729,7 @@ export default function PatientHistory() {
                                 {e.sphLeft || '—'} / {e.cylLeft || '—'} @ {e.axisLeft || '—'}°
                               </TableCell>
                               <TableCell sx={{ fontWeight: 700 }}>{e.nearAdd || '—'}</TableCell>
-                              <TableCell sx={{ fontWeight: 600 }}>{e.assignedOptometrist || e.optometrist || 'Optometrist'}</TableCell>
+                              <TableCell sx={{ fontWeight: 600 }}>{e.assignedOptometrist || e.optometrist || '—'}</TableCell>
                             </TableRow>
                           ))}
                         </TableBody>

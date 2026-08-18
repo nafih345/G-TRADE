@@ -20,16 +20,24 @@ import {
 } from '@mui/icons-material';
 import QuickDatePickerField from '../common/QuickDatePickerField';
 import { useDebounce } from '../../hooks/useDebounce';
+import useBarcodeScanner from '../../hooks/useBarcodeScanner';
 import { printPurchaseReceipt } from '../../utils/printPurchase';
 
 const todayStr = () => new Date().toISOString().split('T')[0];
 const genInvoiceNumber = () => `PINV-${Date.now().toString().slice(-8)}`;
 
-const EDIT_ORDER = ['batchNumber', 'expiryDate', 'quantity', 'freeQuantity', 'purchaseRate', 'discountPercent', 'discountAmount', 'gstPercent', 'mrp', 'sellingPrice'];
+const EDIT_ORDER = ['batchNumber', 'hsnCode', 'expiryDate', 'quantity', 'freeQuantity', 'purchaseRate', 'discountPercent', 'discountAmount', 'gstPercent', 'cessPercent', 'vatPercent', 'mrp', 'sellingPrice'];
 
-const blankRow = (product, overrides = {}) => {
+// First two digits of a GSTIN are the state code. Comparing the company's and the
+// supplier's tells us whether a purchase is intra-state (CGST+SGST) or inter-state (IGST).
+const gstinStateCode = (gstin) => {
+  const clean = (gstin || '').trim();
+  return clean.length >= 2 ? clean.slice(0, 2) : null;
+};
+
+const blankRow = (product, overrides = {}, defaultGstPercent = 18, defaultCessPercent = 0, defaultVatPercent = 0) => {
   const rate = parseFloat(overrides.purchaseRate ?? product.costPrice ?? product.price ?? 0) || 0;
-  const gstPercent = parseFloat(overrides.gstPercent ?? product.taxRate) || 18;
+  const gstPercent = parseFloat(overrides.gstPercent ?? product.taxRate) || defaultGstPercent;
   const mrp = +(rate * 1.4).toFixed(2);
   return {
     rowId: `row-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
@@ -39,6 +47,7 @@ const blankRow = (product, overrides = {}) => {
     currentStock: parseFloat(product.stock) || 0,
     lastRate: null,
     batchNumber: '',
+    hsnCode: overrides.hsnCode ?? product.hsnCode ?? product.hsn_code ?? '',
     expiryDate: '',
     quantity: overrides.quantity ?? 1,
     freeQuantity: 0,
@@ -47,6 +56,16 @@ const blankRow = (product, overrides = {}) => {
     discountAmount: 0,
     gstPercent,
     gstAmount: 0,
+    cessPercent: parseFloat(overrides.cessPercent ?? defaultCessPercent) || 0,
+    cessAmount: 0,
+    vatPercent: parseFloat(overrides.vatPercent ?? defaultVatPercent) || 0,
+    vatAmount: 0,
+    cgstPercent: 0,
+    cgstAmount: 0,
+    sgstPercent: 0,
+    sgstAmount: 0,
+    igstPercent: 0,
+    igstAmount: 0,
     mrp,
     sellingPrice: mrp,
     marginPercent: rate > 0 ? +(((mrp - rate) / rate) * 100).toFixed(2) : 0,
@@ -55,7 +74,7 @@ const blankRow = (product, overrides = {}) => {
 };
 
 // Keeps discount/gst/margin/total consistent regardless of which cell was just edited
-function recalcRow(row, changedField, gstType) {
+function recalcRow(row, changedField, gstType, isInterstate) {
   const r = { ...row };
   const qty = parseFloat(r.quantity) || 0;
   const rate = parseFloat(r.purchaseRate) || 0;
@@ -70,13 +89,42 @@ function recalcRow(row, changedField, gstType) {
   const taxable = Math.max(0, base - (parseFloat(r.discountAmount) || 0));
   const gstPercent = parseFloat(r.gstPercent) || 0;
 
-  if (gstType === 'INCLUSIVE') {
+  if (gstType === 'NO_GST') {
+    r.gstAmount = 0;
+    r.cgstPercent = 0; r.cgstAmount = 0;
+    r.sgstPercent = 0; r.sgstAmount = 0;
+    r.igstPercent = 0; r.igstAmount = 0;
+  } else if (gstType === 'INCLUSIVE') {
     r.gstAmount = +((taxable - taxable / (1 + gstPercent / 100))).toFixed(2);
-    r.lineTotal = +taxable.toFixed(2);
   } else {
     r.gstAmount = +((taxable * gstPercent) / 100).toFixed(2);
-    r.lineTotal = +(taxable + r.gstAmount).toFixed(2);
   }
+
+  if (gstType !== 'NO_GST') {
+    if (isInterstate) {
+      r.igstPercent = gstPercent;
+      r.igstAmount = r.gstAmount;
+      r.cgstPercent = 0; r.cgstAmount = 0;
+      r.sgstPercent = 0; r.sgstAmount = 0;
+    } else {
+      r.cgstPercent = +(gstPercent / 2).toFixed(2);
+      r.sgstPercent = +(gstPercent / 2).toFixed(2);
+      r.cgstAmount = +(r.gstAmount / 2).toFixed(2);
+      r.sgstAmount = +(r.gstAmount - r.cgstAmount).toFixed(2);
+      r.igstPercent = 0; r.igstAmount = 0;
+    }
+  }
+
+  // Cess and VAT are always additive charges on top of the taxable value, regardless of GST type.
+  const cessPercent = parseFloat(r.cessPercent) || 0;
+  r.cessAmount = +((taxable * cessPercent) / 100).toFixed(2);
+
+  const vatPercent = parseFloat(r.vatPercent) || 0;
+  r.vatAmount = +((taxable * vatPercent) / 100).toFixed(2);
+
+  r.lineTotal = gstType === 'INCLUSIVE'
+    ? +(taxable + r.cessAmount + r.vatAmount).toFixed(2)
+    : +(taxable + r.gstAmount + r.cessAmount + r.vatAmount).toFixed(2);
 
   if (changedField === 'marginPercent') {
     r.sellingPrice = rate > 0 ? +(rate * (1 + (parseFloat(r.marginPercent) || 0) / 100)).toFixed(2) : r.sellingPrice;
@@ -105,6 +153,10 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
   const [warehouseId, setWarehouseId] = useState('');
   const [branchId, setBranchId] = useState('');
   const [gstType, setGstType] = useState('EXCLUSIVE');
+  const [defaultGstPercent, setDefaultGstPercent] = useState(18);
+  const [defaultCessPercent, setDefaultCessPercent] = useState(0);
+  const [defaultVatPercent, setDefaultVatPercent] = useState(0);
+  const [supplierVatNumber, setSupplierVatNumber] = useState('');
   const [status, setStatus] = useState('CONFIRMED');
   const [notes, setNotes] = useState('');
   const [poRef, setPoRef] = useState('');
@@ -144,12 +196,32 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
 
   const selectedSupplier = allSuppliers.find(s => String(s.id) === String(selectedSupplierId));
 
+  const companyGstin = useMemo(() => {
+    try {
+      return JSON.parse(localStorage.getItem('optical_app_settings') || '{}').gstin || '';
+    } catch (e) { return ''; }
+  }, []);
+  const supplierGstin = selectedSupplier?.gstin || '';
+  // Interstate (IGST) vs intra-state (CGST+SGST) is derived from the GSTIN state-code
+  // prefix; if either GSTIN is missing we can't tell, so default to intra-state.
+  const isInterstate = Boolean(
+    gstinStateCode(companyGstin) && gstinStateCode(supplierGstin) &&
+    gstinStateCode(companyGstin) !== gstinStateCode(supplierGstin)
+  );
+
   useEffect(() => {
     if (initialSupplierId) {
       setSelectedSupplierId(initialSupplierId);
       setTimeout(() => productSearchRef.current?.focus(), 50);
     }
   }, [initialSupplierId]);
+
+  // Re-split every existing row's tax whenever the GST Type or the
+  // intra/inter-state detection changes (e.g. supplier switched).
+  useEffect(() => {
+    setRows(prev => prev.map(r => recalcRow(r, null, gstType, isInterstate)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gstType, isInterstate]);
 
   const fetchOpenPOs = useCallback(() => {
     axios.get('/api/purchase/orders/', { params: { status: 'SENT' } })
@@ -170,10 +242,10 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
       const product = products.find(p => String(p.id) === String(item.product)) || {
         id: item.product, name: 'Unknown Product (removed from catalog)', costPrice: item.unit_price, stock: 0, taxRate: item.tax_rate
       };
-      return recalcRow(blankRow(product, { quantity: item.quantity, purchaseRate: item.unit_price, gstPercent: item.tax_rate }), 'quantity', gstType);
+      return recalcRow(blankRow(product, { quantity: item.quantity, purchaseRate: item.unit_price, gstPercent: item.tax_rate }), 'quantity', gstType, isInterstate);
     });
     if (newRows.length) setRows(newRows);
-  }, [products, gstType]);
+  }, [products, gstType, isInterstate]);
 
   useEffect(() => {
     if (initialPurchaseOrderId) {
@@ -200,10 +272,15 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
     const gross = rows.reduce((s, r) => s + ((parseFloat(r.quantity) || 0) * (parseFloat(r.purchaseRate) || 0)), 0);
     const discount = rows.reduce((s, r) => s + (parseFloat(r.discountAmount) || 0), 0);
     const tax = rows.reduce((s, r) => s + (parseFloat(r.gstAmount) || 0), 0);
-    const preRound = gross - discount + tax + (parseFloat(otherCharges) || 0);
+    const cgst = rows.reduce((s, r) => s + (parseFloat(r.cgstAmount) || 0), 0);
+    const sgst = rows.reduce((s, r) => s + (parseFloat(r.sgstAmount) || 0), 0);
+    const igst = rows.reduce((s, r) => s + (parseFloat(r.igstAmount) || 0), 0);
+    const cess = rows.reduce((s, r) => s + (parseFloat(r.cessAmount) || 0), 0);
+    const vat = rows.reduce((s, r) => s + (parseFloat(r.vatAmount) || 0), 0);
+    const preRound = gross - discount + tax + cess + vat + (parseFloat(otherCharges) || 0);
     const grandTotal = Math.round(preRound);
     const roundOff = +(grandTotal - preRound).toFixed(2);
-    return { totalItems, totalQty, gross, discount, tax, roundOff, grandTotal };
+    return { totalItems, totalQty, gross, discount, tax, cgst, sgst, igst, cess, vat, roundOff, grandTotal };
   }, [rows, otherCharges]);
 
   const balanceAmount = Math.max(0, +(totals.grandTotal - (parseFloat(paidAmount) || 0)).toFixed(2));
@@ -230,11 +307,11 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
     if (!product) return;
     const existingIdx = rows.findIndex(r => r.productId === product.id);
     if (existingIdx !== -1) {
-      setRows(prev => prev.map((r, i) => i === existingIdx ? recalcRow({ ...r, quantity: (parseFloat(r.quantity) || 0) + 1 }, 'quantity', gstType) : r));
+      setRows(prev => prev.map((r, i) => i === existingIdx ? recalcRow({ ...r, quantity: (parseFloat(r.quantity) || 0) + 1 }, 'quantity', gstType, isInterstate) : r));
       setTimeout(() => focusCell(existingIdx, 'quantity'), 50);
       return;
     }
-    const newRow = recalcRow(blankRow(product), 'quantity', gstType);
+    const newRow = recalcRow(blankRow(product, {}, defaultGstPercent, defaultCessPercent, defaultVatPercent), 'quantity', gstType, isInterstate);
     setRows(prev => {
       const next = [...prev, newRow];
       setTimeout(() => focusCell(next.length - 1, 'quantity'), 50);
@@ -247,7 +324,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
           setRows(prev => prev.map(r => r.productId === product.id ? { ...r, lastRate: res.data.purchase_rate } : r));
         }
       }).catch(() => {});
-  }, [rows, gstType, selectedSupplierId]);
+  }, [rows, gstType, selectedSupplierId, defaultGstPercent, defaultCessPercent, defaultVatPercent, isInterstate]);
 
   const processBarcodeCode = useCallback((codeStr) => {
     const code = (codeStr || '').toLowerCase().trim();
@@ -258,28 +335,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
   }, [products, addProductToGrid]);
 
   // Hardware barcode scanner listener (rapid keystrokes ending in Enter)
-  useEffect(() => {
-    let buffer = '';
-    let lastTime = Date.now();
-    const handleKeyDown = (e) => {
-      const tag = e.target.tagName;
-      const isInput = (tag === 'INPUT' || tag === 'TEXTAREA') && e.target !== productSearchRef.current;
-      const now = Date.now();
-      if (now - lastTime > 120) buffer = '';
-      lastTime = now;
-      if (e.key === 'Enter') {
-        if (buffer.length >= 4 && !isInput) {
-          e.preventDefault();
-          processBarcodeCode(buffer.trim());
-          buffer = '';
-        }
-      } else if (e.key.length === 1 && !isInput) {
-        buffer += e.key;
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [processBarcodeCode]);
+  useBarcodeScanner(processBarcodeCode, { minLength: 4, exemptRefs: [productSearchRef] });
 
   // --- Grid cell helpers ---
   const registerCellRef = (rowIndex, field) => (el) => {
@@ -296,7 +352,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
     setRows(prev => prev.map((r, i) => {
       if (i !== rowIndex) return r;
       const updated = { ...r, [field]: value };
-      return recalcRow(updated, field, gstType);
+      return recalcRow(updated, field, gstType, isInterstate);
     }));
   };
 
@@ -364,6 +420,10 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
     setWarehouseId('');
     setBranchId('');
     setGstType('EXCLUSIVE');
+    setDefaultGstPercent(18);
+    setDefaultCessPercent(0);
+    setDefaultVatPercent(0);
+    setSupplierVatNumber('');
     setStatus('CONFIRMED');
     setNotes('');
     setPoRef('');
@@ -403,10 +463,20 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
     payment_method: paymentMethod,
     paid_amount: parseFloat(paidAmount) || 0,
     balance_amount: balanceAmount,
+    is_interstate: isInterstate,
+    company_gstin: companyGstin || null,
+    supplier_gstin: supplierGstin || null,
+    cgst_amount: totals.cgst,
+    sgst_amount: totals.sgst,
+    igst_amount: totals.igst,
+    cess_amount: totals.cess,
+    supplier_vat_number: supplierVatNumber || null,
+    vat_amount: totals.vat,
     items: rows.map(r => ({
       product: r.productId,
       barcode: r.barcode,
       batch_number: r.batchNumber || null,
+      hsn_code: r.hsnCode || null,
       expiry_date: r.expiryDate || null,
       quantity: r.quantity,
       free_quantity: r.freeQuantity,
@@ -415,6 +485,16 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
       discount_amount: r.discountAmount,
       gst_percent: r.gstPercent,
       gst_amount: r.gstAmount,
+      cgst_percent: r.cgstPercent,
+      cgst_amount: r.cgstAmount,
+      sgst_percent: r.sgstPercent,
+      sgst_amount: r.sgstAmount,
+      igst_percent: r.igstPercent,
+      igst_amount: r.igstAmount,
+      cess_percent: r.cessPercent,
+      cess_amount: r.cessAmount,
+      vat_percent: r.vatPercent,
+      vat_amount: r.vatAmount,
       mrp: r.mrp,
       selling_price: r.sellingPrice,
       margin_percent: r.marginPercent,
@@ -618,7 +698,16 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
             <TextField select fullWidth size="small" label="GST Type" value={gstType} onChange={(e) => setGstType(e.target.value)}>
               <MenuItem value="EXCLUSIVE">Exclusive</MenuItem>
               <MenuItem value="INCLUSIVE">Inclusive</MenuItem>
+              <MenuItem value="NO_GST">No GST</MenuItem>
             </TextField>
+          </Grid>
+          <Grid item xs={6} sm={3} md={1.5}>
+            <TextField
+              type="number" fullWidth size="small" label="Default GST %"
+              value={defaultGstPercent} onChange={(e) => setDefaultGstPercent(parseFloat(e.target.value) || 0)}
+              disabled={gstType === 'NO_GST'}
+              helperText="Applied to newly added items"
+            />
           </Grid>
           <Grid item xs={6} sm={3} md={1.5}>
             <TextField select fullWidth size="small" label="Status" value={status} onChange={(e) => setStatus(e.target.value)}>
@@ -654,6 +743,66 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
           </Grid>
         </Grid>
       </Card>
+
+      {/* 1b. GST Details master section — only relevant once GST actually applies */}
+      {gstType !== 'NO_GST' && (
+        <Card variant="outlined" sx={{ p: 2, mb: 2, borderRadius: 3, borderColor: '#c7d2fe', bgcolor: '#f5f7ff' }}>
+          <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1.5 }}>
+            <Typography variant="subtitle2" fontWeight={800} color="primary.main">GST Details</Typography>
+            <Chip
+              size="small"
+              label={isInterstate ? 'Inter-State — IGST applies' : 'Intra-State — CGST + SGST applies'}
+              color={isInterstate ? 'warning' : 'success'}
+              sx={{ fontWeight: 700 }}
+            />
+          </Stack>
+          <Grid container spacing={2}>
+            <Grid item xs={6} sm={3} md={2.4}>
+              <TextField fullWidth size="small" label="Company GSTIN" value={companyGstin} placeholder="Not set in Settings" InputProps={{ readOnly: true }} />
+            </Grid>
+            <Grid item xs={6} sm={3} md={2.4}>
+              <TextField fullWidth size="small" label="Supplier GSTIN" value={supplierGstin} placeholder="No GSTIN on file" InputProps={{ readOnly: true }} />
+            </Grid>
+            <Grid item xs={6} sm={3} md={2.4}>
+              <TextField fullWidth size="small" label="CGST %" value={isInterstate ? '0.00' : (defaultGstPercent / 2).toFixed(2)} InputProps={{ readOnly: true }} />
+            </Grid>
+            <Grid item xs={6} sm={3} md={2.4}>
+              <TextField fullWidth size="small" label="SGST %" value={isInterstate ? '0.00' : (defaultGstPercent / 2).toFixed(2)} InputProps={{ readOnly: true }} />
+            </Grid>
+            <Grid item xs={6} sm={3} md={2.4}>
+              <TextField fullWidth size="small" label="IGST %" value={isInterstate ? defaultGstPercent : '0.00'} InputProps={{ readOnly: true }} />
+            </Grid>
+          </Grid>
+          <Grid container spacing={2} sx={{ mt: 0.25 }}>
+            <Grid item xs={6} sm={3} md={2.4}>
+              <TextField
+                type="number" fullWidth size="small" label="Default Cess %"
+                value={defaultCessPercent} onChange={(e) => setDefaultCessPercent(parseFloat(e.target.value) || 0)}
+                helperText="Applied to newly added items"
+              />
+            </Grid>
+          </Grid>
+
+          <Divider sx={{ my: 1.75 }} />
+          <Typography variant="subtitle2" fontWeight={800} color="text.secondary" sx={{ mb: 1 }}>VAT Details</Typography>
+          <Grid container spacing={2}>
+            <Grid item xs={6} sm={4} md={2.4}>
+              <TextField
+                fullWidth size="small" label="Supplier VAT Number"
+                value={supplierVatNumber} onChange={(e) => setSupplierVatNumber(e.target.value)}
+                placeholder="If applicable"
+              />
+            </Grid>
+            <Grid item xs={6} sm={4} md={2.4}>
+              <TextField
+                type="number" fullWidth size="small" label="Default VAT %"
+                value={defaultVatPercent} onChange={(e) => setDefaultVatPercent(parseFloat(e.target.value) || 0)}
+                helperText="Applied to newly added items"
+              />
+            </Grid>
+          </Grid>
+        </Card>
+      )}
 
       {/* 2. Product Search */}
       <Paper elevation={0} sx={{ p: '5px 8px 5px 20px', mb: 2, display: 'flex', alignItems: 'center', gap: 1.5, border: '1px solid', borderColor: '#cbd5e1', borderRadius: '32px', bgcolor: '#fff', boxShadow: '0 2px 8px rgba(0,0,0,0.02)' }}>
@@ -693,6 +842,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
                     <TableCell>#</TableCell>
                     <TableCell>Product</TableCell>
                     <TableCell>Batch</TableCell>
+                    <TableCell>HSN/SAC</TableCell>
                     <TableCell>Expiry</TableCell>
                     <TableCell align="right">Qty</TableCell>
                     <TableCell align="right">Free</TableCell>
@@ -701,6 +851,18 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
                     <TableCell align="right">Disc Amt</TableCell>
                     <TableCell align="right">GST %</TableCell>
                     <TableCell align="right">GST Amt</TableCell>
+                    {isInterstate ? (
+                      <TableCell align="right">IGST Amt</TableCell>
+                    ) : (
+                      <>
+                        <TableCell align="right">CGST Amt</TableCell>
+                        <TableCell align="right">SGST Amt</TableCell>
+                      </>
+                    )}
+                    <TableCell align="right">Cess %</TableCell>
+                    <TableCell align="right">Cess Amt</TableCell>
+                    <TableCell align="right">VAT %</TableCell>
+                    <TableCell align="right">VAT Amt</TableCell>
                     <TableCell align="right">MRP</TableCell>
                     <TableCell align="right">Selling</TableCell>
                     <TableCell align="right">Margin %</TableCell>
@@ -711,7 +873,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
                 <TableBody>
                   {rows.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={16} align="center" sx={{ py: 6 }}>
+                      <TableCell colSpan={22} align="center" sx={{ py: 6 }}>
                         <EmptyIcon sx={{ fontSize: 32, color: 'text.disabled', mb: 1 }} />
                         <Typography variant="body2" color="text.secondary">Scan a barcode or search a product above to add it here.</Typography>
                       </TableCell>
@@ -727,6 +889,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
                         </Typography>
                       </TableCell>
                       <TableCell>{numCell(idx, 'batchNumber', { type: 'text', width: 90 })}</TableCell>
+                      <TableCell>{numCell(idx, 'hsnCode', { type: 'text', width: 85 })}</TableCell>
                       <TableCell>{numCell(idx, 'expiryDate', { type: 'date', width: 130 })}</TableCell>
                       <TableCell align="right">{numCell(idx, 'quantity', { width: 65 })}</TableCell>
                       <TableCell align="right">{numCell(idx, 'freeQuantity', { width: 60 })}</TableCell>
@@ -735,6 +898,18 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
                       <TableCell align="right">{numCell(idx, 'discountAmount', { width: 75 })}</TableCell>
                       <TableCell align="right">{numCell(idx, 'gstPercent', { width: 60 })}</TableCell>
                       <TableCell align="right" sx={{ fontSize: '0.78rem', fontWeight: 600 }}>₹{row.gstAmount}</TableCell>
+                      {isInterstate ? (
+                        <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.igstAmount}</TableCell>
+                      ) : (
+                        <>
+                          <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.cgstAmount}</TableCell>
+                          <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.sgstAmount}</TableCell>
+                        </>
+                      )}
+                      <TableCell align="right">{numCell(idx, 'cessPercent', { width: 60 })}</TableCell>
+                      <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.cessAmount}</TableCell>
+                      <TableCell align="right">{numCell(idx, 'vatPercent', { width: 60 })}</TableCell>
+                      <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.vatAmount}</TableCell>
                       <TableCell align="right">{numCell(idx, 'mrp', { width: 75 })}</TableCell>
                       <TableCell align="right">{numCell(idx, 'sellingPrice', { width: 80 })}</TableCell>
                       <TableCell align="right">{numCell(idx, 'marginPercent', { width: 65 })}</TableCell>
@@ -760,6 +935,20 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
               <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="body2" color="text.secondary">Gross Amount</Typography><Typography variant="body2" fontWeight={700}>₹{totals.gross.toFixed(2)}</Typography></Box>
               <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="body2" color="text.secondary">Discount</Typography><Typography variant="body2" fontWeight={700} color="error.main">-₹{totals.discount.toFixed(2)}</Typography></Box>
               <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="body2" color="text.secondary">Tax (GST)</Typography><Typography variant="body2" fontWeight={700}>₹{totals.tax.toFixed(2)}</Typography></Box>
+              {gstType !== 'NO_GST' && (isInterstate ? (
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', pl: 1 }}><Typography variant="caption" color="text.secondary">↳ IGST</Typography><Typography variant="caption" fontWeight={700}>₹{totals.igst.toFixed(2)}</Typography></Box>
+              ) : (
+                <>
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', pl: 1 }}><Typography variant="caption" color="text.secondary">↳ CGST</Typography><Typography variant="caption" fontWeight={700}>₹{totals.cgst.toFixed(2)}</Typography></Box>
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', pl: 1 }}><Typography variant="caption" color="text.secondary">↳ SGST</Typography><Typography variant="caption" fontWeight={700}>₹{totals.sgst.toFixed(2)}</Typography></Box>
+                </>
+              ))}
+              {totals.cess > 0 && (
+                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="body2" color="text.secondary">Cess</Typography><Typography variant="body2" fontWeight={700}>₹{totals.cess.toFixed(2)}</Typography></Box>
+              )}
+              {totals.vat > 0 && (
+                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="body2" color="text.secondary">VAT</Typography><Typography variant="body2" fontWeight={700}>₹{totals.vat.toFixed(2)}</Typography></Box>
+              )}
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <Typography variant="body2" color="text.secondary">Other Charges</Typography>
                 <TextField size="small" type="number" value={otherCharges} onChange={(e) => setOtherCharges(e.target.value)} sx={{ width: 90, '& input': { py: 0.4, textAlign: 'right' } }} />

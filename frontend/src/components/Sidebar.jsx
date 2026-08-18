@@ -132,6 +132,7 @@ const menuItems = [
       { text: 'Doctors Master', path: '/admin/doctors' },
       { text: 'Branch Management (Add Branch)', path: '/admin/branches' },
       { text: 'Excel Import Management', path: '/admin/excel-import' },
+      { text: 'Barcode Printing', path: '/admin/barcode-printing' },
       { text: 'Roles', path: '/admin/roles' },
       { text: 'Permissions', path: '/admin/permissions' },
       { text: 'Audit Logs', path: '/admin/audit' }

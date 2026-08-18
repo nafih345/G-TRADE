@@ -2,9 +2,9 @@ import React, { useState } from 'react';
 import { 
   Box, Card, CardContent, Typography, Grid, TextField, 
   MenuItem, Button, Checkbox, FormControlLabel, Paper, 
-  Table, TableBody, TableCell, TableContainer, TableHead, 
+  Table, TableBody, TableCell, TableContainer, TableHead,
   TableRow, Stack, Divider, InputAdornment, Tooltip, Chip,
-  Dialog
+  Dialog, IconButton, Menu, ListItemIcon, ListItemText
 } from '@mui/material';
 import { 
   Search as SearchIcon, 
@@ -17,11 +17,13 @@ import {
   Assignment as ExamIcon,
   Biotech as MeasurementIcon,
   CheckCircle as ActiveIcon,
-  Close as CloseIcon
+  Close as CloseIcon,
+  Edit as EditIcon
 } from '@mui/icons-material';
 import OrthopticsModal from './OrthopticsModal';
 import PrintPrescriptionCard from './PrintPrescriptionCard';
 import QuickDatePickerField from '../common/QuickDatePickerField';
+import { printSalesInvoiceReceipt } from '../../utils/printInvoice';
 
 export default function SingleScreenEyeTestForm({
   patientData = {}, setPatientData,
@@ -43,7 +45,8 @@ export default function SingleScreenEyeTestForm({
   nextVisitDate = '',
   setNextVisitDate,
   savedExams = [],
-  onSelectExamFromHistory
+  onSelectExamFromHistory,
+  nextPatientId = ''
 }) {
 
   // Handlers for state updates
@@ -98,6 +101,27 @@ export default function SingleScreenEyeTestForm({
   const [orthopticsOpen, setOrthopticsOpen] = useState(false);
   const [printModalOpen, setPrintModalOpen] = useState(false);
 
+  // Prints a billing invoice for a saved visit (procedure + medicine charges recorded at save time)
+  const handlePrintInvoice = (row, paperSize = 'A4') => {
+    const procCharge = parseFloat(row.procedureCharge || 0) || 0;
+    const medCharge = parseFloat(row.medicineCharge || 0) || 0;
+    printSalesInvoiceReceipt({
+      invoiceNumber: `EYE-${row.testNo || row.id || ''}`,
+      date: row.date,
+      customerName: row.name,
+      phone: row.phone,
+      doctor: row.assignedOptometrist || row.optometrist || row.doctor,
+      items: [
+        { name: 'Eye Examination / Consultation Fee', qty: 1, price: procCharge },
+        { name: 'Medicine / Pharmacy Charge', qty: 1, price: medCharge }
+      ],
+      total: procCharge + medCharge
+    }, paperSize);
+  };
+
+  // Anchors the A4/A5 choice menu for the invoice print icon to whichever row's button was clicked
+  const [invoicePrintMenu, setInvoicePrintMenu] = useState({ anchorEl: null, row: null });
+
   // Bottom Table Filter States
   const [historySearch, setHistorySearch] = useState('');
   const [fromDate, setFromDate] = useState('');
@@ -107,12 +131,18 @@ export default function SingleScreenEyeTestForm({
   const safeExams = Array.isArray(savedExams) ? savedExams : [];
   const autoTestNo = testNo || diagnosis?.testNo || (safeExams.length + 1).toString();
   const autoDate = testDate || new Date().toISOString().split('T')[0];
-  const autoPatientId = patientData?.id || `P-${1001 + safeExams.length}`;
+  const autoPatientId = patientData?.id || nextPatientId || `P-${1001 + safeExams.length}`;
 
   const filteredHistory = safeExams.filter(e => {
     if (!e || e.name === 'Mohammed' || e.patientId === 'P-7375') return false;
     const q = (historySearch || '').toLowerCase();
-    return (e.name || '').toLowerCase().includes(q) || (e.phone || '').includes(q) || (e.patientId || '').toLowerCase().includes(q);
+    if (!q) return true;
+    return (e.name || '').toLowerCase().includes(q) ||
+      (e.phone || '').includes(q) ||
+      (e.patientId || '').toLowerCase().includes(q) ||
+      String(e.testNo || '').toLowerCase().includes(q) ||
+      (e.gender || '').toLowerCase().includes(q) ||
+      (e.assignedOptometrist || e.optometrist || e.doctor || '').toLowerCase().includes(q);
   });
 
   return (
@@ -123,174 +153,170 @@ export default function SingleScreenEyeTestForm({
           <PersonIcon fontSize="small" /> 1. Patient Details & Examination Info
         </Typography>
 
-        {/* Row 1: Exam Metadata */}
-        <Grid container spacing={1.5} alignItems="center" sx={{ mb: 1.5 }}>
-          <Grid item xs={6} sm={2} md={1.5}>
-            <TextField
-              fullWidth
-              size="small"
-              label="Test No"
-              value={autoTestNo}
-              onChange={(e) => setDiagnosis(prev => ({ ...prev, testNo: e.target.value }))}
-              inputProps={{ style: { fontWeight: 800 } }}
-            />
-          </Grid>
-          <Grid item xs={6} sm={3} md={2}>
-            <QuickDatePickerField
-              label="Date"
-              value={autoDate}
-              onChange={(newDate) => setDiagnosis(prev => ({ ...prev, testDate: newDate }))}
-              quickPresets={[
-                { label: 'Today', type: 'today' },
-                { label: 'Yesterday', type: 'yesterday' },
-                { label: 'Tomorrow', type: 'tomorrow' }
-              ]}
-            />
-          </Grid>
-          <Grid item xs={12} sm={3} md={2.5}>
-            <TextField
-              fullWidth
-              select
-              size="small"
-              label="Test Type"
-              value={diagnosis.testType || 'FREE EYE TEST'}
-              onChange={(e) => setDiagnosis(prev => ({ ...prev, testType: e.target.value }))}
-              sx={{ '& .MuiSelect-select': { fontWeight: 800 } }}
-            >
-              <MenuItem value="FREE EYE TEST">FREE EYE TEST</MenuItem>
-              <MenuItem value="COMPREHENSIVE EYE TEST">COMPREHENSIVE EYE TEST</MenuItem>
-              <MenuItem value="CONTACT LENS EVALUATION">CONTACT LENS EVALUATION</MenuItem>
-              <MenuItem value="ROUTINE REFRACTION">ROUTINE REFRACTION</MenuItem>
-            </TextField>
-          </Grid>
-          <Grid item xs={12} sm={4} md={3}>
-            <TextField
-              fullWidth
-              select
-              size="small"
-              label="Optometrist"
-              value={patientData.assignedOptometrist || ''}
-              onChange={(e) => setPatientData(prev => ({ ...prev, assignedOptometrist: e.target.value }))}
-            >
-              <MenuItem value="">-- Select Optometrist --</MenuItem>
-              {doctorsList.map((doc, i) => (
-                <MenuItem key={i} value={doc}>{doc}</MenuItem>
-              ))}
-            </TextField>
-          </Grid>
-          <Grid item xs={12} sm={3} md={3}>
-            <QuickDatePickerField
-              label="Next Visit"
-              value={diagnosis.nextReviewDate || nextVisitDate || ''}
-              baseDate={autoDate}
-              showChips={true}
-              onChange={(newDate) => {
-                setDiagnosis(prev => ({ ...prev, nextReviewDate: newDate }));
-                if (setNextVisitDate) setNextVisitDate(newDate);
-              }}
-              quickPresets={[
-                { label: 'Today', type: 'today' },
-                { label: '+1 Week', type: 'weeks', amount: 1 },
-                { label: '+1 Month', type: 'months', amount: 1 },
-                { label: '+3 Months', type: 'months', amount: 3 },
-                { label: '+6 Months (Recommended)', type: 'months', amount: 6 },
-                { label: '+1 Year', type: 'years', amount: 1 },
-              ]}
-              chipPresets={[
-                { label: '+1M', type: 'months', amount: 1 },
-                { label: '+3M', type: 'months', amount: 3 },
-                { label: '+6M', type: 'months', amount: 6 },
-                { label: '+1Y', type: 'years', amount: 1 },
-              ]}
-            />
-          </Grid>
-        </Grid>
+        {/* Both rows share the exact same 7-column grid track definition, so items in Row 2
+            that span multiple tracks line up pixel-perfectly under Row 1's columns — a plain
+            MUI Grid can't guarantee this since flexbox gap distribution differs when the two
+            rows have a different number of items. */}
+        {(() => {
+          const colTemplate = { xs: '1fr 1fr', sm: 'repeat(4, 1fr)', md: '1.5fr 1.3fr 2.5fr 2fr 1.8fr 1.2fr 1fr' };
+          return (
+            <>
+              {/* Row 1: Test No, Patient ID, Patient Name, Address, Place, Gender, Age */}
+              <Box sx={{ display: 'grid', gridTemplateColumns: colTemplate, gap: 1.5, alignItems: 'center', mb: 1.5 }}>
+                <Box sx={{ gridColumn: { md: '1 / 2' } }}>
+                  <TextField
+                    fullWidth
+                    size="small"
+                    label="Test No"
+                    value={autoTestNo}
+                    onChange={(e) => setDiagnosis(prev => ({ ...prev, testNo: e.target.value }))}
+                    inputProps={{ style: { fontWeight: 800 } }}
+                  />
+                </Box>
+                <Box sx={{ gridColumn: { md: '2 / 3' } }}>
+                  <TextField
+                    fullWidth
+                    size="small"
+                    label="Patient ID"
+                    value={autoPatientId}
+                    onChange={(e) => setPatientData(prev => ({ ...prev, id: e.target.value }))}
+                    inputProps={{ style: { fontWeight: 800 } }}
+                  />
+                </Box>
+                <Box sx={{ gridColumn: { md: '3 / 4' } }}>
+                  <Box sx={{ display: 'flex', gap: 0.5 }}>
+                    <TextField
+                      fullWidth
+                      size="small"
+                      label="Patient Name"
+                      value={patientData.name || ''}
+                      onChange={(e) => setPatientData(prev => ({ ...prev, name: e.target.value }))}
+                      placeholder="Enter Patient Name"
+                      sx={{ '& input': { fontWeight: 800, color: '#1e3a8a' } }}
+                    />
+                    <Tooltip title="Search Registered Patients">
+                      <Button variant="contained" color="primary" onClick={onOpenSearchModal} sx={{ minWidth: 40, px: 1 }}>
+                        <SearchIcon fontSize="small" />
+                      </Button>
+                    </Tooltip>
+                  </Box>
+                </Box>
+                <Box sx={{ gridColumn: { md: '4 / 5' } }}>
+                  <TextField
+                    fullWidth
+                    size="small"
+                    label="Address"
+                    placeholder="House / Street"
+                    value={patientData.address || ''}
+                    onChange={(e) => setPatientData(prev => ({ ...prev, address: e.target.value }))}
+                  />
+                </Box>
+                <Box sx={{ gridColumn: { md: '5 / 6' } }}>
+                  <TextField
+                    fullWidth
+                    size="small"
+                    label="Place"
+                    placeholder="City / Place"
+                    value={patientData.place || patientData.city || ''}
+                    onChange={(e) => setPatientData(prev => ({ ...prev, place: e.target.value, city: e.target.value }))}
+                    sx={{ '& input': { fontWeight: 700 } }}
+                  />
+                </Box>
+                <Box sx={{ gridColumn: { md: '6 / 7' } }}>
+                  <TextField
+                    fullWidth
+                    select
+                    size="small"
+                    label="Gender"
+                    value={patientData.gender || 'Male'}
+                    onChange={(e) => setPatientData(prev => ({ ...prev, gender: e.target.value }))}
+                  >
+                    <MenuItem value="Male">MALE</MenuItem>
+                    <MenuItem value="Female">FEMALE</MenuItem>
+                    <MenuItem value="Other">OTHER</MenuItem>
+                  </TextField>
+                </Box>
+                <Box sx={{ gridColumn: { md: '7 / 8' } }}>
+                  <TextField
+                    fullWidth
+                    size="small"
+                    label="Age"
+                    value={patientData.age || ''}
+                    onChange={(e) => setPatientData(prev => ({ ...prev, age: e.target.value }))}
+                  />
+                </Box>
+              </Box>
 
-        {/* Row 2: Patient Registration Inputs */}
-        <Grid container spacing={1.5} alignItems="center">
-          <Grid item xs={6} sm={2} md={1.3}>
-            <TextField
-              fullWidth
-              size="small"
-              label="Patient ID"
-              value={autoPatientId}
-              onChange={(e) => setPatientData(prev => ({ ...prev, id: e.target.value }))}
-              inputProps={{ style: { fontWeight: 800 } }}
-            />
-          </Grid>
-          <Grid item xs={12} sm={4} md={2.5}>
-            <Box sx={{ display: 'flex', gap: 0.5 }}>
-              <TextField
-                fullWidth
-                size="small"
-                label="Patient Name"
-                value={patientData.name || ''}
-                onChange={(e) => setPatientData(prev => ({ ...prev, name: e.target.value }))}
-                placeholder="Enter Patient Name"
-                sx={{ '& input': { fontWeight: 800, color: '#1e3a8a' } }}
-              />
-              <Tooltip title="Search Registered Patients">
-                <Button variant="contained" color="primary" onClick={onOpenSearchModal} sx={{ minWidth: 40, px: 1 }}>
-                  <SearchIcon fontSize="small" />
-                </Button>
-              </Tooltip>
-            </Box>
-          </Grid>
-          <Grid item xs={12} sm={3} md={2}>
-            <TextField
-              fullWidth
-              size="small"
-              label="Address"
-              placeholder="House / Street"
-              value={patientData.address || ''}
-              onChange={(e) => setPatientData(prev => ({ ...prev, address: e.target.value }))}
-            />
-          </Grid>
-          <Grid item xs={12} sm={3} md={1.8}>
-            <TextField
-              fullWidth
-              size="small"
-              label="Place"
-              placeholder="City / Place"
-              value={patientData.place || patientData.city || ''}
-              onChange={(e) => setPatientData(prev => ({ ...prev, place: e.target.value, city: e.target.value }))}
-              sx={{ '& input': { fontWeight: 700 } }}
-            />
-          </Grid>
-          <Grid item xs={6} sm={1.5} md={1.2}>
-            <TextField
-              fullWidth
-              select
-              size="small"
-              label="Gender"
-              value={patientData.gender || 'Male'}
-              onChange={(e) => setPatientData(prev => ({ ...prev, gender: e.target.value }))}
-            >
-              <MenuItem value="Male">MALE</MenuItem>
-              <MenuItem value="Female">FEMALE</MenuItem>
-              <MenuItem value="Other">OTHER</MenuItem>
-            </TextField>
-          </Grid>
-          <Grid item xs={6} sm={1.5} md={1}>
-            <TextField
-              fullWidth
-              size="small"
-              label="Age"
-              value={patientData.age || ''}
-              onChange={(e) => setPatientData(prev => ({ ...prev, age: e.target.value }))}
-            />
-          </Grid>
-          <Grid item xs={12} sm={3} md={2.2}>
-            <TextField
-              fullWidth
-              size="small"
-              label="Mobile No"
-              value={patientData.phone || ''}
-              onChange={(e) => setPatientData(prev => ({ ...prev, phone: e.target.value }))}
-              sx={{ '& input': { fontWeight: 700 } }}
-            />
-          </Grid>
-        </Grid>
+              {/* Row 2: Date, Test Type, Optometrist, Mobile No — each spans the same tracks
+                  as its Row 1 column group (Test No+Patient ID / Patient Name / Address+Place / Gender+Age) */}
+              <Box sx={{ display: 'grid', gridTemplateColumns: colTemplate, gap: 1.5, alignItems: 'center' }}>
+                <Box sx={{ gridColumn: { md: '1 / 3' } }}>
+                  <QuickDatePickerField
+                    label="Date"
+                    value={autoDate}
+                    onChange={(newDate) => setDiagnosis(prev => ({ ...prev, testDate: newDate }))}
+                    quickPresets={[
+                      { label: 'Today', type: 'today' },
+                      { label: 'Yesterday', type: 'yesterday' },
+                      { label: 'Tomorrow', type: 'tomorrow' }
+                    ]}
+                  />
+                </Box>
+                <Box sx={{ gridColumn: { md: '3 / 4' } }}>
+                  <TextField
+                    fullWidth
+                    select
+                    size="small"
+                    label="Test Type"
+                    value={diagnosis.testType || 'FREE EYE TEST'}
+                    onChange={(e) => setDiagnosis(prev => ({ ...prev, testType: e.target.value }))}
+                    sx={{ '& .MuiSelect-select': { fontWeight: 800 } }}
+                  >
+                    <MenuItem value="FREE EYE TEST">FREE EYE TEST</MenuItem>
+                    <MenuItem value="COMPREHENSIVE EYE TEST">COMPREHENSIVE EYE TEST</MenuItem>
+                    <MenuItem value="CONTACT LENS EVALUATION">CONTACT LENS EVALUATION</MenuItem>
+                    <MenuItem value="ROUTINE REFRACTION">ROUTINE REFRACTION</MenuItem>
+                  </TextField>
+                </Box>
+                <Box sx={{ gridColumn: { md: '4 / 6' } }}>
+                  <TextField
+                    fullWidth
+                    select
+                    size="small"
+                    label="Optometrist"
+                    value={patientData.assignedOptometrist || ''}
+                    onChange={(e) => setPatientData(prev => ({ ...prev, assignedOptometrist: e.target.value }))}
+                  >
+                    <MenuItem value="">-- Select Optometrist --</MenuItem>
+                    {doctorsList.map((doc, i) => (
+                      <MenuItem key={i} value={doc}>{doc}</MenuItem>
+                    ))}
+                  </TextField>
+                </Box>
+                <Box sx={{ gridColumn: { md: '6 / 8' } }}>
+                  <Box sx={{ display: 'flex', gap: 0.5 }}>
+                    <TextField
+                      fullWidth
+                      size="small"
+                      label="Mobile No"
+                      value={patientData.phone || ''}
+                      onChange={(e) => setPatientData(prev => ({ ...prev, phone: e.target.value }))}
+                      inputProps={{ id: 'eyetest-mobile-input' }}
+                      sx={{ '& input': { fontWeight: 700 } }}
+                    />
+                    <Button
+                      variant="contained" color="success" size="small" startIcon={<SaveIcon fontSize="small" />}
+                      onClick={onSaveDraft}
+                      sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 2, whiteSpace: 'nowrap', px: 2 }}
+                    >
+                      Save
+                    </Button>
+                  </Box>
+                </Box>
+              </Box>
+            </>
+          );
+        })()}
       </Paper>
 
       {/* 👁️ SECTION 2: Objective & Clinical Measurements Grid */}
@@ -752,6 +778,32 @@ export default function SingleScreenEyeTestForm({
               onChange={(e) => setDiagnosis(prev => ({ ...prev, remarks: e.target.value }))}
             />
           </Grid>
+          <Grid item xs={12} sm={4}>
+            <QuickDatePickerField
+              label="Next Visit"
+              value={diagnosis.nextReviewDate || nextVisitDate || ''}
+              baseDate={autoDate}
+              showChips={true}
+              onChange={(newDate) => {
+                setDiagnosis(prev => ({ ...prev, nextReviewDate: newDate }));
+                if (setNextVisitDate) setNextVisitDate(newDate);
+              }}
+              quickPresets={[
+                { label: 'Today', type: 'today' },
+                { label: '+1 Week', type: 'weeks', amount: 1 },
+                { label: '+1 Month', type: 'months', amount: 1 },
+                { label: '+3 Months', type: 'months', amount: 3 },
+                { label: '+6 Months (Recommended)', type: 'months', amount: 6 },
+                { label: '+1 Year', type: 'years', amount: 1 },
+              ]}
+              chipPresets={[
+                { label: '+1M', type: 'months', amount: 1 },
+                { label: '+3M', type: 'months', amount: 3 },
+                { label: '+6M', type: 'months', amount: 6 },
+                { label: '+1Y', type: 'years', amount: 1 },
+              ]}
+            />
+          </Grid>
         </Grid>
       </Paper>
 
@@ -801,10 +853,10 @@ export default function SingleScreenEyeTestForm({
 
           <Stack direction="row" spacing={1} alignItems="center">
             <TextField
-              size="small" placeholder="Search Name & Mobile..."
+              size="small" placeholder="Search Test No, Patient ID, Name, Gender, Optometrist..."
               value={historySearch}
               onChange={(e) => setHistorySearch(e.target.value)}
-              sx={{ width: 220 }}
+              sx={{ width: 300 }}
             />
             <QuickDatePickerField
               label="From"
@@ -841,6 +893,8 @@ export default function SingleScreenEyeTestForm({
                 <TableCell>Patient</TableCell>
                 <TableCell>Age/Gender</TableCell>
                 <TableCell>Mobile No</TableCell>
+                <TableCell>Address</TableCell>
+                <TableCell>Place</TableCell>
                 <TableCell>Optometrist</TableCell>
                 <TableCell align="center">Actions</TableCell>
               </TableRow>
@@ -848,7 +902,7 @@ export default function SingleScreenEyeTestForm({
             <TableBody>
               {filteredHistory.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={8} align="center" sx={{ py: 3, color: 'text.secondary' }}>
+                  <TableCell colSpan={10} align="center" sx={{ py: 3, color: 'text.secondary' }}>
                     No recent examinations saved in database. Click "Save Clinical Record" to log tests.
                   </TableCell>
                 </TableRow>
@@ -856,16 +910,34 @@ export default function SingleScreenEyeTestForm({
                 filteredHistory.map((row, idx) => (
                   <TableRow key={idx} hover sx={{ cursor: 'pointer' }} onClick={() => onSelectExamFromHistory && onSelectExamFromHistory(row)}>
                     <TableCell sx={{ fontWeight: 800 }}>#{row.testNo || idx + 1}</TableCell>
-                    <TableCell>{row.date || '2026-07-22'}</TableCell>
-                    <TableCell sx={{ fontWeight: 700 }}>{row.patientId || 'P-100'}</TableCell>
-                    <TableCell sx={{ fontWeight: 800, color: 'primary.main' }}>{row.name || 'Patient'}</TableCell>
-                    <TableCell>{row.age || '30'} / {row.gender || 'Male'}</TableCell>
+                    <TableCell>{row.date || '—'}</TableCell>
+                    <TableCell sx={{ fontWeight: 700 }}>{row.patientId || '—'}</TableCell>
+                    <TableCell sx={{ fontWeight: 800, color: 'primary.main' }}>{row.name || '—'}</TableCell>
+                    <TableCell>{row.age || '—'} / {row.gender || '—'}</TableCell>
                     <TableCell>{row.phone || 'N/A'}</TableCell>
+                    <TableCell>{row.address || row.patientData?.address || '—'}</TableCell>
+                    <TableCell>{row.place || row.patientData?.place || row.patientData?.city || '—'}</TableCell>
                     <TableCell>{row.assignedOptometrist || row.optometrist || row.doctor || '—'}</TableCell>
                     <TableCell align="center">
-                      <Button size="small" variant="outlined" onClick={(e) => { e.stopPropagation(); onSelectExamFromHistory(row); }}>
-                        Load Exam
-                      </Button>
+                      <Stack direction="row" spacing={0.75} justifyContent="center">
+                        <Button size="small" variant="outlined" onClick={(e) => { e.stopPropagation(); onSelectExamFromHistory(row); }}>
+                          Load Exam
+                        </Button>
+                        <Tooltip title="Edit">
+                          <IconButton size="small" color="primary" onClick={(e) => { e.stopPropagation(); onSelectExamFromHistory(row); }}>
+                            <EditIcon fontSize="small" />
+                          </IconButton>
+                        </Tooltip>
+                        <Tooltip title="Print Invoice">
+                          <IconButton
+                            size="small"
+                            color="secondary"
+                            onClick={(e) => { e.stopPropagation(); setInvoicePrintMenu({ anchorEl: e.currentTarget, row }); }}
+                          >
+                            <PrintIcon fontSize="small" />
+                          </IconButton>
+                        </Tooltip>
+                      </Stack>
                     </TableCell>
                   </TableRow>
                 ))
@@ -874,6 +946,22 @@ export default function SingleScreenEyeTestForm({
           </Table>
         </TableContainer>
       </Paper>
+
+      {/* Paper size choice for the invoice print icon above */}
+      <Menu
+        anchorEl={invoicePrintMenu.anchorEl}
+        open={Boolean(invoicePrintMenu.anchorEl)}
+        onClose={() => setInvoicePrintMenu({ anchorEl: null, row: null })}
+      >
+        <MenuItem onClick={() => { handlePrintInvoice(invoicePrintMenu.row, 'A4'); setInvoicePrintMenu({ anchorEl: null, row: null }); }}>
+          <ListItemIcon><PrintIcon fontSize="small" /></ListItemIcon>
+          <ListItemText>Print A4</ListItemText>
+        </MenuItem>
+        <MenuItem onClick={() => { handlePrintInvoice(invoicePrintMenu.row, 'A5'); setInvoicePrintMenu({ anchorEl: null, row: null }); }}>
+          <ListItemIcon><PrintIcon fontSize="small" /></ListItemIcon>
+          <ListItemText>Print A5</ListItemText>
+        </MenuItem>
+      </Menu>
 
       {/* 🏥 Orthoptics Examination Modal */}
       <OrthopticsModal

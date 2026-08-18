@@ -1,9 +1,12 @@
-from rest_framework import viewsets, permissions
+from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
+from rest_framework.response import Response
 from rest_framework.serializers import ModelSerializer, SerializerMethodField
 from rest_framework.pagination import PageNumberPagination
+from django.db import transaction, IntegrityError
 from django.db.models import Q
-from .models import Product
+from .models import Product, BarcodeHistory
+from .barcode_utils import reserve_barcodes
 
 
 class ProductPagination(PageNumberPagination):
@@ -90,6 +93,11 @@ class ProductSerializer(ModelSerializer):
     def get_rack(self, obj):
         return obj.rack_location or 'A1'
 
+    def validate_barcode(self, value):
+        # Normalize blank barcode to None so two blank products don't collide
+        # under the unique constraint (NULLs are distinct; empty strings aren't).
+        return value or None
+
     def create(self, validated_data):
         request = self.context.get('request')
         input_data = request.data if request else {}
@@ -131,6 +139,10 @@ class ProductViewSet(viewsets.ModelViewSet):
                 Q(barcode__icontains=search) | Q(brand_name__icontains=search) |
                 Q(category_name__icontains=search) | Q(supplier_name__icontains=search)
             )
+        has_barcode = self.request.query_params.get('has_barcode')
+        if has_barcode is not None:
+            missing = Q(barcode__isnull=True) | Q(barcode='')
+            qs = qs.filter(missing) if has_barcode.lower() in ('false', '0') else qs.exclude(missing)
         return qs
 
     def paginate_queryset(self, queryset):
@@ -139,11 +151,136 @@ class ProductViewSet(viewsets.ModelViewSet):
         return super().paginate_queryset(queryset)
 
     def destroy(self, request, *args, **kwargs):
-        from rest_framework import status
-        from rest_framework.response import Response
         instance = self.get_object()
         instance.hard_delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    def perform_create(self, serializer):
+        super().perform_create(serializer)
+        if serializer.instance.barcode:
+            BarcodeHistory.objects.create(
+                product=serializer.instance,
+                old_barcode=None,
+                new_barcode=serializer.instance.barcode,
+                changed_by=self.request.data.get('changed_by') or 'Administrator',
+                reason=self.request.data.get('barcode_change_reason') or 'Created with product'
+            )
+
+    def perform_update(self, serializer):
+        old_barcode = serializer.instance.barcode
+        super().perform_update(serializer)
+        new_barcode = serializer.instance.barcode
+        if old_barcode != new_barcode:
+            BarcodeHistory.objects.create(
+                product=serializer.instance,
+                old_barcode=old_barcode,
+                new_barcode=new_barcode,
+                changed_by=self.request.data.get('changed_by') or 'Administrator',
+                reason=self.request.data.get('barcode_change_reason') or ('Cleared' if not new_barcode else 'Manual update')
+            )
+
+    @action(detail=True, methods=['post'], url_path='generate_barcode')
+    def generate_barcode(self, request, pk=None):
+        product = self.get_object()
+        force = bool(request.data.get('force'))
+
+        if product.barcode and not force:
+            return Response(
+                {'detail': 'Product already has a barcode. Pass force=true to regenerate.'},
+                status=status.HTTP_409_CONFLICT
+            )
+
+        old_barcode = product.barcode
+        reason = request.data.get('reason') or ('Regenerated' if old_barcode else 'Initial generation')
+        changed_by = request.data.get('changed_by') or 'Administrator'
+
+        new_barcode = None
+        last_error = None
+        for _attempt in range(3):
+            candidate = reserve_barcodes(count=1)[0]
+            try:
+                with transaction.atomic():
+                    product.barcode = candidate
+                    product.save(update_fields=['barcode'])
+                new_barcode = candidate
+                break
+            except IntegrityError as exc:
+                last_error = exc
+                continue
+
+        if new_barcode is None:
+            return Response(
+                {'detail': f'Could not generate a unique barcode: {last_error}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        BarcodeHistory.objects.create(
+            product=product, old_barcode=old_barcode, new_barcode=new_barcode,
+            changed_by=changed_by, reason=reason
+        )
+        return Response(ProductSerializer(product, context={'request': request}).data)
+
+    @action(detail=False, methods=['post'], url_path='generate_missing_barcodes')
+    def generate_missing_barcodes(self, request):
+        product_ids = request.data.get('product_ids')
+        qs = Product.objects.filter(Q(barcode__isnull=True) | Q(barcode=''))
+        if product_ids:
+            qs = qs.filter(id__in=product_ids)
+        products = list(qs)
+
+        if not products:
+            return Response({'generated': 0, 'products': []})
+
+        codes = reserve_barcodes(count=len(products))
+        changed_by = request.data.get('changed_by') or 'Administrator'
+        history_rows = []
+        for product, code in zip(products, codes):
+            product.barcode = code
+            history_rows.append(BarcodeHistory(
+                product=product, old_barcode=None, new_barcode=code,
+                changed_by=changed_by, reason='Bulk generation'
+            ))
+
+        with transaction.atomic():
+            Product.objects.bulk_update(products, ['barcode'])
+            BarcodeHistory.objects.bulk_create(history_rows)
+
+        return Response({
+            'generated': len(products),
+            'products': ProductSerializer(products, many=True, context={'request': request}).data
+        })
+
+    @action(detail=False, methods=['post'], url_path='next_barcode_candidate')
+    def next_barcode_candidate(self, request):
+        code = reserve_barcodes(count=1)[0]
+        return Response({'barcode': code})
+
+    @action(detail=False, methods=['get'], url_path='check_barcode')
+    def check_barcode(self, request):
+        barcode = (request.query_params.get('barcode') or '').strip()
+        exclude_id = request.query_params.get('exclude_id')
+        if not barcode:
+            return Response({'exists': False, 'product_name': None})
+        qs = Product.objects.filter(barcode=barcode)
+        if exclude_id:
+            qs = qs.exclude(id=exclude_id)
+        existing = qs.first()
+        return Response({'exists': bool(existing), 'product_name': existing.name if existing else None})
+
+    @action(detail=True, methods=['get'], url_path='barcode_history')
+    def barcode_history(self, request, pk=None):
+        product = self.get_object()
+        history = product.barcode_history.all()
+        return Response([
+            {
+                'id': str(h.id),
+                'old_barcode': h.old_barcode,
+                'new_barcode': h.new_barcode,
+                'changed_by': h.changed_by,
+                'reason': h.reason,
+                'created_at': h.created_at,
+            } for h in history
+        ])
 
     @action(detail=False, methods=['delete', 'post'], url_path='clear-all')
     def clear_all(self, request):

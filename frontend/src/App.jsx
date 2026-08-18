@@ -39,6 +39,13 @@ function MainLayout() {
       // Exclude textareas so multiline clinical notes can use Enter for line breaks
       if (!target || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
 
+      // The Optical Eye Test screen (single-screen + wizard layouts) has its own dedicated,
+      // field-order-aware Enter-key handler. Layering this generic handler on top of it caused
+      // a real bug: on the last input of a card, this handler's "find a contained/submit-looking
+      // button" fallback would grab whichever contained button appeared first in that card (e.g.
+      // the "Search Registered Patients" icon button) instead of the intended Save action.
+      if (target.closest('#optical-single-form-container') || target.closest('#optical-step-container')) return;
+
       // 1. Inside a Modal Dialog
       const activeDialog = target.closest('.MuiDialog-root') || document.querySelector('.MuiDialog-root');
       if (activeDialog) {
@@ -227,6 +234,7 @@ function MainLayout() {
                 <Route path="/admin/doctors" element={<Administration />} />
                 <Route path="/admin/branches" element={<Administration />} />
                 <Route path="/admin/excel-import" element={<Administration />} />
+                <Route path="/admin/barcode-printing" element={<Administration />} />
                 <Route path="/admin/roles" element={<Administration />} />
                 <Route path="/admin/permissions" element={<Administration />} />
                 <Route path="/admin/audit" element={<Administration />} />

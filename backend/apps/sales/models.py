@@ -1,11 +1,32 @@
 from django.db import models
 from apps.common.models import BaseUUIDModel
 
+
+class PatientCodeSequence(models.Model):
+    """Per-prefix atomic counter for human-readable Customer.patient_code values
+    (see patient_utils.reserve_patient_code). Mirrors apps.products.BarcodeSequence."""
+    prefix = models.CharField(max_length=10, unique=True)
+    last_number = models.BigIntegerField(default=1000)
+
+    def __str__(self):
+        return f"{self.prefix} -> {self.last_number}"
+
+
 class Customer(BaseUUIDModel):
+    # Human-readable id (e.g. "P-1001") assigned atomically on first save — this is the id
+    # every frontend page (Eye Test, Appointments, Patient History) actually matches patients
+    # on, since the real primary key is an opaque UUID. Previously each page independently
+    # guessed the "next" P-xxxx number from whatever local data it happened to have loaded,
+    # which let two different patients collide on the same code; this field/sequence makes
+    # that guess a single, backend-guaranteed-unique source of truth instead.
+    patient_code = models.CharField(max_length=20, unique=True, blank=True, null=True, db_index=True)
     name = models.CharField(max_length=150)
     email = models.EmailField(blank=True, null=True)
     phone = models.CharField(max_length=20, blank=True, null=True)
+    age = models.CharField(max_length=10, blank=True, null=True)
+    gender = models.CharField(max_length=20, blank=True, null=True)
     address = models.TextField(blank=True, null=True)
+    place = models.CharField(max_length=150, blank=True, null=True)
     outstanding_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
     credit_limit = models.DecimalField(max_digits=12, decimal_places=2, default=5000.0)
 
@@ -22,11 +43,23 @@ class Invoice(BaseUUIDModel):
         ('CANCELLED', 'Cancelled'),
     ]
 
-    invoice_number = models.CharField(max_length=50, unique=True)
-    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='invoices')
+    # blank=True: the serializer must not require this upfront — InvoiceViewSet.perform_create
+    # auto-generates one when omitted, but DRF's own required-field validation runs before
+    # perform_create is ever reached, so without blank=True that auto-generation was unreachable.
+    invoice_number = models.CharField(max_length=50, unique=True, blank=True)
+    # Nullable: POS Billing genuinely supports anonymous walk-in sales (buy sunglasses, no
+    # patient record needed) — a required FK here would force fabricating a fake Customer row
+    # for every such sale just to satisfy the constraint. SET_NULL (not CASCADE) so deleting a
+    # Customer later doesn't wipe out their purchase history.
+    customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name='invoices')
     invoice_date = models.DateField()
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='UNPAID')
-    
+    # Separate from `status` on purpose: `status` tracks PAYMENT state (choice-restricted to
+    # DRAFT/PAID/PARTIAL/UNPAID/CANCELLED) while the Orders tab tracks LAB/FULFILLMENT progress
+    # (Order Received -> In Lab Processing -> ... -> Delivered) — an unrelated axis. No choices=
+    # restriction here since OrdersManagerView.jsx owns and can extend this workflow's stage list.
+    fulfillment_status = models.CharField(max_length=30, blank=True, null=True)
+
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
     tax_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
     discount_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
@@ -41,7 +74,13 @@ class Invoice(BaseUUIDModel):
 
 class InvoiceItem(BaseUUIDModel):
     invoice = models.ForeignKey(Invoice, on_delete=models.CASCADE, related_name='items')
-    product = models.ForeignKey('products.Product', on_delete=models.CASCADE)
+    # Nullable + SET_NULL (not the original required CASCADE): POS/New Sale both support ad-hoc
+    # "custom charge" line items (frame repair, one-off service, ...) that were never in the
+    # Product catalog, so there's no Product row to point at. `description` snapshots the name
+    # either way, so the line item still reads correctly even when product is None or later
+    # deleted from the catalog.
+    product = models.ForeignKey('products.Product', on_delete=models.SET_NULL, null=True, blank=True)
+    description = models.CharField(max_length=255, blank=True, null=True)
     quantity = models.IntegerField()
     unit_price = models.DecimalField(max_digits=12, decimal_places=2)
     tax_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0.0)  # Percentage
@@ -49,10 +88,39 @@ class InvoiceItem(BaseUUIDModel):
     subtotal = models.DecimalField(max_digits=12, decimal_places=2)
 
     def __str__(self):
-        return f"{self.product.name} ({self.quantity}pcs)"
+        return f"{self.description or (self.product.name if self.product else 'Item')} ({self.quantity}pcs)"
+
+
+class Payment(BaseUUIDModel):
+    # Retail payment receipts — distinct from Invoice.paid_amount (a running total on the
+    # invoice itself) since a single invoice can be settled across multiple receipts over time
+    # (advance at booking, balance on collection, etc.), and the Payments tab needs to list each
+    # one individually.
+    receipt_no = models.CharField(max_length=50, unique=True, blank=True, null=True, db_index=True)
+    invoice = models.ForeignKey(Invoice, on_delete=models.SET_NULL, null=True, blank=True, related_name='payments')
+    customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name='payments')
+    # Denormalized snapshot so the receipt still displays correctly even if the Customer is
+    # later edited/removed, same rationale as Appointment.patient_name.
+    customer_name = models.CharField(max_length=150, blank=True, null=True)
+    amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
+    method = models.CharField(max_length=50, blank=True, null=True)
+    payment_date = models.DateField()
+    status = models.CharField(max_length=20, default='Completed')
+    notes = models.TextField(blank=True, null=True)
+
+    class Meta:
+        ordering = ['-payment_date', '-created_at']
+
+    def __str__(self):
+        return f"{self.receipt_no or self.id} - {self.customer_name} (₹{self.amount})"
 
 
 class EyeExamination(BaseUUIDModel):
+    # Real link to the Customer record (in addition to the legacy patient_id/patient_name
+    # snapshot fields below, kept for backward compatibility with already-saved exams and for
+    # walk-ins examined before a Customer row exists yet).
+    customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name='eye_examinations')
+
     # Patient Profile
     patient_id = models.CharField(max_length=50)
     patient_name = models.CharField(max_length=150)
@@ -199,6 +267,49 @@ class EyeExamination(BaseUUIDModel):
 
     def __str__(self):
         return f"Exam for {self.patient_name} on {self.examination_date.date() if self.examination_date else 'N/A'}"
+
+
+class Appointment(BaseUUIDModel):
+    # Free-text, not an enforced choices= enum: the Appointments.jsx UI already has its own
+    # richer status/priority vocabulary ("Booked", "Standard Booking", "VIP Patient", ...) and
+    # a DRF ChoiceField would 400-reject anything outside a fixed enum. Kept as plain CharFields
+    # so the frontend stays the single source of truth for these labels.
+    appointment_code = models.CharField(max_length=30, unique=True, blank=True, null=True, db_index=True)
+    token = models.CharField(max_length=20, blank=True, null=True)
+
+    # Real link to the patient record — the primary purpose of this model existing at all is
+    # so Eye Test / Appointments / Patient History can all resolve back to the SAME Customer
+    # row instead of three independent, drifting copies of the same person's details.
+    customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name='appointments')
+    # Denormalized snapshot, kept in sync with customer at booking time — lets the appointment
+    # keep showing correctly even if the linked Customer is later edited or removed, and covers
+    # walk-in bookings taken before a full Customer record exists.
+    patient_name = models.CharField(max_length=150)
+    # Assigned at booking time (front-desk can tell the patient their number right away) and
+    # carried through to the Eye Test form when "Start Eye Test" is clicked from this
+    # appointment, so it doesn't need to be re-derived/re-typed there.
+    test_no = models.CharField(max_length=20, blank=True, null=True)
+    phone = models.CharField(max_length=20, blank=True, null=True)
+    email = models.CharField(max_length=100, blank=True, null=True)
+    age = models.CharField(max_length=10, blank=True, null=True)
+    gender = models.CharField(max_length=20, blank=True, null=True)
+
+    doctor = models.CharField(max_length=150, blank=True, null=True)
+    appointment_date = models.DateField()
+    appointment_time = models.CharField(max_length=20, blank=True, null=True)
+    appointment_type = models.CharField(max_length=50, blank=True, null=True)
+    branch = models.CharField(max_length=100, blank=True, null=True)
+    room = models.CharField(max_length=50, blank=True, null=True)
+    priority = models.CharField(max_length=40, default='Standard Booking')
+    status = models.CharField(max_length=20, default='Booked')
+    send_whatsapp = models.BooleanField(default=False)
+    notes = models.TextField(blank=True, null=True)
+
+    class Meta:
+        ordering = ['-appointment_date', '-created_at']
+
+    def __str__(self):
+        return f"{self.patient_name} - {self.appointment_date} ({self.status})"
 
 
 # ==========================================

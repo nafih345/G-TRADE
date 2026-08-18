@@ -3,10 +3,10 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useDebounce } from '../hooks/useDebounce';
 import { 
   Box, Card, CardContent, Typography, Button, Tab, Tabs,
-  Grid, Table, TableBody, TableCell, TableContainer, 
-  TableHead, TableRow, Paper, Chip, Dialog, 
-  DialogTitle, DialogContent, DialogActions, TextField, 
-  MenuItem, Stack, IconButton, Autocomplete, Alert
+  Grid, Table, TableBody, TableCell, TableContainer,
+  TableHead, TableRow, Paper, Chip, Dialog,
+  DialogTitle, DialogContent, DialogActions, TextField,
+  MenuItem, Stack, IconButton, Autocomplete, Alert, Checkbox
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -22,17 +22,20 @@ import CategoryManagementView from '../components/inventory/CategoryManagementVi
 import BrandManagementView from '../components/inventory/BrandManagementView';
 import LensManagementView from '../components/inventory/LensManagementView';
 import ConfirmActionDialog from '../components/common/ConfirmActionDialog';
+import BarcodePrintDialog from '../components/inventory/BarcodePrintDialog';
+import BarcodeManageDialog from '../components/inventory/BarcodeManageDialog';
+import BarcodeSection from '../components/inventory/BarcodeSection';
 
 const initialProducts = [];
 
 const opticalCategories = [
-  'Frames', 'Prescription Lenses', 'Sunglasses', 'Contact Lenses', 
-  'Reading Glasses', 'Accessories', 'Lens Solutions', 'Cleaning Kits', 
+  'Frames', 'Prescription Lenses', 'Sunglasses', 'Contact Lenses',
+  'Reading Glasses', 'Accessories', 'Lens Solutions', 'Cleaning Kits',
   'Cases', 'Eye Drops'
 ];
 
 const opticalBrands = [
-  'RayBan', 'Oakley', 'Essilor', 'Zeiss', 'Hoya', 'Crizal', 
+  'RayBan', 'Oakley', 'Essilor', 'Zeiss', 'Hoya', 'Crizal',
   'Kodak', 'Bausch + Lomb', 'Johnson & Johnson'
 ];
 
@@ -64,8 +67,12 @@ export default function Products() {
   };
   const [open, setOpen] = useState(false);
   const [adjustOpen, setAdjustOpen] = useState(false);
-  const [barcodeDialog, setBarcodeDialog] = useState(false);
-  const [selectedProduct, setSelectedProduct] = useState(null);
+  const [barcodePrintOpen, setBarcodePrintOpen] = useState(false);
+  const [barcodePrintTargets, setBarcodePrintTargets] = useState([]);
+  const [selectedProductIds, setSelectedProductIds] = useState(new Set());
+  const [manageBarcodeOpen, setManageBarcodeOpen] = useState(false);
+  const [manageBarcodeProduct, setManageBarcodeProduct] = useState(null);
+  const [bulkGenerating, setBulkGenerating] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('All');
   
@@ -130,7 +137,7 @@ export default function Products() {
           const formatted = res.data.map(p => ({
             id: String(p.id),
             code: p.sku || p.code || `PROD-${p.id}`,
-            barcode: p.barcode || '88019482',
+            barcode: p.barcode || '',
             name: p.name || 'Unnamed Item',
             brand: p.brand || 'Generic',
             supplier: p.supplier || '',
@@ -189,13 +196,14 @@ export default function Products() {
       purchasePrice: parseFloat(newProduct.purchasePrice) || 0,
       sellingPrice: parseFloat(newProduct.sellingPrice) || 0,
       stock: parseInt(newProduct.stock) || 0,
-      barcode: newProduct.barcode || String(Math.floor(10000000 + Math.random() * 90000000))
+      barcode: newProduct.barcode || ''
     };
-    
+
     try {
       await axios.post('/api/products/items/', {
         name: productToAdd.name,
         sku: productToAdd.code,
+        barcode: productToAdd.barcode,
         price: productToAdd.sellingPrice,
         cost_price: productToAdd.purchasePrice,
         stock: productToAdd.stock,
@@ -220,8 +228,54 @@ export default function Products() {
   };
 
   const handleOpenBarcode = (product) => {
-    setSelectedProduct(product);
-    setBarcodeDialog(true);
+    setManageBarcodeProduct(product);
+    setManageBarcodeOpen(true);
+  };
+
+  const handleBulkPrintBarcodes = () => {
+    const targets = filteredProducts.filter(p => selectedProductIds.has(p.id));
+    setBarcodePrintTargets(targets);
+    setBarcodePrintOpen(true);
+  };
+
+  const handleBulkGenerateBarcodes = async () => {
+    const targetIds = filteredProducts.filter(p => selectedProductIds.has(p.id) && !p.barcode).map(p => p.id);
+    if (targetIds.length === 0) {
+      alert('All selected products already have a barcode.');
+      return;
+    }
+    setBulkGenerating(true);
+    try {
+      const res = await axios.post('/api/products/items/generate_missing_barcodes/', { product_ids: targetIds });
+      const byId = new Map((res.data.products || []).map(p => [String(p.id), p.barcode]));
+      setProducts(prev => prev.map(p => byId.has(p.id) ? { ...p, barcode: byId.get(p.id) } : p));
+      alert(`Generated barcodes for ${res.data.generated} product(s).`);
+    } catch (e) {
+      alert('Could not generate barcodes. Please try again.');
+    } finally {
+      setBulkGenerating(false);
+    }
+  };
+
+  const handleProductBarcodeUpdated = (productId, newBarcode) => {
+    setProducts(prev => prev.map(p => p.id === productId ? { ...p, barcode: newBarcode } : p));
+    try {
+      const local = JSON.parse(localStorage.getItem('optical_inventory_items') || '[]');
+      const localUpdated = local.map(p => p.id === productId ? { ...p, barcode: newBarcode } : p);
+      localStorage.setItem('optical_inventory_items', JSON.stringify(localUpdated));
+    } catch (e) {}
+  };
+
+  const toggleSelectProduct = (id) => {
+    setSelectedProductIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAllVisible = (checked) => {
+    setSelectedProductIds(checked ? new Set(filteredProducts.map(p => p.id)) : new Set());
   };
 
   const handleOpenAdjustment = (product) => {
@@ -379,6 +433,27 @@ export default function Products() {
         </Box>
         
         <Box sx={{ display: 'flex', gap: 1 }}>
+          {selectedProductIds.size > 0 && (
+            <>
+              <Button
+                variant="outlined"
+                startIcon={<SparkleIcon />}
+                onClick={handleBulkGenerateBarcodes}
+                disabled={bulkGenerating}
+                sx={{ fontWeight: 800 }}
+              >
+                {bulkGenerating ? 'Generating...' : 'Generate Missing Barcodes'}
+              </Button>
+              <Button
+                variant="contained"
+                startIcon={<BarcodeIcon />}
+                onClick={handleBulkPrintBarcodes}
+                sx={{ backgroundColor: '#7c3aed', '&:hover': { backgroundColor: '#6d28d9' }, fontWeight: 800 }}
+              >
+                Bulk Print Barcodes ({selectedProductIds.size})
+              </Button>
+            </>
+          )}
           <Button variant="outlined" color="error" startIcon={<DeleteIcon />} onClick={handleClearEntireDatabase} sx={{ fontWeight: 800 }}>
             Clear Database
           </Button>
@@ -448,6 +523,14 @@ export default function Products() {
                   <Table size="small">
                     <TableHead sx={{ backgroundColor: 'rgba(0,0,0,0.02)' }}>
                       <TableRow>
+                        <TableCell padding="checkbox">
+                          <Checkbox
+                            size="small"
+                            indeterminate={selectedProductIds.size > 0 && selectedProductIds.size < filteredProducts.length}
+                            checked={filteredProducts.length > 0 && selectedProductIds.size === filteredProducts.length}
+                            onChange={(e) => toggleSelectAllVisible(e.target.checked)}
+                          />
+                        </TableCell>
                         <TableCell sx={{ fontWeight: 700 }}>Code / Barcode</TableCell>
                         <TableCell sx={{ fontWeight: 700 }}>Name & Brand</TableCell>
                         <TableCell sx={{ fontWeight: 700 }}>Category</TableCell>
@@ -461,7 +544,7 @@ export default function Products() {
                     <TableBody>
                       {filteredProducts.length === 0 ? (
                         <TableRow>
-                          <TableCell colSpan={8} align="center" sx={{ py: 8 }}>
+                          <TableCell colSpan={9} align="center" sx={{ py: 8 }}>
                             <Typography variant="body2" color="text.secondary" fontWeight={500}>
                               {searchQuery ? "No matching inventory items found." : "No inventory products currently found in the database."}
                             </Typography>
@@ -485,7 +568,14 @@ export default function Products() {
                         filteredProducts.map((product) => {
                           const isLowStock = product.stock <= 10;
                           return (
-                            <TableRow key={product.id} hover>
+                            <TableRow key={product.id} hover selected={selectedProductIds.has(product.id)}>
+                              <TableCell padding="checkbox">
+                                <Checkbox
+                                  size="small"
+                                  checked={selectedProductIds.has(product.id)}
+                                  onChange={() => toggleSelectProduct(product.id)}
+                                />
+                              </TableCell>
                               <TableCell>
                                 <Typography variant="body2" fontWeight={600} color="primary.main">{product.code}</Typography>
                                 <Typography variant="caption" color="text.secondary">{product.barcode}</Typography>
@@ -521,7 +611,11 @@ export default function Products() {
                               </TableCell>
                               <TableCell align="center">
                                 <Stack direction="row" spacing={0.5} justifyContent="center">
-                                  <IconButton color="primary" onClick={() => handleOpenBarcode(product)}>
+                                  <IconButton
+                                    color={product.barcode ? 'primary' : 'warning'}
+                                    onClick={() => handleOpenBarcode(product)}
+                                    title={product.barcode ? 'Manage Barcode' : 'Generate Barcode'}
+                                  >
                                     <BarcodeIcon fontSize="small" />
                                   </IconButton>
                                   <IconButton color="secondary" onClick={() => handleOpenAdjustment(product)}>
@@ -628,53 +722,38 @@ export default function Products() {
           )}
 
           <Grid container spacing={2}>
-            
-            {/* ROW 1: Category | Code/SKU | Barcode */}
-            <Grid item xs={12} sm={4}>
-              <TextField 
-                select 
-                label="Product Category" 
-                fullWidth 
-                value={newProduct.category} 
+
+            {/* ROW 1: Category | Code/SKU */}
+            <Grid item xs={12} sm={6}>
+              <TextField
+                select
+                label="Product Category"
+                fullWidth
+                value={newProduct.category}
                 onChange={(e) => setNewProduct({...newProduct, category: e.target.value})}
               >
                 {opticalCategories.map(cat => <MenuItem key={cat} value={cat}>{cat}</MenuItem>)}
               </TextField>
             </Grid>
 
-            <Grid item xs={12} sm={4}>
-              <TextField 
-                label="Product Code / SKU" 
-                fullWidth 
+            <Grid item xs={12} sm={6}>
+              <TextField
+                label="Product Code / SKU"
+                fullWidth
                 placeholder="e.g. RF-102 or LNS-156"
-                value={newProduct.code} 
-                onChange={(e) => setNewProduct({...newProduct, code: e.target.value})} 
+                value={newProduct.code}
+                onChange={(e) => setNewProduct({...newProduct, code: e.target.value})}
               />
             </Grid>
 
-            <Grid item xs={12} sm={4}>
-              <TextField 
-                label="Barcode / EAN Code" 
-                fullWidth 
-                placeholder="Scan or type barcode"
-                value={newProduct.barcode} 
-                onChange={(e) => setNewProduct({...newProduct, barcode: e.target.value})}
-                InputProps={{
-                  endAdornment: (
-                    <Stack direction="row" spacing={0.5} alignItems="center">
-                      <IconButton color="primary" size="small" title="Scan Barcode" onClick={() => setScanDialogOpen(true)}>
-                        <BarcodeIcon fontSize="small" />
-                      </IconButton>
-                      <Button 
-                        size="small" 
-                        sx={{ fontSize: '0.65rem', minWidth: 'auto', px: 1 }}
-                        onClick={() => setNewProduct({...newProduct, barcode: String(Math.floor(88000000 + Math.random() * 11000000))})}
-                      >
-                        Auto
-                      </Button>
-                    </Stack>
-                  )
-                }}
+            <Grid item xs={12}>
+              <BarcodeSection
+                mode="create"
+                value={newProduct.barcode}
+                onChange={(val) => setNewProduct({ ...newProduct, barcode: val })}
+                productName={newProduct.name}
+                productCode={newProduct.code}
+                productPrice={parseFloat(newProduct.sellingPrice) || 0}
               />
             </Grid>
 
@@ -927,28 +1006,20 @@ export default function Products() {
         </DialogContent>
       </Dialog>
 
-      {/* Barcode Viewer Dialog */}
-      <Dialog open={barcodeDialog} onClose={() => setBarcodeDialog(false)}>
-        <DialogTitle sx={{ fontWeight: 700 }}>Barcode Generator & Label</DialogTitle>
-        <DialogContent dividers sx={{ textAlign: 'center', p: 4 }}>
-          {selectedProduct && (
-            <Box>
-              <Typography variant="subtitle1" fontWeight={700}>{selectedProduct.brand} - {selectedProduct.name}</Typography>
-              <Typography variant="body2" sx={{ mb: 3 }}>Code: {selectedProduct.code} | Price: ${selectedProduct.sellingPrice}</Typography>
-              {/* Visual simulated Barcode */}
-              <Box sx={{ border: '2px solid black', p: 2, display: 'inline-block', letterSpacing: 4, fontFamily: 'monospace', fontWeight: 'bold', mb: 2 }}>
-                |||| | ||||| | || | ||| ||<br />
-                {selectedProduct.barcode}
-              </Box>
-            </Box>
-          )}
-          <Typography variant="caption" color="text.secondary">Ready to print label tags (38mm x 25mm)</Typography>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setBarcodeDialog(false)}>Close</Button>
-          <Button variant="contained" onClick={() => window.print()}>Print Label</Button>
-        </DialogActions>
-      </Dialog>
+      {/* Barcode Label Print Dialog */}
+      <BarcodePrintDialog
+        open={barcodePrintOpen}
+        onClose={() => setBarcodePrintOpen(false)}
+        products={barcodePrintTargets}
+      />
+
+      {/* Barcode Management Dialog — generate/regenerate/copy/print/clear for an existing product */}
+      <BarcodeManageDialog
+        open={manageBarcodeOpen}
+        onClose={() => setManageBarcodeOpen(false)}
+        product={manageBarcodeProduct}
+        onProductUpdated={handleProductBarcodeUpdated}
+      />
 
       {/* Styled MUI Confirm Dialog replacing native browser confirm */}
       <ConfirmActionDialog 

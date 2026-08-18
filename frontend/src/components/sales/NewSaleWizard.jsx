@@ -1,17 +1,21 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
+import useBarcodeScanner from '../../hooks/useBarcodeScanner';
+import { sendInvoiceWhatsApp } from '../../utils/whatsappInvoice';
 import { 
   Box, Card, Typography, Grid, TextField, 
   Button, MenuItem, Table, TableBody, TableCell, 
   TableContainer, TableHead, TableRow, Paper, IconButton, 
   Stack, Divider, Dialog, DialogTitle, DialogContent, DialogActions,
   Chip, Step, Stepper, StepLabel, Checkbox, FormControlLabel,
-  InputAdornment, Avatar, Tooltip, Alert, Switch, RadioGroup, Radio
+  InputAdornment, Avatar, Tooltip, Alert, Switch, RadioGroup, Radio,
+  Autocomplete
 } from '@mui/material';
 import {
   Person as PersonIcon,
   Search as SearchIcon,
   Add as AddIcon,
+  Edit as EditIcon,
   Delete as DeleteIcon,
   Print as PrintIcon,
   CheckCircle as SuccessIcon,
@@ -119,6 +123,10 @@ export default function NewSaleWizard({
   const [deliveryDate, setDeliveryDate] = useState(new Date().toISOString().split('T')[0]);
   const [salesman, setSalesman] = useState('ADMIN');
   const [remark, setRemark] = useState('');
+  // Diagnosis text lives in rxData.notes (auto-filled from the patient's last eye exam when one
+  // is on file — see handleSelectCustomer); icdCode has no equivalent history to pull from since
+  // it was never persisted by the Eye Test module, so it's always staff-entered here.
+  const [icdCode, setIcdCode] = useState('');
 
   // --- PART 2: REFRACTION PRESCRIPTION GRID & PRODUCT ENTRY TOOLBAR ---
   const [showRx, setShowRx] = useState(true);
@@ -136,6 +144,7 @@ export default function NewSaleWizard({
   const [powerChecked, setPowerChecked] = useState(false);
   const [lensIndex, setLensIndex] = useState('1.56');
   const [entryInput, setEntryInput] = useState({
+    productId: '',
     barcode: '',
     item: '',
     modelNo: '',
@@ -151,6 +160,10 @@ export default function NewSaleWizard({
     incTax: 0,
     taxPercent: 18
   });
+  // Full product record for the currently-selected Optical DB item, shown as a detail strip
+  // (barcode/brand/category/stock/price) under the selector so staff can confirm they picked
+  // the right one before it goes into the billing grid.
+  const [selectedProductDetail, setSelectedProductDetail] = useState(null);
 
   // --- PART 3: BILLING ITEMS TABLE & FINANCIAL FOOTER ---
   const [itemsList, setItemsList] = useState([]);
@@ -169,10 +182,6 @@ export default function NewSaleWizard({
     gpay: '',
     bank: ''
   });
-
-  // Patient Register Dialog
-  const [registerDialogOpen, setRegisterDialogOpen] = useState(false);
-  const [newPatientForm, setNewPatientForm] = useState({ name: '', phone: '', age: '', gender: 'MALE' });
 
   // --- NEW QUICK ERP LENS & ITEM CREATOR STATE (IMAGE MODEL 2 FORMAT) ---
   const [quickAddOpen, setQuickAddOpen] = useState(false);
@@ -439,34 +448,71 @@ export default function NewSaleWizard({
     });
   };
 
-  // 1️⃣ PART 1 HANDLER: Register Patient
-  const handleRegisterPatient = (e) => {
-    e.preventDefault();
-    if (!newPatientForm.name || !newPatientForm.phone) return;
-    const newCust = {
-      id: `CUST-${Date.now().toString().slice(-4)}`,
-      name: newPatientForm.name,
-      phone: newPatientForm.phone,
-      age: newPatientForm.age || '25',
-      gender: newPatientForm.gender || 'MALE'
-    };
-    customers.unshift(newCust);
-    handleSelectCustomer(newCust);
-    setRegisterDialogOpen(false);
+  // Saves whatever is already typed into the Customer Name/Phone/Age/Gender fields as a new
+  // patient — no separate re-entry form. If a patient is already selected (selectedCustomerId
+  // set), there's nothing to save. Previously generated a fake local id and mutated the
+  // `customers` prop array directly (no POST, no re-render) — a walk-in typed here never
+  // actually reached the database and was invisible to Appointments/OpticalServices/
+  // PatientHistory, and vanished on refresh. Now resolves-or-creates a real backend Customer,
+  // same pattern used by Appointments.jsx.
+  const handleSavePatient = async () => {
+    if (selectedCustomerId) return;
+    if (!customerInput.name || !customerInput.phone) {
+      alert('Please enter the patient name and mobile number first.');
+      return;
+    }
+    const existingMatch = customers.find(c => c.phone && c.phone === customerInput.phone);
+    if (existingMatch) {
+      handleSelectCustomer(existingMatch);
+      return;
+    }
+    try {
+      const res = await axios.post('/api/sales/customers/', {
+        name: customerInput.name,
+        phone: customerInput.phone,
+        age: customerInput.age || '',
+        gender: customerInput.gender || 'MALE'
+      });
+      handleSelectCustomer(res.data);
+    } catch (e) {
+      alert('Could not save the new patient to the database. Please try again.');
+    }
   };
 
   // 2️⃣ PART 2 HANDLER: Product Select from DB
   const handleProductSelect = (selectedProd) => {
-    if (!selectedProd) return;
+    if (!selectedProd) {
+      setSelectedProductDetail(null);
+      setEntryInput(prev => ({ ...prev, productId: '', barcode: '' }));
+      return;
+    }
+    // model_no/color/size aren't first-class Product fields — they only exist for products
+    // that came in through an Excel import with those columns, parked in extra_data. sku
+    // doubles as a Model No fallback since the importer itself falls back to it the same way
+    // (see import_engine.py: sku = get('sku') or get('model_no')).
+    const extra = selectedProd.extra_data || {};
     setEntryInput({
       ...entryInput,
-      barcode: String(selectedProd.id || selectedProd.code || selectedProd.barcode || ''),
+      // productId is the real DB identity used to link the eventual InvoiceItem back to this
+      // Product; barcode is purely a display/search value and previously did double duty as
+      // BOTH (falling back to the product's own id when no barcode existed) — which broke the
+      // moment a product actually HAD a barcode, since then this field held the barcode string
+      // instead of the id the backend needs.
+      productId: selectedProd.id || '',
+      barcode: String(selectedProd.barcode || selectedProd.id || selectedProd.code || ''),
       item: selectedProd.name || '',
+      modelNo: extra.model_no || extra.modelNo || selectedProd.sku || '',
+      color: extra.color_code || extra.color || '',
+      size: extra.size || '',
       brand: selectedProd.brand || 'Generic',
       category: (selectedProd.type || selectedProd.category || 'FRAME').toUpperCase(),
       price: selectedProd.price || selectedProd.sellingPrice || 0,
+      discPercent: 0,
       taxPercent: selectedProd.taxRate || selectedProd.tax || 18
     });
+    // Shown as a detail strip under the selector so the user can see exactly what they're
+    // about to add (barcode, brand, stock, ...) before committing it to the billing grid.
+    setSelectedProductDetail(selectedProd);
   };
 
   // 2️⃣ PART 2 HANDLER: Add Item to Billing Grid
@@ -479,9 +525,12 @@ export default function NewSaleWizard({
     const qty = parseInt(entryInput.qty) || 1;
     const price = parseFloat(entryInput.price) || 0;
     const disc = parseFloat(entryInput.discPercent) || 0;
+    const taxPercent = parseFloat(entryInput.taxPercent) || 0;
     const gross = qty * price;
     const discVal = (gross * disc) / 100;
-    const total = gross - discVal;
+    const taxableAmount = gross - discVal;
+    const taxVal = (taxableAmount * taxPercent) / 100;
+    const total = taxableAmount + taxVal;
 
     // Power String auto-construct if Power checkbox is active
     let formattedPower = '—';
@@ -497,6 +546,7 @@ export default function NewSaleWizard({
 
     const newItem = {
       id: `ITEM-${Date.now()}`,
+      productId: entryInput.productId || null,
       barcode: entryInput.barcode || `BC-${Math.floor(1000 + Math.random() * 9000)}`,
       item: entryInput.item,
       modelNo: entryInput.modelNo || 'M-01',
@@ -510,18 +560,97 @@ export default function NewSaleWizard({
       price,
       disc: discVal,
       gross,
-      tax: 0,
-      taxPercent: entryInput.taxPercent || 18,
+      discPercent: disc,
+      tax: taxVal,
+      taxPercent,
       total
     };
 
     setItemsList([...itemsList, newItem]);
-    setEntryInput({ ...entryInput, barcode: '', item: '', qty: 1, price: '', power: '' });
+    setEntryInput({
+      ...entryInput,
+      productId: '', barcode: '', item: '', modelNo: '', color: '', size: '', qty: 1, price: '', power: '',
+      discPercent: 0, taxPercent: 18
+    });
+    setSelectedProductDetail(null);
   };
+
+  // Hardware barcode scanner: looks up the product and adds it directly to the
+  // grid. Builds the line item straight from the found product rather than
+  // going through handleProductSelect()+handleAddItem() — those read/write
+  // entryInput state, and calling both back-to-back in the same handler would
+  // read a stale (pre-update) entryInput due to React's async state batching.
+  const handleBarcodeScan = (code) => {
+    const normalized = code.trim().toLowerCase();
+    const found = products.find(p =>
+      (p.barcode && String(p.barcode).toLowerCase() === normalized) ||
+      (p.code && String(p.code).toLowerCase() === normalized) ||
+      (p.sku && String(p.sku).toLowerCase() === normalized)
+    );
+    if (!found) {
+      alert(`No product found for barcode "${code}"`);
+      return;
+    }
+    const price = parseFloat(found.price || found.sellingPrice || 0);
+    const scanTaxPercent = parseFloat(found.taxRate || found.tax || 18) || 0;
+    const scanTaxVal = (price * scanTaxPercent) / 100;
+    const newItem = {
+      id: `ITEM-${Date.now()}`,
+      productId: found.id || null,
+      barcode: String(found.barcode || found.id || found.code || ''),
+      item: found.name || '',
+      modelNo: found.modelNo || 'M-01',
+      color: found.color || 'STANDARD',
+      size: found.size || '50-18',
+      brand: found.brand || 'OPTICAL',
+      category: (found.type || found.category || 'FRAME').toUpperCase(),
+      group: found.group || 'GENERIC',
+      power: '—',
+      qty: 1,
+      price,
+      disc: 0,
+      discPercent: 0,
+      gross: price,
+      tax: scanTaxVal,
+      taxPercent: scanTaxPercent,
+      total: price + scanTaxVal
+    };
+    setItemsList(prev => [...prev, newItem]);
+  };
+
+  useBarcodeScanner(handleBarcodeScan);
 
   // 3️⃣ PART 3 HANDLER: Remove Item from Grid
   const handleRemoveItem = (id) => {
     setItemsList(itemsList.filter(item => item.id !== id));
+  };
+
+  // 3️⃣ PART 3 HANDLER: Edit an already-added row's Qty/Price/Discount/Tax without deleting
+  // and re-entering it — recomputes disc/tax/gross/total the same way handleAddItem does.
+  const [editingItem, setEditingItem] = useState(null);
+
+  const handleOpenEditItem = (row) => {
+    setEditingItem({ ...row });
+  };
+
+  const handleSaveEditItem = () => {
+    if (!editingItem) return;
+    const qty = parseInt(editingItem.qty) || 1;
+    const price = parseFloat(editingItem.price) || 0;
+    const discPercent = parseFloat(editingItem.discPercent) || 0;
+    const taxPercent = parseFloat(editingItem.taxPercent) || 0;
+    const gross = qty * price;
+    const discVal = (gross * discPercent) / 100;
+    const taxableAmount = gross - discVal;
+    const taxVal = (taxableAmount * taxPercent) / 100;
+    const total = taxableAmount + taxVal;
+
+    setItemsList(prev => prev.map(item => item.id === editingItem.id ? {
+      ...item,
+      qty, price, discPercent, taxPercent,
+      disc: discVal, gross, tax: taxVal, total
+    } : item));
+    setEditingItem(null);
   };
 
   // 3️⃣ PART 3 HANDLER: Coupon Code Auto-Calculation
@@ -538,7 +667,8 @@ export default function NewSaleWizard({
   const totalQty = itemsList.reduce((sum, item) => sum + (parseInt(item.qty) || 0), 0);
   const grossTotal = itemsList.reduce((sum, item) => sum + (parseFloat(item.gross) || 0), 0);
   const itemDiscounts = itemsList.reduce((sum, item) => sum + (parseFloat(item.disc) || 0), 0);
-  const netTotal = Math.max(0, grossTotal - itemDiscounts - couponDisc - overallDisc);
+  const totalTax = itemsList.reduce((sum, item) => sum + (parseFloat(item.tax) || 0), 0);
+  const netTotal = Math.max(0, grossTotal - itemDiscounts - couponDisc - overallDisc + totalTax);
   
   const totalPaidAmount = (parseFloat(multiPay.cash) || 0) + 
                           (parseFloat(multiPay.cards) || 0) + 
@@ -563,36 +693,106 @@ export default function NewSaleWizard({
     }
   };
 
-  const handleCompleteBilling = () => {
+  const handleCompleteBilling = async () => {
     if (itemsList.length === 0) {
       alert("Please add at least one item to the billing grid before completing.");
       return;
     }
 
+    // Resolve-or-create the real backend Customer this sale belongs to — same pattern as
+    // handleSavePatient/Appointments.jsx, so a walk-in typed directly here still lands in the
+    // shared Customer table instead of only existing as a name string on this one invoice.
+    let customerId = selectedCustomerId;
+    if (!customerId && customerInput.name) {
+      const existingMatch = customerInput.phone ? customers.find(c => c.phone && c.phone === customerInput.phone) : null;
+      if (existingMatch) {
+        customerId = existingMatch.id;
+      } else {
+        try {
+          const res = await axios.post('/api/sales/customers/', {
+            name: customerInput.name,
+            phone: customerInput.phone || '',
+            age: customerInput.age || '',
+            gender: customerInput.gender || 'MALE'
+          });
+          customerId = res.data.id;
+        } catch (e) {
+          // Continue without a linked customer rather than blocking the sale.
+        }
+      }
+    }
+
+    let backendInvoiceId = null;
+    let backendInvoiceNumber = billNo;
+    // Orders/Quotations aren't real sales yet (no payment, stock not committed) — only a
+    // completed Invoice actually persists to the backend Invoice/InvoiceItem tables and drives
+    // stock deduction + the accounting journal entry.
+    if (docType === 'Invoice' && customerId) {
+      try {
+        const status = balanceDue > 0 ? (totalPaidAmount > 0 ? 'PARTIAL' : 'UNPAID') : 'PAID';
+        const res = await axios.post('/api/sales/invoices/', {
+          invoice_number: billNo,
+          customer: customerId,
+          invoice_date: new Date().toISOString().split('T')[0],
+          status,
+          total_amount: grossTotal,
+          tax_amount: totalTax,
+          discount_amount: itemDiscounts,
+          net_amount: netTotal,
+          paid_amount: totalPaidAmount,
+          payment_method: paymentMode,
+          items: itemsList.map(i => ({
+            product: i.productId || null,
+            description: i.item,
+            quantity: i.qty,
+            unit_price: i.price,
+            tax_rate: i.taxPercent,
+            tax_amount: i.tax,
+            subtotal: i.total
+          }))
+        });
+        backendInvoiceId = res.data.id;
+        backendInvoiceNumber = res.data.invoice_number || billNo;
+      } catch (e) {
+        // Continue with the local-only record rather than blocking the sale — the receipt
+        // still prints and the record still saves to localStorage below.
+        console.warn('Invoice did not save to the database:', e);
+      }
+    }
+
     const completedOrder = {
-      id: billNo,
+      id: backendInvoiceId || billNo,
+      invoiceNumber: backendInvoiceNumber,
+      customerId,
       date: new Date().toISOString().split('T')[0],
       customerName: customerInput.name || 'Walk-in Customer',
       customerPhone: customerInput.phone || '',
       customerAge: customerInput.age,
       customerGender: customerInput.gender,
+      customerAddress: customerInput.address,
+      diagnosis: rxData.notes || '',
+      icdCode,
       docType,
       items: itemsList,
       totalQty,
       grossTotal,
+      itemDiscounts,
+      totalTax,
       netTotal,
       advancePaid: parseFloat(advancePaid) || 0,
       balanceDue,
       paymentMode,
+      multiPay,
+      totalPaidAmount,
       salesman,
       rxData
     };
 
     try {
-      const storedKey = docType === 'Quotation' 
-        ? 'optical_sales_quotations' 
-        : docType === 'Order' 
-          ? 'optical_sales_orders' 
+      const storedKey = docType === 'Quotation'
+        ? 'optical_sales_quotations'
+        : docType === 'Order'
+          ? 'optical_sales_orders'
           : 'optical_sales_invoices';
 
       const stored = JSON.parse(localStorage.getItem(storedKey) || '[]');
@@ -602,6 +802,27 @@ export default function NewSaleWizard({
       const masterStored = JSON.parse(localStorage.getItem('optical_sales_invoices') || '[]');
       localStorage.setItem('optical_sales_invoices', JSON.stringify([completedOrder, ...masterStored]));
     } catch (e) {}
+
+    // Dispatch WhatsApp/SMS receipt if the front-desk left those checked. WhatsApp opens a real
+    // pre-filled chat via the existing invoice-sharing utility; SMS has no gateway configured in
+    // this deployment yet, so it's logged as a queued send rather than faked as delivered.
+    if (sendWhatsapp) {
+      sendInvoiceWhatsApp(completedOrder);
+    }
+    if (sendSms) {
+      try {
+        const logs = JSON.parse(localStorage.getItem('optical_sms_logs') || '[]');
+        logs.unshift({
+          date: new Date().toISOString(),
+          phone: completedOrder.customerPhone,
+          patient: completedOrder.customerName,
+          invoiceId: completedOrder.id,
+          amount: completedOrder.netTotal,
+          status: 'Queued'
+        });
+        localStorage.setItem('optical_sms_logs', JSON.stringify(logs));
+      } catch (e) {}
+    }
 
     if (onCheckoutComplete) {
       onCheckoutComplete(completedOrder);
@@ -717,9 +938,9 @@ export default function NewSaleWizard({
                       </MenuItem>
                     ))}
                   </TextField>
-                  <Button 
+                  <Button
                     variant="contained" color="primary" size="small"
-                    onClick={() => setRegisterDialogOpen(true)}
+                    onClick={handleSavePatient}
                     sx={{ minWidth: 38, height: 38, px: 1, fontWeight: 900, fontSize: '1.2rem', borderRadius: 2 }}
                   >
                     +
@@ -791,9 +1012,7 @@ export default function NewSaleWizard({
                   SelectProps={{ style: { fontWeight: 800, fontSize: '0.85rem' } }}
                 >
                   <MenuItem value="Cash">Cash</MenuItem>
-                  <MenuItem value="UPI / PhonePe">UPI / PhonePe</MenuItem>
-                  <MenuItem value="Card / POS">Card / POS</MenuItem>
-                  <MenuItem value="Bank Transfer">Bank Transfer</MenuItem>
+                  <MenuItem value="Credit">Credit</MenuItem>
                 </TextField>
               </Grid>
 
@@ -836,9 +1055,27 @@ export default function NewSaleWizard({
               </Grid>
 
               <Grid item xs={12} md={2}>
-                <TextField 
+                <TextField
                   fullWidth size="small" label="Remark" placeholder="Notes"
                   value={remark} onChange={(e) => setRemark(e.target.value)}
+                  inputProps={{ style: { fontSize: '0.82rem' } }}
+                />
+              </Grid>
+
+              {/* Row 4: Diagnosis & ICD Code — printed on the invoice alongside patient details.
+                  Diagnosis auto-fills from the patient's last eye exam when one is on file. */}
+              <Grid item xs={12} md={8}>
+                <TextField
+                  fullWidth size="small" label="Diagnosis / Patient Issue" placeholder="e.g. Compound Myopic Astigmatism"
+                  value={rxData.notes} onChange={(e) => setRxData({ ...rxData, notes: e.target.value })}
+                  inputProps={{ style: { fontSize: '0.82rem' } }}
+                />
+              </Grid>
+
+              <Grid item xs={12} md={4}>
+                <TextField
+                  fullWidth size="small" label="ICD Code" placeholder="e.g. H52.13"
+                  value={icdCode} onChange={(e) => setIcdCode(e.target.value)}
                   inputProps={{ style: { fontSize: '0.82rem' } }}
                 />
               </Grid>
@@ -1037,36 +1274,52 @@ export default function NewSaleWizard({
                 </TextField>
               </Grid>
 
-              {/* Select Item from Optical Database */}
-              <Grid item xs={12} sm={2.3} md={2.3}>
-                <TextField 
-                  select fullWidth size="small" label="Optical DB Product Selector"
-                  value={entryInput.barcode}
-                  onChange={(e) => {
-                    const prod = products.find(p => String(p.id || p.code || p.barcode) === String(e.target.value));
-                    handleProductSelect(prod);
+              {/* Select Item from Optical Database — search matches name, barcode, SKU, brand,
+                  category, and (for imported products) model no / color / size, so staff can
+                  find an item by typing whichever detail they actually have on hand. */}
+              <Grid item xs={12} sm={3.0} md={3.0}>
+                <Autocomplete
+                  size="small"
+                  options={products}
+                  value={products.find(p => p.id === entryInput.productId) || null}
+                  onChange={(e, val) => handleProductSelect(val)}
+                  getOptionLabel={(p) => p?.name || ''}
+                  isOptionEqualToValue={(opt, val) => (opt.id || opt.code || opt.barcode) === (val?.id || val?.code || val?.barcode)}
+                  filterOptions={(options, state) => {
+                    const q = state.inputValue.toLowerCase().trim();
+                    if (!q) return options;
+                    return options.filter(p => {
+                      const extra = p.extra_data || {};
+                      const haystack = [
+                        p.name, p.barcode, p.sku, p.brand, p.category,
+                        extra.model_no, extra.modelNo, extra.color_code, extra.color, extra.size
+                      ].filter(Boolean).join(' ').toLowerCase();
+                      return haystack.includes(q);
+                    });
                   }}
-                  SelectProps={{ style: { fontSize: '0.78rem', fontWeight: 800, color: '#2563eb' } }}
-                >
-                  <MenuItem value=""><em>-- Select DB Product --</em></MenuItem>
-                  {products.map(p => (
-                    <MenuItem key={p.id || p.name} value={p.id || p.code || p.barcode}>
-                      {p.name} (₹{p.price || p.sellingPrice || 0})
-                    </MenuItem>
-                  ))}
-                </TextField>
-              </Grid>
-
-              <Grid item xs={12} sm={2.0} md={2.0}>
-                <TextField 
-                  fullWidth size="small" label="Item Name / Description" placeholder="e.g. Anti-Blue Light Lens"
-                  value={entryInput.item} onChange={(e) => setEntryInput({ ...entryInput, item: e.target.value })}
-                  inputProps={{ style: { fontWeight: 800, fontSize: '0.8rem' } }}
+                  renderOption={(props, p) => (
+                    <li {...props} key={p.id || p.code || p.barcode}>
+                      <Box sx={{ py: 0.25 }}>
+                        <Typography variant="body2" fontWeight={800}>{p.name}</Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {p.brand || 'Generic'} • {p.barcode || p.sku || '—'} • ₹{p.price || p.sellingPrice || 0}
+                        </Typography>
+                      </Box>
+                    </li>
+                  )}
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      label="Optical DB Product Selector"
+                      placeholder="Search name, barcode, brand, model..."
+                      InputProps={{ ...params.InputProps, style: { fontSize: '0.78rem', fontWeight: 800, color: '#2563eb' } }}
+                    />
+                  )}
                 />
               </Grid>
 
-              <Grid item xs={12} sm={1.2} md={1.2}>
-                <TextField 
+              <Grid item xs={12} sm={1.0} md={1.0}>
+                <TextField
                   select fullWidth size="small" label="Category"
                   value={entryInput.category} onChange={(e) => setEntryInput({ ...entryInput, category: e.target.value })}
                   SelectProps={{ style: { fontSize: '0.78rem', fontWeight: 800 } }}
@@ -1087,18 +1340,42 @@ export default function NewSaleWizard({
               </Grid>
 
               <Grid item xs={6} sm={1.1} md={1.1}>
-                <TextField 
+                <TextField
                   fullWidth size="small" label="Price (₹)" placeholder="0.00"
                   value={entryInput.price} onChange={(e) => setEntryInput({ ...entryInput, price: e.target.value })}
                   inputProps={{ style: { fontWeight: 800, fontSize: '0.8rem' } }}
                 />
               </Grid>
 
-              <Grid item xs={12} sm={1.4} md={1.4}>
-                <Button 
+              <Grid item xs={6} sm={0.9} md={0.9}>
+                <TextField
+                  fullWidth size="small" label="Disc %" type="number" placeholder="0"
+                  value={entryInput.discPercent}
+                  onChange={(e) => setEntryInput({ ...entryInput, discPercent: e.target.value })}
+                  inputProps={{ min: 0, max: 100, style: { fontWeight: 800, textAlign: 'center', fontSize: '0.8rem', color: '#dc2626' } }}
+                />
+              </Grid>
+
+              <Grid item xs={6} sm={1.0} md={1.0}>
+                <TextField
+                  select fullWidth size="small" label="Tax %"
+                  value={entryInput.taxPercent}
+                  onChange={(e) => setEntryInput({ ...entryInput, taxPercent: e.target.value })}
+                  SelectProps={{ style: { fontSize: '0.78rem', fontWeight: 800, color: '#0f172a' } }}
+                >
+                  <MenuItem value={0}>0% (Exempt)</MenuItem>
+                  <MenuItem value={5}>5% GST</MenuItem>
+                  <MenuItem value={12}>12% GST</MenuItem>
+                  <MenuItem value={18}>18% GST</MenuItem>
+                  <MenuItem value={28}>28% GST</MenuItem>
+                </TextField>
+              </Grid>
+
+              <Grid item xs={12} sm={1.2} md={1.2}>
+                <Button
                   fullWidth variant="contained" size="small"
                   onClick={() => setQuickAddOpen(!quickAddOpen)} startIcon={<AddIcon />}
-                  sx={{ 
+                  sx={{
                     fontWeight: 900, py: 0.8, borderRadius: 2, textTransform: 'none', fontSize: '0.75rem',
                     bgcolor: quickAddOpen ? '#3f4c28' : '#0f172a', color: '#facc15',
                     whiteSpace: 'nowrap',
@@ -1109,8 +1386,8 @@ export default function NewSaleWizard({
                 </Button>
               </Grid>
 
-              <Grid item xs={12} sm={1.4} md={1.4}>
-                <Button 
+              <Grid item xs={12} sm={1.2} md={1.2}>
+                <Button
                   fullWidth variant="contained" size="small" color="primary"
                   onClick={handleAddItem} startIcon={<AddIcon />}
                   sx={{ fontWeight: 900, py: 0.8, borderRadius: 2, textTransform: 'none', fontSize: '0.75rem', whiteSpace: 'nowrap' }}
@@ -1120,6 +1397,26 @@ export default function NewSaleWizard({
               </Grid>
 
             </Grid>
+
+            {/* Selected product's DB details — item name, brand, stock — shown so staff can
+                confirm they picked the right item before adding it to the bill (barcode, model
+                no, color, size, brand ... are all searchable directly in the selector above). */}
+            {selectedProductDetail && (
+              <Box sx={{ mt: 1.2, p: 1, borderRadius: 2, bgcolor: '#ffffff', border: '1px dashed #93c5fd', display: 'flex', flexWrap: 'wrap', gap: 0.75, alignItems: 'center' }}>
+                <Typography variant="caption" fontWeight={900} color="text.secondary" sx={{ mr: 0.5 }}>
+                  SELECTED ITEM:
+                </Typography>
+                <Chip size="small" label={entryInput.item || selectedProductDetail.name} color="primary" sx={{ fontWeight: 800, fontSize: '0.7rem' }} />
+                <Chip size="small" label={`Brand: ${selectedProductDetail.brand || 'Generic'}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
+                <Chip size="small" label={`Stock: ${selectedProductDetail.stock ?? '—'}`} color={parseInt(selectedProductDetail.stock) > 0 ? 'success' : 'error'} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
+                {selectedProductDetail.sku && (
+                  <Chip size="small" label={`SKU: ${selectedProductDetail.sku}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
+                )}
+                {selectedProductDetail.hsn_code && (
+                  <Chip size="small" label={`HSN: ${selectedProductDetail.hsn_code}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
+                )}
+              </Box>
+            )}
           </Paper>
 
           {/* 🌟 IMAGE MODEL 2 FORMAT: EXPANDABLE QUICK LENS & ITEM CREATOR PANEL */}
@@ -1395,6 +1692,7 @@ export default function NewSaleWizard({
                     <TableCell align="right" sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Price</TableCell>
                     <TableCell align="right" sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Disc.</TableCell>
                     <TableCell align="right" sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Gross</TableCell>
+                    <TableCell align="right" sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Tax</TableCell>
                     <TableCell align="right" sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Total</TableCell>
                     <TableCell align="center" sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Action</TableCell>
                   </TableRow>
@@ -1402,7 +1700,7 @@ export default function NewSaleWizard({
                 <TableBody>
                   {itemsList.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={14} align="center" sx={{ py: 4 }}>
+                      <TableCell colSpan={15} align="center" sx={{ py: 4 }}>
                         <Typography variant="body2" color="text.secondary" fontWeight={600}>
                           Billing grid is blank. Select item from Optical DB above or enter details to add.
                         </Typography>
@@ -1421,10 +1719,18 @@ export default function NewSaleWizard({
                         <TableCell sx={{ fontSize: '0.8rem', color: '#2563eb', fontWeight: 700 }}>{row.power}</TableCell>
                         <TableCell align="center" sx={{ fontWeight: 900, fontSize: '0.85rem' }}>{row.qty}</TableCell>
                         <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>₹{row.price.toFixed(2)}</TableCell>
-                        <TableCell align="right" sx={{ color: 'error.main', fontSize: '0.8rem' }}>₹{row.disc.toFixed(2)}</TableCell>
+                        <TableCell align="right" sx={{ color: 'error.main', fontSize: '0.8rem' }}>
+                          ₹{row.disc.toFixed(2)}{row.discPercent ? ` (${row.discPercent}%)` : ''}
+                        </TableCell>
                         <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>₹{row.gross.toFixed(2)}</TableCell>
+                        <TableCell align="right" sx={{ fontSize: '0.8rem', color: '#0f766e' }}>
+                          ₹{(row.tax || 0).toFixed(2)} ({row.taxPercent || 0}%)
+                        </TableCell>
                         <TableCell align="right" sx={{ fontWeight: 900, color: 'primary.main', fontSize: '0.85rem' }}>₹{row.total.toFixed(2)}</TableCell>
                         <TableCell align="center">
+                          <IconButton size="small" color="primary" onClick={() => handleOpenEditItem(row)}>
+                            <EditIcon fontSize="small" />
+                          </IconButton>
                           <IconButton size="small" color="error" onClick={() => handleRemoveItem(row.id)}>
                             <DeleteIcon fontSize="small" />
                           </IconButton>
@@ -1436,6 +1742,58 @@ export default function NewSaleWizard({
               </Table>
             </TableContainer>
           </Card>
+
+          {/* Edit Billing Row — Qty / Price / Discount % / Tax %, recomputed on save */}
+          <Dialog open={!!editingItem} onClose={() => setEditingItem(null)} maxWidth="xs" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
+            <DialogTitle sx={{ fontWeight: 800 }}>Edit Item — {editingItem?.item}</DialogTitle>
+            {editingItem && (
+              <DialogContent>
+                <Stack spacing={2} sx={{ mt: 1 }}>
+                  <Grid container spacing={2}>
+                    <Grid item xs={6}>
+                      <TextField
+                        fullWidth size="small" label="Qty" type="number"
+                        value={editingItem.qty}
+                        onChange={(e) => setEditingItem({ ...editingItem, qty: e.target.value })}
+                      />
+                    </Grid>
+                    <Grid item xs={6}>
+                      <TextField
+                        fullWidth size="small" label="Price (₹)" type="number"
+                        value={editingItem.price}
+                        onChange={(e) => setEditingItem({ ...editingItem, price: e.target.value })}
+                      />
+                    </Grid>
+                    <Grid item xs={6}>
+                      <TextField
+                        fullWidth size="small" label="Discount %" type="number"
+                        value={editingItem.discPercent}
+                        onChange={(e) => setEditingItem({ ...editingItem, discPercent: e.target.value })}
+                        inputProps={{ min: 0, max: 100 }}
+                      />
+                    </Grid>
+                    <Grid item xs={6}>
+                      <TextField
+                        select fullWidth size="small" label="Tax %"
+                        value={editingItem.taxPercent}
+                        onChange={(e) => setEditingItem({ ...editingItem, taxPercent: e.target.value })}
+                      >
+                        <MenuItem value={0}>0% (Exempt)</MenuItem>
+                        <MenuItem value={5}>5% GST</MenuItem>
+                        <MenuItem value={12}>12% GST</MenuItem>
+                        <MenuItem value={18}>18% GST</MenuItem>
+                        <MenuItem value={28}>28% GST</MenuItem>
+                      </TextField>
+                    </Grid>
+                  </Grid>
+                </Stack>
+              </DialogContent>
+            )}
+            <DialogActions sx={{ p: 2 }}>
+              <Button onClick={() => setEditingItem(null)}>Cancel</Button>
+              <Button variant="contained" onClick={handleSaveEditItem}>Save Changes</Button>
+            </DialogActions>
+          </Dialog>
 
           {/* 🟢 PART 3 FOOTER: BOTTOM MULTI-PAYMODE, CRM TOGGLES & SUMMARY FOOTER */}
           <Paper variant="outlined" sx={{ p: 1.8, borderRadius: 3, bgcolor: '#f8fafc', borderColor: '#cbd5e1' }}>
@@ -1453,6 +1811,9 @@ export default function NewSaleWizard({
                     
                     <Grid item xs={6}><Typography variant="caption" color="text.secondary" fontWeight={700}>Item Discount</Typography></Grid>
                     <Grid item xs={6}><Typography variant="body2" fontWeight={900} color="error.main" align="right">₹{itemDiscounts.toFixed(2)}</Typography></Grid>
+
+                    <Grid item xs={6}><Typography variant="caption" color="text.secondary" fontWeight={700}>Tax (GST)</Typography></Grid>
+                    <Grid item xs={6}><Typography variant="body2" fontWeight={900} sx={{ color: '#0f766e' }} align="right">₹{totalTax.toFixed(2)}</Typography></Grid>
                   </Grid>
                 </Paper>
               </Grid>
@@ -1490,8 +1851,16 @@ export default function NewSaleWizard({
                     sx={{ mb: 1 }}
                     inputProps={{ style: { fontWeight: 800, fontSize: '0.8rem' } }}
                   />
-                  <Button 
+                  <Button
                     fullWidth variant="contained" size="small"
+                    onClick={() => {
+                      // Quick-fills whatever's still owed into Cash so staff don't have to do
+                      // the subtraction by hand when the customer is paying the remaining
+                      // balance in a single payment mode.
+                      const remaining = Math.max(0, netTotal - (parseFloat(advancePaid) || 0) -
+                        (parseFloat(multiPay.cards) || 0) - (parseFloat(multiPay.gpay) || 0) - (parseFloat(multiPay.bank) || 0));
+                      setMultiPay(prev => ({ ...prev, cash: remaining.toFixed(2) }));
+                    }}
                     sx={{ bgcolor: '#0f172a', color: '#facc15', fontWeight: 900, textTransform: 'none', py: 0.6 }}
                   >
                     Multi Paymode
@@ -1513,19 +1882,25 @@ export default function NewSaleWizard({
                       <TableRow>
                         <TableCell sx={{ py: 0.2, fontSize: '0.72rem', fontWeight: 700 }}>Cash</TableCell>
                         <TableCell sx={{ p: 0.2 }}>
-                          <TextField size="small" value={multiPay.cash} onChange={(e) => setMultiPay({ ...multiPay, cash: e.target.value })} inputProps={{ style: { textAlign: 'right', fontWeight: 800, padding: '2px', fontSize: '0.72rem' } }} />
+                          <TextField size="small" value={multiPay.cash} onChange={(e) => setMultiPay({ ...multiPay, cash: e.target.value })} inputProps={{ style: { textAlign: 'center', fontWeight: 800, padding: '2px', fontSize: '0.72rem' } }} />
                         </TableCell>
                       </TableRow>
                       <TableRow>
                         <TableCell sx={{ py: 0.2, fontSize: '0.72rem', fontWeight: 700 }}>Cards</TableCell>
                         <TableCell sx={{ p: 0.2 }}>
-                          <TextField size="small" value={multiPay.cards} onChange={(e) => setMultiPay({ ...multiPay, cards: e.target.value })} inputProps={{ style: { textAlign: 'right', fontWeight: 800, padding: '2px', fontSize: '0.72rem' } }} />
+                          <TextField size="small" value={multiPay.cards} onChange={(e) => setMultiPay({ ...multiPay, cards: e.target.value })} inputProps={{ style: { textAlign: 'center', fontWeight: 800, padding: '2px', fontSize: '0.72rem' } }} />
                         </TableCell>
                       </TableRow>
                       <TableRow>
                         <TableCell sx={{ py: 0.2, fontSize: '0.72rem', fontWeight: 700 }}>GPAY / UPI</TableCell>
                         <TableCell sx={{ p: 0.2 }}>
-                          <TextField size="small" value={multiPay.gpay} onChange={(e) => setMultiPay({ ...multiPay, gpay: e.target.value })} inputProps={{ style: { textAlign: 'right', fontWeight: 800, padding: '2px', fontSize: '0.72rem' } }} />
+                          <TextField size="small" value={multiPay.gpay} onChange={(e) => setMultiPay({ ...multiPay, gpay: e.target.value })} inputProps={{ style: { textAlign: 'center', fontWeight: 800, padding: '2px', fontSize: '0.72rem' } }} />
+                        </TableCell>
+                      </TableRow>
+                      <TableRow>
+                        <TableCell sx={{ py: 0.2, fontSize: '0.72rem', fontWeight: 700 }}>Bank Transfer</TableCell>
+                        <TableCell sx={{ p: 0.2 }}>
+                          <TextField size="small" value={multiPay.bank} onChange={(e) => setMultiPay({ ...multiPay, bank: e.target.value })} inputProps={{ style: { textAlign: 'center', fontWeight: 800, padding: '2px', fontSize: '0.72rem' } }} />
                         </TableCell>
                       </TableRow>
                     </TableBody>
@@ -1602,7 +1977,7 @@ export default function NewSaleWizard({
                       <MenuItem key={c.id} value={c.id}>{c.name} ({c.phone || 'No Phone'})</MenuItem>
                     ))}
                   </TextField>
-                  <Button variant="contained" onClick={() => setRegisterDialogOpen(true)}>+ Register New Patient</Button>
+                  <Button variant="contained" onClick={handleSavePatient}>Save Patient</Button>
                 </Card>
               )}
 
@@ -1659,47 +2034,6 @@ export default function NewSaleWizard({
           </Grid>
         </Box>
       )}
-
-      {/* PATIENT REGISTRATION DIALOG */}
-      <Dialog open={registerDialogOpen} onClose={() => setRegisterDialogOpen(false)} maxWidth="xs" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
-        <DialogTitle sx={{ fontWeight: 900 }}>Register New Patient</DialogTitle>
-        <DialogContent dividers>
-          <Stack spacing={2} sx={{ pt: 1 }}>
-            <TextField 
-              label="Patient Full Name" fullWidth required placeholder="e.g. Rahul Sharma"
-              value={newPatientForm.name} onChange={(e) => setNewPatientForm({ ...newPatientForm, name: e.target.value })}
-            />
-            <TextField 
-              label="Mobile Phone Number" fullWidth required placeholder="e.g. +91 9876543210"
-              value={newPatientForm.phone} onChange={(e) => setNewPatientForm({ ...newPatientForm, phone: e.target.value })}
-            />
-            <Grid container spacing={2}>
-              <Grid item xs={6}>
-                <TextField 
-                  label="Age" fullWidth placeholder="e.g. 28"
-                  value={newPatientForm.age} onChange={(e) => setNewPatientForm({ ...newPatientForm, age: e.target.value })}
-                />
-              </Grid>
-              <Grid item xs={6}>
-                <TextField 
-                  select label="Gender" fullWidth
-                  value={newPatientForm.gender} onChange={(e) => setNewPatientForm({ ...newPatientForm, gender: e.target.value })}
-                >
-                  <MenuItem value="MALE">MALE</MenuItem>
-                  <MenuItem value="FEMALE">FEMALE</MenuItem>
-                  <MenuItem value="OTHER">OTHER</MenuItem>
-                </TextField>
-              </Grid>
-            </Grid>
-          </Stack>
-        </DialogContent>
-        <DialogActions sx={{ p: 2 }}>
-          <Button onClick={() => setRegisterDialogOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={handleRegisterPatient} sx={{ fontWeight: 900, px: 3 }}>
-            Save Patient
-          </Button>
-        </DialogActions>
-      </Dialog>
 
     </Box>
   );

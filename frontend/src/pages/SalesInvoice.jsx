@@ -102,21 +102,33 @@ export default function SalesInvoice() {
           price: parseFloat(p.sellingPrice || p.price || 0),
           taxRate: parseFloat(p.tax || 18),
           stock: p.stock || 0,
+          barcode: p.barcode || '',
           image: (p.category || '').toLowerCase().includes('lens') ? '🔍' : '👓'
         })));
       }
 
+      // DRF pagination wraps list responses as {count, next, previous, results: [...]} rather
+      // than returning a bare array, so unwrapping is required before any .length/.map call.
+      const unwrap = (res) => (res && res.data && res.data.results) || (res && res.data) || [];
+
       let apiInvoices = [];
+      let apiPayments = [];
       try {
-        const [custRes, eyeExamRes, prodRes, invRes] = await Promise.all([
+        const [custRes, eyeExamRes, prodRes, invRes, payRes] = await Promise.all([
           axios.get('/api/sales/customers/').catch(() => null),
           axios.get('/api/sales/eye-examinations/').catch(() => null),
           axios.get('/api/products/products/').catch(() => null),
-          axios.get('/api/sales/invoices/').catch(() => null)
+          axios.get('/api/sales/invoices/').catch(() => null),
+          axios.get('/api/sales/payments/').catch(() => null)
         ]);
+        const custList = unwrap(custRes);
+        const eyeExams = unwrap(eyeExamRes);
+        const prodList = unwrap(prodRes);
+        const invList = unwrap(invRes);
+        const payList = unwrap(payRes);
 
-        if (prodRes && prodRes.data && prodRes.data.length > 0) {
-          const apiFormatted = prodRes.data.map(p => ({
+        if (prodList.length > 0) {
+          const apiFormatted = prodList.map(p => ({
             id: String(p.id || p.product_id),
             name: p.name || p.product_name,
             brand: p.brand || 'Generic',
@@ -124,6 +136,7 @@ export default function SalesInvoice() {
             price: parseFloat(p.unit_price || p.price || 0),
             taxRate: parseFloat(p.tax_rate || 18),
             stock: p.stock || 0,
+            barcode: p.barcode || '',
             image: (p.category_name || p.type || '').toLowerCase().includes('lens') ? '🔍' : '👓'
           }));
           setProducts(prev => {
@@ -133,24 +146,27 @@ export default function SalesInvoice() {
           });
         }
 
-        if (invRes && invRes.data && invRes.data.length > 0) {
-          apiInvoices = invRes.data.map(inv => ({
-            id: inv.invoice_number || `INV-${inv.id}`,
+        if (invList.length > 0) {
+          apiInvoices = invList.map(inv => ({
+            // `id` is the real backend UUID (the true identity, needed so status-update PATCHes
+            // and dedup-by-id against locally-created orders both work); invoiceNumber is what
+            // the Orders table actually displays.
+            id: inv.id,
+            invoiceNumber: inv.invoice_number || `INV-${inv.id}`,
             date: inv.created_at ? inv.created_at.split('T')[0] : new Date().toISOString().split('T')[0],
             customer: inv.customer_name || 'Walk-in Customer',
             total: parseFloat(inv.total_amount || 0),
             paidAmount: parseFloat(inv.paid_amount || inv.total_amount || 0),
             payment: parseFloat(inv.paid_amount || 0) >= parseFloat(inv.total_amount || 0) ? 'Paid' : 'Partial',
-            status: inv.status || 'Completed',
+            status: inv.fulfillment_status || 'Order Received',
             paymentMethod: inv.payment_method || 'Cash',
             frame: inv.frame_name || 'Prescribed Frame',
             lens: inv.lens_name || 'Prescribed Lens'
           }));
         }
 
-        if (custRes && custRes.data && custRes.data.length > 0) {
-          const eyeExams = (eyeExamRes && eyeExamRes.data) || [];
-          const mergedCusts = custRes.data.map(c => {
+        if (custList.length > 0) {
+          const mergedCusts = custList.map(c => {
             const matchedExam = eyeExams.find(e => e.phone === c.phone || e.patient_name === c.name || e.patient_id === c.id);
             return {
               id: c.id,
@@ -181,18 +197,30 @@ export default function SalesInvoice() {
           });
           setCustomers(mergedCusts);
         }
+
+        if (payList.length > 0) {
+          apiPayments = payList.map(p => ({
+            id: p.id,
+            customer: p.customer_name || 'Walk-in Patient',
+            date: p.payment_date || (p.created_at ? p.created_at.split('T')[0] : new Date().toISOString().split('T')[0]),
+            amount: parseFloat(p.amount || 0),
+            method: p.method || 'Cash',
+            status: p.status || 'Success',
+            receiptNo: p.receipt_no
+          }));
+        }
       } catch (err) {
         console.warn('Sales DB fetch error:', err);
       }
 
-      // Combine API & local storage orders into database state
+      // Combine API & local storage orders/payments into database state
       const allOrders = [...apiInvoices, ...localInvoices];
       const uniqueOrders = Array.from(new Map(allOrders.map(o => [o.id, o])).values());
       setOrders(uniqueOrders);
 
-      if (localPayments.length > 0) {
-        setPayments(localPayments);
-      }
+      const allPayments = [...apiPayments, ...localPayments];
+      const uniquePayments = Array.from(new Map(allPayments.map(p => [p.id, p])).values());
+      setPayments(uniquePayments);
     };
     fetchOpticalDbData();
 
@@ -332,12 +360,34 @@ export default function SalesInvoice() {
     }
   };
 
-  const handleAddPatientSubmit = () => {
+  const handleAddPatientSubmit = async () => {
     if (!patientInput.name || !patientInput.phone) {
       alert("Please enter at least Patient Name and Phone Number.");
       return;
     }
-    const newId = `c-${Date.now()}`;
+    // Previously generated a fake local id and only did setCustomers([...]) — a patient
+    // registered from the Sales module's Customers tab never actually reached the database, so
+    // it was invisible to Appointments/OpticalServices/PatientHistory and vanished on refresh.
+    // Reuse a real Customer if one already matches this phone; otherwise create one.
+    let newId = `c-${Date.now()}`;
+    const existingMatch = customers.find(c => c.phone && c.phone === patientInput.phone);
+    if (existingMatch) {
+      newId = existingMatch.id;
+    } else {
+      try {
+        const res = await axios.post('/api/sales/customers/', {
+          name: patientInput.name,
+          phone: patientInput.phone,
+          email: patientInput.email || '',
+          age: patientInput.age || '',
+          gender: patientInput.gender || 'Male'
+        });
+        newId = res.data.id;
+      } catch (e) {
+        alert('Could not save the new patient to the database. Please try again.');
+        return;
+      }
+    }
     const newCustObj = {
       id: newId,
       name: patientInput.name,
@@ -441,7 +491,7 @@ export default function SalesInvoice() {
     alert('Invoice Receipt printed & Order registered successfully!');
   };
 
-  const handleRecordPaymentSubmit = () => {
+  const handleRecordPaymentSubmit = async () => {
     if (!payRecordInput.amount || parseFloat(payRecordInput.amount) <= 0) {
       alert("Please enter a valid payment amount.");
       return;
@@ -449,11 +499,12 @@ export default function SalesInvoice() {
     const cust = customers.find(c => c.id === payRecordInput.customerId);
     const custName = cust ? cust.name : 'Walk-in Patient';
     const payAmt = parseFloat(payRecordInput.amount);
+    const today = new Date().toISOString().split('T')[0];
 
     const newPay = {
       id: `PAY-${Math.floor(1000 + Math.random() * 9000)}`,
       customer: custName,
-      date: new Date().toISOString().split('T')[0],
+      date: today,
       amount: payAmt,
       method: payRecordInput.method || 'Cash',
       status: 'Success'
@@ -467,6 +518,22 @@ export default function SalesInvoice() {
     setRecordPaymentDialogOpen(false);
     setPayRecordInput({ customerId: '', amount: '', method: 'Cash' });
     alert(`Payment of ₹${payAmt} recorded successfully for ${custName}!`);
+
+    try {
+      const res = await axios.post('/api/sales/payments/', {
+        customer: cust ? cust.id : null,
+        customer_name: custName,
+        amount: payAmt,
+        method: payRecordInput.method || 'Cash',
+        payment_date: today,
+        status: 'Completed'
+      });
+      // Swap the optimistic local-id row for the real backend one so it keys correctly on
+      // the next fetchOpticalDbData dedup pass.
+      setPayments(prev => prev.map(p => p.id === newPay.id ? { ...p, id: res.data.id, receiptNo: res.data.receipt_no } : p));
+    } catch (err) {
+      console.warn('Failed to save payment to backend:', err);
+    }
   };
 
   return (
@@ -494,6 +561,7 @@ export default function SalesInvoice() {
           onCheckoutComplete={(completedOrder) => {
             const newOrd = {
               id: completedOrder.id || `INV-${Math.floor(1000 + Math.random() * 9000)}`,
+              invoiceNumber: completedOrder.invoiceNumber || completedOrder.id,
               customer: completedOrder.customerName || completedOrder.customer || 'CASH CUSTOMER',
               phone: completedOrder.customerPhone || '+91 98470 12345',
               date: completedOrder.date || new Date().toISOString().split('T')[0],
@@ -506,7 +574,10 @@ export default function SalesInvoice() {
               paymentMethod: completedOrder.paymentMode || 'Cash'
             };
             setOrders(prev => [newOrd, ...prev]);
-            setPrintableInvoice(newOrd);
+            // The print modal needs the FULL order (real per-item brand/tax/disc, diagnosis,
+            // patient age/gender/address, payment method breakdown, ...) — newOrd above is only
+            // the trimmed summary the Orders table displays, so merge rather than replace.
+            setPrintableInvoice({ ...completedOrder, ...newOrd });
             setPrintModalOpen(true);
           }}
         />
@@ -521,24 +592,30 @@ export default function SalesInvoice() {
           onOpenRecordPayment={() => setRecordPaymentDialogOpen(true)}
           onCheckoutComplete={(completedOrder) => {
             const newOrd = {
-              id: `INV-${Math.floor(1000 + Math.random() * 9000)}`,
+              id: completedOrder.id || `INV-${Math.floor(1000 + Math.random() * 9000)}`,
+              invoiceNumber: completedOrder.invoiceNumber || completedOrder.id,
               customer: completedOrder.customer,
               phone: completedOrder.phone || '+91 98470 12345',
-              date: new Date().toISOString().split('T')[0],
+              date: completedOrder.date || new Date().toISOString().split('T')[0],
               total: completedOrder.total,
               paidAmount: completedOrder.total,
               payment: 'Paid',
               status: 'Ready for Collection',
               frame: completedOrder.frame,
               lens: completedOrder.lens,
-              paymentMethod: 'UPI / PhonePe'
+              paymentMethod: completedOrder.paymentMode || 'Cash'
             };
             setOrders(prev => [newOrd, ...prev]);
             try {
               const existing = JSON.parse(localStorage.getItem('optical_sales_invoices') || '[]');
               localStorage.setItem('optical_sales_invoices', JSON.stringify([newOrd, ...existing]));
             } catch(e) {}
-            navigate('/sales/dashboard');
+            // Previously just navigated away with no print step at all — "Quick Pay & Print
+            // Receipt" didn't actually print anything. Now opens the same print modal (with its
+            // A4/A5/Thermal choice) the New Sale wizard uses, with the full item/tax/payment
+            // breakdown PosBillingView now sends through.
+            setPrintableInvoice({ ...completedOrder, ...newOrd });
+            setPrintModalOpen(true);
           }}
         />
       )}
@@ -551,12 +628,23 @@ export default function SalesInvoice() {
           onNavigateToEyeTest={() => navigate('/optical/eyetest')}
           onOpenRecordPayment={() => setRecordPaymentDialogOpen(true)}
           onPrintInvoice={(inv) => { setPrintableInvoice(inv); setPrintModalOpen(true); }}
-          onUpdateOrderStatus={(orderId, newStatus) => {
+          onUpdateOrderStatus={async (orderId, newStatus) => {
             const updated = orders.map(o => o.id === orderId ? { ...o, status: newStatus } : o);
             setOrders(updated);
             try {
               localStorage.setItem('optical_sales_invoices', JSON.stringify(updated));
             } catch(e) {}
+            // fulfillment_status (not `status`, which is choice-restricted to payment states on
+            // the backend) tracks this lab-workflow stage; only real backend Invoices can be
+            // PATCHed — orders still on a locally-generated id (e.g. backend write failed at
+            // checkout) just keep the local-only update above.
+            if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(orderId)) {
+              try {
+                await axios.patch(`/api/sales/invoices/${orderId}/`, { fulfillment_status: newStatus });
+              } catch (err) {
+                console.warn('Failed to sync order status to backend:', err);
+              }
+            }
           }}
         />
       )}
@@ -782,10 +870,27 @@ export default function SalesInvoice() {
           payments={payments}
           customers={customers}
           orders={orders}
-          onRecordPaymentSubmit={(newPayment, custId, payAmt) => {
+          onRecordPaymentSubmit={async (newPayment, custId, payAmt) => {
             setPayments(prev => [newPayment, ...prev]);
             if (custId) {
               setCustomers(customers.map(c => c.id === custId ? { ...c, balance: Math.max(0, (c.balance || 0) - payAmt) } : c));
+            }
+            const isBackendId = (id) => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+            try {
+              const res = await axios.post('/api/sales/payments/', {
+                customer: isBackendId(custId) ? custId : null,
+                customer_name: newPayment.customerName,
+                amount: payAmt,
+                method: newPayment.method,
+                payment_date: newPayment.date || new Date().toISOString().split('T')[0],
+                status: 'Completed',
+                notes: newPayment.notes
+              });
+              // Swap the optimistic local-id row for the real backend one so it keys correctly
+              // on the next fetchOpticalDbData dedup pass.
+              setPayments(prev => prev.map(p => p.id === newPayment.id ? { ...p, id: res.data.id, receiptNo: res.data.receipt_no } : p));
+            } catch (err) {
+              console.warn('Failed to save payment to backend:', err);
             }
           }}
         />

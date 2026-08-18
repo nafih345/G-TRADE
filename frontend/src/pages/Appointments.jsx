@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState, useEffect, useRef } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
 import QuickDatePickerField from '../components/common/QuickDatePickerField';
 import { 
@@ -59,8 +59,63 @@ const roomAllocations = [
   'Room 4 - Pediatric Testing'
 ];
 
+// Maps a backend Appointment record (apps/sales Appointment model) onto the shape
+// this page has always used internally, so existing render/edit code doesn't change.
+const mapBackendAppointment = (a) => ({
+  id: a.id,
+  token: a.token || a.appointment_code || '',
+  customerId: a.customer || null,
+  patientId: a.patient_code || '',
+  testNo: a.test_no || '',
+  patient: a.patient_name || '',
+  phone: a.phone || '',
+  email: a.email || '',
+  age: a.age || '',
+  gender: a.gender || 'Male',
+  doctor: a.doctor || '',
+  date: a.appointment_date || '',
+  time: a.appointment_time || '',
+  type: a.appointment_type || '',
+  branch: a.branch || '',
+  room: a.room || '',
+  priority: a.priority || 'Standard Booking',
+  status: a.status || 'Booked',
+  sendWhatsapp: !!a.send_whatsapp,
+  notes: a.notes || '',
+  createdAt: a.created_at
+});
+
+// Maps this page's internal appointment shape onto the backend Appointment model's fields.
+const mapAppointmentToBackend = (apt, customerId) => ({
+  customer: customerId || null,
+  patient_name: apt.patient,
+  phone: apt.phone,
+  email: apt.email,
+  age: apt.age,
+  gender: apt.gender,
+  doctor: apt.doctor,
+  appointment_date: apt.date,
+  appointment_time: apt.time,
+  appointment_type: apt.type,
+  branch: apt.branch,
+  room: apt.room,
+  priority: apt.priority,
+  status: apt.status,
+  send_whatsapp: !!apt.sendWhatsapp,
+  notes: apt.notes,
+  token: apt.token,
+  test_no: apt.testNo
+});
+
+// A real backend Appointment/Customer id is a UUID; ids the old localStorage-only code
+// generated (e.g. "APT-8402") never look like one — used to tell "already saved to the
+// backend" apart from "local-only record from before this page was connected."
+const isBackendId = (id) => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+
 export default function Appointments() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const handoffPatientHandledRef = useRef(false);
   const [appointments, setAppointments] = useState([]);
   const [dbPatients, setDbPatients] = useState([]);
   const [registeredDoctors, setRegisteredDoctors] = useState([]);
@@ -74,7 +129,23 @@ export default function Appointments() {
   const [isEditing, setIsEditing] = useState(false);
   const [selectedAptId, setSelectedAptId] = useState(null);
 
+  // Client-side preview only — scans every known patient_code for the highest "P-NNNN" in use
+  // and increments it, mirroring the same heuristic OpticalServices.jsx uses. The real,
+  // guaranteed-unique code is assigned server-side when the Customer is actually created; this
+  // just gives the front desk something sensible to show/quote to the patient immediately.
+  const getNextPatientIdPreview = () => {
+    const allIds = (dbPatients || [])
+      .map(p => String(p.patient_code || p.id || '').match(/^p-?(\d+)$/i))
+      .filter(Boolean)
+      .map(m => parseInt(m[1], 10));
+    const maxId = allIds.length > 0 ? Math.max(...allIds) : 1000;
+    return `P-${maxId + 1}`;
+  };
+
   const [newApt, setNewApt] = useState({
+    customerId: null,
+    patientId: '',
+    testNo: '1',
     patient: '',
     phone: '',
     email: '',
@@ -111,18 +182,21 @@ export default function Appointments() {
         docPool = [...localDocs, ...adminDocNames];
       } catch (e) {}
 
-      // API fetches
+      // API fetches — /api/sales/* endpoints are paginated (DRF PageNumberPagination), so a
+      // successful response is {count, next, previous, results}, not a bare array.
       try {
-        const resApts = await axios.get('/api/optical/appointments/');
-        if (resApts.data && Array.isArray(resApts.data)) {
-          aptList = [...aptList, ...resApts.data];
+        const resApts = await axios.get('/api/sales/appointments/');
+        const aptData = resApts.data?.results || resApts.data || [];
+        if (Array.isArray(aptData)) {
+          aptList = [...aptList, ...aptData.map(mapBackendAppointment)];
         }
       } catch (e) {}
 
       try {
         const resCust = await axios.get('/api/sales/customers/');
-        if (resCust.data && Array.isArray(resCust.data)) {
-          custPool = [...custPool, ...resCust.data];
+        const custData = resCust.data?.results || resCust.data || [];
+        if (Array.isArray(custData)) {
+          custPool = [...custPool, ...custData];
         }
       } catch (e) {}
 
@@ -167,6 +241,9 @@ export default function Appointments() {
     setIsEditing(false);
     setSelectedAptId(null);
     setNewApt({
+      customerId: null,
+      patientId: getNextPatientIdPreview(),
+      testNo: '1',
       patient: '',
       phone: '',
       email: '',
@@ -188,13 +265,47 @@ export default function Appointments() {
 
   const handleClose = () => setOpen(false);
 
+  // Patient History's "Book Appointment" button hands the selected patient across via
+  // navigate() state — pre-fill and open the booking dialog with their real details/link
+  // instead of leaving the handoff silently ignored.
+  useEffect(() => {
+    const p = location.state?.patient;
+    if (!p || handoffPatientHandledRef.current) return;
+    handoffPatientHandledRef.current = true;
+    setIsEditing(false);
+    setSelectedAptId(null);
+    setNewApt(prev => ({
+      ...prev,
+      customerId: p.customerId || null,
+      patientId: p.id || getNextPatientIdPreview(),
+      testNo: p.testNo || '1',
+      patient: p.name || '',
+      phone: p.phone || '',
+      email: p.email || '',
+      age: p.age || '',
+      gender: p.gender || 'Male'
+    }));
+    setOpen(true);
+  }, [location.state]);
+
   const handleSelectPatientObj = (patientObj) => {
     if (!patientObj) return;
     if (typeof patientObj === 'string') {
-      setNewApt(prev => ({ ...prev, patient: patientObj }));
+      // Typed freely rather than picked from the list — treat as a brand-new patient and show
+      // a fresh preview ID/token rather than leaving a previously-selected patient's on screen.
+      setNewApt(prev => ({
+        ...prev,
+        patient: patientObj,
+        customerId: null,
+        patientId: getNextPatientIdPreview(),
+        testNo: '1'
+      }));
     } else {
       setNewApt(prev => ({
         ...prev,
+        customerId: patientObj.id || null,
+        patientId: patientObj.patient_code || patientObj.id || '',
+        testNo: patientObj.testNo || '1',
         patient: patientObj.name || '',
         phone: patientObj.phone || '',
         email: patientObj.email || '',
@@ -279,40 +390,71 @@ Thank you for choosing *${storeName}*. We look forward to seeing you!`;
       return;
     }
 
-    let updatedList = [];
+    // Resolve a real backend Customer to link this appointment to: reuse the one the
+    // Autocomplete selected, reuse one matching by phone (avoids piling up duplicate
+    // Customer rows for the same person typed fresh each time), or create a new one.
+    let customerId = newApt.customerId;
+    if (!customerId) {
+      const existingMatch = newApt.phone
+        ? dbPatients.find(c => c.phone && c.phone === newApt.phone)
+        : null;
+      if (existingMatch) {
+        customerId = existingMatch.id;
+      } else {
+        try {
+          // Pass the previewed Patient ID through explicitly so what the front desk saw (and
+          // may have already quoted to the patient) in the booking dialog is what actually
+          // gets saved — the backend only falls back to minting a different one if this exact
+          // code has since been taken (e.g. a concurrent booking).
+          const resCust = await axios.post('/api/sales/customers/', {
+            name: newApt.patient,
+            phone: newApt.phone || '',
+            email: newApt.email || '',
+            age: newApt.age || '',
+            gender: newApt.gender || '',
+            patient_code: newApt.patientId || undefined
+          });
+          customerId = resCust.data.id;
+          setDbPatients(prev => [...prev, resCust.data]);
+        } catch (e) {
+          // Continue without a linked customer rather than blocking the booking.
+        }
+      }
+    }
+
+    const payload = mapAppointmentToBackend(newApt, customerId);
     let savedRecord = null;
 
-    if (isEditing) {
-      updatedList = appointments.map(apt => 
-        apt.id === selectedAptId ? { ...apt, ...newApt } : apt
-      );
-      savedRecord = { id: selectedAptId, ...newApt };
-    } else {
-      const nextTokenNum = 100 + appointments.length + 1;
-      const createdApt = {
-        id: `APT-${Math.floor(1000 + Math.random() * 9000)}`,
-        token: `T-${nextTokenNum}`,
-        ...newApt,
-        createdAt: new Date().toISOString()
-      };
-      savedRecord = createdApt;
-      updatedList = [createdApt, ...appointments];
+    try {
+      if (isEditing && isBackendId(selectedAptId)) {
+        const res = await axios.patch(`/api/sales/appointments/${selectedAptId}/`, payload);
+        savedRecord = mapBackendAppointment(res.data);
+      } else {
+        const res = await axios.post('/api/sales/appointments/', payload);
+        savedRecord = mapBackendAppointment(res.data);
+      }
+    } catch (e) {
+      alert("Could not save the appointment to the server. Please try again.");
+      return;
+    }
 
-      // Automatically register doctor in doctorsList if newly typed
-      if (newApt.doctor) {
-        const localDocs = JSON.parse(localStorage.getItem('optical_doctors') || '[]');
-        if (!localDocs.includes(newApt.doctor)) {
-          const updatedDocs = [...localDocs, newApt.doctor];
-          localStorage.setItem('optical_doctors', JSON.stringify(updatedDocs));
-          setRegisteredDoctors(Array.from(new Set(updatedDocs)));
-        }
+    const updatedList = isEditing
+      ? appointments.map(apt => (apt.id === selectedAptId ? savedRecord : apt))
+      : [savedRecord, ...appointments];
+
+    // Automatically register doctor in doctorsList if newly typed
+    if (newApt.doctor) {
+      const localDocs = JSON.parse(localStorage.getItem('optical_doctors') || '[]');
+      if (!localDocs.includes(newApt.doctor)) {
+        const updatedDocs = [...localDocs, newApt.doctor];
+        localStorage.setItem('optical_doctors', JSON.stringify(updatedDocs));
+        setRegisteredDoctors(Array.from(new Set(updatedDocs)));
       }
     }
 
     setAppointments(updatedList);
     try {
       localStorage.setItem('optical_appointments', JSON.stringify(updatedList));
-      await axios.post('/api/optical/appointments/', newApt);
     } catch (e) {}
 
     handleClose();
@@ -421,13 +563,17 @@ Thank you for choosing *${storeName}*. We hope to serve you again soon!`;
     if (!aptObj) return;
 
     if (confirm(`Are you sure you want to cancel the appointment for ${aptObj.patient}?`)) {
-      const updated = appointments.map(apt => 
+      const updated = appointments.map(apt =>
         apt.id === aptObj.id ? { ...apt, status: 'Cancelled' } : apt
       );
       setAppointments(updated);
       try {
         localStorage.setItem('optical_appointments', JSON.stringify(updated));
       } catch (e) {}
+
+      if (isBackendId(aptObj.id)) {
+        axios.patch(`/api/sales/appointments/${aptObj.id}/`, { status: 'Cancelled' }).catch(() => {});
+      }
 
       // Send automated cancellation WhatsApp message
       sendWhatsAppCancellation(aptObj);
@@ -616,8 +762,14 @@ Thank you for choosing *${storeName}*. We hope to serve you again soon!`;
                                   state: {
                                     appointment: {
                                       id: row.id,
+                                      customerId: row.customerId || null,
+                                      patientId: row.patientId || '',
+                                      testNo: row.testNo || '',
                                       name: row.patient,
                                       phone: row.phone,
+                                      email: row.email,
+                                      age: row.age,
+                                      gender: row.gender,
                                       optometrist: row.doctor,
                                       date: row.date,
                                       type: row.type
@@ -684,9 +836,9 @@ Thank you for choosing *${storeName}*. We hope to serve you again soon!`;
               <Autocomplete
                 freeSolo
                 options={dbPatients}
-                getOptionLabel={(opt) => (typeof opt === 'string' ? opt : `${opt.name} (${opt.phone || opt.id})`)}
+                getOptionLabel={(opt) => (typeof opt === 'string' ? opt : `${opt.name} (${opt.patient_code || opt.phone || opt.id})`)}
                 value={newApt.patient}
-                onInputChange={(e, val) => setNewApt(prev => ({ ...prev, patient: val || '' }))}
+                onInputChange={(e, val) => setNewApt(prev => ({ ...prev, patient: val || '', customerId: null }))}
                 onChange={(e, val) => handleSelectPatientObj(val)}
                 renderInput={(params) => (
                   <TextField 
@@ -710,12 +862,35 @@ Thank you for choosing *${storeName}*. We hope to serve you again soon!`;
             </Grid>
 
             <Grid item xs={12} sm={5}>
-              <TextField 
-                fullWidth 
-                label="Mobile Phone Number" 
+              <TextField
+                fullWidth
+                label="Mobile Phone Number"
                 placeholder="+91..."
-                value={newApt.phone} 
-                onChange={(e) => setNewApt({ ...newApt, phone: e.target.value })} 
+                value={newApt.phone}
+                onChange={(e) => setNewApt({ ...newApt, phone: e.target.value })}
+              />
+            </Grid>
+
+            {/* Patient ID / Test No — auto-assigned (a fresh preview for a new patient, or the
+                selected patient's own real ones), same as they'll appear on the Eye Test form
+                when "Start Eye Test" is used from this appointment. Editable in case front desk
+                needs to correct/override, matching how these fields behave on Eye Test itself. */}
+            <Grid item xs={6} sm={3}>
+              <TextField
+                fullWidth
+                label="Patient ID"
+                value={newApt.patientId}
+                onChange={(e) => setNewApt(prev => ({ ...prev, patientId: e.target.value }))}
+                helperText="Auto-generated"
+              />
+            </Grid>
+            <Grid item xs={6} sm={3}>
+              <TextField
+                fullWidth
+                label="Test No"
+                value={newApt.testNo}
+                onChange={(e) => setNewApt(prev => ({ ...prev, testNo: e.target.value }))}
+                helperText="Auto-generated"
               />
             </Grid>
 

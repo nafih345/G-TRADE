@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { 
@@ -40,9 +40,14 @@ import Step8Diagnosis from '../components/optical/Step8Diagnosis';
 import Step9Prescription from '../components/optical/Step9Prescription';
 import SingleScreenEyeTestForm from '../components/optical/SingleScreenEyeTestForm';
 
+// A real backend Customer id is a UUID; local/legacy records use human-readable
+// "P-1001"-style codes as their id, which never match this shape.
+const isBackendId = (id) => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+
 export default function OpticalServices() {
   const navigate = useNavigate();
   const location = useLocation();
+  const appointmentHandledRef = useRef(false);
 
   const [layoutMode, setLayoutMode] = useState('single'); // 'single' (Image 3 ERP view) or 'wizard'
   const [viewMode, setViewMode] = useState('form'); // 'form' or 'list'
@@ -56,11 +61,13 @@ export default function OpticalServices() {
   // Database Integration State
   const [pastExaminations, setPastExaminations] = useState([]);
   const [dbPatients, setDbPatients] = useState([]);
+  const [recordsLoaded, setRecordsLoaded] = useState(false);
   const [doctorsList, setDoctorsList] = useState([]);
 
   // Core Examination State
   const [patientData, setPatientData] = useState({
     id: '',
+    customerId: null,
     name: '',
     age: '',
     gender: 'Male',
@@ -187,17 +194,21 @@ export default function OpticalServices() {
       } catch (e) {}
 
       try {
+        // /api/sales/* endpoints are paginated (DRF PageNumberPagination) — a successful
+        // response is {count, next, previous, results}, not a bare array.
         const resCust = await axios.get('/api/sales/customers/');
-        if (resCust.data && Array.isArray(resCust.data)) {
-          const apiCust = resCust.data.filter(c => c.name && c.name !== 'Mohammed' && c.id !== 'P-7375');
+        const custData = resCust.data?.results || resCust.data || [];
+        if (Array.isArray(custData)) {
+          const apiCust = custData.filter(c => c.name && c.name !== 'Mohammed' && c.id !== 'P-7375');
           patientsList = [...patientsList, ...apiCust];
         }
       } catch (e) {}
 
       try {
         const resTests = await axios.get('/api/sales/eye-examinations/');
-        if (resTests.data && Array.isArray(resTests.data)) {
-          const apiTests = resTests.data.map(item => item.raw_data || {
+        const testsData = resTests.data?.results || resTests.data || [];
+        if (Array.isArray(testsData)) {
+          const apiTests = testsData.map(item => item.raw_data || {
             id: item.visit_number || item.id,
             date: item.examination_date ? item.examination_date.split('T')[0] : '',
             patientId: item.patient_id,
@@ -250,14 +261,24 @@ export default function OpticalServices() {
         docsList = [...docsList, ...adminDocNames];
       } catch (e) {}
 
-      // Deduplicate patients by ID or Phone
+      // Deduplicate patients: prefer patient_code as the identity key so a locally-cached
+      // record (id = "P-1001") and its backend counterpart (id = real UUID, patient_code =
+      // "P-1001") collapse into one entry instead of showing the same patient twice.
       const uniquePatients = Array.from(
-        new Map(patientsList.map(item => [item.id || item.phone, item])).values()
-      );
+        new Map(patientsList.map(item => [item.patient_code || item.id || item.phone, item])).values()
+      ).map(p => {
+        // patientData.id is always displayed/typed as the human-readable code; the real
+        // backend link (used to PATCH the same Customer row instead of creating a duplicate)
+        // is tracked separately in customerId.
+        const backendId = isBackendId(p.id) ? p.id : (p.customerId || null);
+        const humanId = p.patient_code || (isBackendId(p.id) ? null : p.id) || p.id;
+        return { ...p, id: humanId, customerId: backendId };
+      });
 
       setDbPatients(uniquePatients);
       setDoctorsList(Array.from(new Set(docsList.filter(Boolean))));
       setPastExaminations(testsList);
+      setRecordsLoaded(true);
     };
 
     fetchDatabaseRecords();
@@ -266,10 +287,26 @@ export default function OpticalServices() {
     return () => window.removeEventListener('optical_doctors_updated', fetchDatabaseRecords);
   }, []);
 
+  // Generates the next Patient ID by scanning every known patient/exam id for the highest
+  // "P-NNNN" number in use and incrementing it. A plain count-based scheme (P-1001 + length)
+  // isn't safe: pastExaminations can vary in length between sessions/reloads (depending on what
+  // happened to load), so two different patients registered in different sessions could both
+  // land on the same "next" number — which is exactly how two unrelated patients ended up
+  // sharing the same Patient ID.
+  const getNextPatientId = () => {
+    const allIds = [...(dbPatients || []), ...(pastExaminations || [])]
+      .map(p => String(p.id || p.patientId || '').match(/^p-?(\d+)$/i))
+      .filter(Boolean)
+      .map(m => parseInt(m[1], 10));
+    const maxId = allIds.length > 0 ? Math.max(...allIds) : 1000;
+    return `P-${maxId + 1}`;
+  };
+
   // Reset all examination fields to 100% blank
   const handleResetAll = () => {
     setPatientData({
-      id: `P-${1001 + (pastExaminations?.length || 0)}`,
+      id: getNextPatientId(),
+      customerId: null,
       name: '',
       age: '',
       gender: 'Male',
@@ -388,9 +425,22 @@ export default function OpticalServices() {
     const keys = ['Enter', 'ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown'];
     if (!keys.includes(e.key)) return;
 
-    const activeEl = document.activeElement;
+    // Use e.target rather than document.activeElement: by the time this bubble-phase
+    // handler runs, activeElement can already be one step stale (browser/MUI internals
+    // reassign focus asynchronously relative to this listener), which was causing Enter
+    // to skip two fields at once instead of one. e.target is fixed at dispatch time.
+    const activeEl = e.target;
     // Do not override if user is inside a multiline textarea
     if (activeEl && activeEl.tagName === 'TEXTAREA') return;
+
+    // Mobile No is the last field of the patient registration row — pressing Enter there
+    // saves the clinical record directly to the database instead of just moving focus on
+    // into the next section, so no separate "register patient" step is needed.
+    if (e.key === 'Enter' && activeEl?.id === 'eyetest-mobile-input') {
+      e.preventDefault();
+      handleSaveDraft();
+      return;
+    }
 
     const container = document.getElementById('optical-single-form-container') || document.getElementById('optical-step-container');
     if (!container) return;
@@ -525,6 +575,11 @@ export default function OpticalServices() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [activeStep]);
 
+  // Selecting an existing patient restores their own Patient ID and Test No (assigned when
+  // they were first registered) along with their contact/demographic details — Patient ID and
+  // Test No are that patient's permanent identifiers, not freshly generated each visit. A
+  // brand-new patient (typed in directly, never selected) still gets a fresh auto-generated
+  // Patient ID / Test No, since they have no prior record to restore.
   const handleSelectPatient = (selected) => {
     setPatientData(prev => ({
       ...prev,
@@ -532,7 +587,117 @@ export default function OpticalServices() {
       visitNum: `VIS-${Math.floor(100 + Math.random() * 900)}`,
       appointmentNum: `APT-${Math.floor(1000 + Math.random() * 9000)}`
     }));
+
+    // Find this patient's most recent past visit so its ACCP (the Rx they were finally
+    // accepted/prescribed) can be carried forward as THIS visit's PGP (previous glasses
+    // power) — standard clinical workflow: what was prescribed last time is what they're
+    // wearing now. Everything else clinical (UCVA, AR, retinoscopy, ACCP, diagnosis, etc.)
+    // starts blank below, ready for fresh findings at this new visit.
+    const sId = String(selected?.id || '').toLowerCase().trim();
+    const sPhone = String(selected?.phone || '').toLowerCase().trim();
+    const lastExam = (pastExaminations || [])
+      .filter(e => {
+        const eId = String(e.patientId || e.patient_id || '').toLowerCase().trim();
+        const ePhone = String(e.phone || '').toLowerCase().trim();
+        return (sId && eId && sId === eId) || (sPhone && ePhone && sPhone === ePhone);
+      })
+      .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))[0];
+    const lastRx = lastExam?.subjectiveRefraction || {};
+
+    setMedicalHistory(prev => ({
+      ...prev,
+      pgpOdSph: lastRx?.od?.sph || '',
+      pgpOdCyl: lastRx?.od?.cyl || '',
+      pgpOdAxis: lastRx?.od?.axis || '',
+      pgpOdVa: lastRx?.od?.va || '',
+      pgpOdAdd: lastRx?.nearAdd || '',
+      pgpOdAddVa: lastRx?.odNv?.va || '',
+      pgpOsSph: lastRx?.os?.sph || '',
+      pgpOsCyl: lastRx?.os?.cyl || '',
+      pgpOsAxis: lastRx?.os?.axis || '',
+      pgpOsVa: lastRx?.os?.va || '',
+      pgpOsAdd: lastRx?.nearAdd || '',
+      pgpOsAddVa: lastRx?.osNv?.va || '',
+      previousGlassesDate: lastExam?.date || ''
+    }));
+
+    setSubjectiveRefraction({
+      od: { sph: '', cyl: '', axis: '', va: '' },
+      os: { sph: '', cyl: '', axis: '', va: '' },
+      nearAdd: '', pd: '', prism: '', balanceTest: '', fogging: '', duochrome: '', crossCylinder: ''
+    });
+    setVisualAcuity({
+      distance: { odWo: '', odWith: '', osWo: '', osWith: '', odPinhole: '', osPinhole: '' },
+      near: { odWo: '', odWith: '', osWo: '', osWith: '' },
+      colorVision: 'Normal', contrastSensitivity: 'Normal', dominantEye: 'Right (OD)'
+    });
+    setObjectiveRefraction({
+      autoRefraction: { od: { sph: '', cyl: '', axis: '', va: '', pd: '' }, os: { sph: '', cyl: '', axis: '', va: '', pd: '' } },
+      retinoscopy: { od: { sph: '', cyl: '', axis: '', va: '' }, os: { sph: '', cyl: '', axis: '', va: '' } },
+      kReading: { odK1: '', odK2: '', osK1: '', osK2: '', cornealRadius: '', streakNotes: '' }
+    });
+    setEyeHealth({
+      anterior: { lids: '', lashes: '', conjunctiva: '', cornea: '', iris: '', lens: '', anteriorChamber: '' },
+      posterior: { disc: '', macula: '', retina: '', vessels: '' },
+      iop: { od: '', os: '', method: '' },
+      cupDiscRatio: { od: '', os: '' },
+      dilatedExam: ''
+    });
+    setPrescription({ selectedLenses: [], frameRecommendation: '', lensRecommendation: '' });
+    setDiagnosis(prev => ({
+      ...prev,
+      testNo: selected?.testNo || '',
+      primary: '', icdCode: '', remarks: '', procedure: '', medicine: '', advice: '', nextReview: '', nextReviewDate: '',
+      procedureCharge: '0', medicineCharge: '0'
+    }));
   };
+
+  // "Start Eye Test" hands a patient/appointment across via navigate() state from either the
+  // Appointments page ({ appointment }) or Patient History ({ patient }). Waits for dbPatients
+  // to finish loading so a handoff linked to an existing Customer resolves through the normal
+  // "restore their own ID/history" path instead of being treated as a brand-new patient.
+  useEffect(() => {
+    const apt = location.state?.appointment;
+    const directPatient = location.state?.patient;
+    if ((!apt && !directPatient) || appointmentHandledRef.current || !recordsLoaded) return;
+    appointmentHandledRef.current = true;
+
+    if (directPatient) {
+      const matched = directPatient.customerId
+        ? dbPatients.find(p => p.customerId === directPatient.customerId)
+        : null;
+      handleSelectPatient(matched || directPatient);
+      return;
+    }
+
+    const matched = apt.customerId
+      ? dbPatients.find(p => p.customerId === apt.customerId)
+      : null;
+
+    if (matched) {
+      handleSelectPatient(matched);
+    } else {
+      // The Patient ID/Test No were already assigned (and possibly quoted to the patient) at
+      // booking time in Appointments.jsx — use those rather than re-guessing fresh ones here,
+      // so what shows up matches what the front desk saw.
+      setPatientData(prev => ({
+        ...prev,
+        id: apt.patientId || getNextPatientId(),
+        customerId: apt.customerId || null,
+        name: apt.name || '',
+        phone: apt.phone || '',
+        email: apt.email || '',
+        age: apt.age || '',
+        gender: apt.gender || 'Male',
+        assignedOptometrist: apt.optometrist || '',
+        appointmentNum: apt.id || '',
+        lastVisitDate: apt.date || ''
+      }));
+      if (apt.testNo) {
+        setDiagnosis(prev => ({ ...prev, testNo: apt.testNo }));
+      }
+    }
+  }, [location.state, recordsLoaded, dbPatients]);
 
   const handleRegisterNewPatient = (newP) => {
     setPatientData(newP);
@@ -545,13 +710,35 @@ export default function OpticalServices() {
       return;
     }
 
+    // The Patient ID / Test No fields show auto-generated placeholders (P-1001, "1", ...) until
+    // the user types over them, but those display values were never written back into state —
+    // so saved records ended up with a blank patient ID / test no. Persist the same auto values
+    // now (matching the exact formula SingleScreenEyeTestForm uses to display them).
+    const effectivePatientId = patientData?.id || getNextPatientId();
+    const effectiveTestNo = diagnosis?.testNo || (pastExaminations?.length + 1).toString();
+    if (!patientData?.id) {
+      setPatientData(prev => ({ ...prev, id: effectivePatientId }));
+    }
+    if (!diagnosis?.testNo) {
+      setDiagnosis(prev => ({ ...prev, testNo: effectiveTestNo }));
+    }
+
     const examRecord = {
       id: patientData?.visitNum || `VIS-${Math.floor(100 + Math.random() * 900)}`,
       date: new Date().toISOString().split('T')[0],
-      patientId: patientData?.id || '',
+      testNo: effectiveTestNo,
+      patientId: effectivePatientId,
       name: patientData?.name || '',
+      phone: patientData?.phone || '',
+      age: patientData?.age || '',
+      gender: patientData?.gender || '',
+      address: patientData?.address || '',
+      place: patientData?.place || patientData?.city || '',
+      assignedOptometrist: patientData?.assignedOptometrist || '',
       doctor: patientData?.assignedOptometrist || '',
       diagnosis: diagnosis?.primary || 'Routine Refraction',
+      procedureCharge: diagnosis?.procedureCharge || '0',
+      medicineCharge: diagnosis?.medicineCharge || '0',
       rx: `OD: ${subjectiveRefraction?.od?.sph || ''} SPH / ${subjectiveRefraction?.od?.cyl || ''} CYL @ ${subjectiveRefraction?.od?.axis || ''}° | OS: ${subjectiveRefraction?.os?.sph || ''} SPH / ${subjectiveRefraction?.os?.cyl || ''} CYL @ ${subjectiveRefraction?.os?.axis || ''}°`,
       patientData,
       subjectiveRefraction,
@@ -560,12 +747,17 @@ export default function OpticalServices() {
     };
 
     const customerRecord = {
-      id: patientData?.id || '',
+      id: effectivePatientId,
+      testNo: effectiveTestNo,
       name: patientData?.name || '',
       phone: patientData?.phone || '',
       email: patientData?.email || '',
       age: patientData?.age || '',
       gender: patientData?.gender || '',
+      address: patientData?.address || '',
+      place: patientData?.place || patientData?.city || '',
+      city: patientData?.place || patientData?.city || '',
+      assignedOptometrist: patientData?.assignedOptometrist || '',
       sphRight: subjectiveRefraction?.od?.sph || '',
       cylRight: subjectiveRefraction?.od?.cyl || '',
       axisRight: subjectiveRefraction?.od?.axis || '',
@@ -585,6 +777,16 @@ export default function OpticalServices() {
         lensRec: prescription.lensRecommendation || '1.56 Blue Cut Anti-Glare Lens'
       }
     };
+
+    // Resolve the real backend Customer this examination belongs to: reuse the link already
+    // captured on patientData (set when an existing patient was selected, or once this exact
+    // patient has been saved before), fall back to matching by phone, otherwise a fresh
+    // Customer gets created below.
+    let customerId = patientData?.customerId || null;
+    if (!customerId && patientData?.phone) {
+      const existingMatch = dbPatients.find(c => c.phone && c.phone === patientData.phone);
+      if (existingMatch?.customerId) customerId = existingMatch.customerId;
+    }
 
     // Save locally
     try {
@@ -611,10 +813,27 @@ export default function OpticalServices() {
 
     // Send to API Database
     try {
-      await axios.post('/api/sales/customers/', customerRecord).catch(() => null);
+      // patient_code (not the app-local "id") is the field the backend Customer model
+      // actually keys uniqueness off of — sending it explicitly keeps the human-readable
+      // code the UI shows in sync with the one stored server-side, instead of the backend
+      // silently minting an unrelated one on every save. Known link -> PATCH the same row;
+      // otherwise create it once and remember the real id for every future save.
+      const customerApiPayload = { ...customerRecord, id: undefined, patient_code: effectivePatientId };
+      try {
+        if (customerId) {
+          await axios.patch(`/api/sales/customers/${customerId}/`, customerApiPayload);
+        } else {
+          const res = await axios.post('/api/sales/customers/', customerApiPayload);
+          if (res.data?.id) {
+            customerId = res.data.id;
+            setPatientData(prev => ({ ...prev, customerId }));
+          }
+        }
+      } catch (e) {}
 
       const dbPayload = {
-        patient_id: patientData?.id || '',
+        customer: customerId || null,
+        patient_id: effectivePatientId,
         patient_name: patientData?.name || '',
         age: String(patientData?.age || ''),
         gender: patientData?.gender || '',
@@ -675,11 +894,18 @@ export default function OpticalServices() {
       };
 
       await axios.post('/api/sales/eye-examinations/', dbPayload);
+      alert(`Clinical Examination & Prescription for ${patientData.name} (${effectivePatientId}) saved to database!`);
     } catch (e) {
       console.warn("API database save notice:", e);
+      alert(`Saved locally, but syncing "${patientData.name}"'s record to the database failed. Please check your connection and try Save again.`);
     }
 
-    alert(`Clinical Examination & Prescription for ${patientData.name} (${patientData.id}) saved to database!`);
+    // The saved record now permanently holds effectivePatientId/testNo. Clear those two
+    // fields back to blank (rather than a full form reset) so the next patient typed into
+    // this same screen gets a freshly auto-generated Patient ID / Test No, instead of the
+    // just-saved patient's identifiers sticking around.
+    setPatientData(prev => ({ ...prev, id: '', customerId: null }));
+    setDiagnosis(prev => ({ ...prev, testNo: '' }));
   };
 
   const handleNavigateToSales = () => {
@@ -832,6 +1058,7 @@ export default function OpticalServices() {
             onPrint={() => setActiveStep(9)}
             onClearAll={handleResetAll}
             savedExams={pastExaminations}
+            nextPatientId={getNextPatientId()}
             onSelectExamFromHistory={(exam) => {
               if (exam.patientData) setPatientData(exam.patientData);
               if (exam.subjectiveRefraction) setSubjectiveRefraction(exam.subjectiveRefraction);

@@ -1,4 +1,5 @@
 import uuid
+from decimal import Decimal
 from django.db import models
 from apps.common.models import BaseUUIDModel
 
@@ -89,10 +90,11 @@ class Product(BaseUUIDModel):
     supplier_name = models.CharField(max_length=150, blank=True, null=True)
     frame_type = models.CharField(max_length=150, blank=True, null=True)
     rack_location = models.CharField(max_length=150, blank=True, null=True)
+    hsn_code = models.CharField(max_length=15, blank=True, null=True)
 
-    cost_price = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
-    retail_price = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
-    wholesale_price = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
+    cost_price = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.0'))
+    retail_price = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.0'))
+    wholesale_price = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.0'))
     
     minimum_stock = models.IntegerField(default=5)
     maximum_stock = models.IntegerField(default=100)
@@ -110,3 +112,26 @@ class Product(BaseUUIDModel):
 
     def __str__(self):
         return f"{self.name} ({self.sku})"
+
+
+class BarcodeSequence(models.Model):
+    """Per-prefix atomic counter used to mint unique product barcodes (see barcode_utils.reserve_barcodes)."""
+    prefix = models.CharField(max_length=10, unique=True)
+    last_number = models.BigIntegerField(default=100000)
+
+    def __str__(self):
+        return f"{self.prefix} -> {self.last_number}"
+
+
+class BarcodeHistory(BaseUUIDModel):
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='barcode_history')
+    old_barcode = models.CharField(max_length=150, blank=True, null=True)
+    new_barcode = models.CharField(max_length=150, blank=True, null=True)
+    changed_by = models.CharField(max_length=150, blank=True, null=True)
+    reason = models.CharField(max_length=255, blank=True, null=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.product_id}: {self.old_barcode} -> {self.new_barcode}"

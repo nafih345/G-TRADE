@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
+import useBarcodeScanner from '../../hooks/useBarcodeScanner';
 import { 
   Box, Grid, Card, CardContent, Typography, TextField, InputBase,
   Button, MenuItem, Table, TableBody, TableCell, 
@@ -53,7 +54,10 @@ export default function PosBillingView({
 
   // Search & Filters
   const [barcodeInput, setBarcodeInput] = useState('');
-  const [selectedCategory, setSelectedCategory] = useState('All');
+  // No category pre-selected — the catalog grid starts blank (see filteredCatalog below) until
+  // the user actively picks a category or types a search/barcode query, rather than dumping
+  // every product across every category onto the screen by default.
+  const [selectedCategory, setSelectedCategory] = useState(null);
   const [selectedBrand, setSelectedBrand] = useState('All');
 
   // Customer Selection
@@ -120,7 +124,13 @@ export default function PosBillingView({
   const [cart, setCart] = useState([]);
   const [discountAmount, setDiscountAmount] = useState(0);
   const [useLoyaltyPoints, setUseLoyaltyPoints] = useState(false);
-  const [paymentMethod, setPaymentMethod] = useState('UPI / PhonePe');
+  // Selectable per standard Indian GST slabs — applied to the whole cart's subtotal rather than
+  // trusting each product's own (often missing/inconsistent) taxRate, so what's shown always
+  // matches what's actually charged.
+  const [taxRatePercent, setTaxRatePercent] = useState(18);
+  // Split payment — how much of the total is actually being paid via each mode, mirroring the
+  // same "Multi Paymode" pattern used on the New Sale billing screen.
+  const [multiPay, setMultiPay] = useState({ cash: '', upi: '', card: '', credit: '' });
 
   // Barcode Scanner Machine Connection States
   const [barcodeMachineOpen, setBarcodeMachineOpen] = useState(false);
@@ -143,58 +153,34 @@ export default function PosBillingView({
     setCatalogList(products);
   }, [products]);
 
-  // Global Hardware Barcode Listener for physical USB / Bluetooth barcode machines
-  useEffect(() => {
-    let buffer = '';
-    let lastTime = Date.now();
-
-    const handleKeyDown = (e) => {
-      // Avoid capturing regular text typing if target is standard text input unless focused on barcode search
-      const tag = e.target.tagName;
-      const isInput = (tag === 'INPUT' || tag === 'TEXTAREA') && e.target !== barcodeInputRef.current && e.target !== machineInputRef.current;
-      
-      const now = Date.now();
-      if (now - lastTime > 120) {
-        buffer = ''; // Reset buffer if keystroke speed is human (>120ms delay)
-      }
-      lastTime = now;
-
-      if (e.key === 'Enter') {
-        if (buffer.length >= 3 && !isInput) {
-          e.preventDefault();
-          processBarcodeCode(buffer.trim());
-          buffer = '';
-        }
-      } else if (e.key.length === 1 && !isInput) {
-        buffer += e.key;
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [catalogList, cart]);
-
   const processBarcodeCode = (codeStr) => {
     if (!codeStr) return;
     const code = codeStr.toLowerCase();
-    const matched = catalogList.find(p => 
-      p.id.toLowerCase() === code || 
+    const matched = catalogList.find(p =>
+      (p.barcode && p.barcode.toLowerCase() === code) ||
+      p.id.toLowerCase() === code ||
       p.name.toLowerCase().includes(code)
-    ) || {
-      id: `BC-${codeStr.slice(-6)}`,
-      name: `Scanned Barcode: ${codeStr}`,
-      type: 'Frame',
-      price: 1500,
-      taxRate: 18,
-      image: '👓'
-    };
+    );
+
+    // Previously fell back to a made-up ₹1500 placeholder and added it to the bill anyway —
+    // silently charging the wrong price for an unrecognized barcode. Now it just reports the
+    // miss instead of guessing.
+    if (!matched) {
+      setLastScannedNotice(`❌ No product found for barcode "${codeStr}"`);
+      setScanHistory(prev => [{ code: codeStr, item: 'Not found', time: new Date().toLocaleTimeString() }, ...prev]);
+      setTimeout(() => setLastScannedNotice(null), 4000);
+      return;
+    }
 
     addToCart(matched);
-    const notice = `✅ Scanned "${matched.name}" -> Added to Bill!`;
+    const notice = `✅ Scanned "${matched.name}" (₹${matched.price}) -> Added to Bill!`;
     setLastScannedNotice(notice);
     setScanHistory(prev => [{ code: codeStr, item: matched.name, time: new Date().toLocaleTimeString() }, ...prev]);
     setTimeout(() => setLastScannedNotice(null), 4000);
   };
+
+  // Global Hardware Barcode Listener for physical USB / Bluetooth barcode machines
+  useBarcodeScanner(processBarcodeCode, { exemptRefs: [barcodeInputRef, machineInputRef] });
 
   // Handle Barcode auto-scan from form input
   const handleBarcodeSubmit = (e) => {
@@ -246,17 +232,40 @@ export default function PosBillingView({
 
   // Cart Calculations
   const subtotal = cart.reduce((sum, item) => sum + (parseFloat(item.product.price || 0) * item.qty), 0);
-  const taxAmount = cart.reduce((sum, item) => sum + (parseFloat(item.product.price || 0) * item.qty * ((item.product.taxRate || 18) / 100)), 0);
+  const taxAmount = subtotal * (taxRatePercent / 100);
   const totalDiscount = parseFloat(discountAmount || 0) + loyaltyPointsDiscount;
   const grandTotal = Math.max(0, subtotal + taxAmount - totalDiscount);
 
-  // Filter Catalog List
-  const filteredCatalog = catalogList.filter(p => {
-    const matchesCategory = selectedCategory === 'All' || 
-      (p.type || p.category || '').toLowerCase().includes(selectedCategory.toLowerCase());
-    const matchesBrand = selectedBrand === 'All' || p.brand === selectedBrand;
-    return matchesCategory && matchesBrand;
-  });
+  const totalPaid = (parseFloat(multiPay.cash) || 0) + (parseFloat(multiPay.upi) || 0) +
+    (parseFloat(multiPay.card) || 0) + (parseFloat(multiPay.credit) || 0);
+  const balanceDue = Math.max(0, grandTotal - totalPaid);
+  const changeDue = Math.max(0, totalPaid - grandTotal);
+  // Derived label for records/receipts — lists whichever modes actually have an amount entered.
+  const paymentMethod = [
+    parseFloat(multiPay.cash) > 0 && 'Cash',
+    parseFloat(multiPay.upi) > 0 && 'UPI',
+    parseFloat(multiPay.card) > 0 && 'Card',
+    parseFloat(multiPay.credit) > 0 && 'Credit'
+  ].filter(Boolean).join(' + ') || 'Not Specified';
+
+  // Filter Catalog List — a typed search/barcode takes priority over the category chips (and
+  // searches the whole catalog regardless of category); with no search text, only an explicitly
+  // selected category shows anything; with neither, the grid stays blank rather than dumping
+  // the entire inventory on screen.
+  const searchQuery = barcodeInput.trim().toLowerCase();
+  const filteredCatalog = searchQuery
+    ? catalogList.filter(p => {
+        const haystack = [p.name, p.barcode, p.id, p.code, p.brand].filter(Boolean).join(' ').toLowerCase();
+        return haystack.includes(searchQuery);
+      })
+    : selectedCategory
+      ? catalogList.filter(p => {
+          const matchesCategory = selectedCategory === 'All' ||
+            (p.type || p.category || '').toLowerCase().includes(selectedCategory.toLowerCase());
+          const matchesBrand = selectedBrand === 'All' || p.brand === selectedBrand;
+          return matchesCategory && matchesBrand;
+        })
+      : [];
 
   return (
     <Box>
@@ -309,6 +318,14 @@ export default function PosBillingView({
             Remove Patient
           </Button>
         </Box>
+      )}
+
+      {/* Scan confirmation / "barcode not found" feedback — was being set on every scan but
+          never actually rendered anywhere, so neither success nor failure was ever visible. */}
+      {lastScannedNotice && (
+        <Alert severity={lastScannedNotice.startsWith('❌') ? 'error' : 'success'} sx={{ mb: 2 }} onClose={() => setLastScannedNotice(null)}>
+          {lastScannedNotice}
+        </Alert>
       )}
 
       <Grid container spacing={3}>
@@ -410,7 +427,7 @@ export default function PosBillingView({
           </Box>
 
           {/* Product Catalog Cards Grid */}
-          {filteredCatalog.length === 0 ? (
+          {catalogList.length === 0 ? (
             <Box sx={{ p: 4, textAlign: 'center', bgcolor: 'action.hover', border: '2px dashed', borderColor: 'divider', borderRadius: 3 }}>
               <Avatar sx={{ mx: 'auto', bgcolor: 'primary.main', width: 52, height: 52, mb: 1.5 }}>
                 <EmptyIcon />
@@ -419,27 +436,59 @@ export default function PosBillingView({
                 No Products Found in Inventory Database
               </Typography>
               <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 460, mx: 'auto', mb: 2.5 }}>
-                No matching frames or lenses found. Click below to load sample optical inventory or add custom charges.
+                No products in inventory yet. Click below to load sample optical inventory or add custom charges.
               </Typography>
               <Stack direction="row" spacing={2} justifyContent="center">
-                <Button 
-                  variant="contained" 
-                  color="primary" 
-                  startIcon={<AddIcon />} 
+                <Button
+                  variant="contained"
+                  color="primary"
+                  startIcon={<AddIcon />}
                   onClick={() => setCatalogList(defaultCatalogItems)}
                   sx={{ borderRadius: 2.5, textTransform: 'none', fontWeight: 700 }}
                 >
                   Seed Sample Optical Catalog
                 </Button>
-                <Button 
-                  variant="outlined" 
-                  color="secondary" 
+                <Button
+                  variant="outlined"
+                  color="secondary"
                   onClick={() => setCustomItemOpen(true)}
                   sx={{ borderRadius: 2.5, textTransform: 'none', fontWeight: 600 }}
                 >
                   + Add Custom Item
                 </Button>
               </Stack>
+            </Box>
+          ) : !searchQuery && !selectedCategory ? (
+            <Box sx={{ p: 4, textAlign: 'center', bgcolor: 'action.hover', border: '2px dashed', borderColor: 'divider', borderRadius: 3 }}>
+              <Avatar sx={{ mx: 'auto', bgcolor: 'primary.main', width: 52, height: 52, mb: 1.5 }}>
+                <SearchIcon />
+              </Avatar>
+              <Typography variant="subtitle1" fontWeight={800} gutterBottom>
+                Pick a Category or Search to View Products
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 460, mx: 'auto' }}>
+                Select Frames, Lenses, Contact Lenses, or Accessories above, or scan/type a barcode or product name in the search bar.
+              </Typography>
+            </Box>
+          ) : filteredCatalog.length === 0 ? (
+            <Box sx={{ p: 4, textAlign: 'center', bgcolor: 'action.hover', border: '2px dashed', borderColor: 'divider', borderRadius: 3 }}>
+              <Avatar sx={{ mx: 'auto', bgcolor: 'primary.main', width: 52, height: 52, mb: 1.5 }}>
+                <EmptyIcon />
+              </Avatar>
+              <Typography variant="subtitle1" fontWeight={800} gutterBottom>
+                No Matching Products
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 460, mx: 'auto', mb: 2.5 }}>
+                {searchQuery ? `No products match "${barcodeInput}".` : 'No products found in this category.'}
+              </Typography>
+              <Button
+                variant="outlined"
+                color="secondary"
+                onClick={() => setCustomItemOpen(true)}
+                sx={{ borderRadius: 2.5, textTransform: 'none', fontWeight: 600 }}
+              >
+                + Add Custom Item
+              </Button>
             </Box>
           ) : (
             <Grid container spacing={2}>
@@ -573,9 +622,24 @@ export default function PosBillingView({
                 <Typography variant="body2" fontWeight={700}>₹{subtotal.toLocaleString()}</Typography>
               </Box>
 
-              <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
-                <Typography variant="body2" color="text.secondary">GST / Tax (18%):</Typography>
-                <Typography variant="body2" fontWeight={700}>₹{taxAmount.toLocaleString()}</Typography>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+                <Typography variant="body2" color="text.secondary">GST / Tax:</Typography>
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <TextField
+                    select
+                    size="small"
+                    value={taxRatePercent}
+                    onChange={(e) => setTaxRatePercent(parseFloat(e.target.value))}
+                    sx={{ width: 90, '& .MuiSelect-select': { py: 0.5, fontSize: '0.85rem', fontWeight: 700 } }}
+                  >
+                    <MenuItem value={0}>0%</MenuItem>
+                    <MenuItem value={5}>5%</MenuItem>
+                    <MenuItem value={12}>12%</MenuItem>
+                    <MenuItem value={18}>18%</MenuItem>
+                    <MenuItem value={28}>28%</MenuItem>
+                  </TextField>
+                  <Typography variant="body2" fontWeight={700}>₹{taxAmount.toLocaleString()}</Typography>
+                </Stack>
               </Box>
 
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
@@ -599,22 +663,62 @@ export default function PosBillingView({
               </Box>
             </Box>
 
-            {/* Payment Method Selector */}
-            <TextField
-              select
-              fullWidth
-              size="small"
-              label="Payment Method"
-              value={paymentMethod}
-              onChange={(e) => setPaymentMethod(e.target.value)}
-              sx={{ mb: 2 }}
-            >
-              <MenuItem value="UPI / PhonePe">UPI / GPay / PhonePe</MenuItem>
-              <MenuItem value="Cash">Cash Payment</MenuItem>
-              <MenuItem value="Credit Card">Credit Card Swiper</MenuItem>
-              <MenuItem value="Debit Card">Debit Card Swiper</MenuItem>
-              <MenuItem value="Store Credit">Store Credit / Account Dues</MenuItem>
-            </TextField>
+            {/* Split Payment — how the total is actually being paid, across as many modes as
+                needed (e.g. part Cash, part UPI). Total Paid / Balance / Change update live. */}
+            <Box sx={{ p: 1.5, bgcolor: '#f8fafc', borderRadius: 2.5, border: '1px solid', borderColor: 'divider', mb: 2 }}>
+              <Typography variant="caption" fontWeight={800} color="text.secondary" display="block" sx={{ mb: 1 }}>
+                PAYMENT METHOD
+              </Typography>
+              <Grid container spacing={1}>
+                <Grid item xs={6}>
+                  <TextField
+                    fullWidth size="small" label="Cash (₹)" type="number"
+                    value={multiPay.cash} onChange={(e) => setMultiPay({ ...multiPay, cash: e.target.value })}
+                  />
+                </Grid>
+                <Grid item xs={6}>
+                  <TextField
+                    fullWidth size="small" label="UPI / GPay (₹)" type="number"
+                    value={multiPay.upi} onChange={(e) => setMultiPay({ ...multiPay, upi: e.target.value })}
+                  />
+                </Grid>
+                <Grid item xs={6}>
+                  <TextField
+                    fullWidth size="small" label="Card (₹)" type="number"
+                    value={multiPay.card} onChange={(e) => setMultiPay({ ...multiPay, card: e.target.value })}
+                  />
+                </Grid>
+                <Grid item xs={6}>
+                  <TextField
+                    fullWidth size="small" label="Credit (₹)" type="number"
+                    value={multiPay.credit} onChange={(e) => setMultiPay({ ...multiPay, credit: e.target.value })}
+                  />
+                </Grid>
+              </Grid>
+              <Button
+                size="small"
+                onClick={() => setMultiPay(prev => ({ ...prev, cash: balanceDue.toFixed(2) }))}
+                sx={{ mt: 1, textTransform: 'none', fontWeight: 700, fontSize: '0.72rem' }}
+              >
+                Fill remaining balance into Cash
+              </Button>
+              <Divider sx={{ my: 1 }} />
+              <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                <Typography variant="caption" fontWeight={800}>Total Paid:</Typography>
+                <Typography variant="body2" fontWeight={800} color="success.main">₹{totalPaid.toFixed(2)}</Typography>
+              </Box>
+              {changeDue > 0 ? (
+                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <Typography variant="caption" fontWeight={800} color="success.main">Change Due:</Typography>
+                  <Typography variant="body2" fontWeight={800} color="success.main">₹{changeDue.toFixed(2)}</Typography>
+                </Box>
+              ) : balanceDue > 0 ? (
+                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <Typography variant="caption" fontWeight={800} color="error.main">Balance Due:</Typography>
+                  <Typography variant="body2" fontWeight={800} color="error.main">₹{balanceDue.toFixed(2)}</Typography>
+                </Box>
+              ) : null}
+            </Box>
 
             {/* Primary Action Button */}
             <Button
@@ -624,36 +728,81 @@ export default function PosBillingView({
               fullWidth
               size="large"
               startIcon={<PrintIcon />}
-              onClick={() => {
-                const invNo = `INV-${Math.floor(100000 + Math.random() * 900000)}`;
+              onClick={async () => {
+                // A real UUID from /api/sales/customers/ can be used as the Invoice.customer FK
+                // directly; a legacy localStorage-only id (e.g. "P-1003") can't, so it's treated
+                // the same as "no customer selected" — the sale still goes through as anonymous
+                // walk-in rather than being blocked (Invoice.customer is nullable for exactly
+                // this reason).
+                const isBackendId = (id) => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+                const customerId = selectedCust && isBackendId(selectedCust.id) ? selectedCust.id : null;
 
-                // 1. Deduct Stock from Inventory in database & local storage
+                let backendInvoiceId = null;
+                let invNo = `INV-${Math.floor(100000 + Math.random() * 900000)}`;
                 try {
-                  const existingInventory = JSON.parse(localStorage.getItem('optical_inventory_items') || '[]');
-                  cart.forEach(item => {
-                    const matchIdx = existingInventory.findIndex(i => i.id === item.product.id || i.code === item.product.code || i.name === item.product.name);
-                    if (matchIdx !== -1) {
-                      existingInventory[matchIdx].stock = Math.max(0, (parseInt(existingInventory[matchIdx].stock) || 0) - item.qty);
-                    }
+                  const status = balanceDue > 0 ? (totalPaid > 0 ? 'PARTIAL' : 'UNPAID') : 'PAID';
+                  const res = await axios.post('/api/sales/invoices/', {
+                    customer: customerId,
+                    invoice_date: new Date().toISOString().split('T')[0],
+                    status,
+                    total_amount: subtotal,
+                    tax_amount: taxAmount,
+                    discount_amount: totalDiscount,
+                    net_amount: grandTotal,
+                    paid_amount: totalPaid || grandTotal,
+                    payment_method: paymentMethod,
+                    items: cart.map(i => ({
+                      product: i.product.id,
+                      description: i.product.name,
+                      quantity: i.qty,
+                      unit_price: i.product.price,
+                      tax_rate: taxRatePercent,
+                      tax_amount: parseFloat(i.product.price || 0) * i.qty * (taxRatePercent / 100),
+                      subtotal: parseFloat(i.product.price || 0) * i.qty
+                    }))
                   });
-                  localStorage.setItem('optical_inventory_items', JSON.stringify(existingInventory));
-                  window.dispatchEvent(new Event('optical_stock_updated'));
-                } catch (e) {}
+                  backendInvoiceId = res.data.id;
+                  invNo = res.data.invoice_number || invNo;
 
-                // 2. Post Sales Invoice & Payment to Accounts Database
+                  await axios.post('/api/sales/payments/', {
+                    invoice: backendInvoiceId,
+                    customer: customerId,
+                    customer_name: selectedCust ? selectedCust.name : 'Walk-in Patient',
+                    amount: totalPaid || grandTotal,
+                    method: paymentMethod,
+                    payment_date: new Date().toISOString().split('T')[0],
+                    status: 'Completed'
+                  }).catch(() => {});
+                  // Stock deduction + the accounting journal entry both happen server-side
+                  // (InvoiceViewSet.perform_create) — no separate calls needed here.
+                  window.dispatchEvent(new Event('optical_stock_updated'));
+                  window.dispatchEvent(new Event('optical_accounts_updated'));
+                } catch (e) {
+                  console.warn('POS sale did not save to the database:', e);
+                }
+
+                // Local cache mirror — kept so the receipt still prints and the Dashboard/Orders
+                // tabs still show the sale immediately even if the API call above failed.
                 try {
                   const salesInvoices = JSON.parse(localStorage.getItem('optical_sales_invoices') || '[]');
                   const newInv = {
-                    id: invNo,
+                    id: backendInvoiceId || invNo,
                     invoiceNumber: invNo,
                     customerName: selectedCust ? selectedCust.name : 'Walk-in Patient',
                     phone: selectedCust ? selectedCust.phone : '',
                     date: new Date().toISOString().split('T')[0],
+                    subtotal,
+                    taxRatePercent,
+                    totalTax: taxAmount,
+                    discount: totalDiscount,
                     total: grandTotal,
-                    paidAmount: grandTotal,
+                    paidAmount: totalPaid || grandTotal,
+                    balanceDue,
+                    changeDue,
                     paymentMethod: paymentMethod,
-                    status: 'Paid',
-                    items: cart.map(i => ({ name: i.product.name, qty: i.qty, price: i.product.price }))
+                    multiPay,
+                    status: balanceDue > 0 ? 'Partial' : 'Paid',
+                    items: cart.map(i => ({ name: i.product.name, brand: i.product.brand, qty: i.qty, price: i.product.price, taxPercent: taxRatePercent }))
                   };
                   localStorage.setItem('optical_sales_invoices', JSON.stringify([newInv, ...salesInvoices]));
 
@@ -668,19 +817,33 @@ export default function PosBillingView({
                     status: 'Completed'
                   };
                   localStorage.setItem('optical_payments', JSON.stringify([newPay, ...payments]));
-
-                  window.dispatchEvent(new Event('optical_accounts_updated'));
                 } catch (e) {}
 
-                alert(`POS Bill ${invNo} processed successfully! Total: ₹${grandTotal}. Inventory stock & Accounts database updated.`);
-
                 onCheckoutComplete?.({
+                  id: backendInvoiceId || invNo,
+                  invoiceNumber: invNo,
+                  date: new Date().toISOString().split('T')[0],
                   customer: selectedCust ? selectedCust.name : 'Walk-in Customer',
+                  customerName: selectedCust ? selectedCust.name : 'Walk-in Customer',
+                  phone: selectedCust ? selectedCust.phone : '',
+                  customerAge: selectedCust?.age,
+                  customerGender: selectedCust?.gender,
+                  customerAddress: selectedCust?.address,
+                  items: cart.map(i => ({ name: i.product.name, brand: i.product.brand, qty: i.qty, price: i.product.price, taxPercent: taxRatePercent, total: parseFloat(i.product.price || 0) * i.qty })),
+                  subtotal,
+                  taxRatePercent,
+                  totalTax: taxAmount,
+                  discount: totalDiscount,
                   total: grandTotal,
+                  netTotal: grandTotal,
+                  multiPay,
+                  paymentMode: paymentMethod,
                   frame: cart[0]?.product.name || 'Frame',
                   lens: cart[1]?.product.name || 'Lens'
                 });
                 setCart([]);
+                setMultiPay({ cash: '', upi: '', card: '', credit: '' });
+                setDiscountAmount(0);
               }}
               sx={{ borderRadius: 2.5, py: 1.5, fontWeight: 800, textTransform: 'none', fontSize: '1rem' }}
             >
