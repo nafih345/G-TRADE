@@ -306,6 +306,18 @@ export default function OpticalServices() {
     return `P-${maxId + 1}`;
   };
 
+  // Real backend-tracked Test No preview (replaces the old `pastExaminations.length + 1`
+  // guess, which — like the comment above explains for Patient ID — could repeat across
+  // sessions). Fetched on mount and refreshed after every reset/save so it's always current.
+  const [nextTestNoPreview, setNextTestNoPreview] = useState('');
+  const fetchNextTestNo = async () => {
+    try {
+      const res = await axios.get('/api/sales/eye-examinations/next-test-no/');
+      if (res.data?.test_no) setNextTestNoPreview(res.data.test_no);
+    } catch (e) {}
+  };
+  useEffect(() => { fetchNextTestNo(); }, []);
+
   // Reset all examination fields to 100% blank
   const handleResetAll = () => {
     setPatientData({
@@ -416,6 +428,7 @@ export default function OpticalServices() {
       testType: 'FREE EYE TEST',
       testNo: ''
     });
+    fetchNextTestNo();
 
     setPrescription({
       selectedLenses: [],
@@ -746,7 +759,7 @@ export default function OpticalServices() {
     // so saved records ended up with a blank patient ID / test no. Persist the same auto values
     // now (matching the exact formula SingleScreenEyeTestForm uses to display them).
     const effectivePatientId = patientData?.id || getNextPatientId();
-    const effectiveTestNo = diagnosis?.testNo || (pastExaminations?.length + 1).toString();
+    const effectiveTestNo = diagnosis?.testNo || nextTestNoPreview || (pastExaminations?.length + 1).toString();
     if (!patientData?.id) {
       setPatientData(prev => ({ ...prev, id: effectivePatientId }));
     }
@@ -865,6 +878,7 @@ export default function OpticalServices() {
       const dbPayload = {
         customer: customerId || null,
         patient_id: effectivePatientId,
+        test_no: effectiveTestNo,
         patient_name: patientData?.name || '',
         age: String(patientData?.age || ''),
         gender: patientData?.gender || '',
@@ -930,6 +944,7 @@ export default function OpticalServices() {
       } else {
         await axios.post('/api/sales/eye-examinations/', dbPayload);
         alert(`Clinical Examination & Prescription for ${patientData.name} (${effectivePatientId}) saved to database!`);
+        fetchNextTestNo();
       }
     } catch (e) {
       console.warn("API database save notice:", e);
@@ -1096,6 +1111,7 @@ export default function OpticalServices() {
             onClearAll={handleResetAll}
             savedExams={pastExaminations}
             nextPatientId={getNextPatientId()}
+            testNo={diagnosis?.testNo || nextTestNoPreview}
             onSelectExamFromHistory={(exam) => {
               if (exam.patientData) setPatientData(exam.patientData);
               if (exam.subjectiveRefraction) setSubjectiveRefraction(exam.subjectiveRefraction);

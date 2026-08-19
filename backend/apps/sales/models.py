@@ -12,6 +12,17 @@ class PatientCodeSequence(models.Model):
         return f"{self.prefix} -> {self.last_number}"
 
 
+class TestNoSequence(models.Model):
+    """Single global atomic counter for Test Number, shared across Appointment and
+    EyeExamination so it stays one continuous sequence regardless of which screen a test
+    was first registered from (see patient_utils.reserve_test_numbers)."""
+    prefix = models.CharField(max_length=10, unique=True)
+    last_number = models.BigIntegerField(default=1000)
+
+    def __str__(self):
+        return f"{self.prefix} -> {self.last_number}"
+
+
 class Customer(BaseUUIDModel):
     # Human-readable id (e.g. "P-1001") assigned atomically on first save — this is the id
     # every frontend page (Eye Test, Appointments, Patient History) actually matches patients
@@ -132,6 +143,9 @@ class EyeExamination(BaseUUIDModel):
     occupation = models.CharField(max_length=100, blank=True, null=True)
     
     # Metadata
+    # blank=True: EyeExaminationViewSet.perform_create auto-generates one via
+    # reserve_test_numbers when omitted (same lesson as Invoice.invoice_number).
+    test_no = models.CharField(max_length=20, blank=True, null=True)
     appointment_id = models.CharField(max_length=50, blank=True, null=True)
     visit_number = models.CharField(max_length=50, blank=True, null=True)
     branch = models.CharField(max_length=100, blank=True, null=True)

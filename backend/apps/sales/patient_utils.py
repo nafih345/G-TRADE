@@ -11,9 +11,10 @@ Mirrors apps.products.barcode_utils.reserve_barcodes.
 """
 from django.db import transaction, connection
 
-from .models import PatientCodeSequence
+from .models import PatientCodeSequence, TestNoSequence
 
 DEFAULT_PREFIX = 'P'
+TEST_NO_PREFIX = ''  # Test No is displayed as a bare number (1001, 1002…), unlike patient_code's "P-" prefix
 
 
 def reserve_patient_codes(prefix=DEFAULT_PREFIX, count=1):
@@ -43,3 +44,28 @@ def peek_next_patient_code(prefix=DEFAULT_PREFIX):
     """
     seq, _ = PatientCodeSequence.objects.get_or_create(prefix=prefix, defaults={'last_number': 1000})
     return f"{prefix}-{seq.last_number + 1}"
+
+
+def reserve_test_numbers(count=1):
+    """Atomically reserves `count` sequential Test Numbers (e.g. 1001). One global sequence
+    shared by Appointment.test_no and EyeExamination.test_no — same mechanics as
+    reserve_patient_codes, see its docstring for why an atomic UPDATE is used."""
+    prefix = TEST_NO_PREFIX
+    TestNoSequence.objects.get_or_create(prefix=prefix, defaults={'last_number': 1000})
+    table = TestNoSequence._meta.db_table
+    with transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"UPDATE {table} SET last_number = last_number + %s WHERE prefix = %s RETURNING last_number",
+                [count, prefix]
+            )
+            new_last = cursor.fetchone()[0]
+    start = new_last - count + 1
+    return [str(start + i) for i in range(count)]
+
+
+def peek_next_test_no():
+    """Read-only preview of the Test No reserve_test_numbers would hand out next — does not
+    consume the sequence. Mirrors peek_next_patient_code."""
+    seq, _ = TestNoSequence.objects.get_or_create(prefix=TEST_NO_PREFIX, defaults={'last_number': 1000})
+    return str(seq.last_number + 1)

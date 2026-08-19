@@ -46,9 +46,9 @@ export default function Step1PatientInfo({ patientData, setPatientData, onOpenSe
             fullWidth
             label="Patient ID"
             value={patientData.id || ''}
-            onChange={(e) => handleChange('id', e.target.value)}
             size="small"
             InputProps={{
+              readOnly: true,
               startAdornment: <InputAdornment position="start"><BadgeIcon color="action" fontSize="small" /></InputAdornment>
             }}
           />

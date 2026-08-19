@@ -19,6 +19,8 @@ static/
 # Secrets / env
 .env
 *.env
+.env.local
+.env.*.local
 !*.env.example
 config/database.json
 config/settings.json

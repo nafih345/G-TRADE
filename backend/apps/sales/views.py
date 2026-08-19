@@ -9,7 +9,7 @@ from .models import (
     Dealer, WholesalePriceList, WholesaleQuotation, WholesaleOrder,
     WholesaleDeliveryChallan, WholesaleInvoice, WholesalePaymentCollection, WholesaleReturn
 )
-from .patient_utils import reserve_patient_codes, peek_next_patient_code
+from .patient_utils import reserve_patient_codes, peek_next_patient_code, reserve_test_numbers, peek_next_test_no
 from apps.inventory.models import StockLedger
 
 class CustomerSerializer(ModelSerializer):
@@ -90,6 +90,19 @@ class EyeExaminationViewSet(viewsets.ModelViewSet):
     serializer_class = EyeExaminationSerializer
     permission_classes = [permissions.AllowAny]
 
+    def perform_create(self, serializer):
+        # Preserve a real test_no carried over from the Appointment this exam started from
+        # (see Appointments.jsx's "Start Eye Test" flow); only mint a fresh one for a
+        # standalone/walk-in exam that never had an appointment.
+        test_no = serializer.validated_data.get('test_no')
+        if not test_no:
+            test_no = reserve_test_numbers()[0]
+        serializer.save(test_no=test_no)
+
+    @action(detail=False, methods=['get'], url_path='next-test-no')
+    def next_test_no(self, request):
+        return Response({'test_no': peek_next_test_no()})
+
 class AppointmentViewSet(viewsets.ModelViewSet):
     queryset = Appointment.objects.all()
     serializer_class = AppointmentSerializer
@@ -100,7 +113,10 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         if not appointment_code:
             import time
             appointment_code = f"APT-{int(time.time()) % 1000000}"
-        serializer.save(appointment_code=appointment_code)
+        # Every new appointment is a distinct visit, so it always gets a fresh Test No —
+        # even when booked for a returning patient, rather than reusing their last visit's.
+        test_no = reserve_test_numbers()[0]
+        serializer.save(appointment_code=appointment_code, test_no=test_no)
 
 class InvoiceViewSet(viewsets.ModelViewSet):
     queryset = Invoice.objects.all()

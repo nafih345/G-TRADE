@@ -149,6 +149,17 @@ export default function Appointments() {
     return `P-${maxId + 1}`;
   };
 
+  // Every new appointment gets its own fresh Test No — even for a returning patient, since it
+  // represents this visit, not the patient's identity — so this is always called regardless of
+  // whether a new or existing patient was picked, unlike getNextPatientIdPreview.
+  const getNextTestNoPreview = async () => {
+    try {
+      const res = await axios.get('/api/sales/eye-examinations/next-test-no/');
+      if (res.data?.test_no) return res.data.test_no;
+    } catch (e) {}
+    return '';
+  };
+
   const [newApt, setNewApt] = useState({
     customerId: null,
     patientId: '',
@@ -272,10 +283,10 @@ export default function Appointments() {
       notes: ''
     });
     setOpen(true);
-    const patientId = await getNextPatientIdPreview();
+    const [patientId, testNo] = await Promise.all([getNextPatientIdPreview(), getNextTestNoPreview()]);
     // Guard against a race: if the front desk already picked an existing patient while this
     // was in flight, don't clobber their real ID with a fresh "new patient" preview.
-    setNewApt(prev => prev.customerId ? prev : { ...prev, patientId });
+    setNewApt(prev => prev.customerId ? { ...prev, testNo } : { ...prev, patientId, testNo });
   };
 
   const handleClose = () => setOpen(false);
@@ -293,7 +304,7 @@ export default function Appointments() {
       ...prev,
       customerId: p.customerId || null,
       patientId: p.id || '…',
-      testNo: p.testNo || '',
+      testNo: '',
       patient: p.name || '',
       phone: p.phone || '',
       email: p.email || '',
@@ -306,6 +317,8 @@ export default function Appointments() {
         setNewApt(prev => prev.customerId ? prev : { ...prev, patientId });
       });
     }
+    // This is a new visit for this patient, so it always gets its own fresh Test No.
+    getNextTestNoPreview().then(testNo => setNewApt(prev => ({ ...prev, testNo })));
   }, [location.state]);
 
   const handleSelectPatientObj = async (patientObj) => {
@@ -320,14 +333,16 @@ export default function Appointments() {
         patientId: '…',
         testNo: ''
       }));
-      const patientId = await getNextPatientIdPreview();
-      setNewApt(prev => prev.customerId ? prev : { ...prev, patientId });
+      const [patientId, testNo] = await Promise.all([getNextPatientIdPreview(), getNextTestNoPreview()]);
+      setNewApt(prev => prev.customerId ? { ...prev, testNo } : { ...prev, patientId, testNo });
     } else {
       setNewApt(prev => ({
         ...prev,
         customerId: patientObj.id || null,
         patientId: patientObj.patient_code || patientObj.id || '',
-        testNo: patientObj.testNo || '',
+        // This new appointment is a fresh visit, so it gets its own Test No rather than
+        // reusing this patient's last one — filled in async just below.
+        testNo: '',
         patient: patientObj.name || '',
         phone: patientObj.phone || '',
         email: patientObj.email || '',
@@ -336,6 +351,8 @@ export default function Appointments() {
         address: patientObj.address || '',
         place: patientObj.place || patientObj.city || ''
       }));
+      const testNo = await getNextTestNoPreview();
+      setNewApt(prev => prev.customerId === (patientObj.id || null) ? { ...prev, testNo } : prev);
     }
   };
 
@@ -936,7 +953,7 @@ Thank you for choosing *${storeName}*. We hope to serve you again soon!`;
                 fullWidth
                 label="Patient ID"
                 value={newApt.patientId}
-                onChange={(e) => setNewApt(prev => ({ ...prev, patientId: e.target.value }))}
+                InputProps={{ readOnly: true }}
                 helperText="Auto-generated"
               />
             </Grid>
@@ -946,8 +963,8 @@ Thank you for choosing *${storeName}*. We hope to serve you again soon!`;
                 label="Test No (Optional)"
                 placeholder="e.g. 1"
                 value={newApt.testNo}
-                onChange={(e) => setNewApt(prev => ({ ...prev, testNo: e.target.value }))}
-                helperText="Leave blank if not needed"
+                InputProps={{ readOnly: true }}
+                helperText="Auto-generated"
               />
             </Grid>
 

@@ -169,7 +169,7 @@ export default function SingleScreenEyeTestForm({
                     size="small"
                     label="Test No"
                     value={autoTestNo}
-                    onChange={(e) => setDiagnosis(prev => ({ ...prev, testNo: e.target.value }))}
+                    InputProps={{ readOnly: true }}
                     inputProps={{ style: { fontWeight: 800 } }}
                   />
                 </Box>
@@ -179,7 +179,7 @@ export default function SingleScreenEyeTestForm({
                     size="small"
                     label="Patient ID"
                     value={autoPatientId}
-                    onChange={(e) => setPatientData(prev => ({ ...prev, id: e.target.value }))}
+                    InputProps={{ readOnly: true }}
                     inputProps={{ style: { fontWeight: 800 } }}
                   />
                 </Box>
