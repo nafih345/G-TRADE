@@ -102,7 +102,7 @@ export default function Purchases() {
     if (!s || s.length > 150) return true;
     if (s.startsWith('PK') || s.includes('[Content_Types]') || s.includes('_rels') || s.includes('xl/worksheets') || s.includes('.xml')) return true;
     if (/[\u0000-\u0008\u000E-\u001F]/.test(s)) return true;
-    if (s.includes('===') || s.includes('???') || s.includes('')) return true;
+    if (s.includes('===') || s.includes('???') || s.includes('�')) return true;
     return false;
   };
 
