@@ -232,7 +232,10 @@ export default function Purchases() {
     fetchPurchaseData();
     window.addEventListener('optical_suppliers_updated', fetchPurchaseData);
     return () => window.removeEventListener('optical_suppliers_updated', fetchPurchaseData);
-  }, []);
+    // Re-fetch whenever the user switches back to a tab that displays suppliers, not just on
+    // first mount — otherwise switching tabs within the SPA (no full page reload) leaves the
+    // list frozen at whatever it saw on the very first load, even after suppliers are added.
+  }, [activeTab]);
 
   // Products for the Purchase Entry search bar & grid
   useEffect(() => {
