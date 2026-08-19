@@ -45,10 +45,13 @@ def get_or_create_supplier_ledger_account(supplier):
         defaults={'account_type': 'Liability'}
     )
     code = f"AP-{supplier.supplier_code}"
+    # ChartOfAccount.name is unique, but Supplier.name isn't (two suppliers can legitimately
+    # share a company name) — folding supplier_code into the ledger name keeps it unique
+    # without colliding, since supplier_code always is.
     account, _ = ChartOfAccount.objects.get_or_create(
         code=code,
         defaults={
-            'name': f"{supplier.name} (Supplier)",
+            'name': f"{supplier.name} (Supplier {supplier.supplier_code})",
             'account_group': group,
             'opening_balance': supplier.outstanding_balance or 0,
             'current_balance': supplier.outstanding_balance or 0,
