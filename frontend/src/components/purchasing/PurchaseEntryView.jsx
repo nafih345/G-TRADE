@@ -3,7 +3,8 @@ import axios from 'axios';
 import {
   Box, Grid, Card, Typography, TextField, Button, MenuItem,
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
-  Paper, IconButton, Stack, Divider, Chip, Autocomplete, Alert, Tooltip
+  Paper, IconButton, Stack, Divider, Chip, Autocomplete, Alert, Tooltip,
+  Dialog, DialogTitle, DialogContent, DialogActions, Badge
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -15,7 +16,8 @@ import {
   Close as CloseIcon,
   AttachFile as AttachFileIcon,
   Inbox as EmptyIcon,
-  NoteAdd as DraftIcon
+  NoteAdd as DraftIcon,
+  ListAlt as ListAltIcon
 } from '@mui/icons-material';
 import QuickDatePickerField from '../common/QuickDatePickerField';
 import { useDebounce } from '../../hooks/useDebounce';
@@ -182,6 +184,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
   const [paidAmount, setPaidAmount] = useState(0);
 
   const [saving, setSaving] = useState(false);
+  const [itemsDialogOpen, setItemsDialogOpen] = useState(false);
 
   const allSuppliers = useMemo(() => {
     const map = new Map();
@@ -203,6 +206,11 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
     gstinStateCode(companyGstin) && gstinStateCode(supplierGstin) &&
     gstinStateCode(companyGstin) !== gstinStateCode(supplierGstin)
   );
+
+  // GST/CGST/SGST/IGST/Cess columns only make sense when GST actually applies to this
+  // purchase — hide them entirely for No GST rather than showing empty/zero columns.
+  const showGst = gstType !== 'NO_GST';
+  const columnCount = 17 + (showGst ? (isInterstate ? 5 : 6) : 0);
 
   useEffect(() => {
     if (initialSupplierId) {
@@ -300,6 +308,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
 
   const addProductToGrid = useCallback((product) => {
     if (!product) return;
+    setItemsDialogOpen(true);
     const existingIdx = rows.findIndex(r => r.productId === product.id);
     if (existingIdx !== -1) {
       setRows(prev => prev.map((r, i) => i === existingIdx ? recalcRow({ ...r, quantity: (parseFloat(r.quantity) || 0) + 1 }, 'quantity', gstType, isInterstate) : r));
@@ -807,96 +816,139 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
         />
       </Paper>
 
-      {/* 3. Item Grid */}
-      <Card variant="outlined" sx={{ borderRadius: 3, overflow: 'hidden' }}>
-            <TableContainer sx={{ maxHeight: 480 }}>
-              <Table size="small" stickyHeader>
-                <TableHead>
-                  <TableRow sx={{ '& th': { fontWeight: 700, fontSize: '0.72rem', bgcolor: 'action.hover', whiteSpace: 'nowrap' } }}>
-                    <TableCell>#</TableCell>
-                    <TableCell>Product</TableCell>
-                    <TableCell>Batch</TableCell>
-                    <TableCell>HSN/SAC</TableCell>
-                    <TableCell>Expiry</TableCell>
-                    <TableCell align="right">Qty</TableCell>
-                    <TableCell align="right">Free</TableCell>
-                    <TableCell align="right">Rate</TableCell>
-                    <TableCell align="right">Disc %</TableCell>
-                    <TableCell align="right">Disc Amt</TableCell>
-                    <TableCell align="right">GST %</TableCell>
-                    <TableCell align="right">GST Amt</TableCell>
-                    {isInterstate ? (
-                      <TableCell align="right">IGST Amt</TableCell>
-                    ) : (
-                      <>
-                        <TableCell align="right">CGST Amt</TableCell>
-                        <TableCell align="right">SGST Amt</TableCell>
-                      </>
-                    )}
-                    <TableCell align="right">Cess %</TableCell>
-                    <TableCell align="right">Cess Amt</TableCell>
-                    <TableCell align="right">VAT %</TableCell>
-                    <TableCell align="right">VAT Amt</TableCell>
-                    <TableCell align="right">MRP</TableCell>
-                    <TableCell align="right">Selling</TableCell>
-                    <TableCell align="right">Margin %</TableCell>
-                    <TableCell align="right">Line Total</TableCell>
-                    <TableCell />
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {rows.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={22} align="center" sx={{ py: 6 }}>
-                        <EmptyIcon sx={{ fontSize: 32, color: 'text.disabled', mb: 1 }} />
-                        <Typography variant="body2" color="text.secondary">Scan a barcode or search a product above to add it here.</Typography>
-                      </TableCell>
-                    </TableRow>
-                  ) : rows.map((row, idx) => (
-                    <TableRow key={row.rowId} hover>
-                      <TableCell sx={{ fontSize: '0.75rem' }}>{idx + 1}</TableCell>
-                      <TableCell sx={{ minWidth: 150 }}>
-                        <Typography variant="body2" fontWeight={700} noWrap>{row.productName}</Typography>
-                        <Typography variant="caption" color="text.secondary" noWrap sx={{ display: 'block' }}>
-                          Stock: {row.currentStock} → {row.currentStock + (parseFloat(row.quantity) || 0) + (parseFloat(row.freeQuantity) || 0)}
-                          {row.lastRate != null && ` | Last Rate: ₹${row.lastRate}`}
-                        </Typography>
-                      </TableCell>
-                      <TableCell>{numCell(idx, 'batchNumber', { type: 'text', width: 90 })}</TableCell>
-                      <TableCell>{numCell(idx, 'hsnCode', { type: 'text', width: 85 })}</TableCell>
-                      <TableCell>{numCell(idx, 'expiryDate', { type: 'date', width: 130 })}</TableCell>
-                      <TableCell align="right">{numCell(idx, 'quantity', { width: 65 })}</TableCell>
-                      <TableCell align="right">{numCell(idx, 'freeQuantity', { width: 60 })}</TableCell>
-                      <TableCell align="right">{numCell(idx, 'purchaseRate', { width: 80 })}</TableCell>
-                      <TableCell align="right">{numCell(idx, 'discountPercent', { width: 65 })}</TableCell>
-                      <TableCell align="right">{numCell(idx, 'discountAmount', { width: 75 })}</TableCell>
-                      <TableCell align="right">{numCell(idx, 'gstPercent', { width: 60 })}</TableCell>
-                      <TableCell align="right" sx={{ fontSize: '0.78rem', fontWeight: 600 }}>₹{row.gstAmount}</TableCell>
+      {/* 3. Item Grid trigger — the grid itself lives in a popup (see Dialog below) */}
+      <Card
+        variant="outlined"
+        sx={{ borderRadius: 3, p: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 2, cursor: 'pointer' }}
+        onClick={() => setItemsDialogOpen(true)}
+      >
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+          <Badge badgeContent={rows.length} color="primary" showZero>
+            <ListAltIcon color="action" />
+          </Badge>
+          <Box>
+            <Typography variant="body2" fontWeight={700}>
+              {rows.length === 0 ? 'No items added yet' : `${rows.length} item${rows.length === 1 ? '' : 's'} · Qty ${totals.totalQty}`}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              {rows.length === 0 ? 'Scan a barcode or search a product above to add it here.' : 'Click to view or edit the item grid'}
+            </Typography>
+          </Box>
+        </Box>
+        <Button variant="outlined" size="small" startIcon={<ListAltIcon />} onClick={(e) => { e.stopPropagation(); setItemsDialogOpen(true); }}>
+          {rows.length === 0 ? 'Add Items' : 'View / Edit Items'}
+        </Button>
+      </Card>
+
+      <Dialog open={itemsDialogOpen} onClose={() => setItemsDialogOpen(false)} maxWidth="xl" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontWeight: 800 }}>
+          Purchase Items
+          <IconButton size="small" onClick={() => setItemsDialogOpen(false)}><CloseIcon fontSize="small" /></IconButton>
+        </DialogTitle>
+        <DialogContent dividers sx={{ p: 0 }}>
+          <TableContainer sx={{ maxHeight: '65vh' }}>
+            <Table size="small" stickyHeader>
+              <TableHead>
+                <TableRow sx={{ '& th': { fontWeight: 700, fontSize: '0.72rem', bgcolor: 'action.hover', whiteSpace: 'nowrap' } }}>
+                  <TableCell>#</TableCell>
+                  <TableCell>Product</TableCell>
+                  <TableCell>Batch</TableCell>
+                  <TableCell>HSN/SAC</TableCell>
+                  <TableCell>Expiry</TableCell>
+                  <TableCell align="right">Qty</TableCell>
+                  <TableCell align="right">Free</TableCell>
+                  <TableCell align="right">Rate</TableCell>
+                  <TableCell align="right">Disc %</TableCell>
+                  <TableCell align="right">Disc Amt</TableCell>
+                  {showGst && (
+                    <>
+                      <TableCell align="right">GST %</TableCell>
+                      <TableCell align="right">GST Amt</TableCell>
                       {isInterstate ? (
-                        <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.igstAmount}</TableCell>
+                        <TableCell align="right">IGST Amt</TableCell>
                       ) : (
                         <>
-                          <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.cgstAmount}</TableCell>
-                          <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.sgstAmount}</TableCell>
+                          <TableCell align="right">CGST Amt</TableCell>
+                          <TableCell align="right">SGST Amt</TableCell>
                         </>
                       )}
-                      <TableCell align="right">{numCell(idx, 'cessPercent', { width: 60 })}</TableCell>
-                      <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.cessAmount}</TableCell>
-                      <TableCell align="right">{numCell(idx, 'vatPercent', { width: 60 })}</TableCell>
-                      <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.vatAmount}</TableCell>
-                      <TableCell align="right">{numCell(idx, 'mrp', { width: 75 })}</TableCell>
-                      <TableCell align="right">{numCell(idx, 'sellingPrice', { width: 80 })}</TableCell>
-                      <TableCell align="right">{numCell(idx, 'marginPercent', { width: 65 })}</TableCell>
-                      <TableCell align="right" sx={{ fontWeight: 800, fontSize: '0.8rem' }}>₹{row.lineTotal}</TableCell>
-                      <TableCell>
-                        <IconButton size="small" color="error" onClick={() => deleteRow(idx)}><DeleteIcon fontSize="small" /></IconButton>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </TableContainer>
-          </Card>
+                      <TableCell align="right">Cess %</TableCell>
+                      <TableCell align="right">Cess Amt</TableCell>
+                    </>
+                  )}
+                  <TableCell align="right">VAT %</TableCell>
+                  <TableCell align="right">VAT Amt</TableCell>
+                  <TableCell align="right">MRP</TableCell>
+                  <TableCell align="right">Selling</TableCell>
+                  <TableCell align="right">Margin %</TableCell>
+                  <TableCell align="right">Line Total</TableCell>
+                  <TableCell />
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {rows.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={columnCount} align="center" sx={{ py: 6 }}>
+                      <EmptyIcon sx={{ fontSize: 32, color: 'text.disabled', mb: 1 }} />
+                      <Typography variant="body2" color="text.secondary">Scan a barcode or search a product above to add it here.</Typography>
+                    </TableCell>
+                  </TableRow>
+                ) : rows.map((row, idx) => (
+                  <TableRow key={row.rowId} hover>
+                    <TableCell sx={{ fontSize: '0.75rem' }}>{idx + 1}</TableCell>
+                    <TableCell sx={{ minWidth: 150 }}>
+                      <Typography variant="body2" fontWeight={700} noWrap>{row.productName}</Typography>
+                      <Typography variant="caption" color="text.secondary" noWrap sx={{ display: 'block' }}>
+                        Stock: {row.currentStock} → {row.currentStock + (parseFloat(row.quantity) || 0) + (parseFloat(row.freeQuantity) || 0)}
+                        {row.lastRate != null && ` | Last Rate: ₹${row.lastRate}`}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>{numCell(idx, 'batchNumber', { type: 'text', width: 90 })}</TableCell>
+                    <TableCell>{numCell(idx, 'hsnCode', { type: 'text', width: 85 })}</TableCell>
+                    <TableCell>{numCell(idx, 'expiryDate', { type: 'date', width: 130 })}</TableCell>
+                    <TableCell align="right">{numCell(idx, 'quantity', { width: 65 })}</TableCell>
+                    <TableCell align="right">{numCell(idx, 'freeQuantity', { width: 60 })}</TableCell>
+                    <TableCell align="right">{numCell(idx, 'purchaseRate', { width: 80 })}</TableCell>
+                    <TableCell align="right">{numCell(idx, 'discountPercent', { width: 65 })}</TableCell>
+                    <TableCell align="right">{numCell(idx, 'discountAmount', { width: 75 })}</TableCell>
+                    {showGst && (
+                      <>
+                        <TableCell align="right">{numCell(idx, 'gstPercent', { width: 60 })}</TableCell>
+                        <TableCell align="right" sx={{ fontSize: '0.78rem', fontWeight: 600 }}>₹{row.gstAmount}</TableCell>
+                        {isInterstate ? (
+                          <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.igstAmount}</TableCell>
+                        ) : (
+                          <>
+                            <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.cgstAmount}</TableCell>
+                            <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.sgstAmount}</TableCell>
+                          </>
+                        )}
+                        <TableCell align="right">{numCell(idx, 'cessPercent', { width: 60 })}</TableCell>
+                        <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.cessAmount}</TableCell>
+                      </>
+                    )}
+                    <TableCell align="right">{numCell(idx, 'vatPercent', { width: 60 })}</TableCell>
+                    <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.vatAmount}</TableCell>
+                    <TableCell align="right">{numCell(idx, 'mrp', { width: 75 })}</TableCell>
+                    <TableCell align="right">{numCell(idx, 'sellingPrice', { width: 80 })}</TableCell>
+                    <TableCell align="right">{numCell(idx, 'marginPercent', { width: 65 })}</TableCell>
+                    <TableCell align="right" sx={{ fontWeight: 800, fontSize: '0.8rem' }}>₹{row.lineTotal}</TableCell>
+                    <TableCell>
+                      <IconButton size="small" color="error" onClick={() => deleteRow(idx)}><DeleteIcon fontSize="small" /></IconButton>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        </DialogContent>
+        <DialogActions>
+          <Typography variant="caption" color="text.secondary" sx={{ mr: 'auto', pl: 1 }}>
+            {gstType === 'NO_GST' ? 'GST columns hidden — GST Type is set to No GST' : `GST columns shown — GST Type is ${gstType === 'INCLUSIVE' ? 'Inclusive' : 'Exclusive'}`}
+          </Typography>
+          <Button variant="contained" onClick={() => setItemsDialogOpen(false)}>Done</Button>
+        </DialogActions>
+      </Dialog>
 
       {/* 4 & 5. Summary + Payment — full width, below the item grid */}
       <Card elevation={0} sx={{ mt: 2, p: 2.5, border: '1px solid', borderColor: 'divider', borderRadius: 3 }}>
