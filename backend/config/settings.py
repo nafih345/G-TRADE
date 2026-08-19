@@ -1,9 +1,17 @@
 import os
+import sys
 from pathlib import Path
 from datetime import timedelta
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
-BASE_DIR = Path(__file__).resolve().parent.parent
+# Under PyInstaller's onefile mode, __file__ resolves inside the ephemeral per-launch
+# extraction temp dir (sys._MEIPASS), not the installed app folder — any config lookup or
+# SQLite fallback anchored to that would silently reset on every restart. Anchor to the
+# actual executable's directory instead, matching launcher.py's own frozen-aware BASE_DIR.
+if getattr(sys, 'frozen', False):
+    BASE_DIR = Path(sys.executable).resolve().parent
+else:
+    BASE_DIR = Path(__file__).resolve().parent.parent
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = 'django-insecure-nova-erp-super-secret-key-for-development'

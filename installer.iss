@@ -52,8 +52,12 @@ Source: "backend_dist\backend.exe"; DestDir: "{app}\backend"; Flags: ignoreversi
 ; Electron resources and bundled frontend
 Source: "dist\win-unpacked\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
-; Config Files
-Source: "config\*"; DestDir: "{app}\config"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Config Files — database.json is deliberately excluded: it holds this dev machine's own
+; local PostgreSQL credentials, which would fail on any other PC and would make every
+; install point at the same shared database if that Postgres server were network-reachable.
+; Without it, each install falls through to its own local, isolated SQLite database (see
+; config/settings.py) with zero external setup required.
+Source: "config\*"; DestDir: "{app}\config"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "database.json"
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

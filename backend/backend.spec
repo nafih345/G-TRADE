@@ -36,6 +36,7 @@ hidden_imports = [
     'apps.purchasing',
     'apps.sales',
     'apps.accounts',
+    'apps.financial',
 ]
 
 hidden_imports += collect_submodules('django.contrib')
