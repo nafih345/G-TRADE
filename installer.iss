@@ -3,7 +3,10 @@
 #define MyAppName "Optical ERP"
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "G Optical Software Enterprise"
-#define MyAppExeName "ERP.exe"
+; Must match electron-builder's output filename, which is productName from package.json
+; ("Optical ERP.exe" in dist\win-unpacked), not an arbitrary short name — a mismatch here
+; makes Inno Setup fail to find the exe at compile time.
+#define MyAppExeName "Optical ERP.exe"
 
 [Setup]
 AppId={{A821E310-9F12-421A-851C-1299901C928A}}
@@ -44,9 +47,10 @@ Name: "{app}\cache"
 Name: "{app}\dll"
 
 [Files]
-; Main Executables
-Source: "dist\win-unpacked\ERP.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "backend_dist\backend.exe"; DestDir: "{app}"; Flags: ignoreversion; Tasks: 
+; Main Electron executable is already covered by the win-unpacked wildcard below —
+; a separate explicit entry here previously hardcoded the wrong filename (ERP.exe vs.
+; the actual "Optical ERP.exe") and would fail the compile.
+Source: "backend_dist\backend.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "backend_dist\backend.exe"; DestDir: "{app}\backend"; Flags: ignoreversion
 
 ; Electron resources and bundled frontend
