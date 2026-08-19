@@ -807,10 +807,8 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
         />
       </Paper>
 
-      <Grid container spacing={2}>
-        {/* 3. Item Grid */}
-        <Grid item xs={12} lg={8.5}>
-          <Card variant="outlined" sx={{ borderRadius: 3, overflow: 'hidden' }}>
+      {/* 3. Item Grid */}
+      <Card variant="outlined" sx={{ borderRadius: 3, overflow: 'hidden' }}>
             <TableContainer sx={{ maxHeight: 480 }}>
               <Table size="small" stickyHeader>
                 <TableHead>
@@ -899,39 +897,76 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
               </Table>
             </TableContainer>
           </Card>
-        </Grid>
 
-        {/* 4 & 5. Summary + Payment */}
-        <Grid item xs={12} lg={3.5}>
-          <Card elevation={0} sx={{ p: 2.5, border: '1px solid', borderColor: 'divider', borderRadius: 3, position: 'sticky', top: 20 }}>
+      {/* 4 & 5. Summary + Payment — full width, below the item grid */}
+      <Card elevation={0} sx={{ mt: 2, p: 2.5, border: '1px solid', borderColor: 'divider', borderRadius: 3 }}>
+        <Grid container spacing={3}>
+          {/* Amount breakdown */}
+          <Grid item xs={12} md={8}>
             <Typography variant="subtitle1" fontWeight={800} sx={{ mb: 1.5 }}>Purchase Summary</Typography>
-            <Stack spacing={0.8} sx={{ mb: 1.5 }}>
-              <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="body2" color="text.secondary">Total Items</Typography><Typography variant="body2" fontWeight={700}>{totals.totalItems}</Typography></Box>
-              <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="body2" color="text.secondary">Total Qty</Typography><Typography variant="body2" fontWeight={700}>{totals.totalQty}</Typography></Box>
-              <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="body2" color="text.secondary">Gross Amount</Typography><Typography variant="body2" fontWeight={700}>₹{totals.gross.toFixed(2)}</Typography></Box>
-              <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="body2" color="text.secondary">Discount</Typography><Typography variant="body2" fontWeight={700} color="error.main">-₹{totals.discount.toFixed(2)}</Typography></Box>
-              <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="body2" color="text.secondary">Tax (GST)</Typography><Typography variant="body2" fontWeight={700}>₹{totals.tax.toFixed(2)}</Typography></Box>
+            <Grid container spacing={2}>
+              <Grid item xs={6} sm={4} md={3}>
+                <Typography variant="caption" color="text.secondary" display="block">Total Items</Typography>
+                <Typography variant="body2" fontWeight={700}>{totals.totalItems}</Typography>
+              </Grid>
+              <Grid item xs={6} sm={4} md={3}>
+                <Typography variant="caption" color="text.secondary" display="block">Total Qty</Typography>
+                <Typography variant="body2" fontWeight={700}>{totals.totalQty}</Typography>
+              </Grid>
+              <Grid item xs={6} sm={4} md={3}>
+                <Typography variant="caption" color="text.secondary" display="block">Gross Amount</Typography>
+                <Typography variant="body2" fontWeight={700}>₹{totals.gross.toFixed(2)}</Typography>
+              </Grid>
+              <Grid item xs={6} sm={4} md={3}>
+                <Typography variant="caption" color="text.secondary" display="block">Discount</Typography>
+                <Typography variant="body2" fontWeight={700} color="error.main">-₹{totals.discount.toFixed(2)}</Typography>
+              </Grid>
+              <Grid item xs={6} sm={4} md={3}>
+                <Typography variant="caption" color="text.secondary" display="block">Tax (GST)</Typography>
+                <Typography variant="body2" fontWeight={700}>₹{totals.tax.toFixed(2)}</Typography>
+              </Grid>
               {gstType !== 'NO_GST' && (isInterstate ? (
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', pl: 1 }}><Typography variant="caption" color="text.secondary">↳ IGST</Typography><Typography variant="caption" fontWeight={700}>₹{totals.igst.toFixed(2)}</Typography></Box>
+                <Grid item xs={6} sm={4} md={3}>
+                  <Typography variant="caption" color="text.secondary" display="block">↳ IGST</Typography>
+                  <Typography variant="body2" fontWeight={700}>₹{totals.igst.toFixed(2)}</Typography>
+                </Grid>
               ) : (
                 <>
-                  <Box sx={{ display: 'flex', justifyContent: 'space-between', pl: 1 }}><Typography variant="caption" color="text.secondary">↳ CGST</Typography><Typography variant="caption" fontWeight={700}>₹{totals.cgst.toFixed(2)}</Typography></Box>
-                  <Box sx={{ display: 'flex', justifyContent: 'space-between', pl: 1 }}><Typography variant="caption" color="text.secondary">↳ SGST</Typography><Typography variant="caption" fontWeight={700}>₹{totals.sgst.toFixed(2)}</Typography></Box>
+                  <Grid item xs={6} sm={4} md={3}>
+                    <Typography variant="caption" color="text.secondary" display="block">↳ CGST</Typography>
+                    <Typography variant="body2" fontWeight={700}>₹{totals.cgst.toFixed(2)}</Typography>
+                  </Grid>
+                  <Grid item xs={6} sm={4} md={3}>
+                    <Typography variant="caption" color="text.secondary" display="block">↳ SGST</Typography>
+                    <Typography variant="body2" fontWeight={700}>₹{totals.sgst.toFixed(2)}</Typography>
+                  </Grid>
                 </>
               ))}
               {totals.cess > 0 && (
-                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="body2" color="text.secondary">Cess</Typography><Typography variant="body2" fontWeight={700}>₹{totals.cess.toFixed(2)}</Typography></Box>
+                <Grid item xs={6} sm={4} md={3}>
+                  <Typography variant="caption" color="text.secondary" display="block">Cess</Typography>
+                  <Typography variant="body2" fontWeight={700}>₹{totals.cess.toFixed(2)}</Typography>
+                </Grid>
               )}
               {totals.vat > 0 && (
-                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="body2" color="text.secondary">VAT</Typography><Typography variant="body2" fontWeight={700}>₹{totals.vat.toFixed(2)}</Typography></Box>
+                <Grid item xs={6} sm={4} md={3}>
+                  <Typography variant="caption" color="text.secondary" display="block">VAT</Typography>
+                  <Typography variant="body2" fontWeight={700}>₹{totals.vat.toFixed(2)}</Typography>
+                </Grid>
               )}
-              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <Typography variant="body2" color="text.secondary">Other Charges</Typography>
-                <TextField size="small" type="number" value={otherCharges} onChange={(e) => setOtherCharges(e.target.value)} sx={{ width: 90, '& input': { py: 0.4, textAlign: 'right' } }} />
-              </Box>
-              <Box sx={{ display: 'flex', justifyContent: 'space-between' }}><Typography variant="body2" color="text.secondary">Round Off</Typography><Typography variant="body2" fontWeight={700}>₹{totals.roundOff.toFixed(2)}</Typography></Box>
-            </Stack>
-            <Divider sx={{ my: 1 }} />
+              <Grid item xs={6} sm={4} md={3}>
+                <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.4 }}>Other Charges</Typography>
+                <TextField size="small" type="number" value={otherCharges} onChange={(e) => setOtherCharges(e.target.value)} sx={{ width: '100%', maxWidth: 120, '& input': { py: 0.4 } }} />
+              </Grid>
+              <Grid item xs={6} sm={4} md={3}>
+                <Typography variant="caption" color="text.secondary" display="block">Round Off</Typography>
+                <Typography variant="body2" fontWeight={700}>₹{totals.roundOff.toFixed(2)}</Typography>
+              </Grid>
+            </Grid>
+          </Grid>
+
+          {/* Grand Total + Payment */}
+          <Grid item xs={12} md={4} sx={{ borderLeft: { xs: 'none', md: '1px solid' }, borderTop: { xs: '1px solid', md: 'none' }, borderColor: 'divider', pl: { md: 3 }, pt: { xs: 2, md: 0 } }}>
             <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', mb: 2 }}>
               <Typography variant="subtitle1" fontWeight={800}>Grand Total</Typography>
               <Typography variant="h4" fontWeight={900} color="primary.main">₹{totals.grandTotal.toFixed(2)}</Typography>
@@ -963,9 +998,9 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
                 <QuickDatePickerField label="Due Date" value={dueDate} onChange={setDueDate} size="small" />
               </>
             )}
-          </Card>
+          </Grid>
         </Grid>
-      </Grid>
+      </Card>
 
       {/* 6. Sticky Action Bar */}
       <Box sx={{ position: 'sticky', bottom: 0, mt: 2, py: 1.5, px: 2, bgcolor: 'background.paper', borderTop: '1px solid', borderColor: 'divider', display: 'flex', justifyContent: 'flex-end', gap: 1.5, zIndex: 10 }}>
