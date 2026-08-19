@@ -4,7 +4,8 @@ import {
   Box, Grid, Card, Typography, TextField, Button, MenuItem,
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
   Paper, IconButton, Stack, Divider, Chip, Autocomplete, Alert, Tooltip,
-  Dialog, DialogTitle, DialogContent, DialogActions, Badge
+  Dialog, DialogTitle, DialogContent, DialogActions, Badge,
+  Menu, Checkbox, FormControlLabel
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -17,7 +18,8 @@ import {
   AttachFile as AttachFileIcon,
   Inbox as EmptyIcon,
   NoteAdd as DraftIcon,
-  ListAlt as ListAltIcon
+  ListAlt as ListAltIcon,
+  ViewColumn as ViewColumnIcon
 } from '@mui/icons-material';
 import QuickDatePickerField from '../common/QuickDatePickerField';
 import { useDebounce } from '../../hooks/useDebounce';
@@ -186,6 +188,26 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
   const [saving, setSaving] = useState(false);
   const [itemsDialogOpen, setItemsDialogOpen] = useState(false);
 
+  const DEFAULT_COLUMN_VISIBILITY = {
+    batch: true, hsn: true, expiry: true, free: true,
+    discPercent: true, discAmt: true,
+    gst: true, cess: true, vat: true,
+    mrp: true, selling: true, marginPercent: true
+  };
+  const [columnMenuAnchor, setColumnMenuAnchor] = useState(null);
+  const [colVis, setColVis] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('purchaseEntry_colVis'));
+      return saved ? { ...DEFAULT_COLUMN_VISIBILITY, ...saved } : DEFAULT_COLUMN_VISIBILITY;
+    } catch {
+      return DEFAULT_COLUMN_VISIBILITY;
+    }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('purchaseEntry_colVis', JSON.stringify(colVis)); } catch {}
+  }, [colVis]);
+  const toggleCol = (key) => setColVis(prev => ({ ...prev, [key]: !prev[key] }));
+
   const allSuppliers = useMemo(() => {
     const map = new Map();
     suppliers.forEach(s => map.set(s.id, s));
@@ -209,8 +231,18 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
 
   // GST/CGST/SGST/IGST/Cess columns only make sense when GST actually applies to this
   // purchase — hide them entirely for No GST rather than showing empty/zero columns.
-  const showGst = gstType !== 'NO_GST';
-  const columnCount = 17 + (showGst ? (isInterstate ? 5 : 6) : 0);
+  // Also respects the manual per-column tick boxes (colVis) on top of that.
+  const showGst = gstType !== 'NO_GST' && colVis.gst;
+  const showCess = colVis.cess;
+  const showVat = colVis.vat;
+  const columnCount = 4 // #, Product, Qty, Rate — always shown
+    + (colVis.batch ? 1 : 0) + (colVis.hsn ? 1 : 0) + (colVis.expiry ? 1 : 0) + (colVis.free ? 1 : 0)
+    + (colVis.discPercent ? 1 : 0) + (colVis.discAmt ? 1 : 0)
+    + (showGst ? 2 + (isInterstate ? 1 : 2) : 0)
+    + (showCess ? 2 : 0)
+    + (showVat ? 2 : 0)
+    + (colVis.mrp ? 1 : 0) + (colVis.selling ? 1 : 0) + (colVis.marginPercent ? 1 : 0)
+    + 2; // Line Total + action column
 
   useEffect(() => {
     if (initialSupplierId) {
@@ -843,8 +875,29 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
       <Dialog open={itemsDialogOpen} onClose={() => setItemsDialogOpen(false)} maxWidth="xl" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontWeight: 800 }}>
           Purchase Items
-          <IconButton size="small" onClick={() => setItemsDialogOpen(false)}><CloseIcon fontSize="small" /></IconButton>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+            <Button size="small" startIcon={<ViewColumnIcon fontSize="small" />} onClick={(e) => setColumnMenuAnchor(e.currentTarget)} sx={{ fontWeight: 700, textTransform: 'none' }}>
+              Columns
+            </Button>
+            <IconButton size="small" onClick={() => setItemsDialogOpen(false)}><CloseIcon fontSize="small" /></IconButton>
+          </Box>
         </DialogTitle>
+        <Menu anchorEl={columnMenuAnchor} open={Boolean(columnMenuAnchor)} onClose={() => setColumnMenuAnchor(null)}>
+          {[
+            ['batch', 'Batch'], ['hsn', 'HSN/SAC'], ['expiry', 'Expiry'], ['free', 'Free Qty'],
+            ['discPercent', 'Disc %'], ['discAmt', 'Disc Amt'],
+            ['gst', 'GST % / GST Amt / CGST / SGST / IGST'], ['cess', 'Cess % / Cess Amt'], ['vat', 'VAT % / VAT Amt'],
+            ['mrp', 'MRP'], ['selling', 'Selling Price'], ['marginPercent', 'Margin %']
+          ].map(([key, label]) => (
+            <MenuItem key={key} dense onClick={() => toggleCol(key)} sx={{ py: 0.25 }}>
+              <FormControlLabel
+                control={<Checkbox size="small" checked={colVis[key]} onChange={() => toggleCol(key)} onClick={(e) => e.stopPropagation()} />}
+                label={<Typography variant="body2">{label}</Typography>}
+                sx={{ m: 0, width: '100%' }}
+              />
+            </MenuItem>
+          ))}
+        </Menu>
         <DialogContent dividers sx={{ p: 0 }}>
           <TableContainer sx={{ maxHeight: '65vh' }}>
             <Table size="small" stickyHeader>
@@ -852,14 +905,14 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
                 <TableRow sx={{ '& th': { fontWeight: 700, fontSize: '0.72rem', bgcolor: 'action.hover', whiteSpace: 'nowrap' } }}>
                   <TableCell>#</TableCell>
                   <TableCell>Product</TableCell>
-                  <TableCell>Batch</TableCell>
-                  <TableCell>HSN/SAC</TableCell>
-                  <TableCell>Expiry</TableCell>
+                  {colVis.batch && <TableCell>Batch</TableCell>}
+                  {colVis.hsn && <TableCell>HSN/SAC</TableCell>}
+                  {colVis.expiry && <TableCell>Expiry</TableCell>}
                   <TableCell align="right">Qty</TableCell>
-                  <TableCell align="right">Free</TableCell>
+                  {colVis.free && <TableCell align="right">Free</TableCell>}
                   <TableCell align="right">Rate</TableCell>
-                  <TableCell align="right">Disc %</TableCell>
-                  <TableCell align="right">Disc Amt</TableCell>
+                  {colVis.discPercent && <TableCell align="right">Disc %</TableCell>}
+                  {colVis.discAmt && <TableCell align="right">Disc Amt</TableCell>}
                   {showGst && (
                     <>
                       <TableCell align="right">GST %</TableCell>
@@ -872,15 +925,23 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
                           <TableCell align="right">SGST Amt</TableCell>
                         </>
                       )}
+                    </>
+                  )}
+                  {showCess && (
+                    <>
                       <TableCell align="right">Cess %</TableCell>
                       <TableCell align="right">Cess Amt</TableCell>
                     </>
                   )}
-                  <TableCell align="right">VAT %</TableCell>
-                  <TableCell align="right">VAT Amt</TableCell>
-                  <TableCell align="right">MRP</TableCell>
-                  <TableCell align="right">Selling</TableCell>
-                  <TableCell align="right">Margin %</TableCell>
+                  {showVat && (
+                    <>
+                      <TableCell align="right">VAT %</TableCell>
+                      <TableCell align="right">VAT Amt</TableCell>
+                    </>
+                  )}
+                  {colVis.mrp && <TableCell align="right">MRP</TableCell>}
+                  {colVis.selling && <TableCell align="right">Selling</TableCell>}
+                  {colVis.marginPercent && <TableCell align="right">Margin %</TableCell>}
                   <TableCell align="right">Line Total</TableCell>
                   <TableCell />
                 </TableRow>
@@ -903,14 +964,14 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
                         {row.lastRate != null && ` | Last Rate: ₹${row.lastRate}`}
                       </Typography>
                     </TableCell>
-                    <TableCell>{numCell(idx, 'batchNumber', { type: 'text', width: 90 })}</TableCell>
-                    <TableCell>{numCell(idx, 'hsnCode', { type: 'text', width: 85 })}</TableCell>
-                    <TableCell>{numCell(idx, 'expiryDate', { type: 'date', width: 130 })}</TableCell>
+                    {colVis.batch && <TableCell>{numCell(idx, 'batchNumber', { type: 'text', width: 90 })}</TableCell>}
+                    {colVis.hsn && <TableCell>{numCell(idx, 'hsnCode', { type: 'text', width: 85 })}</TableCell>}
+                    {colVis.expiry && <TableCell>{numCell(idx, 'expiryDate', { type: 'date', width: 130 })}</TableCell>}
                     <TableCell align="right">{numCell(idx, 'quantity', { width: 65 })}</TableCell>
-                    <TableCell align="right">{numCell(idx, 'freeQuantity', { width: 60 })}</TableCell>
+                    {colVis.free && <TableCell align="right">{numCell(idx, 'freeQuantity', { width: 60 })}</TableCell>}
                     <TableCell align="right">{numCell(idx, 'purchaseRate', { width: 80 })}</TableCell>
-                    <TableCell align="right">{numCell(idx, 'discountPercent', { width: 65 })}</TableCell>
-                    <TableCell align="right">{numCell(idx, 'discountAmount', { width: 75 })}</TableCell>
+                    {colVis.discPercent && <TableCell align="right">{numCell(idx, 'discountPercent', { width: 65 })}</TableCell>}
+                    {colVis.discAmt && <TableCell align="right">{numCell(idx, 'discountAmount', { width: 75 })}</TableCell>}
                     {showGst && (
                       <>
                         <TableCell align="right">{numCell(idx, 'gstPercent', { width: 60 })}</TableCell>
@@ -923,15 +984,23 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
                             <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.sgstAmount}</TableCell>
                           </>
                         )}
+                      </>
+                    )}
+                    {showCess && (
+                      <>
                         <TableCell align="right">{numCell(idx, 'cessPercent', { width: 60 })}</TableCell>
                         <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.cessAmount}</TableCell>
                       </>
                     )}
-                    <TableCell align="right">{numCell(idx, 'vatPercent', { width: 60 })}</TableCell>
-                    <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.vatAmount}</TableCell>
-                    <TableCell align="right">{numCell(idx, 'mrp', { width: 75 })}</TableCell>
-                    <TableCell align="right">{numCell(idx, 'sellingPrice', { width: 80 })}</TableCell>
-                    <TableCell align="right">{numCell(idx, 'marginPercent', { width: 65 })}</TableCell>
+                    {showVat && (
+                      <>
+                        <TableCell align="right">{numCell(idx, 'vatPercent', { width: 60 })}</TableCell>
+                        <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.vatAmount}</TableCell>
+                      </>
+                    )}
+                    {colVis.mrp && <TableCell align="right">{numCell(idx, 'mrp', { width: 75 })}</TableCell>}
+                    {colVis.selling && <TableCell align="right">{numCell(idx, 'sellingPrice', { width: 80 })}</TableCell>}
+                    {colVis.marginPercent && <TableCell align="right">{numCell(idx, 'marginPercent', { width: 65 })}</TableCell>}
                     <TableCell align="right" sx={{ fontWeight: 800, fontSize: '0.8rem' }}>₹{row.lineTotal}</TableCell>
                     <TableCell>
                       <IconButton size="small" color="error" onClick={() => deleteRow(idx)}><DeleteIcon fontSize="small" /></IconButton>
