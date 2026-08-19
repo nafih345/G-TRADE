@@ -129,11 +129,18 @@ export default function Appointments() {
   const [isEditing, setIsEditing] = useState(false);
   const [selectedAptId, setSelectedAptId] = useState(null);
 
-  // Client-side preview only — scans every known patient_code for the highest "P-NNNN" in use
-  // and increments it, mirroring the same heuristic OpticalServices.jsx uses. The real,
-  // guaranteed-unique code is assigned server-side when the Customer is actually created; this
-  // just gives the front desk something sensible to show/quote to the patient immediately.
-  const getNextPatientIdPreview = () => {
+  // Preview only — the real, guaranteed-unique code is assigned server-side when the Customer
+  // is actually created; this just gives the front desk something sensible to quote the patient
+  // immediately. Asks the backend's own sequence counter rather than scanning whatever patient
+  // list happened to be loaded client-side: that local scan went stale (kept showing the same
+  // "next" ID for every new patient) whenever it missed a recently-added patient — e.g. a
+  // customer-create call that failed silently, or dbPatients simply not having refetched yet.
+  const getNextPatientIdPreview = async () => {
+    try {
+      const res = await axios.get('/api/sales/customers/next-patient-code/');
+      if (res.data?.patient_code) return res.data.patient_code;
+    } catch (e) {}
+    // Fallback only if the backend call itself fails (offline, etc.) — best-effort guess.
     const allIds = (dbPatients || [])
       .map(p => String(p.patient_code || p.id || '').match(/^p-?(\d+)$/i))
       .filter(Boolean)
@@ -145,12 +152,14 @@ export default function Appointments() {
   const [newApt, setNewApt] = useState({
     customerId: null,
     patientId: '',
-    testNo: '1',
+    testNo: '',
     patient: '',
     phone: '',
     email: '',
     age: '',
     gender: 'Male',
+    address: '',
+    place: '',
     doctor: '',
     date: new Date().toISOString().split('T')[0],
     time: '10:00 AM',
@@ -237,18 +246,20 @@ export default function Appointments() {
     window.location.reload();
   };
 
-  const handleOpen = () => {
+  const handleOpen = async () => {
     setIsEditing(false);
     setSelectedAptId(null);
     setNewApt({
       customerId: null,
-      patientId: getNextPatientIdPreview(),
-      testNo: '1',
+      patientId: '…',
+      testNo: '',
       patient: '',
       phone: '',
       email: '',
       age: '',
       gender: 'Male',
+      address: '',
+      place: '',
       doctor: '',
       date: new Date().toISOString().split('T')[0],
       time: '10:00 AM',
@@ -261,6 +272,10 @@ export default function Appointments() {
       notes: ''
     });
     setOpen(true);
+    const patientId = await getNextPatientIdPreview();
+    // Guard against a race: if the front desk already picked an existing patient while this
+    // was in flight, don't clobber their real ID with a fresh "new patient" preview.
+    setNewApt(prev => prev.customerId ? prev : { ...prev, patientId });
   };
 
   const handleClose = () => setOpen(false);
@@ -277,8 +292,8 @@ export default function Appointments() {
     setNewApt(prev => ({
       ...prev,
       customerId: p.customerId || null,
-      patientId: p.id || getNextPatientIdPreview(),
-      testNo: p.testNo || '1',
+      patientId: p.id || '…',
+      testNo: p.testNo || '',
       patient: p.name || '',
       phone: p.phone || '',
       email: p.email || '',
@@ -286,9 +301,14 @@ export default function Appointments() {
       gender: p.gender || 'Male'
     }));
     setOpen(true);
+    if (!p.id) {
+      getNextPatientIdPreview().then(patientId => {
+        setNewApt(prev => prev.customerId ? prev : { ...prev, patientId });
+      });
+    }
   }, [location.state]);
 
-  const handleSelectPatientObj = (patientObj) => {
+  const handleSelectPatientObj = async (patientObj) => {
     if (!patientObj) return;
     if (typeof patientObj === 'string') {
       // Typed freely rather than picked from the list — treat as a brand-new patient and show
@@ -297,20 +317,24 @@ export default function Appointments() {
         ...prev,
         patient: patientObj,
         customerId: null,
-        patientId: getNextPatientIdPreview(),
-        testNo: '1'
+        patientId: '…',
+        testNo: ''
       }));
+      const patientId = await getNextPatientIdPreview();
+      setNewApt(prev => prev.customerId ? prev : { ...prev, patientId });
     } else {
       setNewApt(prev => ({
         ...prev,
         customerId: patientObj.id || null,
         patientId: patientObj.patient_code || patientObj.id || '',
-        testNo: patientObj.testNo || '1',
+        testNo: patientObj.testNo || '',
         patient: patientObj.name || '',
         phone: patientObj.phone || '',
         email: patientObj.email || '',
         age: patientObj.age || '',
-        gender: patientObj.gender || 'Male'
+        gender: patientObj.gender || 'Male',
+        address: patientObj.address || '',
+        place: patientObj.place || patientObj.city || ''
       }));
     }
   };
@@ -321,9 +345,19 @@ export default function Appointments() {
     setToast({ open: true, message: msg, severity: sev });
   };
 
-  const sendWhatsAppReminder = async (apt) => {
+  // `prewarmedWindow`: browsers silently block window.open() the moment it's no longer
+  // directly inside the click handler's call stack — i.e. after crossing any await/setTimeout.
+  // Direct call sites (the row/detail WhatsApp buttons) call this straight from onClick with no
+  // extra arg, so opening the tab as the very first synchronous line here (before the first
+  // await below) still works. handleSave is several awaits removed by the time it gets here
+  // (customer/appointment saves), so it pre-opens a blank tab synchronously at click time and
+  // passes the handle through instead — this function then just navigates it.
+  const sendWhatsAppReminder = async (apt, prewarmedWindow) => {
+    const waWindow = prewarmedWindow !== undefined ? prewarmedWindow : window.open('', '_blank');
+
     const rawPhone = (apt.phone || '').replace(/[^0-9]/g, '');
     if (!rawPhone) {
+      waWindow?.close();
       triggerToast("No valid mobile phone number found for sending WhatsApp confirmation.", "warning");
       return;
     }
@@ -376,11 +410,16 @@ Thank you for choosing *${storeName}*. We look forward to seeing you!`;
 
     // 3. Feedback Toast & Real Delivery
     if (isCloudApiSent) {
+      waWindow?.close();
       triggerToast(`⚡ Automated WhatsApp Confirmation delivered via Cloud API to +${formattedPhone}`, 'success');
     } else {
-      triggerToast(`📱 Dispatching WhatsApp message to +${formattedPhone}...`, 'success');
       const whatsappUrl = `https://api.whatsapp.com/send?phone=${formattedPhone}&text=${encodeURIComponent(message)}`;
-      window.open(whatsappUrl, '_blank');
+      if (waWindow && !waWindow.closed) {
+        waWindow.location.href = whatsappUrl;
+        triggerToast(`📱 Dispatching WhatsApp message to +${formattedPhone}...`, 'success');
+      } else {
+        triggerToast("Your browser blocked the WhatsApp popup. Please allow popups for this site and try again.", 'warning');
+      }
     }
   };
 
@@ -389,6 +428,11 @@ Thank you for choosing *${storeName}*. We look forward to seeing you!`;
       alert("Please enter or select a Patient Name.");
       return;
     }
+
+    // Pre-open a blank tab synchronously, still inside this click's call stack, before any of
+    // the awaits below — see the comment on sendWhatsAppReminder for why this has to happen
+    // this early rather than after the appointment is saved.
+    const waWindowHandle = (newApt.sendWhatsapp && newApt.phone) ? window.open('', '_blank') : null;
 
     // Resolve a real backend Customer to link this appointment to: reuse the one the
     // Autocomplete selected, reuse one matching by phone (avoids piling up duplicate
@@ -412,6 +456,8 @@ Thank you for choosing *${storeName}*. We look forward to seeing you!`;
             email: newApt.email || '',
             age: newApt.age || '',
             gender: newApt.gender || '',
+            address: newApt.address || '',
+            place: newApt.place || '',
             patient_code: newApt.patientId || undefined
           });
           customerId = resCust.data.id;
@@ -434,6 +480,7 @@ Thank you for choosing *${storeName}*. We look forward to seeing you!`;
         savedRecord = mapBackendAppointment(res.data);
       }
     } catch (e) {
+      waWindowHandle?.close();
       alert("Could not save the appointment to the server. Please try again.");
       return;
     }
@@ -461,15 +508,20 @@ Thank you for choosing *${storeName}*. We look forward to seeing you!`;
 
     // Trigger Automated WhatsApp Confirmation if checkbox is enabled
     if (savedRecord && newApt.sendWhatsapp) {
-      setTimeout(() => {
-        sendWhatsAppReminder(savedRecord);
-      }, 300);
+      sendWhatsAppReminder(savedRecord, waWindowHandle);
+    } else {
+      waWindowHandle?.close();
     }
   };
 
   const sendWhatsAppCancellation = async (apt) => {
+    // See the comment on sendWhatsAppReminder — opened here, synchronously, before the first
+    // await below, so browsers don't silently block it as an unrequested popup.
+    const waWindow = window.open('', '_blank');
+
     const rawPhone = (apt.phone || '').replace(/[^0-9]/g, '');
     if (!rawPhone) {
+      waWindow?.close();
       triggerToast("No valid mobile phone number found for sending WhatsApp cancellation message.", "warning");
       return;
     }
@@ -514,11 +566,16 @@ Thank you for choosing *${storeName}*. We hope to serve you again soon!`;
 
     // 3. Feedback Toast & Real Delivery
     if (isCloudApiSent) {
+      waWindow?.close();
       triggerToast(`⚡ Automated WhatsApp Cancellation delivered via Cloud API to +${formattedPhone}`, 'info');
     } else {
-      triggerToast(`📱 Dispatching WhatsApp cancellation to +${formattedPhone}...`, 'info');
       const whatsappUrl = `https://api.whatsapp.com/send?phone=${formattedPhone}&text=${encodeURIComponent(message)}`;
-      window.open(whatsappUrl, '_blank');
+      if (waWindow && !waWindow.closed) {
+        waWindow.location.href = whatsappUrl;
+        triggerToast(`📱 Dispatching WhatsApp cancellation to +${formattedPhone}...`, 'info');
+      } else {
+        triggerToast("Your browser blocked the WhatsApp popup. Please allow popups for this site and try again.", 'warning');
+      }
     }
   };
 
@@ -790,15 +847,14 @@ Thank you for choosing *${storeName}*. We hope to serve you again soon!`;
                             <WhatsAppIcon fontSize="small" />
                           </IconButton>
 
+                          <IconButton size="small" color="primary" title="Edit Appointment" onClick={() => handleEdit(row)}>
+                            <EditIcon fontSize="small" />
+                          </IconButton>
+
                           {row.status !== 'Completed' && row.status !== 'Cancelled' && (
-                            <>
-                              <IconButton size="small" color="primary" title="Edit Appointment" onClick={() => handleEdit(row)}>
-                                <EditIcon fontSize="small" />
-                              </IconButton>
-                              <IconButton size="small" color="error" title="Cancel Appointment" onClick={() => handleCancelApt(row)}>
-                                <CancelIcon fontSize="small" />
-                              </IconButton>
-                            </>
+                            <IconButton size="small" color="error" title="Cancel Appointment" onClick={() => handleCancelApt(row)}>
+                              <CancelIcon fontSize="small" />
+                            </IconButton>
                           )}
                         </Stack>
                       </TableCell>
@@ -887,10 +943,33 @@ Thank you for choosing *${storeName}*. We hope to serve you again soon!`;
             <Grid item xs={6} sm={3}>
               <TextField
                 fullWidth
-                label="Test No"
+                label="Test No (Optional)"
+                placeholder="e.g. 1"
                 value={newApt.testNo}
                 onChange={(e) => setNewApt(prev => ({ ...prev, testNo: e.target.value }))}
-                helperText="Auto-generated"
+                helperText="Leave blank if not needed"
+              />
+            </Grid>
+
+            {/* Address / Place — collected here so it's already on file by the time this
+                patient reaches the Eye Test form, instead of that form's Address/Place fields
+                starting blank for every patient who was only ever booked, never test-registered. */}
+            <Grid item xs={12} sm={7}>
+              <TextField
+                fullWidth
+                label="Address (Optional)"
+                placeholder="House / Street"
+                value={newApt.address}
+                onChange={(e) => setNewApt(prev => ({ ...prev, address: e.target.value }))}
+              />
+            </Grid>
+            <Grid item xs={12} sm={5}>
+              <TextField
+                fullWidth
+                label="Place / City (Optional)"
+                placeholder="e.g. Kochi"
+                value={newApt.place}
+                onChange={(e) => setNewApt(prev => ({ ...prev, place: e.target.value }))}
               />
             </Grid>
 

@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
-import { 
-  Box, Card, CardContent, Typography, Button, Grid, 
-  Paper, Chip, TextField, Stack, IconButton, Avatar, 
+import {
+  Box, Card, CardContent, Typography, Button, Grid,
+  Paper, Chip, TextField, Stack, IconButton, Avatar,
   Divider, InputAdornment, Tabs, Tab, Alert, Table,
-  TableBody, TableCell, TableContainer, TableHead, TableRow, Tooltip
+  TableBody, TableCell, TableContainer, TableHead, TableRow, Tooltip,
+  Dialog, DialogContent
 } from '@mui/material';
 import {
   History as HistoryIcon,
@@ -18,6 +19,8 @@ import {
   MedicalServices as MedicalIcon,
   Add as AddIcon,
   Print as PrintIcon,
+  Edit as EditIcon,
+  Close as CloseIcon,
   TrendingUp as ProgressionIcon,
   CheckCircle as ActiveIcon,
   Warning as AlertIcon,
@@ -27,6 +30,7 @@ import {
   FilterList as FilterIcon,
   DeleteSweep as ClearIcon
 } from '@mui/icons-material';
+import PrintPrescriptionCard from '../components/optical/PrintPrescriptionCard';
 
 // Patient IDs are generated client-side and aren't guaranteed globally unique (two different
 // patients can end up with the same "P-1003" from separate sessions) — so a plain `p.id` isn't
@@ -38,24 +42,6 @@ const getPatientKey = (p) => `${p?.id || ''}|${p?.phone || ''}|${p?.name || ''}`
 // A real backend Customer/Appointment id is a UUID; human-readable "P-1001" codes never
 // look like one — used to tell a real backend link apart from a locally-generated placeholder.
 const isBackendId = (id) => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
-
-// Appointment records (local legacy shape uses `.patient`, the real backend Appointment model
-// uses `.patient_name`) reduced to the same shape as a customer stub, so a patient who has only
-// booked an appointment (no eye exam yet) still shows up with their real name in the directory
-// instead of the generic "Patient" placeholder.
-const normalizeAptToPatientStub = (a) => ({
-  id: a.customer || a.customerId || a.patient_id || '',
-  customerId: a.customer || a.customerId || null,
-  name: a.patient_name || a.patient || 'Patient',
-  phone: a.phone || '',
-  email: a.email || '',
-  age: a.age || '30',
-  gender: a.gender || 'Male',
-  occupation: 'Standard',
-  hasDiabetes: false,
-  hasSpecBooking: false,
-  specDetails: null
-});
 
 export default function PatientHistory() {
   const navigate = useNavigate();
@@ -125,6 +111,11 @@ export default function PatientHistory() {
         return {
           ...item,
           ...raw,
+          // The display `id` below prefers visit_number (human-readable, e.g. "VIS-123") over
+          // the real backend EyeExamination UUID — so the true UUID is preserved separately
+          // here, otherwise editing and re-saving this exam would have no way to PATCH the
+          // original row and would silently create a duplicate instead.
+          backendId: isBackendId(item.id) ? item.id : null,
           id: item.visit_number || item.id || raw.id || `VIS-${Math.floor(100 + Math.random() * 900)}`,
           date: item.examination_date ? item.examination_date.split('T')[0] : (item.date || raw.date || new Date().toISOString().split('T')[0]),
           patientId: item.patient_id || item.patientId || raw.patientId || '',
@@ -192,16 +183,7 @@ export default function PatientHistory() {
 
       try {
         const localPatients = JSON.parse(localStorage.getItem('optical_patients') || '[]');
-        const localApts = JSON.parse(localStorage.getItem('optical_appointments') || '[]');
-        custPool = [...custPool, ...localPatients, ...localApts.map(normalizeAptToPatientStub)];
-      } catch (e) {}
-
-      try {
-        const resApts = await axios.get('/api/sales/appointments/');
-        const aptData = resApts.data?.results || resApts.data || [];
-        if (Array.isArray(aptData)) {
-          custPool = [...custPool, ...aptData.map(normalizeAptToPatientStub)];
-        }
+        custPool = [...custPool, ...localPatients];
       } catch (e) {}
 
       // Deduplicate and aggregate patient records. A real phone number is a far more reliable
@@ -249,9 +231,21 @@ export default function PatientHistory() {
         }
       });
 
-      const uniqueCust = Array.from(uniqueCustMap.values());
+      const allCust = Array.from(uniqueCustMap.values());
 
       const uniqueExams = Array.from(new Map(normalizedExams.map(e => [String(e.id || `${e.patientId}-${e.date}`).toLowerCase(), e])).values());
+
+      // This page is specifically an exam-history directory, not a general patient list — a
+      // patient who has only booked an appointment (no eye exam completed yet) shouldn't show
+      // up here with an empty history. Keep only patients with at least one completed exam,
+      // matched by phone (most reliable) or Patient ID.
+      const examPhones = new Set(uniqueExams.map(e => String(e.phone || '').trim().toLowerCase()).filter(Boolean));
+      const examPatientIds = new Set(uniqueExams.map(e => String(e.patientId || '').trim().toLowerCase()).filter(Boolean));
+      const uniqueCust = allCust.filter(p => {
+        const phone = String(p.phone || '').trim().toLowerCase();
+        const id = String(p.id || '').trim().toLowerCase();
+        return (phone && phone !== 'no mobile' && examPhones.has(phone)) || (id && examPatientIds.has(id));
+      });
 
       setPatients(uniqueCust);
       setExaminations(uniqueExams);
@@ -311,6 +305,14 @@ export default function PatientHistory() {
       state: {
         patient: selectedPatient
       }
+    });
+  };
+
+  const [printingExam, setPrintingExam] = useState(null);
+
+  const handleEditExam = (exam) => {
+    navigate('/optical/eyetest', {
+      state: { editExam: exam }
     });
   };
 
@@ -601,9 +603,21 @@ export default function PatientHistory() {
                               Exam ID: {exam.id || `EX-${1000 + index}`}
                             </Typography>
                           </Box>
-                          <Typography variant="caption" fontWeight={700} color="primary.main">
-                            Optometrist: {exam.assignedOptometrist || exam.optometrist || '—'}
-                          </Typography>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                            <Typography variant="caption" fontWeight={700} color="primary.main">
+                              Optometrist: {exam.assignedOptometrist || exam.optometrist || '—'}
+                            </Typography>
+                            <Tooltip title="Print This Exam / Prescription">
+                              <IconButton size="small" onClick={() => setPrintingExam(exam)}>
+                                <PrintIcon fontSize="small" />
+                              </IconButton>
+                            </Tooltip>
+                            <Tooltip title="Edit This Exam">
+                              <IconButton size="small" onClick={() => handleEditExam(exam)}>
+                                <EditIcon fontSize="small" />
+                              </IconButton>
+                            </Tooltip>
+                          </Box>
                         </Box>
 
                         <Divider />
@@ -813,6 +827,30 @@ export default function PatientHistory() {
           )}
         </Grid>
       </Grid>
+
+      {/* Print This Exam / Prescription — reuses the same card the Eye Test wizard's final
+          step prints from, so a past visit prints identically to how it looked when recorded. */}
+      <Dialog open={Boolean(printingExam)} onClose={() => setPrintingExam(null)} maxWidth="md" fullWidth>
+        <IconButton
+          onClick={() => setPrintingExam(null)}
+          className="no-print"
+          sx={{ position: 'absolute', right: 8, top: 8, zIndex: 1 }}
+        >
+          <CloseIcon />
+        </IconButton>
+        <DialogContent sx={{ p: { xs: 1, sm: 2 } }}>
+          {printingExam && (
+            <PrintPrescriptionCard
+              patientData={printingExam.raw_data?.patientData || printingExam.patientData || selectedPatient}
+              subjectiveRefraction={printingExam.subjectiveRefraction}
+              diagnosis={printingExam.raw_data?.diagnosis || { primary: printingExam.diagnosis }}
+              prescription={printingExam.raw_data?.prescription || printingExam.prescription || {}}
+              medicalHistory={printingExam.medicalHistory}
+              onNavigateToSales={() => navigate('/sales/new', { state: { patient: selectedPatient } })}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
     </Box>
   );
 }

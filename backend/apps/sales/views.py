@@ -1,13 +1,15 @@
 import time
 
 from rest_framework import viewsets, permissions
+from rest_framework.decorators import action
+from rest_framework.response import Response
 from rest_framework.serializers import ModelSerializer, SerializerMethodField
 from .models import (
     Customer, Invoice, InvoiceItem, Payment, EyeExamination, Appointment,
     Dealer, WholesalePriceList, WholesaleQuotation, WholesaleOrder,
     WholesaleDeliveryChallan, WholesaleInvoice, WholesalePaymentCollection, WholesaleReturn
 )
-from .patient_utils import reserve_patient_codes
+from .patient_utils import reserve_patient_codes, peek_next_patient_code
 from apps.inventory.models import StockLedger
 
 class CustomerSerializer(ModelSerializer):
@@ -78,6 +80,10 @@ class CustomerViewSet(viewsets.ModelViewSet):
         if not patient_code or Customer.all_objects.filter(patient_code=patient_code).exists():
             patient_code = reserve_patient_codes()[0]
         serializer.save(patient_code=patient_code)
+
+    @action(detail=False, methods=['get'], url_path='next-patient-code')
+    def next_patient_code(self, request):
+        return Response({'patient_code': peek_next_patient_code()})
 
 class EyeExaminationViewSet(viewsets.ModelViewSet):
     queryset = EyeExamination.objects.all().order_by('-examination_date')

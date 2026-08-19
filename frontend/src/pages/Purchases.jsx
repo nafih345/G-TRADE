@@ -84,7 +84,7 @@ export default function Purchases() {
 
   // Form Inputs (All start blank)
   const [supplierInput, setSupplierInput] = useState({
-    name: '', contactPerson: '', phone: '', email: '', gstin: '', address: '', city: '', paymentTerms: 'Net 30'
+    name: '', supplierCode: '', contactPerson: '', phone: '', email: '', gstin: '', address: '', city: '', paymentTerms: 'Net 30', accountNumber: ''
   });
 
   const [returnInput, setReturnInput] = useState({
@@ -197,15 +197,30 @@ export default function Purchases() {
       } catch (e) {}
 
       try {
-        let res;
-        try {
-          res = await axios.get('/api/purchase/suppliers/');
-        } catch (e1) {
-          res = await axios.get('/api/purchasing/suppliers/');
-        }
+        const res = await axios.get('/api/purchase/suppliers/');
+        // DRF pagination wraps this as {results: [...]}, not a bare array.
         const rawBackend = res.data?.results || res.data || [];
         if (Array.isArray(rawBackend) && rawBackend.length > 0) {
-          const cleanBackend = rawBackend.filter(s => !isSampleOrCorrupt(s));
+          // Backend fields are snake_case; the rest of this page's UI (table cells, the Add
+          // Supplier dialog, Autocomplete options) reads camelCase — without this mapping,
+          // Contact Person/Payment Terms/Balance/Supplier Code all silently render blank for
+          // any supplier loaded from the database rather than just-created in this session.
+          const cleanBackend = rawBackend
+            .filter(s => !isSampleOrCorrupt(s))
+            .map(s => ({
+              id: s.id,
+              supplierCode: s.supplier_code || '',
+              name: s.name,
+              contactPerson: s.contact_person || '',
+              phone: s.phone || '',
+              email: s.email || '',
+              gstin: s.gstin || '',
+              address: s.address || '',
+              city: s.city || '',
+              paymentTerms: s.payment_terms || 'Net 30',
+              accountNumber: s.account_number || '',
+              balance: parseFloat(s.outstanding_balance || 0)
+            }));
           setSuppliers(cleanBackend);
         } else {
           setSuppliers(localSupps);
@@ -292,12 +307,45 @@ export default function Purchases() {
       alert("Please enter Supplier Company Name.");
       return;
     }
+
+    let created = null;
+    try {
+      const res = await axios.post('/api/purchase/suppliers/', {
+        name: supplierInput.name,
+        supplier_code: supplierInput.supplierCode || undefined,
+        contact_person: supplierInput.contactPerson,
+        phone: supplierInput.phone,
+        email: supplierInput.email,
+        gstin: supplierInput.gstin,
+        address: supplierInput.address,
+        city: supplierInput.city,
+        payment_terms: supplierInput.paymentTerms,
+        account_number: supplierInput.accountNumber
+      });
+      created = res.data;
+    } catch (e) {
+      alert("Could not save the supplier to the database. Please try again.");
+      return;
+    }
+
     const newSupp = {
-      id: `SUP-${Math.floor(100 + Math.random() * 900)}`,
-      ...supplierInput,
-      balance: 0
+      id: created.id,
+      supplierCode: created.supplier_code,
+      name: created.name,
+      contactPerson: created.contact_person || '',
+      phone: created.phone || '',
+      email: created.email || '',
+      gstin: created.gstin || '',
+      address: created.address || '',
+      city: created.city || '',
+      paymentTerms: created.payment_terms || 'Net 30',
+      accountNumber: created.account_number || '',
+      balance: parseFloat(created.outstanding_balance || 0)
     };
     setSuppliers([newSupp, ...suppliers]);
+    // So the Purchase Entry tab picks the newly-created supplier as the selected one, whether
+    // "Add Supplier" was triggered from there directly or from another tab.
+    setEntryPrefillSupplierId(newSupp.id);
 
     // Save to localStorage for instant sync with Products page
     try {
@@ -306,30 +354,9 @@ export default function Purchases() {
       localStorage.setItem('optical_suppliers', JSON.stringify(newSaved));
     } catch (e) {}
 
-    // POST to backend API
-    try {
-      try {
-        await axios.post('/api/purchase/suppliers/', {
-          name: newSupp.name,
-          contact_person: newSupp.contactPerson,
-          phone: newSupp.phone,
-          email: newSupp.email,
-          gstin: newSupp.gstin
-        });
-      } catch (e1) {
-        await axios.post('/api/purchasing/suppliers/', {
-          name: newSupp.name,
-          contact_person: newSupp.contactPerson,
-          phone: newSupp.phone,
-          email: newSupp.email,
-          gstin: newSupp.gstin
-        });
-      }
-    } catch (e) {}
-
-    setSupplierInput({ name: '', contactPerson: '', phone: '', email: '', gstin: '', address: '', city: '', paymentTerms: 'Net 30' });
+    setSupplierInput({ name: '', supplierCode: '', contactPerson: '', phone: '', email: '', gstin: '', address: '', city: '', paymentTerms: 'Net 30', accountNumber: '' });
     setAddSupplierOpen(false);
-    alert(`Supplier '${newSupp.name}' registered to database successfully!`);
+    alert(`Supplier '${newSupp.name}' (${newSupp.supplierCode}) registered to database successfully!`);
   };
 
   // Load SheetJS XLSX Parser Library dynamically
@@ -624,6 +651,7 @@ export default function Purchases() {
           products={products}
           initialSupplierId={entryPrefillSupplierId}
           initialPurchaseOrderId={entryPrefillPoId}
+          onRequestAddSupplier={() => setAddSupplierOpen(true)}
           onSaveComplete={(invoice) => {
             setEntryPrefillSupplierId('');
             setEntryPrefillPoId('');
@@ -809,7 +837,7 @@ export default function Purchases() {
                     ) : (
                       filteredSuppliers.map(s => (
                         <TableRow key={s.id} hover>
-                          <TableCell sx={{ fontWeight: 700, color: 'primary.main' }}>{s.id}</TableCell>
+                          <TableCell sx={{ fontWeight: 700, color: 'primary.main' }}>{s.supplierCode || s.id}</TableCell>
                           <TableCell sx={{ fontWeight: 600 }}>
                             {s.name}
                             {s.contactPerson && (
@@ -1199,20 +1227,30 @@ export default function Purchases() {
         <DialogContent dividers>
           {/* Manual Registration Grid */}
           <Grid container spacing={2}>
-            <Grid item xs={12}>
-              <TextField 
-                label="Supplier Company Name" 
-                fullWidth 
+            <Grid item xs={8}>
+              <TextField
+                label="Supplier Company Name"
+                fullWidth
                 required
                 placeholder="e.g. Luxottica Eyewear Ltd"
                 value={supplierInput.name}
                 onChange={(e) => setSupplierInput({ ...supplierInput, name: e.target.value })}
               />
             </Grid>
+            <Grid item xs={4}>
+              <TextField
+                label="Supplier Code"
+                fullWidth
+                placeholder="Auto-generated"
+                helperText="Leave blank to auto-generate"
+                value={supplierInput.supplierCode}
+                onChange={(e) => setSupplierInput({ ...supplierInput, supplierCode: e.target.value })}
+              />
+            </Grid>
             <Grid item xs={6}>
-              <TextField 
-                label="Contact Person Name" 
-                fullWidth 
+              <TextField
+                label="Contact Person Name"
+                fullWidth
                 placeholder="e.g. Robert Smith"
                 value={supplierInput.contactPerson}
                 onChange={(e) => setSupplierInput({ ...supplierInput, contactPerson: e.target.value })}
@@ -1255,10 +1293,10 @@ export default function Purchases() {
               />
             </Grid>
             <Grid item xs={6}>
-              <TextField 
-                select 
-                label="Payment Terms" 
-                fullWidth 
+              <TextField
+                select
+                label="Payment Terms"
+                fullWidth
                 value={supplierInput.paymentTerms}
                 onChange={(e) => setSupplierInput({ ...supplierInput, paymentTerms: e.target.value })}
               >
@@ -1268,7 +1306,20 @@ export default function Purchases() {
                 <MenuItem value="Net 60">Net 60 Days</MenuItem>
               </TextField>
             </Grid>
+            <Grid item xs={12}>
+              <TextField
+                label="Supplier Bank Account Number"
+                fullWidth
+                placeholder="e.g. 000123456789"
+                value={supplierInput.accountNumber}
+                onChange={(e) => setSupplierInput({ ...supplierInput, accountNumber: e.target.value })}
+              />
+            </Grid>
           </Grid>
+
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1.5 }}>
+            A Chart of Accounts ledger under "Sundry Creditors" is created automatically for this supplier, so their dues track individually in Financial → Chart of Accounts / General Ledger.
+          </Typography>
 
           <Divider sx={{ my: 2.5 }}>
             <Chip label="OR BATCH IMPORT SUPPLIERS VIA EXCEL SHEET" size="small" sx={{ fontWeight: 800, fontSize: '0.65rem', color: 'primary.main' }} />

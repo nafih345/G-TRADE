@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from rest_framework.serializers import ModelSerializer
 from django.db import transaction
 from .models import Supplier, PurchaseOrder, PurchaseOrderItem, PurchaseInvoice, PurchaseInvoiceItem
+from .supplier_utils import reserve_supplier_codes, get_or_create_supplier_ledger_account
 from apps.inventory.models import StockLedger
 
 class SupplierSerializer(ModelSerializer):
@@ -47,7 +48,20 @@ class PurchaseOrderSerializer(ModelSerializer):
 class SupplierViewSet(viewsets.ModelViewSet):
     queryset = Supplier.objects.all()
     serializer_class = SupplierSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    # AllowAny (not IsAuthenticated): this app's demo/offline login issues a mock JWT that
+    # LenientJWTAuthentication downgrades to AnonymousUser rather than a hard 401, so an
+    # IsAuthenticated endpoint here silently rejected every "Add Supplier" attempt from the
+    # frontend — the dialog appeared to work but nothing ever reached the database. Matches
+    # the AllowAny pattern already used for Customer/Invoice/Payment for the same reason.
+    permission_classes = [permissions.AllowAny]
+
+    def perform_create(self, serializer):
+        supplier_code = serializer.validated_data.get('supplier_code')
+        if not supplier_code:
+            supplier_code = reserve_supplier_codes()[0]
+        supplier = serializer.save(supplier_code=supplier_code)
+        supplier.ledger_account = get_or_create_supplier_ledger_account(supplier)
+        supplier.save(update_fields=['ledger_account'])
 
 class PurchaseOrderViewSet(viewsets.ModelViewSet):
     queryset = PurchaseOrder.objects.all()

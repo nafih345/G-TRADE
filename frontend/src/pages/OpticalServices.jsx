@@ -63,6 +63,10 @@ export default function OpticalServices() {
   const [dbPatients, setDbPatients] = useState([]);
   const [recordsLoaded, setRecordsLoaded] = useState(false);
   const [doctorsList, setDoctorsList] = useState([]);
+  // Set when arriving here via Patient History's "Edit" action on a past exam — makes
+  // handleSaveDraft PATCH that same backend EyeExamination row instead of always POSTing a
+  // new one, which would otherwise leave the original unedited and create a duplicate.
+  const [editingExamId, setEditingExamId] = useState(null);
 
   // Core Examination State
   const [patientData, setPatientData] = useState({
@@ -659,8 +663,35 @@ export default function OpticalServices() {
   useEffect(() => {
     const apt = location.state?.appointment;
     const directPatient = location.state?.patient;
-    if ((!apt && !directPatient) || appointmentHandledRef.current || !recordsLoaded) return;
+    const editExam = location.state?.editExam;
+    if ((!apt && !directPatient && !editExam) || appointmentHandledRef.current || !recordsLoaded) return;
     appointmentHandledRef.current = true;
+
+    // Patient History's per-visit "Edit" button — reload a past exam's full clinical record
+    // (not just patient identity, unlike the appointment/direct-patient handoffs below) so
+    // corrections save back over the same visit instead of starting a blank new one.
+    if (editExam) {
+      const raw = editExam.raw_data || {};
+      setEditingExamId(editExam.backendId || null);
+      setPatientData(prev => ({
+        ...prev,
+        ...(raw.patientData || {}),
+        id: editExam.patientId || raw.patientData?.id || prev.id,
+        customerId: editExam.customerId || raw.patientData?.customerId || prev.customerId,
+        name: editExam.name || raw.patientData?.name || '',
+        phone: editExam.phone || raw.patientData?.phone || '',
+        visitNum: editExam.id || prev.visitNum
+      }));
+      if (editExam.subjectiveRefraction) setSubjectiveRefraction(editExam.subjectiveRefraction);
+      if (editExam.medicalHistory) setMedicalHistory(prev => ({ ...prev, ...editExam.medicalHistory }));
+      if (raw.diagnosis) {
+        setDiagnosis(raw.diagnosis);
+      } else {
+        setDiagnosis(prev => ({ ...prev, primary: editExam.diagnosis || '', testNo: editExam.testNo || prev.testNo }));
+      }
+      if (raw.prescription) setPrescription(raw.prescription);
+      return;
+    }
 
     if (directPatient) {
       const matched = directPatient.customerId
@@ -893,8 +924,13 @@ export default function OpticalServices() {
         raw_data: examRecord
       };
 
-      await axios.post('/api/sales/eye-examinations/', dbPayload);
-      alert(`Clinical Examination & Prescription for ${patientData.name} (${effectivePatientId}) saved to database!`);
+      if (editingExamId) {
+        await axios.patch(`/api/sales/eye-examinations/${editingExamId}/`, dbPayload);
+        alert(`Clinical Examination & Prescription for ${patientData.name} (${effectivePatientId}) updated!`);
+      } else {
+        await axios.post('/api/sales/eye-examinations/', dbPayload);
+        alert(`Clinical Examination & Prescription for ${patientData.name} (${effectivePatientId}) saved to database!`);
+      }
     } catch (e) {
       console.warn("API database save notice:", e);
       alert(`Saved locally, but syncing "${patientData.name}"'s record to the database failed. Please check your connection and try Save again.`);
@@ -906,6 +942,7 @@ export default function OpticalServices() {
     // just-saved patient's identifiers sticking around.
     setPatientData(prev => ({ ...prev, id: '', customerId: null }));
     setDiagnosis(prev => ({ ...prev, testNo: '' }));
+    setEditingExamId(null);
   };
 
   const handleNavigateToSales = () => {

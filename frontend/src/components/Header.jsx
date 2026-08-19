@@ -8,6 +8,7 @@ import {
 } from '@mui/material';
 import {
   Search as SearchIcon,
+  Menu as MenuIcon,
   NotificationsNone as NotificationsIcon,
   DarkMode as DarkModeIcon,
   LightMode as LightModeIcon,
@@ -24,7 +25,7 @@ import {
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
 
-export default function Header({ toggleTheme, mode }) {
+export default function Header({ toggleTheme, mode, onMenuClick }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
 
@@ -157,16 +158,27 @@ export default function Header({ toggleTheme, mode }) {
         zIndex: (theme) => theme.zIndex.drawer + 1
       }}
     >
-      <Toolbar sx={{ justifyContent: 'space-between', px: 3 }}>
+      <Toolbar sx={{ justifyContent: 'space-between', px: { xs: 1.5, sm: 3 }, gap: 1 }}>
+        {/* Hamburger Menu — only rendered below `md`, where the Sidebar is an overlay closed
+            by default rather than a permanent space-reserving drawer */}
+        <IconButton
+          onClick={onMenuClick}
+          sx={{ display: { xs: 'inline-flex', md: 'none' }, color: 'text.primary' }}
+        >
+          <MenuIcon />
+        </IconButton>
+
         {/* Global Search Bar */}
-        <Box sx={{ 
-          display: 'flex', 
-          alignItems: 'center', 
+        <Box sx={{
+          display: 'flex',
+          alignItems: 'center',
           backgroundColor: mode === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)',
-          px: 2, 
+          px: 2,
           py: 0.5,
           borderRadius: 3,
-          width: { xs: 150, sm: 350 }
+          flexGrow: { xs: 1, sm: 0 },
+          minWidth: 0,
+          width: { xs: 'auto', sm: 350 }
         }}>
           <SearchIcon sx={{ color: 'text.secondary', mr: 1, fontSize: 20 }} />
           <InputBase 

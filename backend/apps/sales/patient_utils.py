@@ -29,3 +29,17 @@ def reserve_patient_codes(prefix=DEFAULT_PREFIX, count=1):
             new_last = cursor.fetchone()[0]
     start = new_last - count + 1
     return [f"{prefix}-{start + i}" for i in range(count)]
+
+
+def peek_next_patient_code(prefix=DEFAULT_PREFIX):
+    """
+    Read-only preview of the code reserve_patient_codes would hand out next — does NOT
+    consume the sequence. Lets the New Appointment dialog show the front desk a real,
+    always-current "next patient ID" before a patient is actually saved, instead of the old
+    client-side approach of scanning whatever patient list happened to be loaded in the
+    browser and guessing the max+1 — which visibly got stuck repeating the same ID whenever
+    that scan missed a recently-added patient (stale/incomplete local list, a save that
+    failed silently, etc).
+    """
+    seq, _ = PatientCodeSequence.objects.get_or_create(prefix=prefix, defaults={'last_number': 1000})
+    return f"{prefix}-{seq.last_number + 1}"

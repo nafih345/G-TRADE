@@ -1,6 +1,6 @@
 import React, { useState, useEffect, lazy, Suspense } from 'react';
 import { HashRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import { ThemeProvider, CssBaseline, Box, Typography, LinearProgress } from '@mui/material';
+import { ThemeProvider, CssBaseline, Box, Typography, LinearProgress, useMediaQuery } from '@mui/material';
 import { getTheme } from './theme/theme';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import Sidebar from './components/Sidebar';
@@ -24,11 +24,20 @@ const Settings = lazy(() => import('./pages/Settings'));
 
 function MainLayout() {
   const { user, loading } = useAuth();
-  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [themeMode, setThemeMode] = useState('light');
 
   const theme = getTheme(themeMode);
   const toggleTheme = () => setThemeMode(prev => prev === 'dark' ? 'light' : 'dark');
+
+  // The sidebar was a fixed-width permanent Drawer regardless of screen size, so on phones it
+  // ate most of the ~390px viewport, leaving barely any room for content (cramped/truncated KPI
+  // cards). Below `md`, it now behaves as an overlay that's closed by default and opened via the
+  // Header's hamburger button, matching the standard responsive-drawer pattern.
+  const isMobile = useMediaQuery(theme.breakpoints.down('md'));
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  useEffect(() => {
+    setSidebarOpen(!isMobile);
+  }, [isMobile]);
 
   // 🚀 GLOBAL ENTER KEY SMART HANDLER (Form navigation, modal submission & search execution)
   useEffect(() => {
@@ -134,11 +143,11 @@ function MainLayout() {
       <CssBaseline />
       <Box sx={{ display: 'flex', minHeight: '100vh', backgroundColor: 'background.default' }}>
         {/* Collapsible Sidebar */}
-        <Sidebar open={sidebarOpen} toggleSidebar={() => setSidebarOpen(!sidebarOpen)} />
-        
+        <Sidebar open={sidebarOpen} toggleSidebar={() => setSidebarOpen(!sidebarOpen)} isMobile={isMobile} />
+
         {/* Main Work Area */}
         <Box sx={{ flexGrow: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-          <Header toggleTheme={toggleTheme} mode={themeMode} />
+          <Header toggleTheme={toggleTheme} mode={themeMode} onMenuClick={() => setSidebarOpen(true)} />
           
           <Box component="main" sx={{ flexGrow: 1, overflowY: 'auto' }}>
             <Suspense fallback={<LinearProgress color="primary" sx={{ height: 3 }} />}>

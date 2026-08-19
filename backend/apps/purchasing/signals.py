@@ -22,7 +22,11 @@ def purchase_order_post_save_journal_entry(sender, instance, created, **kwargs):
         return
 
     inv_acc = get_or_create_account('1003', 'Optical Stock Inventory', 'Inventory Assets', 'Asset')
-    ap_acc = get_or_create_account('2001', 'Supplier Accounts Payable', 'Accounts Payable', 'Liability')
+    # Prefer the supplier's own per-supplier sub-ledger (see supplier_utils) so this purchase
+    # shows up against that specific supplier in Chart of Accounts / General Ledger, rather
+    # than only ever hitting one shared bucket that can't be broken down by vendor.
+    ap_acc = getattr(instance.supplier, 'ledger_account', None) or \
+        get_or_create_account('2001', 'Supplier Accounts Payable', 'Accounts Payable', 'Liability')
 
     lines = [
         {'account': inv_acc, 'debit': net_amt, 'credit': 0},

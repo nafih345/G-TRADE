@@ -2,14 +2,42 @@ from decimal import Decimal
 from django.db import models
 from apps.common.models import BaseUUIDModel
 
+
+class SupplierCodeSequence(models.Model):
+    """Per-prefix atomic counter for human-readable Supplier.supplier_code values
+    (see supplier_utils.reserve_supplier_codes). Mirrors apps.sales.PatientCodeSequence."""
+    prefix = models.CharField(max_length=10, unique=True)
+    last_number = models.BigIntegerField(default=1000)
+
+    def __str__(self):
+        return f"{self.prefix} (last: {self.last_number})"
+
+
 class Supplier(BaseUUIDModel):
+    # blank=True: SupplierViewSet.perform_create auto-generates one via reserve_supplier_codes
+    # when omitted, but DRF's required-field validation runs before perform_create, so without
+    # blank=True that auto-generation would be unreachable (same lesson as Invoice.invoice_number).
+    supplier_code = models.CharField(max_length=30, unique=True, blank=True, null=True, db_index=True)
     name = models.CharField(max_length=150)
     company_name = models.CharField(max_length=150, blank=True, null=True)
+    contact_person = models.CharField(max_length=150, blank=True, null=True)
     email = models.EmailField(blank=True, null=True)
     phone = models.CharField(max_length=20, blank=True, null=True)
     gstin = models.CharField(max_length=15, blank=True, null=True)
     address = models.TextField(blank=True, null=True)
+    city = models.CharField(max_length=100, blank=True, null=True)
+    payment_terms = models.CharField(max_length=50, blank=True, null=True, default='Net 30')
+    # Bank account the supplier is paid into — distinct from `ledger_account` below, which is
+    # the internal Chart of Accounts sub-ledger tracking what we owe them.
+    account_number = models.CharField(max_length=50, blank=True, null=True)
     outstanding_balance = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.0'))
+    # Auto-provisioned per-supplier Accounts Payable sub-ledger (see
+    # supplier_utils.get_or_create_supplier_ledger_account, called from SupplierViewSet on
+    # create) so each supplier appears individually in Chart of Accounts / General Ledger
+    # instead of every supplier's dues being lumped into one shared "2001" account.
+    ledger_account = models.ForeignKey(
+        'financial.ChartOfAccount', on_delete=models.SET_NULL, null=True, blank=True, related_name='suppliers'
+    )
 
     def __str__(self):
         return self.name

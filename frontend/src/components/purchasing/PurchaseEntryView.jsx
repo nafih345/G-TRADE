@@ -3,8 +3,7 @@ import axios from 'axios';
 import {
   Box, Grid, Card, Typography, TextField, Button, MenuItem,
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
-  Paper, IconButton, Stack, Divider, Dialog, DialogTitle, DialogContent,
-  DialogActions, Chip, Autocomplete, Alert, Tooltip
+  Paper, IconButton, Stack, Divider, Chip, Autocomplete, Alert, Tooltip
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -135,7 +134,7 @@ function recalcRow(row, changedField, gstType, isInterstate) {
   return r;
 }
 
-export default function PurchaseEntryView({ suppliers = [], products = [], initialSupplierId = '', initialPurchaseOrderId = '', onSaveComplete }) {
+export default function PurchaseEntryView({ suppliers = [], products = [], initialSupplierId = '', initialPurchaseOrderId = '', onSaveComplete, onRequestAddSupplier }) {
   const supplierInputRef = useRef(null);
   const dateInputRef = useRef(null);
   const productSearchRef = useRef(null);
@@ -146,7 +145,6 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
   const [invoiceNumber, setInvoiceNumber] = useState(genInvoiceNumber());
   const [supplierInvoiceNumber, setSupplierInvoiceNumber] = useState('');
   const [selectedSupplierId, setSelectedSupplierId] = useState('');
-  const [localSuppliers, setLocalSuppliers] = useState([]);
   const [purchaseDate, setPurchaseDate] = useState(todayStr());
   const [dueDate, setDueDate] = useState('');
   const [purchaseType, setPurchaseType] = useState('CASH');
@@ -166,9 +164,6 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
 
   const [warehouses, setWarehouses] = useState([]);
   const [branches, setBranches] = useState([]);
-
-  const [addSupplierOpen, setAddSupplierOpen] = useState(false);
-  const [newSupplier, setNewSupplier] = useState({ name: '', phone: '', gstin: '', email: '' });
 
   // Purchase Order conversion (PO -> goods received -> Purchase Entry)
   const [openPOs, setOpenPOs] = useState([]);
@@ -190,9 +185,9 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
 
   const allSuppliers = useMemo(() => {
     const map = new Map();
-    [...suppliers, ...localSuppliers].forEach(s => map.set(s.id, s));
+    suppliers.forEach(s => map.set(s.id, s));
     return Array.from(map.values());
-  }, [suppliers, localSuppliers]);
+  }, [suppliers]);
 
   const selectedSupplier = allSuppliers.find(s => String(s.id) === String(selectedSupplierId));
 
@@ -390,25 +385,6 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
       .catch(() => {});
   };
 
-  // --- Add supplier (quick, non-modal-heavy — occasional action) ---
-  const handleAddSupplier = () => {
-    if (!newSupplier.name) { alert('Please enter supplier name.'); return; }
-    axios.post('/api/purchase/suppliers/', newSupplier).then(res => {
-      const created = res.data;
-      setLocalSuppliers(prev => [created, ...prev]);
-      setSelectedSupplierId(created.id);
-      setAddSupplierOpen(false);
-      setNewSupplier({ name: '', phone: '', gstin: '', email: '' });
-      window.dispatchEvent(new Event('optical_suppliers_updated'));
-    }).catch(() => {
-      const fallback = { id: `SUP-LOC-${Date.now()}`, name: newSupplier.name, phone: newSupplier.phone, gstin: newSupplier.gstin, balance: 0 };
-      setLocalSuppliers(prev => [fallback, ...prev]);
-      setSelectedSupplierId(fallback.id);
-      setAddSupplierOpen(false);
-      setNewSupplier({ name: '', phone: '', gstin: '', email: '' });
-    });
-  };
-
   // --- Reset form ---
   const resetForm = () => {
     setInvoiceNumber(genInvoiceNumber());
@@ -583,7 +559,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
     const handleShortcut = (e) => {
       if (e.key === 'F2') { e.preventDefault(); dateInputRef.current?.focus(); }
       else if (e.key === 'F3') { e.preventDefault(); supplierInputRef.current?.focus(); }
-      else if (e.key === 'F4') { e.preventDefault(); setAddSupplierOpen(true); }
+      else if (e.key === 'F4') { e.preventDefault(); onRequestAddSupplier?.(); }
       else if (e.key === 'F5') { e.preventDefault(); setProductSearch(''); productSearchRef.current?.focus(); }
       else if (e.key === 'F6') { e.preventDefault(); productSearchRef.current?.focus(); }
       else if (e.key === 'F7') { e.preventDefault(); if (rows.length) focusCell(rows.length - 1, 'batchNumber'); }
@@ -653,7 +629,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
                   InputProps={{ ...params.InputProps, endAdornment: (
                     <>
                       <Tooltip title="Add Supplier (F4)">
-                        <IconButton size="small" onClick={() => setAddSupplierOpen(true)}><AddIcon fontSize="small" /></IconButton>
+                        <IconButton size="small" onClick={() => onRequestAddSupplier?.()}><AddIcon fontSize="small" /></IconButton>
                       </Tooltip>
                       {params.InputProps.endAdornment}
                     </>
@@ -999,23 +975,6 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
         <Button variant="outlined" color="primary" startIcon={<PrintIcon />} onClick={() => doSave(status, { print: true })} disabled={saving}>Save & Print (Ctrl+P)</Button>
         <Button variant="contained" color="primary" startIcon={<SaveIcon />} onClick={() => doSave(status)} disabled={saving} sx={{ fontWeight: 800 }}>Save Purchase (Ctrl+S)</Button>
       </Box>
-
-      {/* Add Supplier Dialog (occasional action, not the main data-entry loop) */}
-      <Dialog open={addSupplierOpen} onClose={() => setAddSupplierOpen(false)} maxWidth="xs" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
-        <DialogTitle sx={{ fontWeight: 800 }}>Add New Supplier</DialogTitle>
-        <DialogContent>
-          <Stack spacing={2} sx={{ mt: 1 }}>
-            <TextField label="Supplier / Company Name" fullWidth required autoFocus value={newSupplier.name} onChange={(e) => setNewSupplier({ ...newSupplier, name: e.target.value })} />
-            <TextField label="Phone" fullWidth value={newSupplier.phone} onChange={(e) => setNewSupplier({ ...newSupplier, phone: e.target.value })} />
-            <TextField label="GSTIN" fullWidth value={newSupplier.gstin} onChange={(e) => setNewSupplier({ ...newSupplier, gstin: e.target.value })} />
-            <TextField label="Email" fullWidth value={newSupplier.email} onChange={(e) => setNewSupplier({ ...newSupplier, email: e.target.value })} />
-          </Stack>
-        </DialogContent>
-        <DialogActions sx={{ p: 2 }}>
-          <Button onClick={() => setAddSupplierOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={handleAddSupplier}>Add Supplier</Button>
-        </DialogActions>
-      </Dialog>
     </Box>
   );
 }

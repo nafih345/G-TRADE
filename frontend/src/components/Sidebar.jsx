@@ -156,12 +156,19 @@ const menuItems = [
 ];
 
 
-export default function Sidebar({ open, toggleSidebar }) {
+export default function Sidebar({ open, toggleSidebar, isMobile = false }) {
   const { user } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const [expanded, setExpanded] = useState({});
   const [nestedExpanded, setNestedExpanded] = useState({ Vouchers: true });
+
+  // On mobile the drawer is a full-screen overlay, so a nav click should dismiss it as well as
+  // navigate — otherwise the menu would still be covering the page after selecting a route.
+  const goTo = (path) => {
+    navigate(path);
+    if (isMobile) toggleSidebar();
+  };
 
   useEffect(() => {
     menuItems.forEach(item => {
@@ -209,12 +216,15 @@ export default function Sidebar({ open, toggleSidebar }) {
 
   return (
     <Drawer
-      variant="permanent"
+      variant={isMobile ? 'temporary' : 'permanent'}
+      open={isMobile ? open : true}
+      onClose={toggleSidebar}
+      ModalProps={isMobile ? { keepMounted: true } : undefined}
       sx={{
-        width: open ? DRAWER_WIDTH : 70,
+        width: isMobile ? 0 : (open ? DRAWER_WIDTH : 70),
         flexShrink: 0,
-        [`& .MuiDrawer-paper`]: { 
-          width: open ? DRAWER_WIDTH : 70, 
+        [`& .MuiDrawer-paper`]: {
+          width: isMobile ? DRAWER_WIDTH : (open ? DRAWER_WIDTH : 70),
           boxSizing: 'border-box',
           borderRight: '1px solid',
           borderColor: 'divider',
@@ -252,7 +262,7 @@ export default function Sidebar({ open, toggleSidebar }) {
                     if (hasSubItems) {
                       handleToggleExpand(item.text);
                     } else {
-                      navigate(item.path);
+                      goTo(item.path);
                     }
                   }}
                   sx={{
@@ -299,7 +309,7 @@ export default function Sidebar({ open, toggleSidebar }) {
                               if (hasChildren) {
                                 handleToggleNestedExpand(sub.text);
                               } else {
-                                navigate(sub.path);
+                                goTo(sub.path);
                               }
                             }}
                             sx={{
@@ -326,7 +336,7 @@ export default function Sidebar({ open, toggleSidebar }) {
                                   return (
                                     <ListItemButton
                                       key={child.text}
-                                      onClick={() => navigate(child.path)}
+                                      onClick={() => goTo(child.path)}
                                       sx={{
                                         minHeight: 34,
                                         borderRadius: 1.5,
