@@ -37,3 +37,5 @@ backend_dist/
 # Editor / OS
 .DS_Store
 Thumbs.db
+
+.vercel
