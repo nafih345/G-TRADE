@@ -20,12 +20,17 @@ class WarehouseTransferSerializer(ModelSerializer):
 class StockLedgerViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = StockLedger.objects.all()
     serializer_class = StockLedgerSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    # AllowAny: see SupplierViewSet in apps.purchasing.views for why — the demo/offline
+    # login's mock JWT gets downgraded to AnonymousUser, so IsAuthenticated here silently
+    # blocked every stock read/write from the frontend.
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
 
 class StockAdjustmentViewSet(viewsets.ModelViewSet):
     queryset = StockAdjustment.objects.all()
     serializer_class = StockAdjustmentSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
 
     def perform_create(self, serializer):
         adj = serializer.save()
@@ -44,7 +49,8 @@ class StockAdjustmentViewSet(viewsets.ModelViewSet):
 class WarehouseTransferViewSet(viewsets.ModelViewSet):
     queryset = WarehouseTransfer.objects.all()
     serializer_class = WarehouseTransferSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
 
     def perform_create(self, serializer):
         transfer = serializer.save()
