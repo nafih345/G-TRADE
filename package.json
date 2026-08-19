@@ -28,7 +28,7 @@
       {
         "from": "config",
         "to": "config",
-        "filter": ["**/*"]
+        "filter": ["**/*", "!database.json"]
       }
     ],
     "win": {
