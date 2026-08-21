@@ -79,6 +79,11 @@ export default function OpticalServices() {
     email: '',
     address: '',
     occupation: '',
+    idType: '',
+    idNumber: '',
+    medicalAidName: '',
+    medicalAidScheme: '',
+    medicalAidMemberNumber: '',
     branch: 'Main Branch',
     appointmentNum: '',
     visitNum: '',
@@ -286,7 +291,19 @@ export default function OpticalServices() {
         // is tracked separately in customerId.
         const backendId = isBackendId(p.id) ? p.id : (p.customerId || null);
         const humanId = p.patient_code || (isBackendId(p.id) ? null : p.id) || p.id;
-        return { ...p, id: humanId, customerId: backendId };
+        return {
+          ...p,
+          id: humanId,
+          customerId: backendId,
+          // Records fetched straight from the backend carry these as snake_case
+          // (id_type, medical_aid_name, ...); the UI/local cache always reads the
+          // camelCase form, so alias them here rather than at every call site.
+          idType: p.idType || p.id_type || '',
+          idNumber: p.idNumber || p.id_number || '',
+          medicalAidName: p.medicalAidName || p.medical_aid_name || '',
+          medicalAidScheme: p.medicalAidScheme || p.medical_aid_scheme || '',
+          medicalAidMemberNumber: p.medicalAidMemberNumber || p.medical_aid_member_number || ''
+        };
       });
 
       setDbPatients(uniquePatients);
@@ -343,6 +360,11 @@ export default function OpticalServices() {
       email: '',
       address: '',
       occupation: '',
+      idType: '',
+      idNumber: '',
+      medicalAidName: '',
+      medicalAidScheme: '',
+      medicalAidMemberNumber: '',
       branch: 'Main Branch',
       appointmentNum: '',
       visitNum: '',
@@ -789,6 +811,11 @@ export default function OpticalServices() {
       address: patientData?.address || '',
       place: patientData?.place || patientData?.city || '',
       city: patientData?.place || patientData?.city || '',
+      idType: patientData?.idType || '',
+      idNumber: patientData?.idNumber || '',
+      medicalAidName: patientData?.medicalAidName || '',
+      medicalAidScheme: patientData?.medicalAidScheme || '',
+      medicalAidMemberNumber: patientData?.medicalAidMemberNumber || '',
       assignedOptometrist: patientData?.assignedOptometrist || ''
     };
 
@@ -818,7 +845,19 @@ export default function OpticalServices() {
 
     // Send to API Database (Customer only — no eye-examinations call here)
     try {
-      const customerApiPayload = { ...customerRecord, id: undefined, patient_code: effectivePatientId };
+      // Backend Customer model fields are snake_case (id_type, medical_aid_name, ...) —
+      // camelCase keys in customerRecord are silently ignored by the serializer, so map
+      // them explicitly here, same as patient_code below.
+      const customerApiPayload = {
+        ...customerRecord,
+        id: undefined,
+        patient_code: effectivePatientId,
+        id_type: patientData?.idType || '',
+        id_number: patientData?.idNumber || '',
+        medical_aid_name: patientData?.medicalAidName || '',
+        medical_aid_scheme: patientData?.medicalAidScheme || '',
+        medical_aid_member_number: patientData?.medicalAidMemberNumber || ''
+      };
       if (customerId) {
         await axios.patch(`/api/sales/customers/${customerId}/`, customerApiPayload);
       } else {
@@ -949,6 +988,11 @@ export default function OpticalServices() {
       address: patientData?.address || '',
       place: patientData?.place || patientData?.city || '',
       city: patientData?.place || patientData?.city || '',
+      idType: patientData?.idType || '',
+      idNumber: patientData?.idNumber || '',
+      medicalAidName: patientData?.medicalAidName || '',
+      medicalAidScheme: patientData?.medicalAidScheme || '',
+      medicalAidMemberNumber: patientData?.medicalAidMemberNumber || '',
       assignedOptometrist: patientData?.assignedOptometrist || '',
       sphRight: subjectiveRefraction?.od?.sph || '',
       cylRight: subjectiveRefraction?.od?.cyl || '',
@@ -1010,7 +1054,16 @@ export default function OpticalServices() {
       // code the UI shows in sync with the one stored server-side, instead of the backend
       // silently minting an unrelated one on every save. Known link -> PATCH the same row;
       // otherwise create it once and remember the real id for every future save.
-      const customerApiPayload = { ...customerRecord, id: undefined, patient_code: effectivePatientId };
+      const customerApiPayload = {
+        ...customerRecord,
+        id: undefined,
+        patient_code: effectivePatientId,
+        id_type: patientData?.idType || '',
+        id_number: patientData?.idNumber || '',
+        medical_aid_name: patientData?.medicalAidName || '',
+        medical_aid_scheme: patientData?.medicalAidScheme || '',
+        medical_aid_member_number: patientData?.medicalAidMemberNumber || ''
+      };
       try {
         if (customerId) {
           await axios.patch(`/api/sales/customers/${customerId}/`, customerApiPayload);

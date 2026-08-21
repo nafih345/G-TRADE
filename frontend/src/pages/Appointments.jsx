@@ -72,6 +72,11 @@ const mapBackendAppointment = (a) => ({
   email: a.email || '',
   age: a.age || '',
   gender: a.gender || 'Male',
+  idType: a.id_type || '',
+  idNumber: a.id_number || '',
+  medicalAidName: a.medical_aid_name || '',
+  medicalAidScheme: a.medical_aid_scheme || '',
+  medicalAidMemberNumber: a.medical_aid_member_number || '',
   doctor: a.doctor || '',
   date: a.appointment_date || '',
   time: a.appointment_time || '',
@@ -93,6 +98,11 @@ const mapAppointmentToBackend = (apt, customerId) => ({
   email: apt.email,
   age: apt.age,
   gender: apt.gender,
+  id_type: apt.idType,
+  id_number: apt.idNumber,
+  medical_aid_name: apt.medicalAidName,
+  medical_aid_scheme: apt.medicalAidScheme,
+  medical_aid_member_number: apt.medicalAidMemberNumber,
   doctor: apt.doctor,
   appointment_date: apt.date,
   appointment_time: apt.time,
@@ -171,6 +181,11 @@ export default function Appointments() {
     gender: 'Male',
     address: '',
     place: '',
+    idType: '',
+    idNumber: '',
+    medicalAidName: '',
+    medicalAidScheme: '',
+    medicalAidMemberNumber: '',
     doctor: '',
     date: new Date().toISOString().split('T')[0],
     time: '10:00 AM',
@@ -349,7 +364,12 @@ export default function Appointments() {
         age: patientObj.age || '',
         gender: patientObj.gender || 'Male',
         address: patientObj.address || '',
-        place: patientObj.place || patientObj.city || ''
+        place: patientObj.place || patientObj.city || '',
+        idType: patientObj.idType || patientObj.id_type || '',
+        idNumber: patientObj.idNumber || patientObj.id_number || '',
+        medicalAidName: patientObj.medicalAidName || patientObj.medical_aid_name || '',
+        medicalAidScheme: patientObj.medicalAidScheme || patientObj.medical_aid_scheme || '',
+        medicalAidMemberNumber: patientObj.medicalAidMemberNumber || patientObj.medical_aid_member_number || ''
       }));
       const testNo = await getNextTestNoPreview();
       setNewApt(prev => prev.customerId === (patientObj.id || null) ? { ...prev, testNo } : prev);
@@ -475,6 +495,11 @@ Thank you for choosing *${storeName}*. We look forward to seeing you!`;
             gender: newApt.gender || '',
             address: newApt.address || '',
             place: newApt.place || '',
+            id_type: newApt.idType || '',
+            id_number: newApt.idNumber || '',
+            medical_aid_name: newApt.medicalAidName || '',
+            medical_aid_scheme: newApt.medicalAidScheme || '',
+            medical_aid_member_number: newApt.medicalAidMemberNumber || '',
             patient_code: newApt.patientId || undefined
           });
           customerId = resCust.data.id;
@@ -944,25 +969,16 @@ Thank you for choosing *${storeName}*. We hope to serve you again soon!`;
               />
             </Grid>
 
-            {/* Patient ID / Test No — auto-assigned (a fresh preview for a new patient, or the
-                selected patient's own real ones), same as they'll appear on the Eye Test form
-                when "Start Eye Test" is used from this appointment. Editable in case front desk
-                needs to correct/override, matching how these fields behave on Eye Test itself. */}
-            <Grid item xs={6} sm={3}>
+            {/* Patient ID — auto-assigned (a fresh preview for a new patient, or the selected
+                patient's own real one). Test No is still reserved/assigned behind the scenes
+                (see newApt.testNo / mapAppointmentToBackend) and carried through to the Eye
+                Test form when "Start Eye Test" is used from this appointment — it's just not
+                shown in this dialog. */}
+            <Grid item xs={12} sm={6}>
               <TextField
                 fullWidth
                 label="Patient ID"
                 value={newApt.patientId}
-                InputProps={{ readOnly: true }}
-                helperText="Auto-generated"
-              />
-            </Grid>
-            <Grid item xs={6} sm={3}>
-              <TextField
-                fullWidth
-                label="Test No (Optional)"
-                placeholder="e.g. 1"
-                value={newApt.testNo}
                 InputProps={{ readOnly: true }}
                 helperText="Auto-generated"
               />
@@ -987,6 +1003,67 @@ Thank you for choosing *${storeName}*. We hope to serve you again soon!`;
                 placeholder="e.g. Kochi"
                 value={newApt.place}
                 onChange={(e) => setNewApt(prev => ({ ...prev, place: e.target.value }))}
+              />
+            </Grid>
+
+            <Grid item xs={12} sm={6}>
+              <TextField
+                fullWidth
+                label="Email (Optional)"
+                placeholder="patient@example.com"
+                value={newApt.email}
+                onChange={(e) => setNewApt(prev => ({ ...prev, email: e.target.value }))}
+              />
+            </Grid>
+            <Grid item xs={6} sm={3}>
+              <TextField
+                select
+                fullWidth
+                label="ID Type (Optional)"
+                value={newApt.idType}
+                onChange={(e) => setNewApt(prev => ({ ...prev, idType: e.target.value }))}
+              >
+                <MenuItem value="">-- Select --</MenuItem>
+                <MenuItem value="Passport">Passport</MenuItem>
+                <MenuItem value="Aadhaar">Aadhaar</MenuItem>
+                <MenuItem value="Omang">Omang</MenuItem>
+                <MenuItem value="National ID">National ID</MenuItem>
+                <MenuItem value="Driving License">Driving License</MenuItem>
+                <MenuItem value="Other">Other</MenuItem>
+              </TextField>
+            </Grid>
+            <Grid item xs={6} sm={3}>
+              <TextField
+                fullWidth
+                label="ID Number (Optional)"
+                value={newApt.idNumber}
+                onChange={(e) => setNewApt(prev => ({ ...prev, idNumber: e.target.value }))}
+              />
+            </Grid>
+
+            {/* Medical Aid details */}
+            <Grid item xs={12} sm={4}>
+              <TextField
+                fullWidth
+                label="Medical Aid Name (Optional)"
+                value={newApt.medicalAidName}
+                onChange={(e) => setNewApt(prev => ({ ...prev, medicalAidName: e.target.value }))}
+              />
+            </Grid>
+            <Grid item xs={12} sm={4}>
+              <TextField
+                fullWidth
+                label="Medical Aid Scheme (Optional)"
+                value={newApt.medicalAidScheme}
+                onChange={(e) => setNewApt(prev => ({ ...prev, medicalAidScheme: e.target.value }))}
+              />
+            </Grid>
+            <Grid item xs={12} sm={4}>
+              <TextField
+                fullWidth
+                label="Medical Aid Member Number (Optional)"
+                value={newApt.medicalAidMemberNumber}
+                onChange={(e) => setNewApt(prev => ({ ...prev, medicalAidMemberNumber: e.target.value }))}
               />
             </Grid>
 

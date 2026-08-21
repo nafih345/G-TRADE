@@ -38,6 +38,13 @@ class Customer(BaseUUIDModel):
     gender = models.CharField(max_length=20, blank=True, null=True)
     address = models.TextField(blank=True, null=True)
     place = models.CharField(max_length=150, blank=True, null=True)
+    # Identity document — id_type is free text (Passport, Aadhaar, Omang, National ID, ...)
+    # rather than a choices= enum since acceptable ID documents vary by country/branch.
+    id_type = models.CharField(max_length=50, blank=True, null=True)
+    id_number = models.CharField(max_length=100, blank=True, null=True)
+    medical_aid_name = models.CharField(max_length=150, blank=True, null=True)
+    medical_aid_scheme = models.CharField(max_length=150, blank=True, null=True)
+    medical_aid_member_number = models.CharField(max_length=100, blank=True, null=True)
     outstanding_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
     credit_limit = models.DecimalField(max_digits=12, decimal_places=2, default=5000.0)
 
@@ -307,6 +314,11 @@ class Appointment(BaseUUIDModel):
     email = models.CharField(max_length=100, blank=True, null=True)
     age = models.CharField(max_length=10, blank=True, null=True)
     gender = models.CharField(max_length=20, blank=True, null=True)
+    id_type = models.CharField(max_length=50, blank=True, null=True)
+    id_number = models.CharField(max_length=100, blank=True, null=True)
+    medical_aid_name = models.CharField(max_length=150, blank=True, null=True)
+    medical_aid_scheme = models.CharField(max_length=150, blank=True, null=True)
+    medical_aid_member_number = models.CharField(max_length=100, blank=True, null=True)
 
     doctor = models.CharField(max_length=150, blank=True, null=True)
     appointment_date = models.DateField()

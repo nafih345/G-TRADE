@@ -329,6 +329,76 @@ export default function SingleScreenEyeTestForm({
                   </Box>
                 </Box>
               </Box>
+
+              {/* Row 3: Email, ID Type, ID Number, Medical Aid Name, Medical Aid Scheme, Medical Aid Member
+                  Number — shares Row 1/2's colTemplate (not an independent equal-width grid) so every
+                  field lines up under the same tracks instead of drifting out of alignment. */}
+              <Box sx={{ display: 'grid', gridTemplateColumns: colTemplate, gap: 1.5, alignItems: 'center', mt: 1.5 }}>
+                <Box sx={{ gridColumn: { md: '1 / 3' } }}>
+                  <TextField
+                    fullWidth
+                    size="small"
+                    label="Email"
+                    placeholder="patient@example.com"
+                    value={patientData.email || ''}
+                    onChange={(e) => setPatientData(prev => ({ ...prev, email: e.target.value }))}
+                  />
+                </Box>
+                <Box sx={{ gridColumn: { md: '3 / 4' } }}>
+                  <TextField
+                    fullWidth
+                    select
+                    size="small"
+                    label="ID Type"
+                    value={patientData.idType || ''}
+                    onChange={(e) => setPatientData(prev => ({ ...prev, idType: e.target.value }))}
+                  >
+                    <MenuItem value="">-- Select ID Type --</MenuItem>
+                    <MenuItem value="Passport">Passport</MenuItem>
+                    <MenuItem value="Aadhaar">Aadhaar</MenuItem>
+                    <MenuItem value="Omang">Omang</MenuItem>
+                    <MenuItem value="National ID">National ID</MenuItem>
+                    <MenuItem value="Driving License">Driving License</MenuItem>
+                    <MenuItem value="Other">Other</MenuItem>
+                  </TextField>
+                </Box>
+                <Box sx={{ gridColumn: { md: '4 / 5' } }}>
+                  <TextField
+                    fullWidth
+                    size="small"
+                    label="ID Number"
+                    value={patientData.idNumber || ''}
+                    onChange={(e) => setPatientData(prev => ({ ...prev, idNumber: e.target.value }))}
+                  />
+                </Box>
+                <Box sx={{ gridColumn: { md: '5 / 6' } }}>
+                  <TextField
+                    fullWidth
+                    size="small"
+                    label="Medical Aid Name"
+                    value={patientData.medicalAidName || ''}
+                    onChange={(e) => setPatientData(prev => ({ ...prev, medicalAidName: e.target.value }))}
+                  />
+                </Box>
+                <Box sx={{ gridColumn: { md: '6 / 7' } }}>
+                  <TextField
+                    fullWidth
+                    size="small"
+                    label="Medical Aid Scheme"
+                    value={patientData.medicalAidScheme || ''}
+                    onChange={(e) => setPatientData(prev => ({ ...prev, medicalAidScheme: e.target.value }))}
+                  />
+                </Box>
+                <Box sx={{ gridColumn: { md: '7 / 8' } }}>
+                  <TextField
+                    fullWidth
+                    size="small"
+                    label="Medical Aid Member Number"
+                    value={patientData.medicalAidMemberNumber || ''}
+                    onChange={(e) => setPatientData(prev => ({ ...prev, medicalAidMemberNumber: e.target.value }))}
+                  />
+                </Box>
+              </Box>
             </>
           );
         })()}
