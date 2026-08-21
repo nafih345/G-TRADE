@@ -39,6 +39,7 @@ export default function SingleScreenEyeTestForm({
   doctorsList = [],
   onOpenSearchModal,
   onSaveDraft,
+  onSavePatient,
   onPrint,
   onClearAll,
   testNo = '',
@@ -128,9 +129,11 @@ export default function SingleScreenEyeTestForm({
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
 
-  // Auto-generate Test No, Date, and Patient ID (Null-Safe)
+  // Auto-generate Date and Patient ID (Null-Safe). Test No is intentionally left blank until
+  // a real one exists — either an existing exam was selected from history, or one was just
+  // assigned by the backend on save — instead of showing a guessed placeholder up front.
   const safeExams = Array.isArray(savedExams) ? savedExams : [];
-  const autoTestNo = testNo || diagnosis?.testNo || (safeExams.length + 1).toString();
+  const autoTestNo = testNo || diagnosis?.testNo || '';
   const autoDate = testDate || new Date().toISOString().split('T')[0];
   const autoPatientId = patientData?.id || nextPatientId || `P-${1001 + safeExams.length}`;
 
@@ -318,7 +321,7 @@ export default function SingleScreenEyeTestForm({
                     />
                     <Button
                       variant="contained" color="success" size="small" startIcon={<SaveIcon fontSize="small" />}
-                      onClick={onSaveDraft}
+                      onClick={onSavePatient}
                       sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 2, whiteSpace: 'nowrap', px: 2 }}
                     >
                       Save

@@ -464,11 +464,13 @@ export default function OpticalServices() {
     if (activeEl && activeEl.tagName === 'TEXTAREA') return;
 
     // Mobile No is the last field of the patient registration row — pressing Enter there
-    // saves the clinical record directly to the database instead of just moving focus on
-    // into the next section, so no separate "register patient" step is needed.
+    // saves just the patient details to the database instead of just moving focus on
+    // into the next section, so no separate "register patient" step is needed. This must
+    // NOT create/update an eye-examinations record — that only happens via "Save Clinical
+    // Record" once test details have actually been entered.
     if (e.key === 'Enter' && activeEl?.id === 'eyetest-mobile-input') {
       e.preventDefault();
-      handleSaveDraft();
+      handleSavePatient();
       return;
     }
 
@@ -761,9 +763,137 @@ export default function OpticalServices() {
     setDbPatients(prev => [newP, ...prev]);
   };
 
+  // Saves ONLY the patient/demographic details to the Customer database — used by the small
+  // "Save" button next to Mobile No and by pressing Enter there. This must never write into
+  // optical_eye_tests / pastExaminations or call the eye-examinations API: doing so was what
+  // made a row appear in the Recent Examination Directory before any clinical test data had
+  // been entered. A directory row is only created by handleSaveDraft ("Save Clinical Record").
+  const handleSavePatient = async () => {
+    if (!patientData?.name || patientData.name.trim() === '') {
+      alert("Please enter Patient Name before saving.");
+      return;
+    }
+
+    const effectivePatientId = patientData?.id || getNextPatientId();
+    if (!patientData?.id) {
+      setPatientData(prev => ({ ...prev, id: effectivePatientId }));
+    }
+
+    const customerRecord = {
+      id: effectivePatientId,
+      name: patientData?.name || '',
+      phone: patientData?.phone || '',
+      email: patientData?.email || '',
+      age: patientData?.age || '',
+      gender: patientData?.gender || '',
+      address: patientData?.address || '',
+      place: patientData?.place || patientData?.city || '',
+      city: patientData?.place || patientData?.city || '',
+      assignedOptometrist: patientData?.assignedOptometrist || ''
+    };
+
+    let customerId = patientData?.customerId || null;
+    if (!customerId && patientData?.phone) {
+      const existingMatch = dbPatients.find(c => c.phone && c.phone === patientData.phone);
+      if (existingMatch?.customerId) customerId = existingMatch.customerId;
+    }
+
+    // Save locally to the patients list only — not optical_eye_tests / pastExaminations.
+    try {
+      const existingCust = JSON.parse(localStorage.getItem('optical_sales_customers') || '[]');
+      const updatedCust = [customerRecord, ...existingCust.filter(c => c.id !== customerRecord.id)];
+      localStorage.setItem('optical_sales_customers', JSON.stringify(updatedCust));
+
+      if (patientData.assignedOptometrist) {
+        const localDocs = JSON.parse(localStorage.getItem('optical_doctors') || '[]');
+        if (!localDocs.includes(patientData.assignedOptometrist)) {
+          const updatedDocs = [...localDocs, patientData.assignedOptometrist];
+          localStorage.setItem('optical_doctors', JSON.stringify(updatedDocs));
+          setDoctorsList(prev => Array.from(new Set([...prev, patientData.assignedOptometrist])));
+        }
+      }
+
+      setDbPatients(updatedCust);
+    } catch (e) {}
+
+    // Send to API Database (Customer only — no eye-examinations call here)
+    try {
+      const customerApiPayload = { ...customerRecord, id: undefined, patient_code: effectivePatientId };
+      if (customerId) {
+        await axios.patch(`/api/sales/customers/${customerId}/`, customerApiPayload);
+      } else {
+        const res = await axios.post('/api/sales/customers/', customerApiPayload);
+        if (res.data?.id) {
+          customerId = res.data.id;
+          setPatientData(prev => ({ ...prev, customerId }));
+        }
+      }
+      alert(`Patient "${patientData.name}" (${effectivePatientId}) saved successfully!`);
+    } catch (e) {
+      // Surface the real reason (validation error / offline / server error) instead of a
+      // generic message — a silent guess here is what made this failure impossible to
+      // diagnose from the UI alone.
+      console.warn("API database save notice:", e.response?.data || e);
+      const detail = e.response
+        ? (typeof e.response.data === 'string' ? e.response.data : JSON.stringify(e.response.data)) || `HTTP ${e.response.status}`
+        : (e.message || 'No response from server');
+      alert(`Saved locally, but syncing "${patientData.name}"'s details to the database failed: ${detail}`);
+    }
+  };
+
+  // "Save Clinical Record" must not create a directory entry for a visit where no actual test
+  // data was entered yet — only patient/registration fields. Checks the real clinical sections
+  // (medical history, acuity, refraction, binocular vision, eye health, diagnosis, prescription),
+  // not the patient-detail fields, which are saved separately via the Mobile No "Save" button.
+  const hasClinicalData = () => {
+    const filled = (v) => v !== undefined && v !== null && String(v).trim() !== '';
+    const any = (...vals) => vals.some(filled);
+
+    return (
+      any(diagnosis?.primary, diagnosis?.remarks, diagnosis?.procedure, diagnosis?.medicine, diagnosis?.advice, diagnosis?.icdCode) ||
+      any(
+        subjectiveRefraction?.od?.sph, subjectiveRefraction?.od?.cyl, subjectiveRefraction?.od?.axis, subjectiveRefraction?.od?.va,
+        subjectiveRefraction?.os?.sph, subjectiveRefraction?.os?.cyl, subjectiveRefraction?.os?.axis, subjectiveRefraction?.os?.va,
+        subjectiveRefraction?.nearAdd, subjectiveRefraction?.pd
+      ) ||
+      any(
+        objectiveRefraction?.autoRefraction?.od?.sph, objectiveRefraction?.autoRefraction?.od?.cyl, objectiveRefraction?.autoRefraction?.od?.axis,
+        objectiveRefraction?.autoRefraction?.os?.sph, objectiveRefraction?.autoRefraction?.os?.cyl, objectiveRefraction?.autoRefraction?.os?.axis,
+        objectiveRefraction?.retinoscopy?.od?.sph, objectiveRefraction?.retinoscopy?.os?.sph
+      ) ||
+      any(
+        visualAcuity?.distance?.odWo, visualAcuity?.distance?.odWith, visualAcuity?.distance?.osWo, visualAcuity?.distance?.osWith,
+        visualAcuity?.near?.odWo, visualAcuity?.near?.odWith, visualAcuity?.near?.osWo, visualAcuity?.near?.osWith
+      ) ||
+      (Array.isArray(medicalHistory?.chiefComplaints) && medicalHistory.chiefComplaints.length > 0) ||
+      any(
+        medicalHistory?.medicalHistory, medicalHistory?.familyHistory, medicalHistory?.ocularHistory, medicalHistory?.previousSurgery,
+        medicalHistory?.previousGlasses, medicalHistory?.currentMedication, medicalHistory?.allergy, medicalHistory?.contactLensHistory, medicalHistory?.notes
+      ) ||
+      Boolean(medicalHistory?.hasDiabetes) || Boolean(medicalHistory?.hasHypertension) ||
+      any(
+        binocularVision?.npc, binocularVision?.coverTest, binocularVision?.phoria, binocularVision?.vergence,
+        binocularVision?.accommodation, binocularVision?.worthFourDot, binocularVision?.stereoVision, binocularVision?.eyeDominance
+      ) ||
+      any(
+        eyeHealth?.anterior?.lids, eyeHealth?.anterior?.lashes, eyeHealth?.anterior?.conjunctiva, eyeHealth?.anterior?.cornea,
+        eyeHealth?.anterior?.iris, eyeHealth?.anterior?.lens, eyeHealth?.anterior?.anteriorChamber,
+        eyeHealth?.posterior?.disc, eyeHealth?.posterior?.macula, eyeHealth?.posterior?.retina, eyeHealth?.posterior?.vessels,
+        eyeHealth?.iop?.od, eyeHealth?.iop?.os, eyeHealth?.dilatedExam
+      ) ||
+      (Array.isArray(prescription?.selectedLenses) && prescription.selectedLenses.length > 0) ||
+      any(prescription?.frameRecommendation, prescription?.lensRecommendation)
+    );
+  };
+
   const handleSaveDraft = async () => {
     if (!patientData?.name || patientData.name.trim() === '') {
       alert("Please enter Patient Name before saving clinical record.");
+      return;
+    }
+
+    if (!hasClinicalData()) {
+      alert("Please enter at least one test detail (refraction, acuity, diagnosis, etc.) before saving the clinical record.");
       return;
     }
 
@@ -781,7 +911,11 @@ export default function OpticalServices() {
     }
 
     const examRecord = {
-      id: patientData?.visitNum || `VIS-${Math.floor(100 + Math.random() * 900)}`,
+      // A stable key derived from patient + test no (both now fixed for the duration of this
+      // visit — see the Patient ID / Test No persistence fix above) so re-saving the same visit
+      // (e.g. clicking Save again after filling in more sections) replaces this exact local
+      // entry instead of appending a lookalike duplicate row to the Recent Examination Directory.
+      id: `${effectivePatientId}_${effectiveTestNo}`,
       date: new Date().toISOString().split('T')[0],
       testNo: effectiveTestNo,
       patientId: effectivePatientId,
@@ -951,26 +1085,52 @@ export default function OpticalServices() {
         raw_data: examRecord
       };
 
+      let savedExam = null;
       if (editingExamId) {
-        await axios.patch(`/api/sales/eye-examinations/${editingExamId}/`, dbPayload);
+        const res = await axios.patch(`/api/sales/eye-examinations/${editingExamId}/`, dbPayload);
+        savedExam = res.data;
         alert(`Clinical Examination & Prescription for ${patientData.name} (${effectivePatientId}) updated!`);
       } else {
-        await axios.post('/api/sales/eye-examinations/', dbPayload);
+        const res = await axios.post('/api/sales/eye-examinations/', dbPayload);
+        savedExam = res.data;
+        // Remember the record we just created — since the Patient ID / Test No now stay on
+        // screen after saving, clicking Save again for the same patient must PATCH this same
+        // exam instead of silently POSTing a second duplicate one.
+        if (res.data?.id) setEditingExamId(res.data.id);
         alert(`Clinical Examination & Prescription for ${patientData.name} (${effectivePatientId}) saved to database!`);
         fetchNextTestNo();
+      }
+
+      // Test No / Patient ID sent above are just client-side previews — the backend silently
+      // swaps in a fresh one if it collides with a record saved elsewhere in the meantime (see
+      // perform_create in views.py). Reconcile local state with whatever actually got persisted
+      // so the on-screen fields and the Recent Examination Directory reflect the real saved
+      // record instead of a stale/duplicate guess.
+      const savedTestNo = savedExam?.test_no;
+      const savedPatientId = savedExam?.patient_id;
+      if ((savedTestNo && savedTestNo !== effectiveTestNo) || (savedPatientId && savedPatientId !== effectivePatientId)) {
+        if (savedTestNo && savedTestNo !== effectiveTestNo) setDiagnosis(prev => ({ ...prev, testNo: savedTestNo }));
+        if (savedPatientId && savedPatientId !== effectivePatientId) setPatientData(prev => ({ ...prev, id: savedPatientId }));
+        // Also re-key this entry to match the id a repeat save will compute next (it's built
+        // from patient id + test no), so a follow-up save still finds and replaces this same
+        // row instead of appending another duplicate.
+        const reconciledId = `${savedPatientId || effectivePatientId}_${savedTestNo || effectiveTestNo}`;
+        setPastExaminations(prev => prev.map(t => t.id === examRecord.id
+          ? { ...t, id: reconciledId, testNo: savedTestNo || t.testNo, patientId: savedPatientId || t.patientId }
+          : t));
+        setDbPatients(prev => prev.map(c => c.id === customerRecord.id
+          ? { ...c, id: savedPatientId || c.id, testNo: savedTestNo || c.testNo }
+          : c));
       }
     } catch (e) {
       console.warn("API database save notice:", e);
       alert(`Saved locally, but syncing "${patientData.name}"'s record to the database failed. Please check your connection and try Save again.`);
     }
 
-    // The saved record now permanently holds effectivePatientId/testNo. Clear those two
-    // fields back to blank (rather than a full form reset) so the next patient typed into
-    // this same screen gets a freshly auto-generated Patient ID / Test No, instead of the
-    // just-saved patient's identifiers sticking around.
-    setPatientData(prev => ({ ...prev, id: '', customerId: null }));
-    setDiagnosis(prev => ({ ...prev, testNo: '' }));
-    setEditingExamId(null);
+    // Keep the screen on the same Patient ID / Test No after saving — the patient just saved
+    // is still the one on screen, so re-saving (e.g. after adding more details) should update
+    // the same record rather than mint a new identity. A new Patient ID is only generated when
+    // the user explicitly clicks "New Patient" (see handleResetAll).
   };
 
   const handleNavigateToSales = () => {
@@ -1120,11 +1280,12 @@ export default function OpticalServices() {
             doctorsList={doctorsList}
             onOpenSearchModal={() => setSearchModalOpen(true)}
             onSaveDraft={handleSaveDraft}
+            onSavePatient={handleSavePatient}
             onPrint={() => setActiveStep(9)}
             onClearAll={handleResetAll}
             savedExams={pastExaminations}
             nextPatientId={getNextPatientId()}
-            testNo={diagnosis?.testNo || nextTestNoPreview}
+            testNo={diagnosis?.testNo}
             onSelectExamFromHistory={(exam) => {
               // Loading a past exam here means "resume/correct this exact visit" — it must
               // mark the form as editing that record (and restore its real test_no) so Save
