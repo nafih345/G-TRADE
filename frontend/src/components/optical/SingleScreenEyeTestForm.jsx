@@ -686,16 +686,13 @@ export default function SingleScreenEyeTestForm({
                     </TableCell>
                     {/* OD ADD Power (Spans SPH, CYL, AXIS) */}
                     <TableCell colSpan={3} sx={{ p: 0.3 }}>
-                      <TextField 
+                      <TextField
                         fullWidth
-                        size="small" 
-                        value={subjectiveRefraction?.nearAdd || subjectiveRefraction?.odNv?.sph || ''} 
-                        onChange={(e) => {
-                          handleSubjectiveEye('odNv', 'sph', e.target.value);
-                          setSubjectiveRefraction(prev => ({ ...prev, nearAdd: e.target.value }));
-                        }} 
-                        placeholder="0.00" 
-                        inputProps={{ style: { textAlign: 'center', fontWeight: 800, color: '#2563eb', fontSize: '0.8rem', padding: '4px' } }} 
+                        size="small"
+                        value={subjectiveRefraction?.odNv?.sph || ''}
+                        onChange={(e) => handleSubjectiveEye('odNv', 'sph', e.target.value)}
+                        placeholder="0.00"
+                        inputProps={{ style: { textAlign: 'center', fontWeight: 800, color: '#2563eb', fontSize: '0.8rem', padding: '4px' } }}
                       />
                     </TableCell>
                     {/* OD Near VA (Under VA Column) */}
@@ -711,16 +708,13 @@ export default function SingleScreenEyeTestForm({
                     </TableCell>
                     {/* OS ADD Power (Spans SPH, CYL, AXIS) */}
                     <TableCell colSpan={3} sx={{ p: 0.3 }}>
-                      <TextField 
+                      <TextField
                         fullWidth
-                        size="small" 
-                        value={subjectiveRefraction?.nearAdd || subjectiveRefraction?.osNv?.sph || ''} 
-                        onChange={(e) => {
-                          handleSubjectiveEye('osNv', 'sph', e.target.value);
-                          setSubjectiveRefraction(prev => ({ ...prev, nearAdd: e.target.value }));
-                        }} 
-                        placeholder="0.00" 
-                        inputProps={{ style: { textAlign: 'center', fontWeight: 800, color: '#059669', fontSize: '0.8rem', padding: '4px' } }} 
+                        size="small"
+                        value={subjectiveRefraction?.osNv?.sph || ''}
+                        onChange={(e) => handleSubjectiveEye('osNv', 'sph', e.target.value)}
+                        placeholder="0.00"
+                        inputProps={{ style: { textAlign: 'center', fontWeight: 800, color: '#059669', fontSize: '0.8rem', padding: '4px' } }}
                       />
                     </TableCell>
                     {/* OS Near VA (Under VA Column) */}

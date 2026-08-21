@@ -854,7 +854,8 @@ export default function OpticalServices() {
       any(
         subjectiveRefraction?.od?.sph, subjectiveRefraction?.od?.cyl, subjectiveRefraction?.od?.axis, subjectiveRefraction?.od?.va,
         subjectiveRefraction?.os?.sph, subjectiveRefraction?.os?.cyl, subjectiveRefraction?.os?.axis, subjectiveRefraction?.os?.va,
-        subjectiveRefraction?.nearAdd, subjectiveRefraction?.pd
+        subjectiveRefraction?.nearAdd, subjectiveRefraction?.pd,
+        subjectiveRefraction?.odNv?.sph, subjectiveRefraction?.odNv?.va, subjectiveRefraction?.osNv?.sph, subjectiveRefraction?.osNv?.va
       ) ||
       any(
         objectiveRefraction?.autoRefraction?.od?.sph, objectiveRefraction?.autoRefraction?.od?.cyl, objectiveRefraction?.autoRefraction?.od?.axis,
