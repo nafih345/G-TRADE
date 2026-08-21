@@ -1,5 +1,6 @@
 import time
 
+from django.db import IntegrityError, transaction
 from rest_framework import viewsets, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -79,7 +80,23 @@ class CustomerViewSet(viewsets.ModelViewSet):
         patient_code = serializer.validated_data.get('patient_code')
         if not patient_code or Customer.all_objects.filter(patient_code=patient_code).exists():
             patient_code = reserve_patient_codes()[0]
-        serializer.save(patient_code=patient_code)
+
+        # The exists()-then-insert check above still has a TOCTOU race window: two requests
+        # (e.g. the same "Save" fired twice back-to-back, or two front-desk tabs) can both pass
+        # the check for the same code before either commits, and the loser's INSERT then hits
+        # the column's real UNIQUE constraint as a raw, unhandled IntegrityError (500). Retry
+        # with a freshly reserved code instead of letting that surface as a server error.
+        attempts_left = 3
+        while True:
+            try:
+                with transaction.atomic():
+                    serializer.save(patient_code=patient_code)
+                return
+            except IntegrityError:
+                attempts_left -= 1
+                if attempts_left <= 0:
+                    raise
+                patient_code = reserve_patient_codes()[0]
 
     @action(detail=False, methods=['get'], url_path='next-patient-code')
     def next_patient_code(self, request):

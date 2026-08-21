@@ -410,6 +410,7 @@ export default function SingleScreenEyeTestForm({
                     label="Medical Aid Member Number"
                     value={patientData.medicalAidMemberNumber || ''}
                     onChange={(e) => setPatientData(prev => ({ ...prev, medicalAidMemberNumber: e.target.value }))}
+                    inputProps={{ id: 'eyetest-medicalaid-membernumber-input' }}
                   />
                 </Box>
               </Box>

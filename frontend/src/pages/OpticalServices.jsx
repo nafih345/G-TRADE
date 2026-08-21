@@ -71,6 +71,13 @@ export default function OpticalServices() {
   // silently mutated after the fact. Cleared by "New Patient" (handleResetAll) or by using the
   // history table's Edit icon (onSelectExamFromHistory) to intentionally resume that record.
   const [isRecordLocked, setIsRecordLocked] = useState(false);
+  // Guards handleSavePatient against firing twice before the first call's POST resolves — two
+  // near-simultaneous calls (e.g. an Enter keypress bouncing, or a stray double click) both read
+  // the same not-yet-assigned patientData.id, both compute the same "next" patient_code via
+  // getNextPatientId(), and both then race the backend's own collision check, which is only safe
+  // against genuinely sequential requests. The loser hits a raw IntegrityError instead of the
+  // graceful re-roll perform_create otherwise guarantees.
+  const savingPatientRef = useRef(false);
 
   // Core Examination State
   const [patientData, setPatientData] = useState({
@@ -490,12 +497,13 @@ export default function OpticalServices() {
     // Do not override if user is inside a multiline textarea
     if (activeEl && activeEl.tagName === 'TEXTAREA') return;
 
-    // Mobile No is the last field of the patient registration row — pressing Enter there
-    // saves just the patient details to the database instead of just moving focus on
-    // into the next section, so no separate "register patient" step is needed. This must
-    // NOT create/update an eye-examinations record — that only happens via "Save Clinical
-    // Record" once test details have actually been entered.
-    if (e.key === 'Enter' && activeEl?.id === 'eyetest-mobile-input') {
+    // Medical Aid Member Number is the LAST field of the patient registration rows (Mobile No
+    // now flows on into Email, ID Type, ID Number, Medical Aid Name/Scheme like every other
+    // field below) — pressing Enter there saves just the patient details to the database
+    // instead of just moving focus on into the next section, so no separate "register patient"
+    // step is needed. This must NOT create/update an eye-examinations record — that only
+    // happens via "Save Clinical Record" once test details have actually been entered.
+    if (e.key === 'Enter' && activeEl?.id === 'eyetest-medicalaid-membernumber-input') {
       e.preventDefault();
       handleSavePatient();
       return;
@@ -800,6 +808,10 @@ export default function OpticalServices() {
       alert("Please enter Patient Name before saving.");
       return;
     }
+    // See savingPatientRef's declaration — refuses a second overlapping call instead of racing
+    // the first one's still-in-flight patient_code reservation.
+    if (savingPatientRef.current) return;
+    savingPatientRef.current = true;
 
     const effectivePatientId = patientData?.id || getNextPatientId();
     if (!patientData?.id) {
@@ -876,12 +888,24 @@ export default function OpticalServices() {
     } catch (e) {
       // Surface the real reason (validation error / offline / server error) instead of a
       // generic message — a silent guess here is what made this failure impossible to
-      // diagnose from the UI alone.
+      // diagnose from the UI alone. Django's DEBUG error pages come back as a full HTML
+      // document (Content-Type text/html) rather than JSON — dumping that raw markup into an
+      // alert() was unreadable, so pull just the exception title out of it when present.
       console.warn("API database save notice:", e.response?.data || e);
-      const detail = e.response
-        ? (typeof e.response.data === 'string' ? e.response.data : JSON.stringify(e.response.data)) || `HTTP ${e.response.status}`
-        : (e.message || 'No response from server');
+      let detail;
+      if (e.response) {
+        const raw = e.response.data;
+        if (typeof raw === 'string' && /<title>/i.test(raw)) {
+          detail = raw.match(/<title>([\s\S]*?)<\/title>/i)[1].replace(/\s+/g, ' ').trim();
+        } else {
+          detail = (typeof raw === 'string' ? raw : JSON.stringify(raw)) || `HTTP ${e.response.status}`;
+        }
+      } else {
+        detail = e.message || 'No response from server';
+      }
       alert(`Saved locally, but syncing "${patientData.name}"'s details to the database failed: ${detail}`);
+    } finally {
+      savingPatientRef.current = false;
     }
   };
 
