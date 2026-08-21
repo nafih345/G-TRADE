@@ -309,24 +309,15 @@ export default function SingleScreenEyeTestForm({
                   </TextField>
                 </Box>
                 <Box sx={{ gridColumn: { md: '6 / 8' } }}>
-                  <Box sx={{ display: 'flex', gap: 0.5 }}>
-                    <TextField
-                      fullWidth
-                      size="small"
-                      label="Mobile No"
-                      value={patientData.phone || ''}
-                      onChange={(e) => setPatientData(prev => ({ ...prev, phone: e.target.value }))}
-                      inputProps={{ id: 'eyetest-mobile-input' }}
-                      sx={{ '& input': { fontWeight: 700 } }}
-                    />
-                    <Button
-                      variant="contained" color="success" size="small" startIcon={<SaveIcon fontSize="small" />}
-                      onClick={onSavePatient}
-                      sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 2, whiteSpace: 'nowrap', px: 2 }}
-                    >
-                      Save
-                    </Button>
-                  </Box>
+                  <TextField
+                    fullWidth
+                    size="small"
+                    label="Mobile No"
+                    value={patientData.phone || ''}
+                    onChange={(e) => setPatientData(prev => ({ ...prev, phone: e.target.value }))}
+                    inputProps={{ id: 'eyetest-mobile-input' }}
+                    sx={{ '& input': { fontWeight: 700 } }}
+                  />
                 </Box>
               </Box>
 
@@ -390,13 +381,22 @@ export default function SingleScreenEyeTestForm({
                   />
                 </Box>
                 <Box sx={{ gridColumn: { md: '7 / 8' } }}>
-                  <TextField
-                    fullWidth
-                    size="small"
-                    label="Medical Aid Member Number"
-                    value={patientData.medicalAidMemberNumber || ''}
-                    onChange={(e) => setPatientData(prev => ({ ...prev, medicalAidMemberNumber: e.target.value }))}
-                  />
+                  <Box sx={{ display: 'flex', gap: 0.5 }}>
+                    <TextField
+                      fullWidth
+                      size="small"
+                      label="Medical Aid Member Number"
+                      value={patientData.medicalAidMemberNumber || ''}
+                      onChange={(e) => setPatientData(prev => ({ ...prev, medicalAidMemberNumber: e.target.value }))}
+                    />
+                    <Button
+                      variant="contained" color="success" size="small" startIcon={<SaveIcon fontSize="small" />}
+                      onClick={onSavePatient}
+                      sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 2, whiteSpace: 'nowrap', px: 2 }}
+                    >
+                      Save
+                    </Button>
+                  </Box>
                 </Box>
               </Box>
             </>
