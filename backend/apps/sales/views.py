@@ -94,8 +94,24 @@ class EyeExaminationViewSet(viewsets.ModelViewSet):
         # Preserve a real test_no carried over from the Appointment this exam started from
         # (see Appointments.jsx's "Start Eye Test" flow); only mint a fresh one for a
         # standalone/walk-in exam that never had an appointment.
+        #
+        # The frontend's Test No field is just a preview fetched once when the page loads
+        # (peek_next_test_no doesn't consume the sequence), so it goes stale the moment a
+        # second exam is saved anywhere else before this one is submitted — two Eye Test
+        # tabs open at once, or one left open overnight, would otherwise both submit the
+        # same number and silently save a duplicate (test_no has no DB unique constraint).
+        # Re-check for a collision at the moment of save, exactly like CustomerViewSet does
+        # for patient_code above, and only then fall back to reserving a fresh one.
+        #
+        # Must check all_objects, not the default soft-delete-filtered manager: a soft-deleted
+        # exam/appointment's test_no is still "used" as far as this collision check should
+        # care, even though Customer.objects/EyeExamination.objects no longer lists it.
         test_no = serializer.validated_data.get('test_no')
-        if not test_no:
+        if (
+            not test_no
+            or EyeExamination.all_objects.filter(test_no=test_no).exists()
+            or Appointment.all_objects.filter(test_no=test_no).exists()
+        ):
             test_no = reserve_test_numbers()[0]
         serializer.save(test_no=test_no)
 
