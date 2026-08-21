@@ -212,7 +212,8 @@ export default function OpticalServices() {
         const resTests = await axios.get('/api/sales/eye-examinations/');
         const testsData = resTests.data?.results || resTests.data || [];
         if (Array.isArray(testsData)) {
-          const apiTests = testsData.map(item => item.raw_data || {
+          const apiTests = testsData.map(item => ({
+            ...(item.raw_data || {
             id: item.visit_number || item.id,
             date: item.examination_date ? item.examination_date.split('T')[0] : '',
             patientId: item.patient_id,
@@ -242,7 +243,16 @@ export default function OpticalServices() {
               pgpOsAddVa: item.pgp_os_add_va,
               previousGlassesDate: item.previous_glasses_date
             }
-          }).filter(t => t.name && t.name !== 'Mohammed' && t.patientId !== 'P-7375');
+            }),
+            // The saved raw_data snapshot has no idea what its own backend row id is (it was
+            // built client-side before the save happened), so it never carries a usable link
+            // back to this exact EyeExamination row — loading it from history could only ever
+            // create a brand new duplicate record, never update the original. Stamp the real
+            // UUID and the backend's authoritative test_no back on afterwards so "Load Exam"/
+            // "Edit" can actually resume editing the same row instead of cloning it.
+            backendId: item.id,
+            testNo: item.test_no || item.raw_data?.testNo
+          })).filter(t => t.name && t.name !== 'Mohammed' && t.patientId !== 'P-7375');
           testsList = [...testsList, ...apiTests];
         }
       } catch (e) {}
@@ -320,6 +330,9 @@ export default function OpticalServices() {
 
   // Reset all examination fields to 100% blank
   const handleResetAll = () => {
+    // Break any edit-lock left over from loading a past exam (see onSelectExamFromHistory) —
+    // otherwise a fresh "new patient" form would still silently PATCH over that old record.
+    setEditingExamId(null);
     setPatientData({
       id: getNextPatientId(),
       customerId: null,
@@ -1113,9 +1126,17 @@ export default function OpticalServices() {
             nextPatientId={getNextPatientId()}
             testNo={diagnosis?.testNo || nextTestNoPreview}
             onSelectExamFromHistory={(exam) => {
+              // Loading a past exam here means "resume/correct this exact visit" — it must
+              // mark the form as editing that record (and restore its real test_no) so Save
+              // PATCHes the same row. Without this, the loaded patient's id/testNo silently
+              // rode along into what still looked like a blank form, and clicking Save created
+              // a brand new duplicate record carrying that stale patient id instead of a fresh
+              // one — which is what produced two directory rows for two different patients.
+              setEditingExamId(exam.backendId || null);
               if (exam.patientData) setPatientData(exam.patientData);
               if (exam.subjectiveRefraction) setSubjectiveRefraction(exam.subjectiveRefraction);
               if (exam.medicalHistory) setMedicalHistory(exam.medicalHistory);
+              setDiagnosis(prev => ({ ...prev, testNo: exam.testNo || '' }));
             }}
           />
         </Box>

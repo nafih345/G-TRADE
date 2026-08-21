@@ -18,7 +18,8 @@ import {
   Biotech as MeasurementIcon,
   CheckCircle as ActiveIcon,
   Close as CloseIcon,
-  Edit as EditIcon
+  Edit as EditIcon,
+  PersonAdd as PersonAddIcon
 } from '@mui/icons-material';
 import OrthopticsModal from './OrthopticsModal';
 import PrintPrescriptionCard from './PrintPrescriptionCard';
@@ -149,9 +150,20 @@ export default function SingleScreenEyeTestForm({
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2.5 }}>
       {/* 📌 SECTION 1: Patient & Examination Registration Bar */}
       <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, bgcolor: '#ffffff', borderColor: '#cbd5e1', boxShadow: '0 2px 10px rgba(0,0,0,0.02)' }}>
-        <Typography variant="subtitle2" fontWeight={800} color="primary.main" sx={{ mb: 1.5, display: 'flex', alignItems: 'center', gap: 1 }}>
-          <PersonIcon fontSize="small" /> 1. Patient Details & Examination Info
-        </Typography>
+        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1.5, flexWrap: 'wrap', gap: 1 }}>
+          <Typography variant="subtitle2" fontWeight={800} color="primary.main" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            <PersonIcon fontSize="small" /> 1. Patient Details & Examination Info
+          </Typography>
+          <Tooltip title="Clear this form and start registering a new patient">
+            <Button
+              variant="outlined" color="primary" size="small" startIcon={<PersonAddIcon fontSize="small" />}
+              onClick={onClearAll}
+              sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 2 }}
+            >
+              New Patient
+            </Button>
+          </Tooltip>
+        </Box>
 
         {/* Both rows share the exact same 7-column grid track definition, so items in Row 2
             that span multiple tracks line up pixel-perfectly under Row 1's columns — a plain
