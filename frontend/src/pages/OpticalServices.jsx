@@ -67,6 +67,10 @@ export default function OpticalServices() {
   // handleSaveDraft PATCH that same backend EyeExamination row instead of always POSTing a
   // new one, which would otherwise leave the original unedited and create a duplicate.
   const [editingExamId, setEditingExamId] = useState(null);
+  // Locks the patient/test-detail fields once a clinical record has been saved, so it can't be
+  // silently mutated after the fact. Cleared by "New Patient" (handleResetAll) or by using the
+  // history table's Edit icon (onSelectExamFromHistory) to intentionally resume that record.
+  const [isRecordLocked, setIsRecordLocked] = useState(false);
 
   // Core Examination State
   const [patientData, setPatientData] = useState({
@@ -350,6 +354,7 @@ export default function OpticalServices() {
     // Break any edit-lock left over from loading a past exam (see onSelectExamFromHistory) —
     // otherwise a fresh "new patient" form would still silently PATCH over that old record.
     setEditingExamId(null);
+    setIsRecordLocked(false);
     setPatientData({
       id: getNextPatientId(),
       customerId: null,
@@ -1154,6 +1159,9 @@ export default function OpticalServices() {
         alert(`Clinical Examination & Prescription for ${patientData.name} (${effectivePatientId}) saved to database!`);
         fetchNextTestNo();
       }
+      // Lock the form now that this visit is on record — re-enabled by "New Patient" or by
+      // reopening this exact record via the history table's Edit icon.
+      setIsRecordLocked(true);
 
       // Test No / Patient ID sent above are just client-side previews — the backend silently
       // swaps in a fresh one if it collides with a record saved elsewhere in the meantime (see
@@ -1340,6 +1348,7 @@ export default function OpticalServices() {
             savedExams={pastExaminations}
             nextPatientId={getNextPatientId()}
             testNo={diagnosis?.testNo}
+            isLocked={isRecordLocked}
             onSelectExamFromHistory={(exam) => {
               // Loading a past exam here means "resume/correct this exact visit" — it must
               // mark the form as editing that record (and restore its real test_no) so Save
@@ -1347,7 +1356,10 @@ export default function OpticalServices() {
               // rode along into what still looked like a blank form, and clicking Save created
               // a brand new duplicate record carrying that stale patient id instead of a fresh
               // one — which is what produced two directory rows for two different patients.
+              // Also this is the app's "Edit" action — unlock the form so this record's fields
+              // become editable again (see isRecordLocked).
               setEditingExamId(exam.backendId || null);
+              setIsRecordLocked(false);
               if (exam.patientData) setPatientData(exam.patientData);
               if (exam.subjectiveRefraction) setSubjectiveRefraction(exam.subjectiveRefraction);
               if (exam.medicalHistory) setMedicalHistory(exam.medicalHistory);

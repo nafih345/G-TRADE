@@ -48,7 +48,13 @@ export default function SingleScreenEyeTestForm({
   setNextVisitDate,
   savedExams = [],
   onSelectExamFromHistory,
-  nextPatientId = ''
+  nextPatientId = '',
+  // Once a clinical record has been saved, its patient/test-detail fields go read-only —
+  // re-editing on top of an already-saved record without an explicit action was how a single
+  // visit ended up silently mutated after the fact. Reactivated by "New Patient" (fresh visit,
+  // see onClearAll) or by clicking the history table's Edit icon (see onSelectExamFromHistory),
+  // both of which clear this from the parent.
+  isLocked = false
 }) {
 
   // Handlers for state updates
@@ -137,6 +143,11 @@ export default function SingleScreenEyeTestForm({
   const autoDate = testDate || new Date().toISOString().split('T')[0];
   const autoPatientId = patientData?.id || nextPatientId || `P-${1001 + safeExams.length}`;
 
+  // Applied to every input-bearing section once isLocked is true: visually dims the fields and
+  // blocks interaction (pointerEvents) without having to thread a `disabled` prop through every
+  // TextField in these sections individually.
+  const lockSx = isLocked ? { pointerEvents: 'none', opacity: 0.55, filter: 'grayscale(15%)' } : {};
+
   const filteredHistory = safeExams.filter(e => {
     if (!e || e.name === 'Mohammed' || e.patientId === 'P-7375') return false;
     const q = (historySearch || '').toLowerCase();
@@ -157,21 +168,33 @@ export default function SingleScreenEyeTestForm({
           <Typography variant="subtitle2" fontWeight={800} color="primary.main" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
             <PersonIcon fontSize="small" /> 1. Patient Details & Examination Info
           </Typography>
-          <Tooltip title="Clear this form and start registering a new patient">
-            <Button
-              variant="outlined" color="primary" size="small" startIcon={<PersonAddIcon fontSize="small" />}
-              onClick={onClearAll}
-              sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 2 }}
-            >
-              New Patient
-            </Button>
-          </Tooltip>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            {isLocked && (
+              <Chip
+                size="small"
+                color="success"
+                label="Saved — locked. Use Edit (in the table below) or New Patient to change."
+                sx={{ fontWeight: 700 }}
+              />
+            )}
+            <Tooltip title="Clear this form and start registering a new patient">
+              <Button
+                variant="outlined" color="primary" size="small" startIcon={<PersonAddIcon fontSize="small" />}
+                onClick={onClearAll}
+                sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 2 }}
+              >
+                New Patient
+              </Button>
+            </Tooltip>
+          </Box>
         </Box>
 
         {/* Both rows share the exact same 7-column grid track definition, so items in Row 2
             that span multiple tracks line up pixel-perfectly under Row 1's columns — a plain
             MUI Grid can't guarantee this since flexbox gap distribution differs when the two
-            rows have a different number of items. */}
+            rows have a different number of items. Locked once isLocked (see lockSx) — only the
+            header above (New Patient) and the history table's Edit icon stay clickable. */}
+        <Box sx={lockSx}>
         {(() => {
           const colTemplate = { xs: '1fr 1fr', sm: 'repeat(4, 1fr)', md: '1.5fr 1.3fr 2.5fr 2fr 1.8fr 1.2fr 1fr' };
           return (
@@ -381,27 +404,34 @@ export default function SingleScreenEyeTestForm({
                   />
                 </Box>
                 <Box sx={{ gridColumn: { md: '7 / 8' } }}>
-                  <Box sx={{ display: 'flex', gap: 0.5 }}>
-                    <TextField
-                      fullWidth
-                      size="small"
-                      label="Medical Aid Member Number"
-                      value={patientData.medicalAidMemberNumber || ''}
-                      onChange={(e) => setPatientData(prev => ({ ...prev, medicalAidMemberNumber: e.target.value }))}
-                    />
-                    <Button
-                      variant="contained" color="success" size="small" startIcon={<SaveIcon fontSize="small" />}
-                      onClick={onSavePatient}
-                      sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 2, whiteSpace: 'nowrap', px: 2 }}
-                    >
-                      Save
-                    </Button>
-                  </Box>
+                  <TextField
+                    fullWidth
+                    size="small"
+                    label="Medical Aid Member Number"
+                    value={patientData.medicalAidMemberNumber || ''}
+                    onChange={(e) => setPatientData(prev => ({ ...prev, medicalAidMemberNumber: e.target.value }))}
+                  />
+                </Box>
+              </Box>
+
+              {/* Row 4: Save sits alone, directly under Medical Aid Member Number's column, so it
+                  no longer shares that field's track and squeeze its label into truncation. */}
+              <Box sx={{ display: 'grid', gridTemplateColumns: colTemplate, gap: 1.5, mt: 1.5 }}>
+                <Box sx={{ gridColumn: { md: '7 / 8' } }}>
+                  <Button
+                    fullWidth
+                    variant="contained" color="success" size="small" startIcon={<SaveIcon fontSize="small" />}
+                    onClick={onSavePatient}
+                    sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 2, whiteSpace: 'nowrap', px: 2 }}
+                  >
+                    Save
+                  </Button>
                 </Box>
               </Box>
             </>
           );
         })()}
+        </Box>
       </Paper>
 
       {/* 👁️ SECTION 2: Objective & Clinical Measurements Grid */}
@@ -409,6 +439,7 @@ export default function SingleScreenEyeTestForm({
         <Typography variant="subtitle2" fontWeight={800} color="primary.main" sx={{ mb: 1.5, display: 'flex', alignItems: 'center', gap: 1 }}>
           <MeasurementIcon fontSize="small" /> 2. Clinical Refraction & Measurement Grid
         </Typography>
+        <Box sx={lockSx}>
 
         <Grid container spacing={1.5}>
           {/* Column 1: UCVA */}
@@ -570,9 +601,11 @@ export default function SingleScreenEyeTestForm({
             </Paper>
           </Grid>
         </Grid>
+        </Box>
       </Paper>
 
       {/* 👓 SECTION 3: Previous Glasses (PGP) vs Acceptance Refraction (ACCP) */}
+      <Box sx={lockSx}>
       <Grid container spacing={2}>
         {/* Left: Previous Glasses Power (PGP) Card */}
         <Grid item xs={12} md={6}>
@@ -805,6 +838,7 @@ export default function SingleScreenEyeTestForm({
           </Paper>
         </Grid>
       </Grid>
+      </Box>
 
 
       {/* 📋 SECTION 4: Clinical Notes & Management Plan */}
@@ -813,6 +847,7 @@ export default function SingleScreenEyeTestForm({
           <ExamIcon fontSize="small" /> 4. Clinical Observations & Doctor Advice
         </Typography>
 
+        <Box sx={lockSx}>
         <Grid container spacing={1.5}>
           <Grid item xs={12} sm={4}>
             <TextField
@@ -884,12 +919,15 @@ export default function SingleScreenEyeTestForm({
             />
           </Grid>
         </Grid>
+        </Box>
       </Paper>
 
-      {/* 💰 SECTION 5: Charges & Action Buttons Bar */}
+      {/* 💰 SECTION 5: Charges & Action Buttons Bar — charge fields lock with everything else,
+          but the action buttons stay reachable: Save is simply disabled once already locked
+          (nothing new to save), Rx Print/Clear Form/New Patient must keep working regardless. */}
       <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, bgcolor: '#ffffff', borderColor: '#cbd5e1' }}>
         <Grid container spacing={2} alignItems="center">
-          <Grid item xs={6} sm={2.5}>
+          <Grid item xs={6} sm={2.5} sx={lockSx}>
             <TextField
               fullWidth size="small" label="Procedure Charge"
               value={diagnosis?.procedureCharge || '0'}
@@ -897,7 +935,7 @@ export default function SingleScreenEyeTestForm({
               InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
             />
           </Grid>
-          <Grid item xs={6} sm={2.5}>
+          <Grid item xs={6} sm={2.5} sx={lockSx}>
             <TextField
               fullWidth size="small" label="Medicine Charge"
               value={diagnosis?.medicineCharge || '0'}
@@ -907,13 +945,13 @@ export default function SingleScreenEyeTestForm({
           </Grid>
 
           <Grid item xs={12} sm={7} sx={{ display: 'flex', gap: 1, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
-            <Button variant="outlined" color="primary" startIcon={<MedicalIcon />} onClick={() => setOrthopticsOpen(true)} sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 2 }}>
+            <Button variant="outlined" color="primary" disabled={isLocked} startIcon={<MedicalIcon />} onClick={() => setOrthopticsOpen(true)} sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 2 }}>
               Orthoptics Form
             </Button>
             <Button variant="outlined" color="secondary" startIcon={<PrintIcon />} onClick={() => setPrintModalOpen(true)} sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 2 }}>
               Rx Print
             </Button>
-            <Button variant="contained" color="success" startIcon={<SaveIcon />} onClick={onSaveDraft} sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 2, px: 3 }}>
+            <Button variant="contained" color="success" disabled={isLocked} startIcon={<SaveIcon />} onClick={onSaveDraft} sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 2, px: 3 }}>
               Save Clinical Record
             </Button>
             <Button variant="outlined" color="inherit" startIcon={<ClearIcon />} onClick={onClearAll} sx={{ textTransform: 'none', fontWeight: 600, borderRadius: 2 }}>
