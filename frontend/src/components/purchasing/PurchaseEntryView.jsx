@@ -867,9 +867,22 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
             </Typography>
           </Box>
         </Box>
-        <Button variant="outlined" size="small" startIcon={<ListAltIcon />} onClick={(e) => { e.stopPropagation(); setItemsDialogOpen(true); }}>
-          {rows.length === 0 ? 'Add Items' : 'View / Edit Items'}
-        </Button>
+        <Stack direction="row" spacing={1} onClick={(e) => e.stopPropagation()}>
+          <Button variant="outlined" size="small" startIcon={<ListAltIcon />} onClick={() => setItemsDialogOpen(true)}>
+            {rows.length === 0 ? 'Add Items' : 'View / Edit Items'}
+          </Button>
+          <Button
+            variant="contained"
+            size="small"
+            color="primary"
+            startIcon={<SaveIcon />}
+            disabled={saving || rows.length === 0}
+            onClick={() => doSave(status)}
+            sx={{ fontWeight: 800 }}
+          >
+            Save Purchase
+          </Button>
+        </Stack>
       </Card>
 
       <Dialog open={itemsDialogOpen} onClose={() => setItemsDialogOpen(false)} maxWidth="xl" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
@@ -1015,7 +1028,17 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
           <Typography variant="caption" color="text.secondary" sx={{ mr: 'auto', pl: 1 }}>
             {gstType === 'NO_GST' ? 'GST columns hidden — GST Type is set to No GST' : `GST columns shown — GST Type is ${gstType === 'INCLUSIVE' ? 'Inclusive' : 'Exclusive'}`}
           </Typography>
-          <Button variant="contained" onClick={() => setItemsDialogOpen(false)}>Done</Button>
+          <Button variant="outlined" onClick={() => setItemsDialogOpen(false)}>Done</Button>
+          <Button
+            variant="contained"
+            color="primary"
+            startIcon={<SaveIcon />}
+            disabled={saving || rows.length === 0}
+            onClick={() => { setItemsDialogOpen(false); doSave(status); }}
+            sx={{ fontWeight: 800 }}
+          >
+            Save Purchase
+          </Button>
         </DialogActions>
       </Dialog>
 
