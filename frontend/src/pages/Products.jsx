@@ -1,12 +1,11 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useDebounce } from '../hooks/useDebounce';
-import { 
+import {
   Box, Card, CardContent, Typography, Button, Tab, Tabs,
-  Grid, Table, TableBody, TableCell, TableContainer,
-  TableHead, TableRow, Paper, Chip, Dialog,
-  DialogTitle, DialogContent, DialogActions, TextField,
-  MenuItem, Stack, IconButton, Autocomplete, Alert, Checkbox
+  Table, TableBody, TableCell, TableContainer,
+  TableHead, TableRow, Paper, Chip, TextField,
+  MenuItem, Stack, IconButton, Checkbox
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -24,7 +23,7 @@ import LensManagementView from '../components/inventory/LensManagementView';
 import ConfirmActionDialog from '../components/common/ConfirmActionDialog';
 import BarcodePrintDialog from '../components/inventory/BarcodePrintDialog';
 import BarcodeManageDialog from '../components/inventory/BarcodeManageDialog';
-import BarcodeSection from '../components/inventory/BarcodeSection';
+import ProductMasterDialog from '../components/inventory/ProductMasterDialog';
 
 const initialProducts = [];
 
@@ -76,15 +75,9 @@ export default function Products() {
   const [searchQuery, setSearchQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('All');
   
-  const [newProduct, setNewProduct] = useState({
-    code: '', barcode: '', name: '', brand: '', supplier: '', category: 'Frames',
-    frameType: '', lensType: '', color: '', material: '',
-    gender: '', size: '', purchasePrice: '', sellingPrice: '',
-    gst: '18%', stock: '', rack: '', shelf: '', warehouse: 'Main', status: 'Active'
-  });
+  const [addProductCategory, setAddProductCategory] = useState('Frames');
 
   const [adjustStock, setAdjustStock] = useState({ id: '', name: '', current: 0, change: 0, reason: 'Manual audit' });
-  const [scanDialogOpen, setScanDialogOpen] = useState(false);
   const [dbSuppliers, setDbSuppliers] = useState([]);
   const [confirmDialog, setConfirmDialog] = useState({
     open: false, title: '', message: '', type: 'danger', confirmText: 'Confirm', onConfirm: null
@@ -173,58 +166,22 @@ export default function Products() {
   }, []);
 
   const handleOpen = () => {
-    setNewProduct({
-      code: '', barcode: '', name: '', brand: '', supplier: '', category: 'Frames',
-      frameType: '', lensType: '', color: '', material: '',
-      gender: '', size: '', purchasePrice: '', sellingPrice: '',
-      gst: '18%', stock: '', rack: '', shelf: '', warehouse: 'Main', status: 'Active'
-    });
+    setAddProductCategory('Frames');
     setOpen(true);
   };
   const handleClose = () => setOpen(false);
 
-  const handleSave = async () => {
-    if (!newProduct.name) {
-      alert("Please enter a Product Name.");
-      return;
-    }
-    const productToAdd = {
-      id: String(Date.now()),
-      ...newProduct,
-      code: newProduct.code || `PRD-${Math.floor(100 + Math.random() * 900)}`,
-      brand: newProduct.brand || '',
-      purchasePrice: parseFloat(newProduct.purchasePrice) || 0,
-      sellingPrice: parseFloat(newProduct.sellingPrice) || 0,
-      stock: parseInt(newProduct.stock) || 0,
-      barcode: newProduct.barcode || ''
-    };
-
-    try {
-      await axios.post('/api/products/items/', {
-        name: productToAdd.name,
-        sku: productToAdd.code,
-        barcode: productToAdd.barcode,
-        price: productToAdd.sellingPrice,
-        cost_price: productToAdd.purchasePrice,
-        stock: productToAdd.stock,
-        category: productToAdd.category,
-        category_name: productToAdd.category,
-        brand: productToAdd.brand,
-        brand_name: productToAdd.brand
+  const handleProductCreated = (record) => {
+    if (record) {
+      setProducts(prev => {
+        const withoutDupe = prev.filter(p =>
+          String(p.id) !== String(record.id) &&
+          (!record.code || String(p.code) !== String(record.code))
+        );
+        return [record, ...withoutDupe];
       });
-    } catch (err) {
-      console.log("Local state updated for new product.");
     }
-
-    setProducts([productToAdd, ...products]);
-    setNewProduct({
-      code: '', barcode: '', name: '', brand: '', supplier: '', category: 'Frames',
-      frameType: '', lensType: '', color: '', material: '',
-      gender: '', size: '', purchasePrice: '', sellingPrice: '',
-      gst: '18%', stock: '', rack: '', shelf: '', warehouse: 'Main', status: 'Active'
-    });
-    handleClose();
-    alert(`Product '${productToAdd.name}' saved to inventory database successfully!`);
+    window.dispatchEvent(new Event('optical_stock_updated'));
   };
 
   const handleOpenBarcode = (product) => {
@@ -319,28 +276,7 @@ export default function Products() {
   };
 
   const handleOpenFastLens = () => {
-    setNewProduct({
-      code: '',
-      barcode: '',
-      name: '',
-      brand: '',
-      supplier: '',
-      category: 'Prescription Lenses',
-      frameType: '',
-      lensType: '',
-      color: '',
-      material: '',
-      gender: '',
-      size: '',
-      purchasePrice: '',
-      sellingPrice: '',
-      gst: '18%',
-      stock: '',
-      rack: '',
-      shelf: '',
-      warehouse: 'Main',
-      status: 'Active'
-    });
+    setAddProductCategory('Prescription Lenses');
     setOpen(true);
   };
 
@@ -650,361 +586,14 @@ export default function Products() {
         <LensManagementView onProductAdded={() => window.dispatchEvent(new Event('optical_stock_updated'))} />
       )}
 
-      {/* Add New Product / Lens Dialog */}
-      <Dialog open={open} onClose={handleClose} maxWidth="md" fullWidth PaperProps={{ sx: { borderRadius: 3.5 } }}>
-        <DialogTitle sx={{ fontWeight: 800, display: 'flex', justifyContent: 'space-between', alignItems: 'center', bgcolor: newProduct.category === 'Prescription Lenses' ? '#0f172a' : '#ffffff', color: newProduct.category === 'Prescription Lenses' ? '#facc15' : 'inherit', transition: 'all 0.3s ease' }}>
-          <Stack direction="row" spacing={1.5} alignItems="center">
-            <Typography variant="h6" fontWeight={900}>
-              {newProduct.category === 'Prescription Lenses' ? '🔬 Add Ophthalmic Lens Product' : '📦 Add Optical Stock / Product'}
-            </Typography>
-            <Paper variant="outlined" sx={{ p: 0.3, display: 'flex', gap: 0.5, bgcolor: '#f1f5f9', borderRadius: 2 }}>
-              <Button 
-                size="small" 
-                variant={newProduct.category !== 'Prescription Lenses' ? 'contained' : 'text'}
-                onClick={() => setNewProduct({ ...newProduct, category: 'Frames' })}
-                sx={{ py: 0.2, px: 1, fontSize: '0.72rem', fontWeight: 800 }}
-              >
-                Frame / General
-              </Button>
-              <Button 
-                size="small" 
-                variant={newProduct.category === 'Prescription Lenses' ? 'contained' : 'text'}
-                onClick={() => setNewProduct({ ...newProduct, category: 'Prescription Lenses', name: newProduct.name || 'BlueControl UV420 Lens 1.56' })}
-                sx={{ py: 0.2, px: 1, fontSize: '0.72rem', fontWeight: 800, bgcolor: newProduct.category === 'Prescription Lenses' ? '#2563eb' : 'transparent', color: newProduct.category === 'Prescription Lenses' ? '#ffffff' : 'inherit' }}
-              >
-                🔬 Lens Mode
-              </Button>
-            </Paper>
-          </Stack>
-
-          <Button 
-            variant="contained" 
-            size="small" 
-            startIcon={<BarcodeIcon />} 
-            onClick={() => setScanDialogOpen(true)}
-            sx={{ backgroundColor: '#10B981', color: 'white', fontWeight: 700 }}
-          >
-            📷 Scan Barcode
-          </Button>
-        </DialogTitle>
-
-        <DialogContent dividers>
-          
-          {/* ⚡ FAST LENS PRESET QUICK FILLER BAR WHEN IN LENS MODE */}
-          {newProduct.category === 'Prescription Lenses' && (
-            <Alert severity="info" icon={<SparkleIcon />} sx={{ mb: 2, borderRadius: 2.5, bgcolor: '#eff6ff', borderColor: '#bfdbfe' }}>
-              <Typography variant="subtitle2" fontWeight={900} color="#1e3a8a">
-                ⚡ Fast Lens Quick-Fill Presets (Click to auto-populate lens details):
-              </Typography>
-              <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: 'wrap', gap: 0.8 }}>
-                <Chip 
-                  label="⚡ Essilor Crizal 1.67" size="small" clickable color="primary" 
-                  onClick={() => setNewProduct({ ...newProduct, category: 'Prescription Lenses', name: 'Essilor Crizal Sapphire HR 1.67', brand: 'Essilor', lensType: 'Single Vision', frameType: '1.67', color: 'Anti-Glare (ARC)', purchasePrice: '1800', sellingPrice: '4200' })}
-                  sx={{ fontWeight: 800 }} 
-                />
-                <Chip 
-                  label="⚡ Hoya BlueControl 1.56" size="small" clickable color="success" 
-                  onClick={() => setNewProduct({ ...newProduct, category: 'Prescription Lenses', name: 'Hoya BlueControl UV420 1.56', brand: 'Hoya', lensType: 'Single Vision', frameType: '1.56', color: 'Blue Cut UV420', purchasePrice: '450', sellingPrice: '1450' })}
-                  sx={{ fontWeight: 800 }} 
-                />
-                <Chip 
-                  label="⚡ Zeiss Progressive 1.60" size="small" clickable 
-                  onClick={() => setNewProduct({ ...newProduct, category: 'Prescription Lenses', name: 'Zeiss SmartLife Progressive 1.60', brand: 'Zeiss', lensType: 'Progressive Digital', frameType: '1.60', color: 'Anti-Glare (ARC)', purchasePrice: '2400', sellingPrice: '6800' })}
-                  sx={{ bgcolor: '#ca8a04', color: '#fff', fontWeight: 800 }} 
-                />
-                <Chip 
-                  label="⚡ Kodak Photochromic 1.56" size="small" clickable 
-                  onClick={() => setNewProduct({ ...newProduct, category: 'Prescription Lenses', name: 'Kodak CityLens Photochromic 1.56', brand: 'Kodak', lensType: 'Single Vision', frameType: '1.56', color: 'Photochromic Auto-Tint', purchasePrice: '850', sellingPrice: '2400' })}
-                  sx={{ bgcolor: '#9333ea', color: '#fff', fontWeight: 800 }} 
-                />
-              </Stack>
-            </Alert>
-          )}
-
-          <Grid container spacing={2}>
-
-            {/* ROW 1: Category | Code/SKU */}
-            <Grid item xs={12} sm={6}>
-              <TextField
-                select
-                label="Product Category"
-                fullWidth
-                value={newProduct.category}
-                onChange={(e) => setNewProduct({...newProduct, category: e.target.value})}
-              >
-                {opticalCategories.map(cat => <MenuItem key={cat} value={cat}>{cat}</MenuItem>)}
-              </TextField>
-            </Grid>
-
-            <Grid item xs={12} sm={6}>
-              <TextField
-                label="Product Code / SKU"
-                fullWidth
-                placeholder="e.g. RF-102 or LNS-156"
-                value={newProduct.code}
-                onChange={(e) => setNewProduct({...newProduct, code: e.target.value})}
-              />
-            </Grid>
-
-            <Grid item xs={12}>
-              <BarcodeSection
-                mode="create"
-                value={newProduct.barcode}
-                onChange={(val) => setNewProduct({ ...newProduct, barcode: val })}
-                productName={newProduct.name}
-                productCode={newProduct.code}
-                productPrice={parseFloat(newProduct.sellingPrice) || 0}
-              />
-            </Grid>
-
-            {/* ROW 2: Product Name (8) | Brand (4) */}
-            <Grid item xs={12} sm={8}>
-              <TextField 
-                label={newProduct.category === 'Prescription Lenses' ? "Lens Product Name & Specification *" : "Product Name *"} 
-                fullWidth 
-                required
-                placeholder={newProduct.category === 'Prescription Lenses' ? "e.g. Essilor Crizal Sapphire HR 1.67 Blue Cut" : "e.g. Aviator Classic Rimless"}
-                value={newProduct.name} 
-                onChange={(e) => setNewProduct({...newProduct, name: e.target.value})} 
-                inputProps={{ style: { fontWeight: 800 } }}
-              />
-            </Grid>
-
-            <Grid item xs={12} sm={4}>
-              <Autocomplete
-                freeSolo
-                options={opticalBrands}
-                value={newProduct.brand}
-                onInputChange={(event, newInputValue) => {
-                  setNewProduct({ ...newProduct, brand: newInputValue });
-                }}
-                renderInput={(params) => (
-                  <TextField 
-                    {...params} 
-                    label="Brand / Manufacturer" 
-                    placeholder="e.g. Essilor, Zeiss, RayBan..."
-                    fullWidth 
-                  />
-                )}
-              />
-            </Grid>
-
-            {/* ROW 3: Lens Specs if Prescription Lenses (Refractive Index | Design Type | Coating) */}
-            {newProduct.category === 'Prescription Lenses' && (
-              <>
-                <Grid item xs={12} sm={4}>
-                  <TextField 
-                    select label="Refractive Index" fullWidth 
-                    value={newProduct.frameType || '1.56'} 
-                    onChange={(e) => setNewProduct({...newProduct, frameType: e.target.value})}
-                  >
-                    <MenuItem value="1.50">1.50 Standard CR39</MenuItem>
-                    <MenuItem value="1.56">1.56 Mid Index Blue Cut</MenuItem>
-                    <MenuItem value="1.60">1.60 Hi-Index</MenuItem>
-                    <MenuItem value="1.67">1.67 Ultra Thin</MenuItem>
-                    <MenuItem value="1.74">1.74 Super High Index</MenuItem>
-                  </TextField>
-                </Grid>
-
-                <Grid item xs={12} sm={4}>
-                  <TextField 
-                    select label="Lens Design Type" fullWidth 
-                    value={newProduct.lensType || 'Single Vision'} 
-                    onChange={(e) => setNewProduct({...newProduct, lensType: e.target.value})}
-                  >
-                    <MenuItem value="Single Vision">Single Vision</MenuItem>
-                    <MenuItem value="Progressive Digital">Progressive Digital</MenuItem>
-                    <MenuItem value="Bifocal D-Seg">Bifocal D-Seg</MenuItem>
-                    <MenuItem value="Office / Workspace">Office / Workspace</MenuItem>
-                  </TextField>
-                </Grid>
-
-                <Grid item xs={12} sm={4}>
-                  <TextField 
-                    select label="Coating Technology" fullWidth 
-                    value={newProduct.color || 'Blue Cut UV420'} 
-                    onChange={(e) => setNewProduct({...newProduct, color: e.target.value})}
-                  >
-                    <MenuItem value="Anti-Glare (ARC)">Anti-Glare (ARC)</MenuItem>
-                    <MenuItem value="Blue Cut UV420">Blue Cut UV420</MenuItem>
-                    <MenuItem value="Photochromic Auto-Tint">Photochromic Auto-Tint</MenuItem>
-                    <MenuItem value="Polarized Sun Shield">Polarized Sun Shield</MenuItem>
-                    <MenuItem value="Hard Coated Scratch Resistant">Hard Coated Scratch Resistant</MenuItem>
-                  </TextField>
-                </Grid>
-              </>
-            )}
-
-            {/* ROW 4: Supplier Name | Purchase Price | Selling Price */}
-            <Grid item xs={12} sm={4}>
-              <Autocomplete
-                freeSolo
-                options={dbSuppliers}
-                value={newProduct.supplier || ''}
-                onInputChange={(event, newInputValue) => {
-                  setNewProduct({ ...newProduct, supplier: newInputValue || '' });
-                }}
-                onChange={(event, newValue) => {
-                  setNewProduct({ ...newProduct, supplier: newValue || '' });
-                }}
-                renderInput={(params) => (
-                  <TextField 
-                    {...params} 
-                    label="Supplier Name" 
-                    placeholder="Search or select supplier..."
-                    fullWidth 
-                  />
-                )}
-              />
-            </Grid>
-
-            <Grid item xs={12} sm={4}>
-              <TextField 
-                label="Purchase Cost Price (₹)" 
-                fullWidth 
-                type="number" 
-                value={newProduct.purchasePrice} 
-                onChange={(e) => setNewProduct({...newProduct, purchasePrice: e.target.value})} 
-                inputProps={{ style: { fontWeight: 800 } }} 
-              />
-            </Grid>
-
-            <Grid item xs={12} sm={4}>
-              <TextField 
-                label="Selling MRP Price (₹)" 
-                fullWidth 
-                type="number" 
-                value={newProduct.sellingPrice} 
-                onChange={(e) => setNewProduct({...newProduct, sellingPrice: e.target.value})} 
-                inputProps={{ style: { fontWeight: 900, color: '#059669' } }} 
-              />
-            </Grid>
-
-            {/* ROW 5: GST Rate | Initial Stock Qty | Rack Location */}
-            <Grid item xs={12} sm={4}>
-              <TextField 
-                select 
-                label="GST Tax Rate" 
-                fullWidth 
-                value={newProduct.gst} 
-                onChange={(e) => setNewProduct({...newProduct, gst: e.target.value})}
-              >
-                <MenuItem value="5%">5% GST</MenuItem>
-                <MenuItem value="12%">12% GST</MenuItem>
-                <MenuItem value="18%">18% GST</MenuItem>
-                <MenuItem value="28%">28% GST</MenuItem>
-              </TextField>
-            </Grid>
-
-            <Grid item xs={12} sm={4}>
-              <TextField 
-                label="Initial Stock Qty" 
-                fullWidth 
-                type="number" 
-                value={newProduct.stock} 
-                onChange={(e) => setNewProduct({...newProduct, stock: e.target.value})} 
-                inputProps={{ style: { fontWeight: 800 } }} 
-              />
-            </Grid>
-
-            <Grid item xs={12} sm={4}>
-              <TextField 
-                label="Rack Location" 
-                fullWidth 
-                placeholder="e.g. Rack A1 / Lens Drawer 2" 
-                value={newProduct.rack} 
-                onChange={(e) => setNewProduct({...newProduct, rack: e.target.value})} 
-              />
-            </Grid>
-
-          </Grid>
-        </DialogContent>
-
-        <DialogActions sx={{ p: 2, justifyContent: 'space-between', bgcolor: '#f8fafc' }}>
-          <Button onClick={handleClose}>Cancel</Button>
-          <Button onClick={handleSave} variant="contained" sx={{ backgroundColor: '#2563EB', px: 3.5, py: 1, fontWeight: 900, borderRadius: 2 }}>
-            Save {newProduct.category === 'Prescription Lenses' ? 'Lens Option' : 'Product'} to Database
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* --- BARCODE SCANNER MODAL FOR ARRIVING PRODUCTS --- */}
-      <Dialog 
-        open={scanDialogOpen} 
-        onClose={() => setScanDialogOpen(false)} 
-        maxWidth="xs" 
-        fullWidth
-        PaperProps={{ sx: { borderRadius: 4 } }}
-      >
-        <DialogTitle sx={{ fontWeight: 800, textAlign: 'center' }}>📷 Scan Arriving Stock Barcode</DialogTitle>
-        <DialogContent dividers sx={{ textAlign: 'center', py: 4 }}>
-          <Box sx={{ 
-            p: 3, 
-            border: '2px dashed #2563eb', 
-            borderRadius: 3, 
-            bgcolor: '#eff6ff', 
-            mb: 3,
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center'
-          }}>
-            <Typography variant="h1" sx={{ my: 1 }}>📱</Typography>
-            <Typography variant="subtitle2" fontWeight={700} color="primary">Point USB Scanner or Camera at Barcode</Typography>
-            <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
-              Hardware USB barcode scanners automatically input codes here upon trigger
-            </Typography>
-          </Box>
-
-          <TextField 
-            autoFocus 
-            fullWidth 
-            label="Scanned Barcode / EAN Number" 
-            placeholder="Barcode will appear here..."
-            value={newProduct.barcode}
-            onChange={(e) => {
-              const val = e.target.value;
-              setNewProduct({ ...newProduct, barcode: val });
-              // Check if barcode already exists in database
-              const existing = products.find(p => p.barcode === val || p.code === val);
-              if (existing) {
-                setNewProduct({
-                  ...newProduct,
-                  barcode: val,
-                  code: existing.code,
-                  name: existing.name,
-                  brand: existing.brand,
-                  category: existing.category,
-                  purchasePrice: String(existing.purchasePrice),
-                  sellingPrice: String(existing.sellingPrice),
-                  stock: String(existing.stock)
-                });
-              }
-            }}
-            InputProps={{
-              startAdornment: <BarcodeIcon color="action" sx={{ mr: 1 }} />
-            }}
-          />
-
-          <Stack spacing={1} sx={{ mt: 3 }}>
-            <Button 
-              variant="contained" 
-              color="success"
-              onClick={() => {
-                const sampleBarcode = String(Math.floor(88000000 + Math.random() * 11000000));
-                setNewProduct({ ...newProduct, barcode: sampleBarcode });
-                setScanDialogOpen(false);
-                alert(`Barcode '${sampleBarcode}' scanned successfully!`);
-              }}
-              sx={{ fontWeight: 700 }}
-            >
-              Simulate Barcode Scan Success
-            </Button>
-            <Button variant="text" size="small" onClick={() => setScanDialogOpen(false)}>
-              Done / Close Scanner
-            </Button>
-          </Stack>
-        </DialogContent>
-      </Dialog>
+      {/* Add New Product / Lens Dialog — shared Product Master form */}
+      <ProductMasterDialog
+        open={open}
+        onClose={handleClose}
+        suppliers={dbSuppliers}
+        defaultCategory={addProductCategory}
+        onCreated={handleProductCreated}
+      />
 
       {/* Barcode Label Print Dialog */}
       <BarcodePrintDialog

@@ -30,6 +30,11 @@ import { printPurchaseReceipt } from '../../utils/printPurchase';
 const todayStr = () => new Date().toISOString().split('T')[0];
 const genInvoiceNumber = () => `PINV-${Date.now().toString().slice(-8)}`;
 
+// Backend product PKs are UUIDs. Products that only ever lived in the browser's
+// localStorage inventory carry throwaway ids ("102", a timestamp, a barcode) that
+// the API rejects as a foreign key — those rows need a real Product created first.
+const isBackendId = (v) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(v || ''));
+
 const EDIT_ORDER = ['batchNumber', 'hsnCode', 'expiryDate', 'quantity', 'freeQuantity', 'purchaseRate', 'discountPercent', 'discountAmount', 'gstPercent', 'cessPercent', 'vatPercent', 'mrp', 'sellingPrice'];
 
 // First two digits of a GSTIN are the state code. Comparing the company's and the
@@ -378,6 +383,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
       return next;
     });
 
+    if (!isBackendId(product.id)) return; // local-only product — no purchase history to look up
     axios.get('/api/purchase/invoices/last-rate/', { params: { product: product.id, supplier: selectedSupplierId || undefined } })
       .then(res => {
         if (res.data?.found) {
@@ -481,7 +487,39 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
   };
 
   // --- Save ---
-  const buildPayload = (saveStatus) => ({
+  // Any grid row whose product only exists in the browser's local inventory is
+  // created in the Product Master first, so "Save Purchase" also saves the item.
+  const resolveProductIds = async (itemRows) => {
+    const idMap = {};
+    for (const r of itemRows) {
+      if (isBackendId(r.productId) || idMap[r.productId]) continue;
+
+      const nameKey = (r.productName || '').trim().toLowerCase();
+      const match = products.find(p => isBackendId(p.id) && (
+        (r.barcode && (p.barcode === r.barcode || p.sku === r.barcode)) ||
+        (nameKey && (p.name || '').trim().toLowerCase() === nameKey)
+      ));
+      if (match) { idMap[r.productId] = String(match.id); continue; }
+
+      const res = await axios.post('/api/products/items/', {
+        name: r.productName,
+        sku: r.barcode || `PRD-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        barcode: r.barcode || null,
+        hsn_code: r.hsnCode || '',
+        cost_price: parseFloat(r.purchaseRate) || 0,
+        retail_price: parseFloat(r.sellingPrice) || 0,
+        wholesale_price: parseFloat(r.mrp) || 0,
+        stock: 0,
+        opening_stock: 0,
+        extra_data: { gst: r.gstPercent != null ? String(r.gstPercent) : '' }
+      });
+      idMap[r.productId] = String(res.data.id);
+    }
+    if (Object.keys(idMap).length === 0) return itemRows;
+    return itemRows.map(r => idMap[r.productId] ? { ...r, productId: idMap[r.productId] } : r);
+  };
+
+  const buildPayload = (saveStatus, itemRows) => ({
     invoice_number: invoiceNumber,
     supplier_invoice_number: supplierInvoiceNumber || null,
     supplier: selectedSupplierId,
@@ -513,7 +551,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
     cess_amount: totals.cess,
     supplier_vat_number: supplierVatNumber || null,
     vat_amount: totals.vat,
-    items: rows.map(r => ({
+    items: itemRows.map(r => ({
       product: r.productId,
       barcode: r.barcode,
       batch_number: r.batchNumber || null,
@@ -580,7 +618,16 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
 
     setSaving(true);
     try {
-      const payload = buildPayload(saveStatus);
+      let itemRows = rows;
+      try {
+        itemRows = await resolveProductIds(rows);
+        if (itemRows !== rows) setRows(itemRows);
+      } catch (e) {
+        alert('Failed to save one or more new products to the Product Master. Please add them via "Add New Product" and try again.');
+        setSaving(false);
+        return;
+      }
+      const payload = buildPayload(saveStatus, itemRows);
       const res = await axios.post('/api/purchase/invoices/', payload);
       let saved = res.data;
 
@@ -613,7 +660,13 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
 
       if (andNew || saveStatus !== 'DRAFT') resetForm();
     } catch (err) {
-      alert('Failed to save purchase entry. Please check the required fields and try again.');
+      const data = err.response?.data;
+      let detail = '';
+      if (typeof data === 'string') detail = data;
+      else if (data && typeof data === 'object') {
+        detail = data.detail || JSON.stringify(data);
+      }
+      alert(`Failed to save purchase entry. Please check the required fields and try again.${detail ? `\n\n${detail}` : ''}`);
     } finally {
       setSaving(false);
     }
@@ -915,7 +968,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
             onClick={() => doSave(status)}
             sx={{ fontWeight: 800 }}
           >
-            Save Purchase
+            Save Item
           </Button>
         </Stack>
       </Card>
@@ -1072,7 +1125,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
             onClick={() => { setItemsDialogOpen(false); doSave(status); }}
             sx={{ fontWeight: 800 }}
           >
-            Save Purchase
+            Save Item
           </Button>
         </DialogActions>
       </Dialog>

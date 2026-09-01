@@ -45,6 +45,19 @@ import OrdersManagerView from '../components/sales/OrdersManagerView';
 import PaymentsManagerView from '../components/sales/PaymentsManagerView';
 import PrintInvoiceModal from '../components/sales/PrintInvoiceModal';
 
+// A product's tax can arrive as a numeric %, a "18%" string, null, or (for the raw
+// Product.tax field) a Tax-master UUID. Coerce to a usable GST % and fall back to 18
+// when there's no parseable rate — never silently to 0, which the Tax dropdown then
+// renders as "0% (Exempt)".
+const normalizeTaxPercent = (...candidates) => {
+  for (const c of candidates) {
+    if (c === null || c === undefined || c === '') continue;
+    const n = parseFloat(String(c).replace('%', '').trim());
+    if (!isNaN(n)) return n;
+  }
+  return 18;
+};
+
 // --- MASTER DATABASE ARRAYS (Starts blank until entered/fetched from DB) ---
 const initialProducts = [];
 const initialCustomers = [];
@@ -100,7 +113,7 @@ export default function SalesInvoice() {
           brand: p.brand || 'Generic',
           type: p.category || 'Frame',
           price: parseFloat(p.sellingPrice || p.price || 0),
-          taxRate: parseFloat(p.tax || 18),
+          taxRate: normalizeTaxPercent(p.tax_rate, p.gst, p.taxRate),
           stock: p.stock || 0,
           barcode: p.barcode || '',
           image: (p.category || '').toLowerCase().includes('lens') ? '🔍' : '👓'
@@ -134,7 +147,7 @@ export default function SalesInvoice() {
             brand: p.brand || 'Generic',
             type: p.category_name || (p.type || 'Frame'),
             price: parseFloat(p.unit_price || p.price || 0),
-            taxRate: parseFloat(p.tax_rate || 18),
+            taxRate: normalizeTaxPercent(p.tax_rate, p.gst),
             stock: p.stock || 0,
             barcode: p.barcode || '',
             image: (p.category_name || p.type || '').toLowerCase().includes('lens') ? '🔍' : '👓'

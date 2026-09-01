@@ -1,3 +1,4 @@
+import uuid
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -215,6 +216,13 @@ class PurchaseInvoiceViewSet(viewsets.ModelViewSet):
         supplier_id = request.query_params.get('supplier')
         if not product_id:
             return Response({'detail': 'product query param is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # A product that only exists in the frontend's local inventory has a non-UUID
+        # id and therefore no purchase history — answer "not found" instead of 500ing.
+        try:
+            uuid.UUID(str(product_id))
+        except (ValueError, TypeError, AttributeError):
+            return Response({'found': False})
 
         qs = PurchaseInvoiceItem.objects.filter(product_id=product_id).order_by('-created_at')
         if supplier_id:

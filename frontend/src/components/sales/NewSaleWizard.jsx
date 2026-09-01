@@ -34,6 +34,37 @@ import {
   Visibility as EyeIcon
 } from '@mui/icons-material';
 
+// Standard Indian GST slabs offered in the Tax % dropdowns.
+const TAX_SLABS = [0, 5, 12, 18, 28];
+
+// Resolve a numeric GST % for a product picked from the DB. `taxRate`/`gst` are the
+// numeric rates the product loaders derive; `tax` is a Tax-master UUID and must never
+// be treated as a rate. Returns 18 only when the product carries no tax information.
+const resolveProductTaxPercent = (prod) => {
+  if (!prod) return 18;
+  const candidates = [prod.taxRate, prod.tax_rate, prod.gst];
+  for (const c of candidates) {
+    if (c === null || c === undefined || c === '') continue;
+    const n = parseFloat(String(c).replace('%', '').trim());
+    if (!isNaN(n)) return n;
+  }
+  return 18;
+};
+
+// Build the <MenuItem> list for a Tax % select, injecting the product's own rate as an
+// extra option when it isn't one of the standard slabs (otherwise the select goes blank).
+const taxSlabItems = (currentValue) => {
+  const val = parseFloat(currentValue);
+  const slabs = [...TAX_SLABS];
+  if (!isNaN(val) && !slabs.includes(val)) slabs.push(val);
+  slabs.sort((a, b) => a - b);
+  return slabs.map(rate => (
+    <MenuItem key={rate} value={rate}>
+      {rate === 0 ? '0% (Exempt)' : `${rate}% GST`}
+    </MenuItem>
+  ));
+};
+
 export default function NewSaleWizard({
   customers = [],
   products = [],
@@ -508,7 +539,10 @@ export default function NewSaleWizard({
       category: (selectedProd.type || selectedProd.category || 'FRAME').toUpperCase(),
       price: selectedProd.price || selectedProd.sellingPrice || 0,
       discPercent: 0,
-      taxPercent: selectedProd.taxRate || selectedProd.tax || 18
+      // Pre-fill the Tax % from the picked product. selectedProd.tax is a Tax-master UUID
+      // (not a number) so it must NOT be used as a rate — use the numeric taxRate/gst the
+      // product loaders derive. Only fall back to 18% when the product has no tax at all.
+      taxPercent: resolveProductTaxPercent(selectedProd)
     });
     // Shown as a detail strip under the selector so the user can see exactly what they're
     // about to add (barcode, brand, stock, ...) before committing it to the billing grid.
@@ -592,7 +626,7 @@ export default function NewSaleWizard({
       return;
     }
     const price = parseFloat(found.price || found.sellingPrice || 0);
-    const scanTaxPercent = parseFloat(found.taxRate || found.tax || 18) || 0;
+    const scanTaxPercent = resolveProductTaxPercent(found);
     const scanTaxVal = (price * scanTaxPercent) / 100;
     const newItem = {
       id: `ITEM-${Date.now()}`,
@@ -1363,11 +1397,7 @@ export default function NewSaleWizard({
                   onChange={(e) => setEntryInput({ ...entryInput, taxPercent: e.target.value })}
                   SelectProps={{ style: { fontSize: '0.78rem', fontWeight: 800, color: '#0f172a' } }}
                 >
-                  <MenuItem value={0}>0% (Exempt)</MenuItem>
-                  <MenuItem value={5}>5% GST</MenuItem>
-                  <MenuItem value={12}>12% GST</MenuItem>
-                  <MenuItem value={18}>18% GST</MenuItem>
-                  <MenuItem value={28}>28% GST</MenuItem>
+                  {taxSlabItems(entryInput.taxPercent)}
                 </TextField>
               </Grid>
 
@@ -1415,6 +1445,13 @@ export default function NewSaleWizard({
                 {selectedProductDetail.hsn_code && (
                   <Chip size="small" label={`HSN: ${selectedProductDetail.hsn_code}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
                 )}
+                <Chip
+                  size="small"
+                  label={`Tax: ${entryInput.taxPercent || 0}% GST`}
+                  color="warning"
+                  variant="outlined"
+                  sx={{ fontWeight: 700, fontSize: '0.7rem' }}
+                />
               </Box>
             )}
           </Paper>
@@ -1778,11 +1815,7 @@ export default function NewSaleWizard({
                         value={editingItem.taxPercent}
                         onChange={(e) => setEditingItem({ ...editingItem, taxPercent: e.target.value })}
                       >
-                        <MenuItem value={0}>0% (Exempt)</MenuItem>
-                        <MenuItem value={5}>5% GST</MenuItem>
-                        <MenuItem value={12}>12% GST</MenuItem>
-                        <MenuItem value={18}>18% GST</MenuItem>
-                        <MenuItem value={28}>28% GST</MenuItem>
+                        {taxSlabItems(editingItem.taxPercent)}
                       </TextField>
                     </Grid>
                   </Grid>

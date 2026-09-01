@@ -362,6 +362,29 @@ export default function Purchases() {
     alert(`Supplier '${newSupp.name}' (${newSupp.supplierCode}) registered to database successfully!`);
   };
 
+  // Delete a supplier from the database (or just from the local list for offline-only entries)
+  const handleDeleteSupplier = async (s) => {
+    if (!window.confirm(`Delete supplier '${s.name}'? This cannot be undone.`)) return;
+
+    const isLocalOnly = typeof s.id === 'string' && s.id.startsWith('SUP-LOC');
+    if (!isLocalOnly) {
+      try {
+        await axios.delete(`/api/purchase/suppliers/${s.id}/`);
+      } catch (err) {
+        alert("Could not delete this supplier. It may be linked to existing purchase orders or receipts.");
+        return;
+      }
+    }
+
+    setSuppliers(prev => prev.filter(x => String(x.id) !== String(s.id)));
+    try {
+      const existingSaved = JSON.parse(localStorage.getItem('optical_suppliers') || '[]');
+      const nextSaved = existingSaved.filter(n => n !== s.name);
+      localStorage.setItem('optical_suppliers', JSON.stringify(nextSaved));
+    } catch (e) { /* ignore */ }
+    window.dispatchEvent(new Event('optical_suppliers_updated'));
+  };
+
   // Load SheetJS XLSX Parser Library dynamically
   const loadSheetJS = () => {
     return new Promise((resolve, reject) => {
@@ -872,6 +895,15 @@ export default function Purchases() {
                               >
                                 Create PO
                               </Button>
+                              <Tooltip title="Delete Supplier">
+                                <IconButton
+                                  size="small"
+                                  color="error"
+                                  onClick={() => handleDeleteSupplier(s)}
+                                >
+                                  <DeleteIcon fontSize="small" />
+                                </IconButton>
+                              </Tooltip>
                             </Stack>
                           </TableCell>
                         </TableRow>

@@ -69,10 +69,24 @@ class ProductSerializer(ModelSerializer):
     selling_price = SerializerMethodField()
     supplier = SerializerMethodField()
     rack = SerializerMethodField()
+    tax_rate = SerializerMethodField()
 
     class Meta:
         model = Product
         fields = '__all__'
+
+    def get_tax_rate(self, obj):
+        # The item-entry screens (Sales / Purchase) need a numeric GST % to pre-fill the
+        # Tax dropdown when a product is picked. Prefer the linked Tax master rate; fall
+        # back to the product category's configured GST percentage (stored as e.g. "18%").
+        if getattr(obj, 'tax', None) and obj.tax.rate is not None:
+            return float(obj.tax.rate)
+        if getattr(obj, 'category', None) and obj.category.gst_percentage:
+            try:
+                return float(str(obj.category.gst_percentage).replace('%', '').strip())
+            except (TypeError, ValueError):
+                pass
+        return None
 
     def get_category(self, obj):
         cat_val = obj.category_name or (obj.category.name if obj.category else None)
