@@ -695,6 +695,177 @@ Thank you for choosing *${storeName}*. We hope to serve you again soon!`;
     return matchesSearch && matchesDoc;
   });
 
+  // Split into "Upcoming Bookings" (still actionable, scheduled today or later) and
+  // "Past Booking Details" (already happened, or closed out as Completed/Cancelled
+  // regardless of date) so the front desk can see what's still coming up vs. history
+  // without scanning one long mixed list.
+  const todayStr = new Date().toISOString().split('T')[0];
+  const isUpcoming = (apt) => apt.status !== 'Cancelled' && apt.status !== 'Completed' && (!apt.date || apt.date >= todayStr);
+  const upcomingAppointments = filteredAppointments
+    .filter(isUpcoming)
+    .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+  const pastAppointments = filteredAppointments
+    .filter(apt => !isUpcoming(apt))
+    .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+
+  const renderAptRow = (row) => (
+    <TableRow key={row.id} hover sx={{ '&:last-child td, &:last-child th': { border: 0 } }}>
+      <TableCell sx={{ py: 2 }}>
+        <Typography variant="subtitle2" fontWeight={800} color="primary.main">{row.id}</Typography>
+        <Chip
+          label={row.token || 'T-101'}
+          size="small"
+          color="secondary"
+          variant="outlined"
+          sx={{ fontWeight: 800, borderRadius: 1.5, height: 22, mt: 0.5 }}
+        />
+      </TableCell>
+
+      <TableCell sx={{ py: 2 }}>
+        <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>{row.patient || 'Unregistered Patient'}</Typography>
+        <Typography variant="caption" color="text.secondary" display="block">📞 {row.phone || 'No Phone'}</Typography>
+        {row.email && <Typography variant="caption" color="text.secondary">{row.email}</Typography>}
+      </TableCell>
+
+      <TableCell sx={{ py: 2, fontWeight: 600 }}>
+        {row.doctor ? (
+          <Chip label={row.doctor} size="small" color="primary" variant="outlined" sx={{ fontWeight: 700 }} />
+        ) : (
+          <Typography variant="caption" color="text.secondary" fontStyle="italic">Unassigned</Typography>
+        )}
+      </TableCell>
+
+      <TableCell sx={{ py: 2 }}>
+        <Typography variant="body2" sx={{ fontWeight: 700 }}>📅 {row.date || 'Today'}</Typography>
+        <Typography variant="caption" color="primary.main" fontWeight={700} display="block">⏰ {row.time || '10:00 AM'}</Typography>
+        <Typography variant="caption" color="text.secondary">{row.room || 'Room 1'}</Typography>
+      </TableCell>
+
+      <TableCell sx={{ py: 2, color: 'text.primary', fontWeight: 600, fontSize: '0.85rem' }}>
+        {row.type}
+      </TableCell>
+
+      <TableCell align="center" sx={{ py: 2 }}>
+        <Stack spacing={0.5} alignItems="center">
+          <Chip
+            label={row.status}
+            size="small"
+            color={row.status === 'Completed' ? 'success' : row.status === 'Cancelled' ? 'error' : row.status === 'Checked In' ? 'info' : 'primary'}
+            sx={{ fontWeight: 800, borderRadius: 1.5, minWidth: 90 }}
+          />
+          {row.priority && row.priority !== 'Standard Booking' && (
+            <Chip label={row.priority} size="small" color="warning" variant="outlined" sx={{ height: 18, fontSize: '0.65rem', fontWeight: 700 }} />
+          )}
+        </Stack>
+      </TableCell>
+
+      <TableCell align="right" sx={{ py: 2 }}>
+        <Stack direction="row" spacing={1} justifyContent="flex-end" alignItems="center">
+          {row.status !== 'Completed' && row.status !== 'Cancelled' && (
+            <Button
+              variant="contained"
+              size="small"
+              sx={{ textTransform: 'none', borderRadius: 2, fontSize: '0.75rem', px: 1.5, py: 0.5, backgroundColor: '#2563EB', fontWeight: 700 }}
+              onClick={() => {
+                navigate('/optical/eyetest', {
+                  state: {
+                    appointment: {
+                      id: row.id,
+                      customerId: row.customerId || null,
+                      patientId: row.patientId || '',
+                      testNo: row.testNo || '',
+                      name: row.patient,
+                      phone: row.phone,
+                      email: row.email,
+                      age: row.age,
+                      gender: row.gender,
+                      optometrist: row.doctor,
+                      date: row.date,
+                      type: row.type
+                    }
+                  }
+                });
+              }}
+            >
+              Start Eye Test
+            </Button>
+          )}
+
+          <IconButton size="small" color="info" title="View Details" onClick={() => handleView(row)}>
+            <ViewIcon fontSize="small" />
+          </IconButton>
+
+          <IconButton size="small" sx={{ color: '#25D366' }} title="Send WhatsApp Confirmation" onClick={() => sendWhatsAppReminder(row)}>
+            <WhatsAppIcon fontSize="small" />
+          </IconButton>
+
+          <IconButton size="small" color="primary" title="Edit Appointment" onClick={() => handleEdit(row)}>
+            <EditIcon fontSize="small" />
+          </IconButton>
+
+          {row.status !== 'Completed' && row.status !== 'Cancelled' && (
+            <IconButton size="small" color="error" title="Cancel Appointment" onClick={() => handleCancelApt(row)}>
+              <CancelIcon fontSize="small" />
+            </IconButton>
+          )}
+        </Stack>
+      </TableCell>
+    </TableRow>
+  );
+
+  const renderAptTableCard = (list, { title, subtitleText, emptyTitle, emptySubtitle, showBookCta, headerColor }) => (
+    <Card sx={{ borderRadius: 4, border: '1px solid', borderColor: 'divider', overflow: 'hidden', mb: 3 }}>
+      <Box sx={{ px: 3, py: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 1, borderBottom: '1px solid', borderColor: 'divider' }}>
+        <Box>
+          <Typography variant="subtitle1" fontWeight={800} sx={{ color: headerColor, display: 'flex', alignItems: 'center', gap: 1 }}>
+            <CalendarIcon sx={{ fontSize: 20 }} /> {title}
+          </Typography>
+          <Typography variant="caption" color="text.secondary">{subtitleText}</Typography>
+        </Box>
+        <Chip label={`${list.length} ${list.length === 1 ? 'Booking' : 'Bookings'}`} size="small" sx={{ fontWeight: 800 }} />
+      </Box>
+      <CardContent sx={{ p: 0 }}>
+        <TableContainer component={Paper} elevation={0} sx={{ backgroundColor: 'transparent' }}>
+          <Table size="medium">
+            <TableHead sx={{ backgroundColor: 'action.hover' }}>
+              <TableRow>
+                <TableCell sx={{ fontWeight: 800, py: 1.8 }}>Appointment ID & Token</TableCell>
+                <TableCell sx={{ fontWeight: 800, py: 1.8 }}>Patient Demographics</TableCell>
+                <TableCell sx={{ fontWeight: 800, py: 1.8 }}>Attending Optometrist</TableCell>
+                <TableCell sx={{ fontWeight: 800, py: 1.8 }}>Schedule & Room</TableCell>
+                <TableCell sx={{ fontWeight: 800, py: 1.8 }}>Clinical Exam Type</TableCell>
+                <TableCell sx={{ fontWeight: 800, py: 1.8 }} align="center">Priority / Status</TableCell>
+                <TableCell sx={{ fontWeight: 800, py: 1.8 }} align="right">Actions</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {list.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={7} align="center" sx={{ py: 8 }}>
+                    <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
+                      <CalendarIcon sx={{ fontSize: 48, color: 'text.secondary', opacity: 0.5 }} />
+                      <Typography variant="h6" color="text.secondary" fontWeight={800}>{emptyTitle}</Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        {searchQuery || filterDoctor !== 'All' ? "No bookings match your search query." : emptySubtitle}
+                      </Typography>
+                      {showBookCta && (
+                        <Button variant="contained" color="primary" startIcon={<AddIcon />} onClick={handleOpen} sx={{ mt: 2, borderRadius: 2 }}>
+                          + Book Appointment Now
+                        </Button>
+                      )}
+                    </Box>
+                  </TableCell>
+                </TableRow>
+              ) : (
+                list.map(renderAptRow)
+              )}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      </CardContent>
+    </Card>
+  );
+
   return (
     <Box sx={{ p: 4, pb: 8 }}>
       {/* Module Header */}
@@ -765,149 +936,25 @@ Thank you for choosing *${storeName}*. We hope to serve you again soon!`;
         </Grid>
       </Card>
 
-      {/* Appointment Table */}
-      <Card sx={{ borderRadius: 4, border: '1px solid', borderColor: 'divider', overflow: 'hidden' }}>
-        <CardContent sx={{ p: 0 }}>
-          <TableContainer component={Paper} elevation={0} sx={{ backgroundColor: 'transparent' }}>
-            <Table size="medium">
-              <TableHead sx={{ backgroundColor: 'action.hover' }}>
-                <TableRow>
-                  <TableCell sx={{ fontWeight: 800, py: 1.8 }}>Appointment ID & Token</TableCell>
-                  <TableCell sx={{ fontWeight: 800, py: 1.8 }}>Patient Demographics</TableCell>
-                  <TableCell sx={{ fontWeight: 800, py: 1.8 }}>Attending Optometrist</TableCell>
-                  <TableCell sx={{ fontWeight: 800, py: 1.8 }}>Schedule & Room</TableCell>
-                  <TableCell sx={{ fontWeight: 800, py: 1.8 }}>Clinical Exam Type</TableCell>
-                  <TableCell sx={{ fontWeight: 800, py: 1.8 }} align="center">Priority / Status</TableCell>
-                  <TableCell sx={{ fontWeight: 800, py: 1.8 }} align="right">Actions</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {filteredAppointments.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={7} align="center" sx={{ py: 8 }}>
-                      <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
-                        <CalendarIcon sx={{ fontSize: 48, color: 'text.secondary', opacity: 0.5 }} />
-                        <Typography variant="h6" color="text.secondary" fontWeight={800}>No Appointments Scheduled</Typography>
-                        <Typography variant="body2" color="text.secondary">
-                          {searchQuery || filterDoctor !== 'All' ? "No bookings match your search query." : "Click '+ Book New Appointment' to register a patient for clinical examination."}
-                        </Typography>
-                        <Button variant="contained" color="primary" startIcon={<AddIcon />} onClick={handleOpen} sx={{ mt: 2, borderRadius: 2 }}>
-                          + Book Appointment Now
-                        </Button>
-                      </Box>
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  filteredAppointments.map((row) => (
-                    <TableRow key={row.id} hover sx={{ '&:last-child td, &:last-child th': { border: 0 } }}>
-                      <TableCell sx={{ py: 2 }}>
-                        <Typography variant="subtitle2" fontWeight={800} color="primary.main">{row.id}</Typography>
-                        <Chip 
-                          label={row.token || 'T-101'} 
-                          size="small" 
-                          color="secondary" 
-                          variant="outlined" 
-                          sx={{ fontWeight: 800, borderRadius: 1.5, height: 22, mt: 0.5 }}
-                        />
-                      </TableCell>
-                      
-                      <TableCell sx={{ py: 2 }}>
-                        <Typography variant="subtitle2" sx={{ fontWeight: 800 }}>{row.patient || 'Unregistered Patient'}</Typography>
-                        <Typography variant="caption" color="text.secondary" display="block">📞 {row.phone || 'No Phone'}</Typography>
-                        {row.email && <Typography variant="caption" color="text.secondary">{row.email}</Typography>}
-                      </TableCell>
+      {/* Upcoming Bookings */}
+      {renderAptTableCard(upcomingAppointments, {
+        title: 'Upcoming Bookings',
+        subtitleText: "Scheduled for today or later — still open to check in, edit, or start the eye test.",
+        emptyTitle: 'No Upcoming Appointments',
+        emptySubtitle: "Click '+ Book New Appointment' to register a patient for clinical examination.",
+        showBookCta: true,
+        headerColor: 'primary.main'
+      })}
 
-                      <TableCell sx={{ py: 2, fontWeight: 600 }}>
-                        {row.doctor ? (
-                          <Chip label={row.doctor} size="small" color="primary" variant="outlined" sx={{ fontWeight: 700 }} />
-                        ) : (
-                          <Typography variant="caption" color="text.secondary" fontStyle="italic">Unassigned</Typography>
-                        )}
-                      </TableCell>
-
-                      <TableCell sx={{ py: 2 }}>
-                        <Typography variant="body2" sx={{ fontWeight: 700 }}>📅 {row.date || 'Today'}</Typography>
-                        <Typography variant="caption" color="primary.main" fontWeight={700} display="block">⏰ {row.time || '10:00 AM'}</Typography>
-                        <Typography variant="caption" color="text.secondary">{row.room || 'Room 1'}</Typography>
-                      </TableCell>
-
-                      <TableCell sx={{ py: 2, color: 'text.primary', fontWeight: 600, fontSize: '0.85rem' }}>
-                        {row.type}
-                      </TableCell>
-
-                      <TableCell align="center" sx={{ py: 2 }}>
-                        <Stack spacing={0.5} alignItems="center">
-                          <Chip 
-                            label={row.status} 
-                            size="small" 
-                            color={row.status === 'Completed' ? 'success' : row.status === 'Cancelled' ? 'error' : row.status === 'Checked In' ? 'info' : 'primary'}
-                            sx={{ fontWeight: 800, borderRadius: 1.5, minWidth: 90 }}
-                          />
-                          {row.priority && row.priority !== 'Standard Booking' && (
-                            <Chip label={row.priority} size="small" color="warning" variant="outlined" sx={{ height: 18, fontSize: '0.65rem', fontWeight: 700 }} />
-                          )}
-                        </Stack>
-                      </TableCell>
-
-                      <TableCell align="right" sx={{ py: 2 }}>
-                        <Stack direction="row" spacing={1} justifyContent="flex-end" alignItems="center">
-                          {row.status !== 'Completed' && row.status !== 'Cancelled' && (
-                            <Button 
-                              variant="contained" 
-                              size="small" 
-                              sx={{ textTransform: 'none', borderRadius: 2, fontSize: '0.75rem', px: 1.5, py: 0.5, backgroundColor: '#2563EB', fontWeight: 700 }}
-                              onClick={() => {
-                                navigate('/optical/eyetest', {
-                                  state: {
-                                    appointment: {
-                                      id: row.id,
-                                      customerId: row.customerId || null,
-                                      patientId: row.patientId || '',
-                                      testNo: row.testNo || '',
-                                      name: row.patient,
-                                      phone: row.phone,
-                                      email: row.email,
-                                      age: row.age,
-                                      gender: row.gender,
-                                      optometrist: row.doctor,
-                                      date: row.date,
-                                      type: row.type
-                                    }
-                                  }
-                                });
-                              }}
-                            >
-                              Start Eye Test
-                            </Button>
-                          )}
-
-                          <IconButton size="small" color="info" title="View Details" onClick={() => handleView(row)}>
-                            <ViewIcon fontSize="small" />
-                          </IconButton>
-
-                          <IconButton size="small" sx={{ color: '#25D366' }} title="Send WhatsApp Confirmation" onClick={() => sendWhatsAppReminder(row)}>
-                            <WhatsAppIcon fontSize="small" />
-                          </IconButton>
-
-                          <IconButton size="small" color="primary" title="Edit Appointment" onClick={() => handleEdit(row)}>
-                            <EditIcon fontSize="small" />
-                          </IconButton>
-
-                          {row.status !== 'Completed' && row.status !== 'Cancelled' && (
-                            <IconButton size="small" color="error" title="Cancel Appointment" onClick={() => handleCancelApt(row)}>
-                              <CancelIcon fontSize="small" />
-                            </IconButton>
-                          )}
-                        </Stack>
-                      </TableCell>
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
-          </TableContainer>
-        </CardContent>
-      </Card>
+      {/* Past Booking Details */}
+      {renderAptTableCard(pastAppointments, {
+        title: 'Past Booking Details',
+        subtitleText: 'Completed, cancelled, or already-elapsed appointments — booking history only.',
+        emptyTitle: 'No Past Bookings Yet',
+        emptySubtitle: 'Completed and cancelled appointments will appear here once you have some booking history.',
+        showBookCta: false,
+        headerColor: 'text.secondary'
+      })}
 
       {/* Future-Scope Book Appointment Dialog */}
       <Dialog 
