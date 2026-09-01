@@ -6,7 +6,7 @@ from rest_framework.pagination import PageNumberPagination
 from django.db import transaction, IntegrityError
 from django.db.models import Q
 from .models import Product, BarcodeHistory
-from .barcode_utils import reserve_barcodes
+from .barcode_utils import reserve_barcodes, reserve_ean13
 
 
 class ProductPagination(PageNumberPagination):
@@ -253,6 +253,12 @@ class ProductViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'], url_path='next_barcode_candidate')
     def next_barcode_candidate(self, request):
         code = reserve_barcodes(count=1)[0]
+        return Response({'barcode': code})
+
+    @action(detail=False, methods=['post'], url_path='next_ean13_candidate')
+    def next_ean13_candidate(self, request):
+        """Next barcode in the 13-digit EAN-13 series (used by the Product Master dialog)."""
+        code = reserve_ean13(count=1)[0]
         return Response({'barcode': code})
 
     @action(detail=False, methods=['get'], url_path='check_barcode')

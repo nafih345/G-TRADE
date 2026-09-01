@@ -34,7 +34,10 @@ export default function BarcodeSection({
   productCode,
   productPrice,
   productStock,
-  onSaved
+  onSaved,
+  // Endpoint that mints the next barcode in create-mode. Defaults to the legacy
+  // OPTxxxxxx series; pass the EAN-13 endpoint for a 13-digit numeric series.
+  generateUrl = '/api/products/items/next_barcode_candidate/'
 }) {
   const [localValue, setLocalValue] = useState(value || '');
   const [checking, setChecking] = useState(false);
@@ -118,7 +121,7 @@ export default function BarcodeSection({
     setBusy(true);
     try {
       if (mode === 'create') {
-        const res = await axios.post('/api/products/items/next_barcode_candidate/');
+        const res = await axios.post(generateUrl);
         applyNewValue(res.data.barcode);
       } else {
         const res = await axios.post(`/api/products/items/${productId}/generate_barcode/`);
@@ -135,7 +138,7 @@ export default function BarcodeSection({
     setBusy(true);
     try {
       if (mode === 'create') {
-        const res = await axios.post('/api/products/items/next_barcode_candidate/');
+        const res = await axios.post(generateUrl);
         applyNewValue(res.data.barcode);
       } else {
         const res = await axios.post(`/api/products/items/${productId}/generate_barcode/`, {

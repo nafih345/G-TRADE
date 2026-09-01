@@ -22,6 +22,7 @@ import {
   ViewColumn as ViewColumnIcon
 } from '@mui/icons-material';
 import QuickDatePickerField from '../common/QuickDatePickerField';
+import ProductMasterDialog from '../inventory/ProductMasterDialog';
 import { useDebounce } from '../../hooks/useDebounce';
 import useBarcodeScanner from '../../hooks/useBarcodeScanner';
 import { printPurchaseReceipt } from '../../utils/printPurchase';
@@ -187,6 +188,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
 
   const [saving, setSaving] = useState(false);
   const [itemsDialogOpen, setItemsDialogOpen] = useState(false);
+  const [addProductOpen, setAddProductOpen] = useState(false);
 
   const DEFAULT_COLUMN_VISIBILITY = {
     batch: true, hsn: true, expiry: true, free: true,
@@ -215,6 +217,28 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
   }, [suppliers]);
 
   const selectedSupplier = allSuppliers.find(s => String(s.id) === String(selectedSupplierId));
+
+  const supplierNames = useMemo(
+    () => Array.from(new Set(allSuppliers.map(s => s.name || s.company_name).filter(Boolean))),
+    [allSuppliers]
+  );
+
+  // A product just created through the inline Product Master dialog — drop it straight
+  // into the purchase grid so the user can carry on entering the invoice line.
+  const handleProductMasterCreated = (p) => {
+    if (!p) return;
+    addProductToGrid({
+      id: String(p.id),
+      name: p.name,
+      sku: p.code || '',
+      barcode: p.barcode || '',
+      costPrice: parseFloat(p.purchasePrice) || 0,
+      price: parseFloat(p.sellingPrice) || 0,
+      stock: parseInt(p.stock) || 0,
+      taxRate: parseFloat(p.gst) || defaultGstPercent,
+      hsnCode: p.hsnCode || ''
+    });
+  };
 
   const companyGstin = useMemo(() => {
     try {
@@ -846,6 +870,17 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
           )}
           sx={{ flexGrow: 1 }}
         />
+        <Tooltip title="Create a new product in the Product Master">
+          <Button
+            variant="contained"
+            size="small"
+            startIcon={<AddIcon />}
+            onClick={() => setAddProductOpen(true)}
+            sx={{ flexShrink: 0, fontWeight: 800, borderRadius: '24px', px: 2, whiteSpace: 'nowrap' }}
+          >
+            Add New Product
+          </Button>
+        </Tooltip>
       </Paper>
 
       {/* 3. Item Grid trigger — the grid itself lives in a popup (see Dialog below) */}
@@ -1154,6 +1189,15 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
         <Button variant="outlined" color="primary" startIcon={<PrintIcon />} onClick={() => doSave(status, { print: true })} disabled={saving}>Save & Print (Ctrl+P)</Button>
         <Button variant="contained" color="primary" startIcon={<SaveIcon />} onClick={() => doSave(status)} disabled={saving} sx={{ fontWeight: 800 }}>Save Purchase (Ctrl+S)</Button>
       </Box>
+
+      {/* Inline Product Master — create a brand-new product without leaving Purchase Entry */}
+      <ProductMasterDialog
+        open={addProductOpen}
+        onClose={() => setAddProductOpen(false)}
+        suppliers={supplierNames}
+        defaultSupplier={selectedSupplier?.name || selectedSupplier?.company_name || ''}
+        onCreated={handleProductMasterCreated}
+      />
     </Box>
   );
 }
