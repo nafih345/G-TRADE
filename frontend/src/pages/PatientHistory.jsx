@@ -28,7 +28,8 @@ import {
   Phone as PhoneIcon,
   Badge as BadgeIcon,
   FilterList as FilterIcon,
-  DeleteSweep as ClearIcon
+  DeleteSweep as ClearIcon,
+  DeleteOutline as DeleteIcon
 } from '@mui/icons-material';
 import PrintPrescriptionCard from '../components/optical/PrintPrescriptionCard';
 
@@ -42,6 +43,25 @@ const getPatientKey = (p) => `${p?.id || ''}|${p?.phone || ''}|${p?.name || ''}`
 // A real backend Customer/Appointment id is a UUID; human-readable "P-1001" codes never
 // look like one — used to tell a real backend link apart from a locally-generated placeholder.
 const isBackendId = (id) => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+
+// Normalizes the handful of shapes patient identity shows up in across this page (a merged
+// customer record, a raw eye-examination record, a plain localStorage fallback record) down to
+// one {id, phone, name} triple, so matching "is this the same person" is a single implementation
+// instead of the same three-way id/phone/name comparison copy-pasted at every call site.
+const personKeyFields = (o) => ({
+  id: String(o?.id || o?.patientId || o?.patient_id || o?.patient_code || '').toLowerCase().trim(),
+  phone: String(o?.phone || '').toLowerCase().trim(),
+  name: String(o?.name || o?.patient_name || '').toLowerCase().trim()
+});
+
+const samePerson = (a, b) => {
+  const A = personKeyFields(a);
+  const B = personKeyFields(b);
+  const matchId = A.id && B.id && A.id === B.id;
+  const matchPhone = A.phone && B.phone && A.phone !== 'no mobile' && A.phone === B.phone;
+  const matchName = A.name && B.name && (A.name.includes(B.name) || B.name.includes(A.name));
+  return matchId || matchPhone || matchName;
+};
 
 export default function PatientHistory() {
   const navigate = useNavigate();
@@ -279,22 +299,8 @@ export default function PatientHistory() {
   const selectedPatient = patients.find(p => getPatientKey(p) === String(selectedPatientId || ''));
 
   // Get all past examinations for selected patient
-  const rawPatientExams = selectedPatient 
-    ? examinations.filter(e => {
-        const pId = String(selectedPatient.id || '').toLowerCase().trim();
-        const pPhone = String(selectedPatient.phone || '').toLowerCase().trim();
-        const pName = String(selectedPatient.name || '').toLowerCase().trim();
-
-        const ePatientId = String(e.patientId || e.patient_id || '').toLowerCase().trim();
-        const ePhone = String(e.phone || '').toLowerCase().trim();
-        const eName = String(e.name || e.patient_name || '').toLowerCase().trim();
-
-        const matchId = pId && ePatientId && pId === ePatientId;
-        const matchPhone = pPhone && ePhone && pPhone !== 'no mobile' && pPhone === ePhone;
-        const matchName = pName && eName && (pName.includes(eName) || eName.includes(pName));
-
-        return matchId || matchPhone || matchName;
-      })
+  const rawPatientExams = selectedPatient
+    ? examinations.filter(e => samePerson(e, selectedPatient))
     : [];
 
   const patientExams = rawPatientExams;
@@ -323,6 +329,59 @@ export default function PatientHistory() {
         patient: selectedPatient
       }
     });
+  };
+
+  const [deletingKey, setDeletingKey] = useState(null);
+
+  // Permanently removes one patient: their backend Customer row, every eye examination linked
+  // to them (both are soft-deleted server-side via BaseUUIDModel, mirroring how every other
+  // delete in this app works), and any locally-cached fallback records — otherwise a stale
+  // localStorage copy or an orphaned exam record would just resurrect the same patient into
+  // this directory on the next refresh.
+  const handleDeletePatient = async (patient, event) => {
+    event.stopPropagation();
+    if (!window.confirm(`Permanently delete ${patient.name || 'this patient'} (${patient.id}) and all their eye examination history? This cannot be undone.`)) {
+      return;
+    }
+
+    const pKey = getPatientKey(patient);
+    setDeletingKey(pKey);
+
+    const examsToDelete = examinations.filter(ex => samePerson(ex, patient));
+
+    try {
+      await Promise.all(
+        examsToDelete
+          .filter(ex => ex.backendId)
+          .map(ex => axios.delete(`/api/sales/eye-examinations/${ex.backendId}/`).catch(() => {}))
+      );
+
+      if (isBackendId(patient.customerId)) {
+        await axios.delete(`/api/sales/customers/${patient.customerId}/`).catch(() => {});
+      }
+
+      const remainingPatients = patients.filter(p => getPatientKey(p) !== pKey);
+      const remainingExams = examinations.filter(ex => !samePerson(ex, patient));
+
+      setPatients(remainingPatients);
+      setExaminations(remainingExams);
+      setSelectedPatientId(prev =>
+        prev === pKey
+          ? (remainingPatients.length > 0 ? getPatientKey(remainingPatients[0]) : null)
+          : prev
+      );
+
+      try {
+        ['optical_patients', 'optical_sales_customers'].forEach(key => {
+          const list = JSON.parse(localStorage.getItem(key) || '[]');
+          localStorage.setItem(key, JSON.stringify(list.filter(rec => !samePerson(rec, patient))));
+        });
+        const localExams = JSON.parse(localStorage.getItem('optical_eye_tests') || '[]');
+        localStorage.setItem('optical_eye_tests', JSON.stringify(localExams.filter(ex => !samePerson(ex, patient))));
+      } catch (e) {}
+    } finally {
+      setDeletingKey(null);
+    }
   };
 
   const handleClearAllPatientData = () => {
@@ -431,19 +490,7 @@ export default function PatientHistory() {
                 filteredPatients.map((p) => {
                   const pKey = getPatientKey(p);
                   const isSelected = pKey === String(selectedPatientId || '');
-                  const rawCount = examinations.filter(e => {
-                    const pId = String(p.id || '').toLowerCase().trim();
-                    const pPhone = String(p.phone || '').toLowerCase().trim();
-                    const pName = String(p.name || '').toLowerCase().trim();
-
-                    const ePatientId = String(e.patientId || e.patient_id || '').toLowerCase().trim();
-                    const ePhone = String(e.phone || '').toLowerCase().trim();
-                    const eName = String(e.name || e.patient_name || '').toLowerCase().trim();
-
-                    return (pId && ePatientId && pId === ePatientId) ||
-                           (pPhone && ePhone && pPhone !== 'no mobile' && pPhone === ePhone) ||
-                           (pName && eName && (pName.includes(eName) || eName.includes(pName)));
-                  }).length;
+                  const rawCount = examinations.filter(e => samePerson(e, p)).length;
                   const countExams = rawCount > 0 ? rawCount : 1;
 
                   return (
@@ -481,15 +528,29 @@ export default function PatientHistory() {
                         </Box>
 
                         <Stack alignItems="flex-end" spacing={0.5}>
-                          <Chip 
-                            label={`${countExams} ${countExams === 1 ? 'Exam' : 'Exams'}`} 
-                            size="small" 
-                            color={countExams > 0 ? 'primary' : 'default'} 
-                            variant="outlined" 
+                          <Chip
+                            label={`${countExams} ${countExams === 1 ? 'Exam' : 'Exams'}`}
+                            size="small"
+                            color={countExams > 0 ? 'primary' : 'default'}
+                            variant="outlined"
                             sx={{ height: 20, fontSize: '0.65rem', fontWeight: 800 }}
                           />
                           {isSelected && <ActiveIcon color="primary" sx={{ fontSize: 16 }} />}
                         </Stack>
+
+                        <Tooltip title="Delete Patient">
+                          <span>
+                            <IconButton
+                              size="small"
+                              color="error"
+                              disabled={deletingKey === pKey}
+                              onClick={(e) => handleDeletePatient(p, e)}
+                              sx={{ ml: -0.5 }}
+                            >
+                              <DeleteIcon fontSize="small" />
+                            </IconButton>
+                          </span>
+                        </Tooltip>
                       </Box>
                     </Paper>
                   );
