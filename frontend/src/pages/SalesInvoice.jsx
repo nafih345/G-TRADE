@@ -116,6 +116,7 @@ export default function SalesInvoice() {
           taxRate: normalizeTaxPercent(p.tax_rate, p.gst, p.taxRate),
           stock: p.stock || 0,
           barcode: p.barcode || '',
+          extra_barcodes: p.extra_barcodes || [],
           image: (p.category || '').toLowerCase().includes('lens') ? '🔍' : '👓'
         })));
       }
@@ -150,6 +151,7 @@ export default function SalesInvoice() {
             taxRate: normalizeTaxPercent(p.tax_rate, p.gst),
             stock: p.stock || 0,
             barcode: p.barcode || '',
+            extra_barcodes: p.extra_barcodes || [],
             image: (p.category_name || p.type || '').toLowerCase().includes('lens') ? '🔍' : '👓'
           }));
           setProducts(prev => {

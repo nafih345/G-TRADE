@@ -24,6 +24,8 @@ export default function BarcodeManageDialog({ open, onClose, product, onProductU
           productCode={product.code}
           productPrice={product.sellingPrice}
           productStock={product.stock}
+          productColour={product.colour || product.color}
+          productSize={product.size}
           onSaved={(newBarcode) => onProductUpdated && onProductUpdated(product.id, newBarcode)}
         />
       </DialogContent>

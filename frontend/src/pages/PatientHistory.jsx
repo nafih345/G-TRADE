@@ -6,7 +6,7 @@ import {
   Paper, Chip, TextField, Stack, IconButton, Avatar,
   Divider, InputAdornment, Tabs, Tab, Alert, Table,
   TableBody, TableCell, TableContainer, TableHead, TableRow, Tooltip,
-  Dialog, DialogContent
+  Dialog, DialogContent, LinearProgress
 } from '@mui/material';
 import {
   History as HistoryIcon,
@@ -29,7 +29,12 @@ import {
   Badge as BadgeIcon,
   FilterList as FilterIcon,
   DeleteSweep as ClearIcon,
-  DeleteOutline as DeleteIcon
+  DeleteOutline as DeleteIcon,
+  Assignment as RxIcon,
+  Notes as NotesIcon,
+  ReceiptLong as BillIcon,
+  Science as LabIcon,
+  Payments as PaymentsIcon
 } from '@mui/icons-material';
 import PrintPrescriptionCard from '../components/optical/PrintPrescriptionCard';
 
@@ -63,6 +68,46 @@ const samePerson = (a, b) => {
   return matchId || matchPhone || matchName;
 };
 
+// Invoice / payment / appointment records key their patient link a few different ways depending
+// on where they came from: a real backend row carries the Customer UUID in `customer`, while a
+// localStorage fallback record only has a denormalized name/phone snapshot. Resolve both here so
+// billing history matches the same patient the exam history does.
+const billingRecordMatchesPatient = (rec, patient) => {
+  if (!rec || !patient) return false;
+  const uuid = String(rec.customer || rec.customerId || rec.customer_id || '').toLowerCase().trim();
+  if (uuid && patient.customerId && uuid === String(patient.customerId).toLowerCase().trim()) return true;
+  const custStr = typeof rec.customer === 'string' && !isBackendId(rec.customer) ? rec.customer : '';
+  return samePerson({
+    id: rec.patient_code || rec.patientId || rec.patient_id || '',
+    phone: rec.phone || rec.customer_phone || rec.customerPhone || '',
+    name: rec.customer_name || rec.customerName || rec.patient_name || rec.name || custStr
+  }, patient);
+};
+
+// `status` is overloaded across the two invoice shapes: a backend Invoice uses it for the PAYMENT
+// state (PAID/PARTIAL/UNPAID/...) and keeps the lab/fulfillment stage in `fulfillment_status`,
+// while a local order record uses `status` for the lab stage and `payment` for the payment state.
+const PAYMENT_STATUS_WORDS = ['paid', 'unpaid', 'partial', 'partially paid', 'draft', 'cancelled'];
+const invoiceTotal = (inv) => parseFloat(inv.net_amount || inv.total_amount || inv.total || inv.amount || 0) || 0;
+const invoicePaid = (inv) => parseFloat(inv.paid_amount ?? inv.paidAmount ?? 0) || 0;
+const invoiceLabStatus = (inv) => {
+  if (inv.fulfillment_status) return inv.fulfillment_status;
+  const s = String(inv.status || '').trim();
+  if (s && !PAYMENT_STATUS_WORDS.includes(s.toLowerCase())) return s;
+  return '';
+};
+const invoicePaymentStatus = (inv) => {
+  if (inv.payment) return inv.payment;
+  const s = String(inv.status || '').trim();
+  if (s && PAYMENT_STATUS_WORDS.includes(s.toLowerCase())) return s;
+  const total = invoiceTotal(inv);
+  const paid = invoicePaid(inv);
+  if (paid <= 0) return 'Unpaid';
+  return paid + 0.01 >= total ? 'Paid' : 'Partial';
+};
+const recordDate = (rec) => rec.invoice_date || rec.payment_date || rec.appointment_date || rec.date ||
+  (typeof rec.created_at === 'string' ? rec.created_at.split('T')[0] : '') || '';
+
 export default function PatientHistory() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -70,6 +115,9 @@ export default function PatientHistory() {
   // State Definitions
   const [patients, setPatients] = useState([]);
   const [examinations, setExaminations] = useState([]);
+  const [invoices, setInvoices] = useState([]);
+  const [payments, setPayments] = useState([]);
+  const [appointments, setAppointments] = useState([]);
   const [selectedPatientId, setSelectedPatientId] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterRisk, setFilterRisk] = useState('ALL');
@@ -283,6 +331,48 @@ export default function PatientHistory() {
     fetchDatabaseRecords();
   }, [location.state]);
 
+  // Fetch billing / lab / appointment records so the selected patient's 360° history can also
+  // show their previous invoices, payments, lab job status, and visit notes — not just eye exams.
+  useEffect(() => {
+    const fetchBillingRecords = async () => {
+      const unwrap = (res) => (res && res.data && res.data.results) || (res && res.data) || [];
+      let invPool = [];
+      let payPool = [];
+      let apptPool = [];
+
+      try {
+        invPool = JSON.parse(localStorage.getItem('optical_sales_invoices') || '[]');
+        payPool = [
+          ...JSON.parse(localStorage.getItem('optical_payments') || '[]'),
+          ...JSON.parse(localStorage.getItem('optical_sales_payments') || '[]')
+        ];
+        apptPool = JSON.parse(localStorage.getItem('optical_appointments') || '[]');
+      } catch (e) {}
+
+      try {
+        const [invRes, payRes, apptRes] = await Promise.all([
+          axios.get('/api/sales/invoices/').catch(() => null),
+          axios.get('/api/sales/payments/').catch(() => null),
+          axios.get('/api/sales/appointments/').catch(() => null)
+        ]);
+        invPool = [...invPool, ...unwrap(invRes)];
+        payPool = [...payPool, ...unwrap(payRes)];
+        apptPool = [...apptPool, ...unwrap(apptRes)];
+      } catch (e) {}
+
+      // Dedup by id (backend rows and their localStorage mirror share the same id where saved)
+      const dedup = (arr) => Array.from(
+        new Map(arr.filter(Boolean).map(r => [String(r.id || r.receipt_no || r.invoice_number || Math.random()), r])).values()
+      );
+
+      setInvoices(dedup(invPool));
+      setPayments(dedup(payPool));
+      setAppointments(dedup(apptPool));
+    };
+
+    fetchBillingRecords();
+  }, []);
+
   // Filtered Patients List
   const filteredPatients = patients.filter(p => {
     const q = searchQuery.toLowerCase();
@@ -304,6 +394,121 @@ export default function PatientHistory() {
     : [];
 
   const patientExams = rawPatientExams;
+
+  // Every prescription this patient has ever been given — one row per eye-exam visit, pulling the
+  // final subjective refraction plus near-add / PD / diagnosis for each.
+  const patientPrescriptions = patientExams.map((exam, index) => ({
+    key: exam.id || index,
+    exam,
+    date: exam.date || '—',
+    optometrist: exam.assignedOptometrist || exam.optometrist || '—',
+    od: {
+      sph: exam.sphRight || exam.od?.sph || '—',
+      cyl: exam.cylRight || exam.od?.cyl || '—',
+      axis: exam.axisRight || exam.od?.axis || '—',
+      va: exam.vaOD || exam.od?.va || '—',
+      add: exam.sub_add_od || exam.nearAdd || '—'
+    },
+    os: {
+      sph: exam.sphLeft || exam.os?.sph || '—',
+      cyl: exam.cylLeft || exam.os?.cyl || '—',
+      axis: exam.axisLeft || exam.os?.axis || '—',
+      va: exam.vaOS || exam.os?.va || '—',
+      add: exam.sub_add_os || exam.nearAdd || '—'
+    },
+    nearAdd: exam.nearAdd || '—',
+    pd: exam.distancePD || exam.pd || '',
+    diagnosis: exam.diagnosis || exam.primary_diagnosis || '',
+    rxSummary: exam.rx_summary || exam.raw_data?.rxSummary || ''
+  }));
+
+  // Consolidated per-visit clinical notes (complaints, history, diagnosis, recommendations,
+  // follow-up) drawn from each eye-exam record, plus any front-desk appointment notes.
+  const patientVisitNotes = patientExams.map((exam, index) => {
+    const mh = exam.medicalHistory || {};
+    return {
+      key: exam.id || `exam-${index}`,
+      type: 'Eye Examination',
+      date: exam.date || '—',
+      optometrist: exam.assignedOptometrist || exam.optometrist || '—',
+      fields: [
+        ['Chief Complaints', exam.complaints || mh.complaints],
+        ['Complaint Duration', exam.complaint_duration || exam.raw_data?.complaintDuration],
+        ['Glasses Usage', exam.glasses_usage || exam.raw_data?.glassesUsage],
+        ['Medical History', exam.medical_history || mh.medical_history],
+        ['Allergies', exam.allergies || mh.allergies],
+        ['Family History', exam.family_history || exam.raw_data?.familyHistory],
+        ['Primary Diagnosis', exam.diagnosis || exam.primary_diagnosis],
+        ['Rx / Advice Summary', exam.rx_summary || exam.raw_data?.rxSummary],
+        ['Contact Lens Advice', exam.cl_recommend || exam.raw_data?.clRecommend],
+        ['Lens Recommendation', [exam.rec_lens_brand, exam.rec_lens_type, exam.rec_lens_coating].filter(Boolean).join(' ')],
+        ['Frame Recommendation', [exam.rec_frame_brand, exam.rec_frame_shape, exam.rec_frame_color].filter(Boolean).join(' ')],
+        ['Follow-up Date', exam.follow_up_date],
+        ['Follow-up Interval', exam.follow_up_interval]
+      ].filter(([, v]) => v && String(v).trim() && String(v).trim() !== '—')
+    };
+  });
+
+  const patientAppointmentNotes = appointments
+    .filter(a => billingRecordMatchesPatient(a, selectedPatient))
+    .map((a, index) => ({
+      key: a.id || `appt-${index}`,
+      type: 'Appointment',
+      date: a.appointment_date || a.date || '—',
+      time: a.appointment_time || '',
+      doctor: a.doctor || '—',
+      status: a.status || '',
+      appointmentType: a.appointment_type || '',
+      notes: a.notes || ''
+    }))
+    .filter(a => a.notes || a.appointmentType || a.status);
+
+  // Previous invoices & the payment receipts booked against them.
+  const patientInvoices = invoices
+    .filter(inv => billingRecordMatchesPatient(inv, selectedPatient))
+    .map((inv, index) => {
+      const total = invoiceTotal(inv);
+      const paid = invoicePaid(inv);
+      return {
+        key: inv.id || `inv-${index}`,
+        raw: inv,
+        number: inv.invoice_number || inv.invoiceNumber || inv.id || `INV-${index + 1}`,
+        date: recordDate(inv) || '—',
+        total,
+        paid,
+        balance: Math.max(0, total - paid),
+        paymentStatus: invoicePaymentStatus(inv),
+        labStatus: invoiceLabStatus(inv),
+        method: inv.payment_method || inv.paymentMethod || '',
+        frame: inv.frame || inv.frame_name || '',
+        lens: inv.lens || inv.lens_name || '',
+        items: Array.isArray(inv.items) ? inv.items : []
+      };
+    })
+    .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+
+  const patientPayments = payments
+    .filter(p => billingRecordMatchesPatient(p, selectedPatient))
+    .map((p, index) => ({
+      key: p.id || p.receipt_no || `pay-${index}`,
+      receiptNo: p.receipt_no || p.receiptNo || p.id || '—',
+      date: recordDate(p) || '—',
+      amount: parseFloat(p.amount || 0) || 0,
+      method: p.method || p.payment_method || p.paymentMethod || '—',
+      status: p.status || 'Completed',
+      invoiceRef: p.invoice || p.invoiceNumber || '',
+      notes: p.notes || ''
+    }))
+    .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+
+  const totalBilled = patientInvoices.reduce((s, i) => s + i.total, 0);
+  const totalPaid = patientInvoices.reduce((s, i) => s + i.paid, 0);
+  const totalOutstanding = Math.max(0, totalBilled - totalPaid);
+
+  // Lab / fulfillment jobs — the subset of invoices that have a lab pipeline stage or dispensed
+  // frame/lens items to track.
+  const LAB_STAGES = ['Order Received', 'In Lab Processing', 'Frame Mounting', 'Quality Control', 'Ready for Collection', 'Delivered'];
+  const patientLabOrders = patientInvoices.filter(i => i.labStatus || i.frame || i.lens);
 
   const handleStartExamForPatient = () => {
     if (!selectedPatient) return;
@@ -403,7 +608,7 @@ export default function PatientHistory() {
             <HistoryIcon sx={{ fontSize: 36 }} /> Patient Clinical History & 360° Vision Profile
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            Two-panel split workspace: Inspect past eye tests, refraction power progression, spectacle orders, and risk alerts
+            Two-panel split workspace: past eye tests, refraction progression, all previous prescriptions, visit notes, invoices &amp; payments, and lab order status
           </Typography>
         </Box>
 
@@ -637,6 +842,10 @@ export default function PatientHistory() {
                   <Tab icon={<ProgressionIcon fontSize="small" />} iconPosition="start" label="Refraction Power Progression" />
                   <Tab icon={<SpecIcon fontSize="small" />} iconPosition="start" label="Spectacles & Sales Orders" />
                   <Tab icon={<MedicalIcon fontSize="small" />} iconPosition="start" label="Medical & Risk History" />
+                  <Tab icon={<RxIcon fontSize="small" />} iconPosition="start" label={`Previous Prescriptions (${patientPrescriptions.length})`} />
+                  <Tab icon={<NotesIcon fontSize="small" />} iconPosition="start" label={`Previous Visit Notes (${patientVisitNotes.length + patientAppointmentNotes.length})`} />
+                  <Tab icon={<BillIcon fontSize="small" />} iconPosition="start" label={`Invoices & Payments (${patientInvoices.length})`} />
+                  <Tab icon={<LabIcon fontSize="small" />} iconPosition="start" label={`Lab Orders & Status (${patientLabOrders.length})`} />
                 </Tabs>
               </Card>
 
@@ -882,6 +1091,302 @@ export default function PatientHistory() {
                       </Paper>
                     </Grid>
                   </Grid>
+                </Card>
+              )}
+
+              {/* TAB 5: Previous Prescriptions (All) */}
+              {activeTab === 4 && (
+                <Card variant="outlined" sx={{ borderRadius: 3, p: 3 }}>
+                  <Typography variant="h6" fontWeight={800} color="primary.main" sx={{ mb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <RxIcon /> All Previous Prescriptions
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+                    Every spectacle prescription issued to this patient across all recorded eye examinations.
+                  </Typography>
+
+                  {patientPrescriptions.length === 0 ? (
+                    <Alert severity="info" sx={{ borderRadius: 2 }}>
+                      No prescriptions on record yet. A prescription is captured each time an eye examination is saved for this patient.
+                    </Alert>
+                  ) : (
+                    <TableContainer component={Paper} elevation={0} sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
+                      <Table size="small">
+                        <TableHead sx={{ bgcolor: 'action.hover' }}>
+                          <TableRow>
+                            <TableCell sx={{ fontWeight: 800 }}>Date</TableCell>
+                            <TableCell sx={{ fontWeight: 800, color: 'primary.main' }}>OD — SPH / CYL / AXIS / ADD</TableCell>
+                            <TableCell sx={{ fontWeight: 800, color: '#059669' }}>OS — SPH / CYL / AXIS / ADD</TableCell>
+                            <TableCell sx={{ fontWeight: 800 }}>PD</TableCell>
+                            <TableCell sx={{ fontWeight: 800 }}>Diagnosis</TableCell>
+                            <TableCell sx={{ fontWeight: 800 }}>Optometrist</TableCell>
+                            <TableCell sx={{ fontWeight: 800, textAlign: 'right' }}>Print</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {patientPrescriptions.map((rx) => (
+                            <TableRow key={rx.key} hover>
+                              <TableCell sx={{ fontWeight: 700, whiteSpace: 'nowrap' }}>📅 {rx.date}</TableCell>
+                              <TableCell sx={{ fontWeight: 700, color: 'primary.main' }}>
+                                {rx.od.sph} / {rx.od.cyl} / {rx.od.axis}{rx.od.axis !== '—' ? '°' : ''} / {rx.od.add}
+                              </TableCell>
+                              <TableCell sx={{ fontWeight: 700, color: '#059669' }}>
+                                {rx.os.sph} / {rx.os.cyl} / {rx.os.axis}{rx.os.axis !== '—' ? '°' : ''} / {rx.os.add}
+                              </TableCell>
+                              <TableCell sx={{ fontWeight: 700 }}>{rx.pd ? `${rx.pd} mm` : '—'}</TableCell>
+                              <TableCell sx={{ fontSize: '0.8rem' }}>{rx.diagnosis || '—'}</TableCell>
+                              <TableCell sx={{ fontSize: '0.8rem' }}>{rx.optometrist}</TableCell>
+                              <TableCell align="right">
+                                <Tooltip title="Print This Prescription">
+                                  <IconButton size="small" onClick={() => setPrintingExam(rx.exam)}>
+                                    <PrintIcon fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </TableContainer>
+                  )}
+                </Card>
+              )}
+
+              {/* TAB 6: Previous Visit Notes */}
+              {activeTab === 5 && (
+                <Card variant="outlined" sx={{ borderRadius: 3, p: 3 }}>
+                  <Typography variant="h6" fontWeight={800} color="primary.main" sx={{ mb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <NotesIcon /> Previous Visit Notes
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+                    Clinical notes, complaints, diagnoses, recommendations and follow-up plans recorded at each past visit.
+                  </Typography>
+
+                  {(patientVisitNotes.every(v => v.fields.length === 0) && patientAppointmentNotes.length === 0) ? (
+                    <Alert severity="info" sx={{ borderRadius: 2 }}>
+                      No visit notes recorded for this patient yet.
+                    </Alert>
+                  ) : (
+                    <Stack spacing={2}>
+                      {patientVisitNotes.filter(v => v.fields.length > 0).map((v) => (
+                        <Paper key={v.key} variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5, flexWrap: 'wrap' }}>
+                            <Chip label={v.type} size="small" color="primary" sx={{ fontWeight: 700 }} />
+                            <Typography variant="subtitle2" fontWeight={800}>📅 {v.date}</Typography>
+                            <Typography variant="caption" color="text.secondary">Optometrist: {v.optometrist}</Typography>
+                          </Box>
+                          <Grid container spacing={1.5}>
+                            {v.fields.map(([label, value]) => (
+                              <Grid item xs={12} sm={6} key={label}>
+                                <Typography variant="caption" color="text.secondary" display="block" sx={{ textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</Typography>
+                                <Typography variant="body2" fontWeight={600}>{value}</Typography>
+                              </Grid>
+                            ))}
+                          </Grid>
+                        </Paper>
+                      ))}
+
+                      {patientAppointmentNotes.map((a) => (
+                        <Paper key={a.key} variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1, flexWrap: 'wrap' }}>
+                            <Chip label={a.type} size="small" color="secondary" sx={{ fontWeight: 700 }} />
+                            <Typography variant="subtitle2" fontWeight={800}>📅 {a.date}{a.time ? ` • ${a.time}` : ''}</Typography>
+                            {a.status && <Chip label={a.status} size="small" variant="outlined" sx={{ fontWeight: 700 }} />}
+                          </Box>
+                          <Typography variant="caption" color="text.secondary" display="block">
+                            Doctor: {a.doctor}{a.appointmentType ? ` • ${a.appointmentType}` : ''}
+                          </Typography>
+                          {a.notes && <Typography variant="body2" fontWeight={600} sx={{ mt: 0.5 }}>{a.notes}</Typography>}
+                        </Paper>
+                      ))}
+                    </Stack>
+                  )}
+                </Card>
+              )}
+
+              {/* TAB 7: Previous Invoices & Payments */}
+              {activeTab === 6 && (
+                <Card variant="outlined" sx={{ borderRadius: 3, p: 3 }}>
+                  <Typography variant="h6" fontWeight={800} color="primary.main" sx={{ mb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <BillIcon /> Previous Invoices & Payments
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+                    Full billing history for this patient — every sales invoice raised and every payment receipt collected.
+                  </Typography>
+
+                  {patientInvoices.length === 0 && patientPayments.length === 0 ? (
+                    <Alert severity="info" sx={{ borderRadius: 2 }}>
+                      No invoices or payments recorded for this patient yet.
+                    </Alert>
+                  ) : (
+                    <>
+                      <Grid container spacing={2} sx={{ mb: 3 }}>
+                        <Grid item xs={12} sm={4}>
+                          <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, borderLeft: '4px solid #2563eb' }}>
+                            <Typography variant="caption" color="text.secondary" fontWeight={700}>TOTAL BILLED</Typography>
+                            <Typography variant="h6" fontWeight={900}>₹{totalBilled.toLocaleString('en-IN')}</Typography>
+                          </Paper>
+                        </Grid>
+                        <Grid item xs={12} sm={4}>
+                          <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, borderLeft: '4px solid #059669' }}>
+                            <Typography variant="caption" color="text.secondary" fontWeight={700}>TOTAL PAID</Typography>
+                            <Typography variant="h6" fontWeight={900} color="success.main">₹{totalPaid.toLocaleString('en-IN')}</Typography>
+                          </Paper>
+                        </Grid>
+                        <Grid item xs={12} sm={4}>
+                          <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, borderLeft: '4px solid #d97706' }}>
+                            <Typography variant="caption" color="text.secondary" fontWeight={700}>OUTSTANDING</Typography>
+                            <Typography variant="h6" fontWeight={900} color={totalOutstanding > 0 ? 'error.main' : 'text.primary'}>₹{totalOutstanding.toLocaleString('en-IN')}</Typography>
+                          </Paper>
+                        </Grid>
+                      </Grid>
+
+                      <Typography variant="caption" fontWeight={800} color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: '0.05em', display: 'block', mb: 1 }}>
+                        Invoices ({patientInvoices.length})
+                      </Typography>
+                      {patientInvoices.length === 0 ? (
+                        <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>No invoices on record.</Typography>
+                      ) : (
+                        <TableContainer component={Paper} elevation={0} sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 2, mb: 3 }}>
+                          <Table size="small">
+                            <TableHead sx={{ bgcolor: 'action.hover' }}>
+                              <TableRow>
+                                <TableCell sx={{ fontWeight: 800 }}>Invoice #</TableCell>
+                                <TableCell sx={{ fontWeight: 800 }}>Date</TableCell>
+                                <TableCell sx={{ fontWeight: 800, textAlign: 'right' }}>Total</TableCell>
+                                <TableCell sx={{ fontWeight: 800, textAlign: 'right' }}>Paid</TableCell>
+                                <TableCell sx={{ fontWeight: 800, textAlign: 'right' }}>Balance</TableCell>
+                                <TableCell sx={{ fontWeight: 800 }}>Payment</TableCell>
+                                <TableCell sx={{ fontWeight: 800 }}>Method</TableCell>
+                              </TableRow>
+                            </TableHead>
+                            <TableBody>
+                              {patientInvoices.map((inv) => (
+                                <TableRow key={inv.key} hover>
+                                  <TableCell sx={{ fontWeight: 800, color: 'primary.main' }}>{inv.number}</TableCell>
+                                  <TableCell sx={{ whiteSpace: 'nowrap' }}>{inv.date}</TableCell>
+                                  <TableCell sx={{ textAlign: 'right', fontWeight: 700 }}>₹{inv.total.toLocaleString('en-IN')}</TableCell>
+                                  <TableCell sx={{ textAlign: 'right' }}>₹{inv.paid.toLocaleString('en-IN')}</TableCell>
+                                  <TableCell sx={{ textAlign: 'right', fontWeight: 700, color: inv.balance > 0 ? 'error.main' : 'text.secondary' }}>₹{inv.balance.toLocaleString('en-IN')}</TableCell>
+                                  <TableCell>
+                                    <Chip
+                                      label={inv.paymentStatus}
+                                      size="small"
+                                      color={/paid/i.test(inv.paymentStatus) && !/unpaid/i.test(inv.paymentStatus) ? 'success' : /partial/i.test(inv.paymentStatus) ? 'warning' : 'default'}
+                                      variant="outlined"
+                                      sx={{ fontWeight: 700, fontSize: '0.7rem' }}
+                                    />
+                                  </TableCell>
+                                  <TableCell sx={{ fontSize: '0.8rem' }}>{inv.method || '—'}</TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        </TableContainer>
+                      )}
+
+                      <Typography variant="caption" fontWeight={800} color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: '0.05em', display: 'flex', alignItems: 'center', gap: 0.5, mb: 1 }}>
+                        <PaymentsIcon fontSize="small" /> Payment Receipts ({patientPayments.length})
+                      </Typography>
+                      {patientPayments.length === 0 ? (
+                        <Typography variant="body2" color="text.secondary">No payment receipts on record.</Typography>
+                      ) : (
+                        <TableContainer component={Paper} elevation={0} sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 2 }}>
+                          <Table size="small">
+                            <TableHead sx={{ bgcolor: 'action.hover' }}>
+                              <TableRow>
+                                <TableCell sx={{ fontWeight: 800 }}>Receipt #</TableCell>
+                                <TableCell sx={{ fontWeight: 800 }}>Date</TableCell>
+                                <TableCell sx={{ fontWeight: 800, textAlign: 'right' }}>Amount</TableCell>
+                                <TableCell sx={{ fontWeight: 800 }}>Method</TableCell>
+                                <TableCell sx={{ fontWeight: 800 }}>Status</TableCell>
+                              </TableRow>
+                            </TableHead>
+                            <TableBody>
+                              {patientPayments.map((p) => (
+                                <TableRow key={p.key} hover>
+                                  <TableCell sx={{ fontWeight: 700 }}>{p.receiptNo}</TableCell>
+                                  <TableCell sx={{ whiteSpace: 'nowrap' }}>{p.date}</TableCell>
+                                  <TableCell sx={{ textAlign: 'right', fontWeight: 800, color: 'success.main' }}>₹{p.amount.toLocaleString('en-IN')}</TableCell>
+                                  <TableCell sx={{ fontSize: '0.8rem' }}>{p.method}</TableCell>
+                                  <TableCell>
+                                    <Chip label={p.status} size="small" color="success" variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
+                                  </TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        </TableContainer>
+                      )}
+                    </>
+                  )}
+                </Card>
+              )}
+
+              {/* TAB 8: Previous Lab Orders & Status */}
+              {activeTab === 7 && (
+                <Card variant="outlined" sx={{ borderRadius: 3, p: 3 }}>
+                  <Typography variant="h6" fontWeight={800} color="primary.main" sx={{ mb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <LabIcon /> Previous Lab Orders & Status
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+                    Optical laboratory job tracking for this patient — lens/frame dispensing orders and their current pipeline stage.
+                  </Typography>
+
+                  {patientLabOrders.length === 0 ? (
+                    <Alert severity="info" sx={{ borderRadius: 2 }}>
+                      No lab / dispensing orders recorded for this patient yet.
+                    </Alert>
+                  ) : (
+                    <Stack spacing={2}>
+                      {patientLabOrders.map((ord) => {
+                        const stageIdx = LAB_STAGES.findIndex(s => s.toLowerCase() === String(ord.labStatus || '').toLowerCase());
+                        const pct = stageIdx >= 0 ? Math.round(((stageIdx + 1) / LAB_STAGES.length) * 100) : (ord.labStatus ? 15 : 0);
+                        const delivered = /delivered/i.test(ord.labStatus);
+                        const ready = /ready/i.test(ord.labStatus);
+                        return (
+                          <Paper key={ord.key} variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
+                            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 1, mb: 1 }}>
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                <LabIcon color="primary" fontSize="small" />
+                                <Typography variant="subtitle2" fontWeight={800}>Order {ord.number}</Typography>
+                                <Typography variant="caption" color="text.secondary">📅 {ord.date}</Typography>
+                              </Box>
+                              <Chip
+                                label={ord.labStatus || 'Pending'}
+                                size="small"
+                                color={delivered ? 'info' : ready ? 'success' : 'warning'}
+                                sx={{ fontWeight: 800, fontSize: '0.7rem' }}
+                              />
+                            </Box>
+                            <LinearProgress
+                              variant="determinate"
+                              value={pct}
+                              sx={{ height: 8, borderRadius: 4, mb: 1 }}
+                              color={delivered ? 'info' : ready ? 'success' : 'warning'}
+                            />
+                            <Grid container spacing={1.5} sx={{ mt: 0 }}>
+                              <Grid item xs={12} sm={6}>
+                                <Typography variant="caption" color="text.secondary" display="block">FRAME</Typography>
+                                <Typography variant="body2" fontWeight={700}>👓 {ord.frame || '—'}</Typography>
+                              </Grid>
+                              <Grid item xs={12} sm={6}>
+                                <Typography variant="caption" color="text.secondary" display="block">LENS</Typography>
+                                <Typography variant="body2" fontWeight={700}>🔍 {ord.lens || '—'}</Typography>
+                              </Grid>
+                              <Grid item xs={6} sm={3}>
+                                <Typography variant="caption" color="text.secondary" display="block">ORDER VALUE</Typography>
+                                <Typography variant="body2" fontWeight={700}>₹{ord.total.toLocaleString('en-IN')}</Typography>
+                              </Grid>
+                              <Grid item xs={6} sm={3}>
+                                <Typography variant="caption" color="text.secondary" display="block">PAYMENT</Typography>
+                                <Typography variant="body2" fontWeight={700}>{ord.paymentStatus}</Typography>
+                              </Grid>
+                            </Grid>
+                          </Paper>
+                        );
+                      })}
+                    </Stack>
+                  )}
                 </Card>
               )}
             </Box>

@@ -6,7 +6,7 @@ import {
   Alert, Divider, Stack
 } from '@mui/material';
 import {
-  THERMAL_SIZES, A4_SHEET_LAYOUTS, BARCODE_TYPES,
+  THERMAL_SIZES, A4_SHEET_LAYOUTS, BARCODE_TYPES, LABEL_STYLES,
   getLayout, getTotalLabelCount, renderBarcodeMarkup, buildLabelInnerHtml,
   buildStyleBlock, printBarcodeLabels
 } from '../../utils/printBarcodeLabels';
@@ -15,19 +15,23 @@ const SETTINGS_STORAGE_KEY = 'optical_barcode_print_settings';
 
 const DEFAULT_SETTINGS = {
   printerType: 'thermal',
-  sizeId: 'roll_38x25_1up',
+  sizeId: 'roll_50x25_1up',
   barcodeType: 'EAN13',
+  labelStyle: 'jewel',
   quantityMode: 'custom',
   customQuantity: 1,
   showBusinessName: true,
   showProductName: true,
   showBarcodeText: true,
   showPrice: true,
+  showColour: true,
+  showSize: true,
+  showProductCode: false,
   showDiscountPrice: false,
   showExpiryBatch: false,
 };
 
-const EMPTY_EPHEMERAL = { discountPriceValue: '', expiryDate: '', batchNo: '' };
+const EMPTY_EPHEMERAL = { discountPriceValue: '', expiryDate: '', batchNo: '', customBarcode: '' };
 
 const BARCODE_STANDARD_MAP = {
   'EAN-13': 'EAN13', EAN13: 'EAN13',
@@ -94,8 +98,21 @@ export default function BarcodePrintDialog({ open, onClose, products }) {
   const totalCount = getTotalLabelCount(validProducts, fullSettings);
   const previewCss = useMemo(() => buildStyleBlock(layout, fullSettings.printerType), [layout, fullSettings.printerType]);
   // Scale each label up to a roughly consistent on-screen size regardless of
-  // its true mm dimensions (25mm thermal vs 13.5mm A4-80up render very differently otherwise).
-  const previewScale = Math.max(1.5, Math.min(4, 170 / (layout.heightMm * 3.78)));
+  // its true mm dimensions (25mm thermal vs 13.5mm A4-80up render very differently otherwise),
+  // but never so wide it overflows the preview box (long dumbbell jewellery tags).
+  const previewScale = Math.min(
+    Math.max(1.5, Math.min(4, 170 / (layout.heightMm * 3.78))),
+    300 / (layout.widthMm * 3.78)
+  );
+
+  // A manually typed value (single-product print only) overrides the product's
+  // saved barcode / auto series for this batch — driving both the preview and
+  // the actual print job (printBarcodeLabels reads settings.customBarcode).
+  const trimmedCustomBarcode = (fullSettings.customBarcode || '').trim();
+  const previewBarcodeValue =
+    (validProducts.length === 1 && trimmedCustomBarcode) || validProducts[0]?.barcode || '';
+  const previewProductForLabel =
+    validProducts.length > 0 ? { ...validProducts[0], barcode: previewBarcodeValue } : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -103,12 +120,12 @@ export default function BarcodePrintDialog({ open, onClose, products }) {
       setPreviewSymbol({ markup: '', error: null });
       return undefined;
     }
-    renderBarcodeMarkup(fullSettings.barcodeType, validProducts[0].barcode).then((result) => {
+    renderBarcodeMarkup(fullSettings.barcodeType, previewBarcodeValue).then((result) => {
       if (!cancelled) setPreviewSymbol(result);
     });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, validProducts, fullSettings.barcodeType]);
+  }, [open, validProducts, fullSettings.barcodeType, previewBarcodeValue]);
 
   const updateSetting = (key, value) => {
     if (key in EMPTY_EPHEMERAL) {
@@ -192,6 +209,39 @@ export default function BarcodePrintDialog({ open, onClose, products }) {
                   </Select>
                 </FormControl>
 
+                {layout.tag !== 'jewellery' && layout.tag !== 'rattail' && (
+                  <Box>
+                    <Typography variant="subtitle2" fontWeight={700} gutterBottom>Label Style</Typography>
+                    <ToggleButtonGroup
+                      exclusive
+                      size="small"
+                      value={fullSettings.labelStyle || 'jewel'}
+                      onChange={(e, val) => val && updateSetting('labelStyle', val)}
+                    >
+                      {LABEL_STYLES.map((s) => (
+                        <ToggleButton key={s.id} value={s.id}>{s.label}</ToggleButton>
+                      ))}
+                    </ToggleButtonGroup>
+                  </Box>
+                )}
+
+                {validProducts.length === 1 && (
+                  <TextField
+                    size="small"
+                    fullWidth
+                    label="Barcode Value (manual override)"
+                    placeholder={validProducts[0].barcode || 'Type a barcode'}
+                    value={ephemeral.customBarcode}
+                    onChange={(e) => updateSetting('customBarcode', e.target.value)}
+                    InputLabelProps={{ shrink: true }}
+                    helperText={
+                      trimmedCustomBarcode
+                        ? 'This exact value prints on every label in this batch (auto series is skipped).'
+                        : "Leave blank to use the product's saved barcode."
+                    }
+                  />
+                )}
+
                 <Box>
                   <Typography variant="subtitle2" fontWeight={700} gutterBottom>Quantity</Typography>
                   <RadioGroup
@@ -242,6 +292,24 @@ export default function BarcodePrintDialog({ open, onClose, products }) {
                         <FormControlLabel
                           control={<Checkbox size="small" checked={fullSettings.showPrice} onChange={(e) => updateSetting('showPrice', e.target.checked)} />}
                           label="Price / MRP"
+                        />
+                      </Grid>
+                      <Grid item xs={6}>
+                        <FormControlLabel
+                          control={<Checkbox size="small" checked={fullSettings.showColour} onChange={(e) => updateSetting('showColour', e.target.checked)} />}
+                          label="Colour"
+                        />
+                      </Grid>
+                      <Grid item xs={6}>
+                        <FormControlLabel
+                          control={<Checkbox size="small" checked={fullSettings.showSize} onChange={(e) => updateSetting('showSize', e.target.checked)} />}
+                          label="Size"
+                        />
+                      </Grid>
+                      <Grid item xs={6}>
+                        <FormControlLabel
+                          control={<Checkbox size="small" checked={fullSettings.showProductCode} onChange={(e) => updateSetting('showProductCode', e.target.checked)} />}
+                          label="Product Code"
                         />
                       </Grid>
                       <Grid item xs={6}>
@@ -308,8 +376,8 @@ export default function BarcodePrintDialog({ open, onClose, products }) {
                   sx={{ transform: `scale(${previewScale})` }}
                   dangerouslySetInnerHTML={{
                     __html: buildLabelInnerHtml(
-                      validProducts[0], fullSettings, businessName,
-                      previewSymbol.markup, previewSymbol.error
+                      previewProductForLabel, fullSettings, businessName,
+                      previewSymbol.markup, previewSymbol.error, layout
                     )
                   }}
                 />
@@ -320,6 +388,21 @@ export default function BarcodePrintDialog({ open, onClose, products }) {
               {fullSettings.sizeId === 'a4_80up' && (
                 <Alert severity="info" sx={{ mt: 1, py: 0 }}>
                   80-up dimensions vary by vendor — verify against your label sheet packaging before a large run.
+                </Alert>
+              )}
+              {layout.tag === 'jewellery' && (
+                <Alert severity="info" sx={{ mt: 1, py: 0 }}>
+                  Dumbbell tags: barcode prints on the left wing, price on the right. Fold along the
+                  centre tie-bridge (the non-adhesive strip) around the frame or chain — the gummed
+                  wings stick to each other, not to the item.
+                </Alert>
+              )}
+              {layout.tag === 'rattail' && (
+                <Alert severity="info" sx={{ mt: 1, py: 0 }}>
+                  Rat-tail tag — one borderless strip in three sections: <b>barcode</b>, then
+                  {' '}<b>price + colour / size / barcode-number</b>, then a <b>blank tail</b>. The A4
+                  layout tiles the full sheet (2 &times; 21 = 42 tags). Fold the two printed panels
+                  back-to-back at the crease; thread the blank tail through the ring, chain or hinge.
                 </Alert>
               )}
             </Grid>

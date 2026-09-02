@@ -472,6 +472,7 @@ export default function OpticalServices() {
       dispensingRemarks: '',
       procedureCharge: '0',
       medicineCharge: '0',
+      medicalAidCharge: '0',
       testType: 'FREE EYE TEST',
       testNo: ''
     });
@@ -715,7 +716,7 @@ export default function OpticalServices() {
       ...prev,
       testNo: selected?.testNo || '',
       primary: '', icdCode: '', remarks: '', procedure: '', medicine: '', advice: '', nextReview: '', nextReviewDate: '',
-      procedureCharge: '0', medicineCharge: '0'
+      procedureCharge: '0', medicineCharge: '0', medicalAidCharge: '0'
     }));
   };
 
@@ -999,6 +1000,8 @@ export default function OpticalServices() {
       diagnosis: diagnosis?.primary || 'Routine Refraction',
       procedureCharge: diagnosis?.procedureCharge || '0',
       medicineCharge: diagnosis?.medicineCharge || '0',
+      medicalAidCharge: diagnosis?.medicalAidCharge || '0',
+      medicalAidName: patientData?.medicalAidName || '',
       rx: `OD: ${subjectiveRefraction?.od?.sph || ''} SPH / ${subjectiveRefraction?.od?.cyl || ''} CYL @ ${subjectiveRefraction?.od?.axis || ''}° | OS: ${subjectiveRefraction?.os?.sph || ''} SPH / ${subjectiveRefraction?.os?.cyl || ''} CYL @ ${subjectiveRefraction?.os?.axis || ''}°`,
       patientData,
       subjectiveRefraction,
@@ -1387,7 +1390,13 @@ export default function OpticalServices() {
               if (exam.patientData) setPatientData(exam.patientData);
               if (exam.subjectiveRefraction) setSubjectiveRefraction(exam.subjectiveRefraction);
               if (exam.medicalHistory) setMedicalHistory(exam.medicalHistory);
-              setDiagnosis(prev => ({ ...prev, testNo: exam.testNo || '' }));
+              setDiagnosis(prev => ({
+                ...prev,
+                testNo: exam.testNo || '',
+                procedureCharge: exam.procedureCharge ?? prev.procedureCharge ?? '0',
+                medicineCharge: exam.medicineCharge ?? prev.medicineCharge ?? '0',
+                medicalAidCharge: exam.medicalAidCharge ?? prev.medicalAidCharge ?? '0'
+              }));
             }}
           />
         </Box>

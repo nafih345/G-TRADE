@@ -4,7 +4,7 @@ import {
   MenuItem, Button, Checkbox, FormControlLabel, Paper, 
   Table, TableBody, TableCell, TableContainer, TableHead,
   TableRow, Stack, Divider, InputAdornment, Tooltip, Chip,
-  Dialog, IconButton, Menu, ListItemIcon, ListItemText
+  Dialog, IconButton, Menu, ListItemIcon, ListItemText, Autocomplete
 } from '@mui/material';
 import { 
   Search as SearchIcon, 
@@ -25,6 +25,21 @@ import OrthopticsModal from './OrthopticsModal';
 import PrintPrescriptionCard from './PrintPrescriptionCard';
 import QuickDatePickerField from '../common/QuickDatePickerField';
 import { printSalesInvoiceReceipt } from '../../utils/printInvoice';
+
+// Common medical aid / insurance schemes offered as quick picks on the charges bar. The field
+// is free-solo, so staff can still type any scheme not listed here.
+const MEDICAL_AID_OPTIONS = [
+  'Self-Pay / Cash',
+  'BOMAID',
+  'PULA Medical Aid Fund',
+  'Botsogo Health Plan',
+  'BPOMAS',
+  'Pres Care Medical Aid',
+  'Medscheme',
+  'Discovery Health',
+  'Star Health',
+  'Other / Private',
+];
 
 export default function SingleScreenEyeTestForm({
   patientData = {}, setPatientData,
@@ -109,21 +124,28 @@ export default function SingleScreenEyeTestForm({
   const [orthopticsOpen, setOrthopticsOpen] = useState(false);
   const [printModalOpen, setPrintModalOpen] = useState(false);
 
-  // Prints a billing invoice for a saved visit (procedure + medicine charges recorded at save time)
+  // Prints a billing invoice for a saved visit (procedure + medicine + medical-aid charges
+  // recorded at save time). Medical Aid Charge is the amount claimed from / covered by the
+  // patient's medical aid, shown as a deduction line so the total reflects what the patient pays.
   const handlePrintInvoice = (row, paperSize = 'A4') => {
     const procCharge = parseFloat(row.procedureCharge || 0) || 0;
     const medCharge = parseFloat(row.medicineCharge || 0) || 0;
+    const aidCharge = parseFloat(row.medicalAidCharge || 0) || 0;
+    const items = [
+      { name: 'Eye Examination / Consultation Fee', qty: 1, price: procCharge },
+      { name: 'Medicine / Pharmacy Charge', qty: 1, price: medCharge }
+    ];
+    if (aidCharge) {
+      items.push({ name: `Medical Aid Cover${row.medicalAidName ? ` (${row.medicalAidName})` : ''}`, qty: 1, price: -aidCharge });
+    }
     printSalesInvoiceReceipt({
       invoiceNumber: `EYE-${row.testNo || row.id || ''}`,
       date: row.date,
       customerName: row.name,
       phone: row.phone,
       doctor: row.assignedOptometrist || row.optometrist || row.doctor,
-      items: [
-        { name: 'Eye Examination / Consultation Fee', qty: 1, price: procCharge },
-        { name: 'Medicine / Pharmacy Charge', qty: 1, price: medCharge }
-      ],
-      total: procCharge + medCharge
+      items,
+      total: Math.max(0, procCharge + medCharge - aidCharge)
     }, paperSize);
   };
 
@@ -927,8 +949,9 @@ export default function SingleScreenEyeTestForm({
           but the action buttons stay reachable: Save is simply disabled once already locked
           (nothing new to save), Rx Print/Clear Form/New Patient must keep working regardless. */}
       <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, bgcolor: '#ffffff', borderColor: '#cbd5e1' }}>
+        {/* Row 1: the four charge / medical-aid fields, evenly spaced across the full width. */}
         <Grid container spacing={2} alignItems="center">
-          <Grid item xs={6} sm={2.5} sx={lockSx}>
+          <Grid item xs={6} sm={3} sx={lockSx}>
             <TextField
               fullWidth size="small" label="Procedure Charge"
               value={diagnosis?.procedureCharge || '0'}
@@ -936,7 +959,7 @@ export default function SingleScreenEyeTestForm({
               InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
             />
           </Grid>
-          <Grid item xs={6} sm={2.5} sx={lockSx}>
+          <Grid item xs={6} sm={3} sx={lockSx}>
             <TextField
               fullWidth size="small" label="Medicine Charge"
               value={diagnosis?.medicineCharge || '0'}
@@ -945,21 +968,59 @@ export default function SingleScreenEyeTestForm({
             />
           </Grid>
 
-          <Grid item xs={12} sm={7} sx={{ display: 'flex', gap: 1, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
-            <Button variant="outlined" color="primary" disabled={isLocked} startIcon={<MedicalIcon />} onClick={() => setOrthopticsOpen(true)} sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 2 }}>
-              Orthoptics Form
-            </Button>
-            <Button variant="outlined" color="secondary" startIcon={<PrintIcon />} onClick={() => setPrintModalOpen(true)} sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 2 }}>
-              Rx Print
-            </Button>
-            <Button variant="contained" color="success" disabled={isLocked} startIcon={<SaveIcon />} onClick={onSaveDraft} sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 2, px: 3 }}>
-              Save Clinical Record
-            </Button>
-            <Button variant="outlined" color="inherit" startIcon={<ClearIcon />} onClick={onClearAll} sx={{ textTransform: 'none', fontWeight: 600, borderRadius: 2 }}>
-              Clear Form
-            </Button>
+          {/* Medical Aid — pick a common scheme or type a custom one. Bound to the same
+              patientData.medicalAidName captured in the patient-registration section, so setting
+              it here fills that field (and vice-versa) and it flows into the saved visit /
+              customer record on Save Clinical Record. */}
+          <Grid item xs={6} sm={3}>
+            <Autocomplete
+              freeSolo
+              size="small"
+              options={MEDICAL_AID_OPTIONS}
+              value={patientData.medicalAidName || ''}
+              onChange={(e, val) => setPatientData(prev => ({ ...prev, medicalAidName: val || '' }))}
+              onInputChange={(e, val) => setPatientData(prev => ({ ...prev, medicalAidName: val || '' }))}
+              renderInput={(params) => (
+                <TextField
+                  {...params}
+                  label="Medical Aid"
+                  placeholder="Scheme / insurer"
+                  InputProps={{
+                    ...params.InputProps,
+                    startAdornment: <InputAdornment position="start"><MedicalIcon fontSize="small" color="action" /></InputAdornment>
+                  }}
+                />
+              )}
+            />
+          </Grid>
+
+          {/* Amount claimed from / covered by the medical aid — deducted from the patient's
+              payable on the printed invoice (see handlePrintInvoice). */}
+          <Grid item xs={6} sm={3} sx={lockSx}>
+            <TextField
+              fullWidth size="small" label="Medical Aid Charge"
+              value={diagnosis?.medicalAidCharge || '0'}
+              onChange={(e) => setDiagnosis(prev => ({ ...prev, medicalAidCharge: e.target.value }))}
+              InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
+            />
           </Grid>
         </Grid>
+
+        {/* Row 2: action buttons on their own line, right-aligned, wrapping cleanly on small screens. */}
+        <Box sx={{ display: 'flex', gap: 1, justifyContent: { xs: 'stretch', sm: 'flex-end' }, flexWrap: 'wrap', mt: 2 }}>
+          <Button variant="outlined" color="primary" disabled={isLocked} startIcon={<MedicalIcon />} onClick={() => setOrthopticsOpen(true)} sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 2 }}>
+            Orthoptics Form
+          </Button>
+          <Button variant="outlined" color="secondary" startIcon={<PrintIcon />} onClick={() => setPrintModalOpen(true)} sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 2 }}>
+            Rx Print
+          </Button>
+          <Button variant="contained" color="success" disabled={isLocked} startIcon={<SaveIcon />} onClick={onSaveDraft} sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 2, px: 3 }}>
+            Save Clinical Record
+          </Button>
+          <Button variant="outlined" color="inherit" startIcon={<ClearIcon />} onClick={onClearAll} sx={{ textTransform: 'none', fontWeight: 600, borderRadius: 2 }}>
+            Clear Form
+          </Button>
+        </Box>
       </Paper>
 
       {/* 📜 SECTION 6: Saved Examination Directory Search Table */}

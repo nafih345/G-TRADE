@@ -250,6 +250,7 @@ export default function Purchases() {
         name: p.name,
         sku: p.code || p.sku || '',
         barcode: p.barcode || '',
+        extra_barcodes: p.extra_barcodes || [],
         costPrice: parseFloat(p.purchasePrice || p.cost_price || p.costPrice || 0) || 0,
         retailPrice: parseFloat(p.sellingPrice || p.retail_price || p.retailPrice || p.price || 0) || 0,
         stock: parseInt(p.stock) || 0,

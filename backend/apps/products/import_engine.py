@@ -295,6 +295,8 @@ def _process_chunk(batch, chunk_rows, resolved, duplicate_strategy,
             category_name=(infer_category_name(category, name) or category)[:140],
             brand_name=brand[:140],
             supplier_name=supplier[:140] if supplier else '',
+            color=(get('color_code')[:100] or None),
+            size=(get('size')[:100] or None),
             cost_price=cost_price,
             retail_price=selling_price,
             stock=stock,
@@ -378,8 +380,8 @@ def _process_chunk(batch, chunk_rows, resolved, duplicate_strategy,
                 Product.objects.bulk_update(
                     to_update,
                     fields=['name', 'category_name', 'brand_name', 'supplier_name',
-                            'cost_price', 'retail_price', 'stock', 'extra_data',
-                            'barcode', 'import_batch'],
+                            'color', 'size', 'cost_price', 'retail_price', 'stock',
+                            'extra_data', 'barcode', 'import_batch'],
                     batch_size=CHUNK_SIZE
                 )
             imported += len(to_update)

@@ -255,6 +255,8 @@ export default function ProductMasterDialog({
       category_name: p.category || '',
       brand_name: p.brand || '',
       supplier_name: p.supplier || '',
+      color: p.color || '',
+      size: p.size || '',
       hsn_code: p.hsnCode || '',
       rack_location: p.rack || '',
       cost_price: purchasePrice,
@@ -547,6 +549,8 @@ export default function ProductMasterDialog({
                 productName={p.name}
                 productCode={p.code}
                 productPrice={saleNum || mrpNum || 0}
+                productColour={p.color}
+                productSize={p.size}
                 generateUrl="/api/products/items/next_ean13_candidate/"
               />
             </Section>

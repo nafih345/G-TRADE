@@ -88,6 +88,10 @@ class Product(BaseUUIDModel):
     category_name = models.CharField(max_length=150, blank=True, null=True, db_index=True)
     brand_name = models.CharField(max_length=150, blank=True, null=True, db_index=True)
     supplier_name = models.CharField(max_length=150, blank=True, null=True)
+    # Variant attributes surfaced on barcode labels / pickers. Legacy imported rows
+    # may still only carry these inside extra_data — the serializer falls back to that.
+    color = models.CharField(max_length=100, blank=True, null=True)
+    size = models.CharField(max_length=100, blank=True, null=True)
     frame_type = models.CharField(max_length=150, blank=True, null=True)
     rack_location = models.CharField(max_length=150, blank=True, null=True)
     hsn_code = models.CharField(max_length=15, blank=True, null=True)
@@ -121,6 +125,27 @@ class BarcodeSequence(models.Model):
 
     def __str__(self):
         return f"{self.prefix} -> {self.last_number}"
+
+
+class ProductBarcode(models.Model):
+    """Additional scan-in barcodes that all resolve to the same product.
+
+    When N labels are printed for one product the printer assigns each label its
+    own code from a running EAN-13 series (see barcode_utils.reserve_ean13), so
+    no two physical tags carry an identical barcode. Every code in that series is
+    stored here against the product, so scanning any of them at billing still
+    finds the product. Label #1 always reuses ``Product.barcode`` itself.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='extra_barcodes')
+    code = models.CharField(max_length=150, unique=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"{self.code} -> {self.product_id}"
 
 
 class BarcodeHistory(BaseUUIDModel):

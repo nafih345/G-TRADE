@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import useBarcodeScanner from '../../hooks/useBarcodeScanner';
 import { sendInvoiceWhatsApp } from '../../utils/whatsappInvoice';
+import { barcodeMatchesProduct } from '../../utils/barcodeMatch';
 import { 
   Box, Card, Typography, Grid, TextField, 
   Button, MenuItem, Table, TableBody, TableCell, 
@@ -31,8 +32,10 @@ import {
   Send as SendIcon,
   Speed as SpeedIcon,
   CloudDone as CloudIcon,
-  Visibility as EyeIcon
+  Visibility as EyeIcon,
+  ReceiptLong as BillIcon
 } from '@mui/icons-material';
+import PrintInvoiceModal from './PrintInvoiceModal';
 
 // Standard Indian GST slabs offered in the Tax % dropdowns.
 const TAX_SLABS = [0, 5, 12, 18, 28];
@@ -189,7 +192,7 @@ export default function NewSaleWizard({
     price: '',
     discPercent: 0,
     incTax: 0,
-    taxPercent: 18
+    taxPercent: 0
   });
   // Full product record for the currently-selected Optical DB item, shown as a detail strip
   // (barcode/brand/category/stock/price) under the selector so staff can confirm they picked
@@ -539,10 +542,8 @@ export default function NewSaleWizard({
       category: (selectedProd.type || selectedProd.category || 'FRAME').toUpperCase(),
       price: selectedProd.price || selectedProd.sellingPrice || 0,
       discPercent: 0,
-      // Pre-fill the Tax % from the picked product. selectedProd.tax is a Tax-master UUID
-      // (not a number) so it must NOT be used as a rate — use the numeric taxRate/gst the
-      // product loaders derive. Only fall back to 18% when the product has no tax at all.
-      taxPercent: resolveProductTaxPercent(selectedProd)
+      // Tax % is fixed at 0 for this entry row regardless of the product's tax master.
+      taxPercent: 0
     });
     // Shown as a detail strip under the selector so the user can see exactly what they're
     // about to add (barcode, brand, stock, ...) before committing it to the billing grid.
@@ -604,7 +605,7 @@ export default function NewSaleWizard({
     setEntryInput({
       ...entryInput,
       productId: '', barcode: '', item: '', modelNo: '', color: '', size: '', qty: 1, price: '', power: '',
-      discPercent: 0, taxPercent: 18
+      discPercent: 0, taxPercent: 0
     });
     setSelectedProductDetail(null);
   };
@@ -617,7 +618,7 @@ export default function NewSaleWizard({
   const handleBarcodeScan = (code) => {
     const normalized = code.trim().toLowerCase();
     const found = products.find(p =>
-      (p.barcode && String(p.barcode).toLowerCase() === normalized) ||
+      barcodeMatchesProduct(p, normalized) ||
       (p.code && String(p.code).toLowerCase() === normalized) ||
       (p.sku && String(p.sku).toLowerCase() === normalized)
     );
@@ -662,6 +663,48 @@ export default function NewSaleWizard({
   // 3️⃣ PART 3 HANDLER: Edit an already-added row's Qty/Price/Discount/Tax without deleting
   // and re-entering it — recomputes disc/tax/gross/total the same way handleAddItem does.
   const [editingItem, setEditingItem] = useState(null);
+
+  // "Show Bill" — a read-only invoice preview of the current billing grid before the sale is
+  // completed/persisted. Reuses the same PrintInvoiceModal the post-checkout flow uses, fed a
+  // snapshot object built from live state (no backend write, no localStorage, no stock move).
+  const [showBillOpen, setShowBillOpen] = useState(false);
+
+  const buildInvoiceSnapshot = () => ({
+    id: billNo,
+    invoiceNumber: billNo,
+    date: new Date().toISOString().split('T')[0],
+    customerName: customerInput.name || 'Walk-in Customer',
+    phone: customerInput.phone || '',
+    customerPhone: customerInput.phone || '',
+    customerAge: customerInput.age,
+    customerGender: customerInput.gender,
+    customerAddress: customerInput.address,
+    diagnosis: rxData.notes || '',
+    icdCode,
+    docType,
+    items: itemsList,
+    totalQty,
+    grossTotal,
+    itemDiscounts,
+    totalTax,
+    netTotal,
+    advancePaid: parseFloat(advancePaid) || 0,
+    balanceDue,
+    paymentMode,
+    paymentMethod: paymentMode,
+    multiPay,
+    totalPaidAmount,
+    salesman,
+    rxData
+  });
+
+  const handleShowBill = () => {
+    if (itemsList.length === 0) {
+      alert('Please add at least one item to the billing grid before showing the bill.');
+      return;
+    }
+    setShowBillOpen(true);
+  };
 
   const handleOpenEditItem = (row) => {
     setEditingItem({ ...row });
@@ -1326,7 +1369,8 @@ export default function NewSaleWizard({
                       const extra = p.extra_data || {};
                       const haystack = [
                         p.name, p.barcode, p.sku, p.brand, p.category,
-                        extra.model_no, extra.modelNo, extra.color_code, extra.color, extra.size
+                        extra.model_no, extra.modelNo, extra.color_code, extra.color, extra.size,
+                        ...(p.extra_barcodes || [])
                       ].filter(Boolean).join(' ').toLowerCase();
                       return haystack.includes(q);
                     });
@@ -1391,14 +1435,30 @@ export default function NewSaleWizard({
               </Grid>
 
               <Grid item xs={6} sm={1.0} md={1.0}>
-                <TextField
-                  select fullWidth size="small" label="Tax %"
-                  value={entryInput.taxPercent}
-                  onChange={(e) => setEntryInput({ ...entryInput, taxPercent: e.target.value })}
-                  SelectProps={{ style: { fontSize: '0.78rem', fontWeight: 800, color: '#0f172a' } }}
+                <Autocomplete
+                  freeSolo
+                  options={['0', '5', '12', '18', '21']}
+                  value={String(entryInput.taxPercent ?? 0)}
+                  onChange={(e, val) => setEntryInput({ ...entryInput, taxPercent: val == null ? 0 : val })}
+                  onInputChange={(e, val) => setEntryInput({ ...entryInput, taxPercent: val })}
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      fullWidth size="small" label="Tax %"
+                      inputProps={{ ...params.inputProps, inputMode: 'decimal', style: { fontWeight: 900, textAlign: 'center', fontSize: '0.8rem', color: '#0f172a' } }}
+                    />
+                  )}
+                />
+              </Grid>
+
+              <Grid item xs={12} sm={1.2} md={1.2}>
+                <Button
+                  fullWidth variant="contained" size="small" color="primary"
+                  onClick={handleAddItem} startIcon={<AddIcon />}
+                  sx={{ fontWeight: 900, py: 0.8, borderRadius: 2, textTransform: 'none', fontSize: '0.75rem', whiteSpace: 'nowrap' }}
                 >
-                  {taxSlabItems(entryInput.taxPercent)}
-                </TextField>
+                  + Add Item
+                </Button>
               </Grid>
 
               <Grid item xs={12} sm={1.2} md={1.2}>
@@ -1413,16 +1473,6 @@ export default function NewSaleWizard({
                   }}
                 >
                   {quickAddOpen ? 'Close NEW' : '+ NEW Lens'}
-                </Button>
-              </Grid>
-
-              <Grid item xs={12} sm={1.2} md={1.2}>
-                <Button
-                  fullWidth variant="contained" size="small" color="primary"
-                  onClick={handleAddItem} startIcon={<AddIcon />}
-                  sx={{ fontWeight: 900, py: 0.8, borderRadius: 2, textTransform: 'none', fontSize: '0.75rem', whiteSpace: 'nowrap' }}
-                >
-                  + Add Item
                 </Button>
               </Grid>
 
@@ -1954,14 +2004,23 @@ export default function NewSaleWizard({
                     <Typography variant="subtitle1" fontWeight={900} color="success.main">₹{totalPaidAmount.toFixed(2)}</Typography>
                   </Box>
 
-                  <Button 
-                    fullWidth variant="contained" 
-                    color={docType === 'Quotation' ? 'warning' : docType === 'Order' ? 'primary' : 'success'} 
+                  <Button
+                    fullWidth variant="outlined"
+                    color="primary" size="small"
+                    onClick={handleShowBill} startIcon={<BillIcon />}
+                    sx={{ fontWeight: 900, py: 0.7, borderRadius: 2.5, textTransform: 'none' }}
+                  >
+                    Show Bill
+                  </Button>
+
+                  <Button
+                    fullWidth variant="contained"
+                    color={docType === 'Quotation' ? 'warning' : docType === 'Order' ? 'primary' : 'success'}
                     size="medium"
                     onClick={handleCompleteBilling} startIcon={<PrintIcon />}
                     sx={{ fontWeight: 900, py: 1, borderRadius: 2.5, textTransform: 'none' }}
                   >
-                    {docType === 'Order' 
+                    {docType === 'Order'
                       ? 'Complete Spectacle Order (F10)' 
                       : docType === 'Quotation' 
                         ? 'Generate Quotation (F10)' 
@@ -2038,7 +2097,10 @@ export default function NewSaleWizard({
               {activeStep === 4 && (
                 <Card elevation={0} sx={{ p: 3, border: '1px solid', borderColor: 'divider', borderRadius: 3 }}>
                   <Typography variant="h6" fontWeight={800} color="primary.main" gutterBottom>Step 5: Review & Billing Checkout</Typography>
-                  <Button variant="contained" color="success" onClick={handleCompleteBilling}>Complete Order & Print Invoice</Button>
+                  <Stack direction="row" spacing={1.5}>
+                    <Button variant="outlined" color="primary" startIcon={<BillIcon />} onClick={handleShowBill}>Show Bill</Button>
+                    <Button variant="contained" color="success" onClick={handleCompleteBilling}>Complete Order & Print Invoice</Button>
+                  </Stack>
                 </Card>
               )}
             </Grid>
@@ -2067,6 +2129,13 @@ export default function NewSaleWizard({
           </Grid>
         </Box>
       )}
+
+      {/* Read-only invoice preview of the current billing grid (no save / no stock move) */}
+      <PrintInvoiceModal
+        open={showBillOpen}
+        onClose={() => setShowBillOpen(false)}
+        invoice={showBillOpen ? buildInvoiceSnapshot() : null}
+      />
 
     </Box>
   );

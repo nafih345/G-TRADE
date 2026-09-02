@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import useBarcodeScanner from '../../hooks/useBarcodeScanner';
+import { barcodeMatchesProduct } from '../../utils/barcodeMatch';
 import { 
   Box, Grid, Card, CardContent, Typography, TextField, InputBase,
   Button, MenuItem, Table, TableBody, TableCell, 
@@ -153,29 +154,61 @@ export default function PosBillingView({
     setCatalogList(products);
   }, [products]);
 
-  const processBarcodeCode = (codeStr) => {
+  const announceScan = (product, rawCode) => {
+    addToCart(product);
+    setLastScannedNotice(`✅ Scanned "${product.name}" (₹${product.price}) -> Added to Bill!`);
+    setScanHistory(prev => [{ code: rawCode, item: product.name, time: new Date().toLocaleTimeString() }, ...prev]);
+    setTimeout(() => setLastScannedNotice(null), 4000);
+  };
+
+  const processBarcodeCode = async (codeStr) => {
     if (!codeStr) return;
-    const code = codeStr.toLowerCase();
+    const rawCode = String(codeStr).trim();
+    const code = rawCode.toLowerCase();
     const matched = catalogList.find(p =>
-      (p.barcode && p.barcode.toLowerCase() === code) ||
-      p.id.toLowerCase() === code ||
-      p.name.toLowerCase().includes(code)
+      barcodeMatchesProduct(p, code) ||
+      String(p.id || '').toLowerCase() === code ||
+      String(p.name || '').toLowerCase().includes(code)
     );
+
+    if (matched) {
+      announceScan(matched, rawCode);
+      return;
+    }
+
+    // Not in the in-memory catalog — which can be stale right after a label is printed, or
+    // capped by pagination. Ask the backend to resolve the scanned code against primary
+    // barcodes AND the printed per-label EAN-13 series (ProductBarcode) before giving up.
+    try {
+      const res = await axios.get('/api/products/items/resolve_barcode/', { params: { code: rawCode } });
+      const p = res.data && res.data.found ? res.data.product : null;
+      if (p) {
+        const catType = String(p.category || p.type || '').toLowerCase();
+        const normalized = {
+          id: String(p.id),
+          name: p.name,
+          brand: p.brand || 'Generic',
+          type: p.category || p.type || 'Frame',
+          price: parseFloat(p.price ?? p.selling_price ?? p.retail_price ?? 0),
+          taxRate: p.tax_rate ?? 18,
+          stock: p.stock || 0,
+          barcode: p.barcode || '',
+          extra_barcodes: p.extra_barcodes || [],
+          image: catType.includes('lens') ? '🔍' : '👓'
+        };
+        setCatalogList(prev => (prev.some(x => String(x.id) === normalized.id) ? prev : [...prev, normalized]));
+        announceScan(normalized, rawCode);
+        return;
+      }
+    } catch (e) {
+      // network/endpoint failure — fall through to the not-found notice below
+    }
 
     // Previously fell back to a made-up ₹1500 placeholder and added it to the bill anyway —
     // silently charging the wrong price for an unrecognized barcode. Now it just reports the
     // miss instead of guessing.
-    if (!matched) {
-      setLastScannedNotice(`❌ No product found for barcode "${codeStr}"`);
-      setScanHistory(prev => [{ code: codeStr, item: 'Not found', time: new Date().toLocaleTimeString() }, ...prev]);
-      setTimeout(() => setLastScannedNotice(null), 4000);
-      return;
-    }
-
-    addToCart(matched);
-    const notice = `✅ Scanned "${matched.name}" (₹${matched.price}) -> Added to Bill!`;
-    setLastScannedNotice(notice);
-    setScanHistory(prev => [{ code: codeStr, item: matched.name, time: new Date().toLocaleTimeString() }, ...prev]);
+    setLastScannedNotice(`❌ No product found for barcode "${rawCode}"`);
+    setScanHistory(prev => [{ code: rawCode, item: 'Not found', time: new Date().toLocaleTimeString() }, ...prev]);
     setTimeout(() => setLastScannedNotice(null), 4000);
   };
 
@@ -255,7 +288,7 @@ export default function PosBillingView({
   const searchQuery = barcodeInput.trim().toLowerCase();
   const filteredCatalog = searchQuery
     ? catalogList.filter(p => {
-        const haystack = [p.name, p.barcode, p.id, p.code, p.brand].filter(Boolean).join(' ').toLowerCase();
+        const haystack = [p.name, p.barcode, p.id, p.code, p.brand, ...(p.extra_barcodes || [])].filter(Boolean).join(' ').toLowerCase();
         return haystack.includes(searchQuery);
       })
     : selectedCategory

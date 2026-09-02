@@ -34,6 +34,8 @@ export default function BarcodeSection({
   productCode,
   productPrice,
   productStock,
+  productColour,
+  productSize,
   onSaved,
   // Endpoint that mints the next barcode in create-mode. Defaults to the legacy
   // OPTxxxxxx series; pass the EAN-13 endpoint for a 13-digit numeric series.
@@ -202,6 +204,9 @@ export default function BarcodeSection({
     id: productId || 'preview',
     name: productName || '',
     code: productCode || '',
+    product_code: productCode || '',
+    colour: productColour || '',
+    size: productSize || '',
     barcode: localValue,
     sellingPrice: productPrice || 0,
     stock: productStock || 0

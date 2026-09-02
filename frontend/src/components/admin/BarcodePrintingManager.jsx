@@ -65,6 +65,8 @@ export default function BarcodePrintingManager() {
 
   const selectedProducts = useMemo(() => Array.from(selected.values()).map((p) => ({
     id: p.id, name: p.name, code: p.sku, barcode: p.barcode,
+    colour: p.colour || p.color || '', size: p.size || '',
+    product_code: p.product_code || p.sku || '',
     sellingPrice: p.price ?? p.selling_price ?? 0, stock: p.stock
   })), [selected]);
 

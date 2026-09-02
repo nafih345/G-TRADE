@@ -26,6 +26,7 @@ import ProductMasterDialog from '../inventory/ProductMasterDialog';
 import { useDebounce } from '../../hooks/useDebounce';
 import useBarcodeScanner from '../../hooks/useBarcodeScanner';
 import { printPurchaseReceipt } from '../../utils/printPurchase';
+import { barcodeMatchesProduct } from '../../utils/barcodeMatch';
 
 const todayStr = () => new Date().toISOString().split('T')[0];
 const genInvoiceNumber = () => `PINV-${Date.now().toString().slice(-8)}`;
@@ -395,7 +396,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
   const processBarcodeCode = useCallback((codeStr) => {
     const code = (codeStr || '').toLowerCase().trim();
     if (!code) return;
-    const matched = products.find(p => (p.barcode || '').toLowerCase() === code || (p.sku || '').toLowerCase() === code);
+    const matched = products.find(p => barcodeMatchesProduct(p, code) || (p.sku || '').toLowerCase() === code);
     if (matched) addProductToGrid(matched);
     setProductSearch('');
   }, [products, addProductToGrid]);

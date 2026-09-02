@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { 
-  Box, Card, CardContent, Typography, Grid, Button, Table, TableBody, 
-  TableCell, TableContainer, TableHead, TableRow, Paper, Dialog, 
+  Box, Card, CardContent, Typography, Grid, Button, Table, TableBody,
+  TableCell, TableContainer, TableHead, TableRow, TableFooter, Paper, Dialog,
   DialogTitle, DialogContent, DialogActions, TextField, MenuItem, 
   Stack, Chip, IconButton, InputAdornment, LinearProgress, Divider, 
   Alert, Autocomplete, Tooltip, Avatar, Badge, ToggleButton, ToggleButtonGroup, Collapse
@@ -34,7 +34,10 @@ import {
   AttachMoney as MoneyIcon,
   CleaningServices as ClearIcon,
   ExpandMore as ExpandMoreIcon,
-  ExpandLess as ExpandLessIcon
+  ExpandLess as ExpandLessIcon,
+  Inventory2 as InventoryIcon,
+  ShoppingCartCheckout as CartIcon,
+  TrendingUp as TrendingUpIcon
 } from '@mui/icons-material';
 import axios from 'axios';
 import QuickDatePickerField from '../components/common/QuickDatePickerField';
@@ -509,7 +512,7 @@ export default function WholesaleSales() {
           borderColor: '#cbd5e1',
           boxShadow: '0 2px 8px rgba(0, 0, 0, 0.04)',
           display: 'flex',
-          justify: 'space-between',
+          justifyContent: 'space-between',
           alignItems: 'center',
           flexWrap: 'wrap',
           gap: 2
@@ -576,11 +579,8 @@ export default function WholesaleSales() {
         </Alert>
       )}
 
-      {/* MAIN SINGLE-PAGE POS LAYOUT */}
-      <Grid container spacing={2.5}>
-        {/* LEFT COLUMN: SECTION 1 (CUSTOMER), SECTION 2 (PRODUCTS & CART), & SECTION 4 (PAYMENT PANEL) (8 COLUMNS) */}
-        <Grid item xs={12} lg={8}>
-          <Stack spacing={2.5}>
+      {/* MAIN SINGLE-PAGE POS LAYOUT — FULL-WIDTH STACKED SECTIONS (1 → 2 → 3 → 4) */}
+      <Stack spacing={2.5}>
             {/* SECTION 1 — WHOLESALE CUSTOMER INFORMATION (WITH COLLAPSIBLE SUMMARY LINE) */}
             <Card variant="outlined" sx={{ p: 2.5, borderRadius: 4, bgcolor: '#ffffff', borderColor: '#e2e8f0' }}>
               <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: selectedCustomer && !customerDetailsExpanded ? 0 : 2 }}>
@@ -764,12 +764,49 @@ export default function WholesaleSales() {
             {/* SECTION 2 — PRODUCT SELECTION & POS CART */}
             <Card variant="outlined" sx={{ borderRadius: 4, bgcolor: '#ffffff', borderColor: '#e2e8f0', overflow: 'hidden' }}>
               <Box sx={{ p: 2.5, borderBottom: '1px solid #e2e8f0', bgcolor: '#f8fafc' }}>
-                <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mb: 2 }}>
-                  <Typography variant="subtitle1" fontWeight={850} color="#0f172a">
-                    Section 2: Live Inventory Product Selection
-                  </Typography>
-                  <Chip label="F3" size="small" sx={{ height: 20, fontSize: '0.68rem', fontWeight: 800, bgcolor: '#e2e8f0', color: '#475569' }} />
-                </Stack>
+                {(() => {
+                  const catalogCount = products.length;
+                  const inStock = products.filter((p) => parseFloat(p.availableStock ?? p.stock ?? 0) > 5).length;
+                  const lowStock = products.filter((p) => {
+                    const s = parseFloat(p.availableStock ?? p.stock ?? 0);
+                    return s > 0 && s <= 5;
+                  }).length;
+                  const outStock = products.filter((p) => parseFloat(p.availableStock ?? p.stock ?? 0) <= 0).length;
+                  return (
+                    <Stack
+                      direction={{ xs: 'column', md: 'row' }}
+                      spacing={1.5}
+                      alignItems={{ xs: 'flex-start', md: 'center' }}
+                      justifyContent="space-between"
+                      sx={{ mb: 2, width: '100%' }}
+                    >
+                      <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap" useFlexGap>
+                        <Typography variant="subtitle1" fontWeight={850} color="#0f172a">
+                          Section 2: Live Inventory Product Selection
+                        </Typography>
+                        <Chip label="F3" size="small" sx={{ height: 20, fontSize: '0.68rem', fontWeight: 800, bgcolor: '#e2e8f0', color: '#475569' }} />
+                      </Stack>
+
+                      {/* LIVE INVENTORY STATS — ALIGNED TO END OF ROW */}
+                      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ ml: 'auto' }}>
+                        <Chip
+                          icon={<InventoryIcon sx={{ fontSize: 15 }} />}
+                          label={`${catalogCount} SKUs`}
+                          size="small"
+                          variant="outlined"
+                          sx={{ fontWeight: 800, height: 24, borderColor: '#cbd5e1', color: '#475569', '& .MuiChip-icon': { color: '#64748b' } }}
+                        />
+                        <Chip label={`${inStock} In stock`} size="small" color="success" variant="outlined" sx={{ fontWeight: 800, height: 24 }} />
+                        <Chip label={`${lowStock} Low`} size="small" color="warning" variant="outlined" sx={{ fontWeight: 800, height: 24 }} />
+                        <Chip label={`${outStock} Out`} size="small" color="error" variant="outlined" sx={{ fontWeight: 800, height: 24 }} />
+                      </Stack>
+                    </Stack>
+                  );
+                })()}
+
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5, fontWeight: 600 }}>
+                  Scan a barcode gun into the F3 field for instant add, or search by product name, code, brand or category. Stock, rate and GST are pulled live from inventory.
+                </Typography>
 
                 <Grid container spacing={2}>
                   {/* BARCODE SCANNER INPUT */}
@@ -837,6 +874,43 @@ export default function WholesaleSales() {
                     />
                   </Grid>
                 </Grid>
+
+                {/* RUNNING CART SNAPSHOT — ALIGNED TO END OF PAGE */}
+                <Stack
+                  direction="row"
+                  spacing={2}
+                  alignItems="center"
+                  justifyContent="flex-end"
+                  flexWrap="wrap"
+                  useFlexGap
+                  sx={{ mt: 2, pt: 1.5, borderTop: '1px dashed #cbd5e1' }}
+                >
+                  <Stack direction="row" spacing={0.75} alignItems="center">
+                    <CartIcon sx={{ fontSize: 17, color: '#64748b' }} />
+                    <Typography variant="caption" fontWeight={800} color="#475569">
+                      {summary.totalItems} line{summary.totalItems === 1 ? '' : 's'}
+                    </Typography>
+                  </Stack>
+                  <Divider orientation="vertical" flexItem sx={{ my: 0.5 }} />
+                  <Typography variant="caption" fontWeight={800} color="#475569">
+                    {summary.totalQty} unit{summary.totalQty === 1 ? '' : 's'}
+                  </Typography>
+                  <Divider orientation="vertical" flexItem sx={{ my: 0.5 }} />
+                  <Typography variant="caption" fontWeight={800} color="#475569">
+                    Disc −₹{summary.totalDiscount.toFixed(2)}
+                  </Typography>
+                  <Divider orientation="vertical" flexItem sx={{ my: 0.5 }} />
+                  <Typography variant="caption" fontWeight={800} color="#475569">
+                    GST ₹{summary.totalGst.toFixed(2)}
+                  </Typography>
+                  <Divider orientation="vertical" flexItem sx={{ my: 0.5 }} />
+                  <Stack direction="row" spacing={0.75} alignItems="center">
+                    <TrendingUpIcon sx={{ fontSize: 17, color: 'primary.main' }} />
+                    <Typography variant="subtitle2" fontWeight={900} color="primary.main">
+                      ₹{summary.grandTotal.toLocaleString('en-IN')}
+                    </Typography>
+                  </Stack>
+                </Stack>
               </Box>
 
               {/* POS CART PRODUCTS DATA TABLE WITH STOCK OVER-LIMIT RED HIGHLIGHT */}
@@ -953,8 +1027,97 @@ export default function WholesaleSales() {
                       })
                     )}
                   </TableBody>
+                  {cartItems.length > 0 && (
+                    <TableFooter sx={{ position: 'sticky', bottom: 0, bgcolor: '#f8fafc', '& td': { borderTop: '2px solid #e2e8f0' } }}>
+                      <TableRow>
+                        <TableCell colSpan={3} sx={{ fontWeight: 800, color: '#475569' }}>
+                          {summary.totalItems} item{summary.totalItems === 1 ? '' : 's'} in cart
+                        </TableCell>
+                        <TableCell align="center" sx={{ fontWeight: 800, color: '#475569' }}>
+                          {summary.totalQty} units
+                        </TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 700, color: '#475569' }}>
+                          ₹{summary.subtotal.toFixed(2)}
+                        </TableCell>
+                        <TableCell align="center" sx={{ fontWeight: 700, color: '#dc2626' }}>
+                          −₹{summary.totalDiscount.toFixed(2)}
+                        </TableCell>
+                        <TableCell align="center" sx={{ fontWeight: 700, color: '#475569' }}>
+                          ₹{summary.totalGst.toFixed(2)}
+                        </TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 900, fontSize: '0.95rem', color: 'primary.main' }}>
+                          ₹{summary.grandTotal.toLocaleString('en-IN')}
+                        </TableCell>
+                        <TableCell />
+                      </TableRow>
+                    </TableFooter>
+                  )}
                 </Table>
               </TableContainer>
+            </Card>
+
+            {/* SECTION 3 — LIVE INVOICE SUMMARY PANEL (FULL WIDTH, UNDER SECTION 2) */}
+            <Card variant="outlined" sx={{ p: 2.5, borderRadius: 4, bgcolor: '#ffffff', borderColor: '#e2e8f0' }}>
+              <Typography variant="subtitle1" fontWeight={850} color="#0f172a" sx={{ mb: 2 }}>
+                Section 3: Live Invoice Summary
+              </Typography>
+
+              <Grid container spacing={2} alignItems="stretch">
+                <Grid item xs={12} md={7}>
+                  <Stack spacing={1.4} sx={{ p: 2, height: '100%', bgcolor: '#f8fafc', borderRadius: 3, border: '1px solid #e2e8f0' }}>
+                    <Stack direction="row" justifyContent="space-between" alignItems="center">
+                      <Typography variant="body2" color="text.secondary">Total Line Items</Typography>
+                      <Typography variant="body2" fontWeight={700}>{summary.totalItems}</Typography>
+                    </Stack>
+                    <Stack direction="row" justifyContent="space-between" alignItems="center">
+                      <Typography variant="body2" color="text.secondary">Total Quantity Units</Typography>
+                      <Typography variant="body2" fontWeight={700}>{summary.totalQty} Units</Typography>
+                    </Stack>
+                    <Divider />
+                    <Stack direction="row" justifyContent="space-between" alignItems="center">
+                      <Typography variant="body2" color="text.secondary">Subtotal (Base Price)</Typography>
+                      <Typography variant="body2" fontWeight={700}>₹ {summary.subtotal.toFixed(2)}</Typography>
+                    </Stack>
+                    <Stack direction="row" justifyContent="space-between" alignItems="center">
+                      <Typography variant="body2" color="text.secondary">Total Discount</Typography>
+                      <Typography variant="body2" fontWeight={700} color="success.main">- ₹ {summary.totalDiscount.toFixed(2)}</Typography>
+                    </Stack>
+                    <Stack direction="row" justifyContent="space-between" alignItems="center">
+                      <Typography variant="body2" color="text.secondary">GST Tax (18%)</Typography>
+                      <Typography variant="body2" fontWeight={700}>+ ₹ {summary.totalGst.toFixed(2)}</Typography>
+                    </Stack>
+                    <Stack direction="row" justifyContent="space-between" alignItems="center">
+                      <Typography variant="body2" color="text.secondary">Freight / Additional Charges</Typography>
+                      <TextField
+                        size="small"
+                        type="number"
+                        placeholder="0"
+                        value={additionalCharges}
+                        onChange={(e) => setAdditionalCharges(e.target.value)}
+                        sx={{ width: 110, '& .MuiInputBase-input': { py: 0.4, px: 0.8, textAlign: 'right', fontWeight: 700 } }}
+                      />
+                    </Stack>
+                    <Stack direction="row" justifyContent="space-between" alignItems="center">
+                      <Typography variant="body2" color="text.secondary">Round Off</Typography>
+                      <Typography variant="body2" fontWeight={600}>{summary.roundOff >= 0 ? `+ ₹${summary.roundOff.toFixed(2)}` : `- ₹${Math.abs(summary.roundOff).toFixed(2)}`}</Typography>
+                    </Stack>
+                  </Stack>
+                </Grid>
+
+                <Grid item xs={12} md={5}>
+                  <Stack justifyContent="center" spacing={1} sx={{ p: 2.5, height: '100%', borderRadius: 3, bgcolor: '#eef2ff', border: '1px solid #c7d2fe' }}>
+                    <Typography variant="subtitle2" fontWeight={800} color="#4f46e5">
+                      Grand Total Payable
+                    </Typography>
+                    <Typography variant="h3" fontWeight={900} color="primary.main" sx={{ lineHeight: 1.1 }}>
+                      ₹ {summary.grandTotal.toLocaleString('en-IN')}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary" fontWeight={600}>
+                      Inclusive of 18% GST • {summary.totalItems} items • {summary.totalQty} units
+                    </Typography>
+                  </Stack>
+                </Grid>
+              </Grid>
             </Card>
 
             {/* SECTION 4 — DYNAMIC PAYMENT & COMPLETION PANEL */}
@@ -1165,67 +1328,7 @@ export default function WholesaleSales() {
                 </Alert>
               )}
             </Card>
-          </Stack>
-        </Grid>
-
-        {/* RIGHT COLUMN: SECTION 3 (LIVE INVOICE SUMMARY STICKY PANEL) (4 COLUMNS) */}
-        <Grid item xs={12} lg={4}>
-          <Stack spacing={2.5} sx={{ position: 'sticky', top: 90, zIndex: 10 }}>
-            {/* SECTION 3 — LIVE INVOICE SUMMARY PANEL */}
-            <Card variant="outlined" sx={{ p: 2.5, borderRadius: 4, bgcolor: '#ffffff', borderColor: '#e2e8f0' }}>
-              <Typography variant="subtitle1" fontWeight={850} color="#0f172a" sx={{ mb: 2 }}>
-                Section 3: Live Invoice Summary
-              </Typography>
-
-              <Stack spacing={1.8}>
-                <Stack direction="row" justifyContent="space-between" alignItems="center">
-                  <Typography variant="body2" color="text.secondary">Total Line Items</Typography>
-                  <Typography variant="body2" fontWeight={700}>{summary.totalItems}</Typography>
-                </Stack>
-                <Stack direction="row" justifyContent="space-between" alignItems="center">
-                  <Typography variant="body2" color="text.secondary">Total Quantity Units</Typography>
-                  <Typography variant="body2" fontWeight={700}>{summary.totalQty} Units</Typography>
-                </Stack>
-                <Divider />
-                <Stack direction="row" justifyContent="space-between" alignItems="center">
-                  <Typography variant="body2" color="text.secondary">Subtotal (Base Price)</Typography>
-                  <Typography variant="body2" fontWeight={700}>₹ {summary.subtotal.toFixed(2)}</Typography>
-                </Stack>
-                <Stack direction="row" justifyContent="space-between" alignItems="center">
-                  <Typography variant="body2" color="text.secondary">Total Discount</Typography>
-                  <Typography variant="body2" fontWeight={700} color="success.main">- ₹ {summary.totalDiscount.toFixed(2)}</Typography>
-                </Stack>
-                <Stack direction="row" justifyContent="space-between" alignItems="center">
-                  <Typography variant="body2" color="text.secondary">GST Tax (18%)</Typography>
-                  <Typography variant="body2" fontWeight={700}>+ ₹ {summary.totalGst.toFixed(2)}</Typography>
-                </Stack>
-                <Stack direction="row" justifyContent="space-between" alignItems="center">
-                  <Typography variant="body2" color="text.secondary">Freight / Additional Charges</Typography>
-                  <TextField
-                    size="small"
-                    type="number"
-                    placeholder="0"
-                    value={additionalCharges}
-                    onChange={(e) => setAdditionalCharges(e.target.value)}
-                    sx={{ width: 90, '& .MuiInputBase-input': { py: 0.4, px: 0.8, textAlign: 'right', fontWeight: 700 } }}
-                  />
-                </Stack>
-                <Stack direction="row" justifyContent="space-between" alignItems="center">
-                  <Typography variant="body2" color="text.secondary">Round Off</Typography>
-                  <Typography variant="body2" fontWeight={600}>{summary.roundOff >= 0 ? `+ ₹${summary.roundOff.toFixed(2)}` : `- ₹${Math.abs(summary.roundOff).toFixed(2)}`}</Typography>
-                </Stack>
-                <Divider />
-                <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ pt: 0.5 }}>
-                  <Typography variant="subtitle1" fontWeight={850}>Grand Total</Typography>
-                  <Typography variant="h4" fontWeight={900} color="primary.main">
-                    ₹ {summary.grandTotal.toLocaleString('en-IN')}
-                  </Typography>
-                </Stack>
-              </Stack>
-            </Card>
-          </Stack>
-        </Grid>
-      </Grid>
+      </Stack>
 
       {/* DIALOG: + ADD WHOLESALE CUSTOMER */}
       <Dialog open={addCustomerOpen} onClose={() => setAddCustomerOpen(false)} maxWidth="sm" fullWidth>
