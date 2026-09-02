@@ -112,11 +112,21 @@ export default function SalesInvoice() {
           name: p.name,
           brand: p.brand || 'Generic',
           type: p.category || 'Frame',
+          category: p.category || 'Frame',
           price: parseFloat(p.sellingPrice || p.price || 0),
+          costPrice: parseFloat(p.costPrice || p.cost_price || 0),
           taxRate: normalizeTaxPercent(p.tax_rate, p.gst, p.taxRate),
           stock: p.stock || 0,
           barcode: p.barcode || '',
           extra_barcodes: p.extra_barcodes || [],
+          sku: p.sku || p.product_code || p.code || '',
+          hsn_code: p.hsn_code || p.hsn || '',
+          colour: p.colour || p.color || p.color_code || '',
+          size: p.size || '',
+          frameType: p.frame_type || p.frameType || '',
+          rack: p.rack || p.rack_location || '',
+          description: p.description || '',
+          extra_data: p.extra_data || {},
           image: (p.category || '').toLowerCase().includes('lens') ? '🔍' : '👓'
         })));
       }
@@ -146,13 +156,23 @@ export default function SalesInvoice() {
             id: String(p.id || p.product_id),
             name: p.name || p.product_name,
             brand: p.brand || 'Generic',
-            type: p.category_name || (p.type || 'Frame'),
-            price: parseFloat(p.unit_price || p.price || 0),
+            type: p.category_name || p.category || (p.type || 'Frame'),
+            category: p.category || p.category_name || (p.type || 'Frame'),
+            price: parseFloat(p.price || p.selling_price || p.unit_price || 0),
+            costPrice: parseFloat(p.cost_price || 0),
             taxRate: normalizeTaxPercent(p.tax_rate, p.gst),
             stock: p.stock || 0,
             barcode: p.barcode || '',
             extra_barcodes: p.extra_barcodes || [],
-            image: (p.category_name || p.type || '').toLowerCase().includes('lens') ? '🔍' : '👓'
+            sku: p.sku || p.product_code || '',
+            hsn_code: p.hsn_code || '',
+            colour: p.colour || p.color || '',
+            size: p.size || '',
+            frameType: p.frame_type || '',
+            rack: p.rack || p.rack_location || '',
+            description: p.description || '',
+            extra_data: p.extra_data || {},
+            image: (p.category_name || p.category || p.type || '').toLowerCase().includes('lens') ? '🔍' : '👓'
           }));
           setProducts(prev => {
             const map = new Map();

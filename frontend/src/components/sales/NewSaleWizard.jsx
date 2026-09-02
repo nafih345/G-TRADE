@@ -536,8 +536,8 @@ export default function NewSaleWizard({
       barcode: String(selectedProd.barcode || selectedProd.id || selectedProd.code || ''),
       item: selectedProd.name || '',
       modelNo: extra.model_no || extra.modelNo || selectedProd.sku || '',
-      color: extra.color_code || extra.color || '',
-      size: extra.size || '',
+      color: selectedProd.colour || selectedProd.color || extra.color_code || extra.color || '',
+      size: selectedProd.size || extra.size || '',
       brand: selectedProd.brand || 'Generic',
       category: (selectedProd.type || selectedProd.category || 'FRAME').toUpperCase(),
       price: selectedProd.price || selectedProd.sellingPrice || 0,
@@ -1368,23 +1368,54 @@ export default function NewSaleWizard({
                     return options.filter(p => {
                       const extra = p.extra_data || {};
                       const haystack = [
-                        p.name, p.barcode, p.sku, p.brand, p.category,
+                        p.name, p.barcode, p.sku, p.brand, p.category, p.type,
+                        p.hsn_code, p.colour, p.color, p.size, p.frameType,
                         extra.model_no, extra.modelNo, extra.color_code, extra.color, extra.size,
                         ...(p.extra_barcodes || [])
                       ].filter(Boolean).join(' ').toLowerCase();
                       return haystack.includes(q);
                     });
                   }}
-                  renderOption={(props, p) => (
-                    <li {...props} key={p.id || p.code || p.barcode}>
-                      <Box sx={{ py: 0.25 }}>
-                        <Typography variant="body2" fontWeight={800}>{p.name}</Typography>
-                        <Typography variant="caption" color="text.secondary">
-                          {p.brand || 'Generic'} • {p.barcode || p.sku || '—'} • ₹{p.price || p.sellingPrice || 0}
-                        </Typography>
-                      </Box>
-                    </li>
-                  )}
+                  renderOption={(props, p) => {
+                    const extra = p.extra_data || {};
+                    const modelNo = extra.model_no || extra.modelNo || p.sku || '';
+                    const colour = p.colour || p.color || extra.color_code || extra.color || '';
+                    const size = p.size || extra.size || '';
+                    const stock = p.stock ?? p.qty;
+                    const meta = [
+                      p.brand || 'Generic',
+                      (p.category || p.type || '').toString().toUpperCase() || null,
+                      modelNo ? `Model ${modelNo}` : null,
+                      colour || null,
+                      size ? `Size ${size}` : null,
+                      p.hsn_code ? `HSN ${p.hsn_code}` : null,
+                    ].filter(Boolean).join('  •  ');
+                    return (
+                      <li {...props} key={p.id || p.code || p.barcode}>
+                        <Box sx={{ py: 0.4, width: '100%' }}>
+                          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 1 }}>
+                            <Typography variant="body2" fontWeight={800}>{p.name}</Typography>
+                            <Typography variant="body2" fontWeight={900} color="primary.main" sx={{ whiteSpace: 'nowrap' }}>
+                              ₹{p.price || p.sellingPrice || 0}
+                            </Typography>
+                          </Box>
+                          <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                            {meta}
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                            Barcode: {p.barcode || '—'}
+                            {p.sku ? `  •  SKU: ${p.sku}` : ''}
+                            {stock != null ? `  •  ` : ''}
+                            {stock != null && (
+                              <Box component="span" sx={{ fontWeight: 800, color: parseInt(stock) > 0 ? 'success.main' : 'error.main' }}>
+                                Stock: {stock}
+                              </Box>
+                            )}
+                          </Typography>
+                        </Box>
+                      </li>
+                    );
+                  }}
                   renderInput={(params) => (
                     <TextField
                       {...params}
@@ -1488,12 +1519,31 @@ export default function NewSaleWizard({
                 </Typography>
                 <Chip size="small" label={entryInput.item || selectedProductDetail.name} color="primary" sx={{ fontWeight: 800, fontSize: '0.7rem' }} />
                 <Chip size="small" label={`Brand: ${selectedProductDetail.brand || 'Generic'}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
+                {(selectedProductDetail.category || selectedProductDetail.type) && (
+                  <Chip size="small" label={`Category: ${(selectedProductDetail.category || selectedProductDetail.type).toString().toUpperCase()}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
+                )}
                 <Chip size="small" label={`Stock: ${selectedProductDetail.stock ?? '—'}`} color={parseInt(selectedProductDetail.stock) > 0 ? 'success' : 'error'} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
+                <Chip size="small" label={`Price: ₹${selectedProductDetail.price || selectedProductDetail.sellingPrice || 0}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
+                {selectedProductDetail.barcode && (
+                  <Chip size="small" label={`Barcode: ${selectedProductDetail.barcode}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
+                )}
+                {entryInput.modelNo && (
+                  <Chip size="small" label={`Model: ${entryInput.modelNo}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
+                )}
+                {entryInput.color && (
+                  <Chip size="small" label={`Colour: ${entryInput.color}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
+                )}
+                {entryInput.size && (
+                  <Chip size="small" label={`Size: ${entryInput.size}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
+                )}
                 {selectedProductDetail.sku && (
                   <Chip size="small" label={`SKU: ${selectedProductDetail.sku}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
                 )}
                 {selectedProductDetail.hsn_code && (
                   <Chip size="small" label={`HSN: ${selectedProductDetail.hsn_code}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
+                )}
+                {selectedProductDetail.rack && (
+                  <Chip size="small" label={`Rack: ${selectedProductDetail.rack}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
                 )}
                 <Chip
                   size="small"
