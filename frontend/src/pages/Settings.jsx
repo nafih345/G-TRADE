@@ -25,18 +25,34 @@ export default function Settings() {
   const [multiBranch, setMultiBranch] = useState(false);
   const [confirmEnableOpen, setConfirmEnableOpen] = useState(false);
   const [branchSavedAlert, setBranchSavedAlert] = useState(false);
+  const [branchError, setBranchError] = useState('');
 
   useEffect(() => { setMultiBranch(multiBranchEnabled); }, [multiBranchEnabled]);
 
   const persistMultiBranch = async (value) => {
     setMultiBranch(value);
+    setBranchError('');
     try {
-      await axios.patch('/api/company/business-settings/', { multi_branch_enabled: value });
+      const { data } = await axios.patch('/api/company/business-settings/', { multi_branch_enabled: value });
+      // The request succeeded but the value did not stick — the backend DB is read-only or
+      // ephemeral (e.g. serverless SQLite). Surface it instead of silently snapping back.
+      if (data && typeof data.multi_branch_enabled === 'boolean' && data.multi_branch_enabled !== value) {
+        setMultiBranch(!value);
+        setBranchError('The server accepted the change but did not save it. The production '
+          + 'database looks read-only or temporary — configure a persistent database (DATABASE_URL) '
+          + 'on the backend.');
+        return;
+      }
       await refreshBranchContext();
       setBranchSavedAlert(true);
       setTimeout(() => setBranchSavedAlert(false), 4000);
     } catch (e) {
       setMultiBranch(!value); // revert on failure
+      const msg = e?.response?.data?.detail
+        || (e?.response?.status ? `Server responded ${e.response.status} ${e.response.statusText || ''}`.trim() : '')
+        || e?.message
+        || 'Could not reach the backend server.';
+      setBranchError(`Couldn't ${value ? 'enable' : 'disable'} Multi-Branch mode. ${msg}`);
     }
   };
 
@@ -496,6 +512,12 @@ export default function Settings() {
           {branchSavedAlert && (
             <Alert severity="success" sx={{ mb: 2, borderRadius: 3, fontWeight: 600 }}>
               Multi-Branch mode updated. {multiBranch ? 'Branch Management and the Branch Switcher are now active.' : 'The system is back in Single Branch mode.'}
+            </Alert>
+          )}
+
+          {branchError && (
+            <Alert severity="error" onClose={() => setBranchError('')} sx={{ mb: 2, borderRadius: 3, fontWeight: 600 }}>
+              {branchError}
             </Alert>
           )}
 

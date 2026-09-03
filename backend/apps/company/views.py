@@ -1,3 +1,7 @@
+import datetime
+import logging
+
+from django.db.utils import OperationalError, ProgrammingError
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
@@ -7,6 +11,8 @@ from .models import (
     Company, Branch, Warehouse, Notification,
     BusinessSettings, UserBranchAccess, BranchStock, StockTransfer, StockTransferItem,
 )
+
+logger = logging.getLogger('django')
 
 class CompanySerializer(ModelSerializer):
     class Meta:
@@ -152,30 +158,83 @@ class BusinessSettingsSerializer(ModelSerializer):
         fields = ('id', 'multi_branch_enabled', 'default_branch')
 
 
+def _ensure_default_branch():
+    """Return the default Branch, creating a Company + Head Office branch if none exists.
+    Enabling Multi-Branch Mode needs a branch for every operation to fall back to."""
+    branch = Branch.get_default()
+    if branch is not None:
+        return branch
+    company = Company.objects.first()
+    if company is None:
+        today = datetime.date.today()
+        company = Company.objects.create(
+            name='Main Company',
+            fiscal_year_start=datetime.date(today.year, 4, 1),
+            fiscal_year_end=datetime.date(today.year + 1, 3, 31),
+        )
+    return Branch.objects.create(
+        company=company, name='Head Office', code='HO', is_default=True, is_active=True,
+    )
+
+
 class BusinessSettingsView(APIView):
     """Singleton at /api/company/business-settings/.
-    GET returns the row; PATCH / PUT / POST update the multi_branch toggle + default branch."""
+    GET returns the row; PATCH / PUT / POST update the multi_branch toggle + default branch.
+
+    Every handler runs through `_run`, which self-heals a schema that is behind the deployed
+    code: the first time a query raises ProgrammingError/OperationalError (missing
+    company_businesssettings table / multi_branch_enabled column — i.e. the Multi-Branch
+    migrations never ran in this environment) it applies the pending migrations and retries
+    once, then returns an actionable 503 instead of a bare 500 if that still fails."""
     authentication_classes = []
     permission_classes = [permissions.AllowAny]
 
-    def get(self, request):
-        return Response(BusinessSettingsSerializer(BusinessSettings.load()).data)
+    def _run(self, fn):
+        try:
+            return fn()
+        except (ProgrammingError, OperationalError) as exc:
+            logger.warning("business-settings: schema behind code (%s); attempting self-heal.", exc)
+            healed = False
+            try:
+                from apps.common.startup import run_migrations_now
+                healed = run_migrations_now("business-settings endpoint hit missing branch schema")
+            except Exception:
+                logger.exception("business-settings: self-heal migrate raised.")
+            if healed:
+                try:
+                    return fn()
+                except (ProgrammingError, OperationalError):
+                    logger.exception("business-settings: still failing after migrate.")
+            return Response(
+                {'detail': 'The Multi-Branch database schema is not deployed in this '
+                           'environment yet. Run "python manage.py migrate" against the '
+                           'backend database, then retry. See /api/health/ for the pending '
+                           'migration list.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
-    def _update(self, request):
+    def _apply(self, request):
         obj = BusinessSettings.load()
         ser = BusinessSettingsSerializer(obj, data=request.data, partial=True)
         ser.is_valid(raise_exception=True)
-        ser.save()
+        if ser.validated_data.get('multi_branch_enabled') and obj.default_branch_id is None:
+            ser.save(default_branch=_ensure_default_branch())
+        else:
+            ser.save()
+        obj.refresh_from_db()
         return Response(BusinessSettingsSerializer(obj).data)
 
+    def get(self, request):
+        return self._run(lambda: Response(BusinessSettingsSerializer(BusinessSettings.load()).data))
+
     def patch(self, request):
-        return self._update(request)
+        return self._run(lambda: self._apply(request))
 
     def put(self, request):
-        return self._update(request)
+        return self._run(lambda: self._apply(request))
 
     def post(self, request):
-        return self._update(request)
+        return self._run(lambda: self._apply(request))
 
 
 class UserBranchAccessSerializer(ModelSerializer):

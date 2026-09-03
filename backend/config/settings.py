@@ -14,10 +14,15 @@ else:
     BASE_DIR = Path(__file__).resolve().parent.parent
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-nova-erp-super-secret-key-for-development'
+SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-nova-erp-super-secret-key-for-development')
+
+# True inside a Vercel / AWS Lambda serverless function: the code directory is read-only and
+# every invocation is isolated, so logs must go to stdout and the database must be external
+# (a bundled SQLite file would reset on every cold start). Vercel always sets $VERCEL.
+IS_SERVERLESS = bool(os.environ.get('VERCEL') or os.environ.get('AWS_LAMBDA_FUNCTION_NAME'))
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.environ.get('DEBUG', 'True') == 'True'
+DEBUG = os.environ.get('DEBUG', 'False' if IS_SERVERLESS else 'True') == 'True'
 
 ALLOWED_HOSTS = ['*']
 
@@ -87,8 +92,15 @@ ROOT_DIR = BASE_DIR.parent
 CONFIG_DIR = ROOT_DIR / 'config' if (ROOT_DIR / 'config').exists() else BASE_DIR / 'config'
 LOGS_DIR = ROOT_DIR / 'logs' if (ROOT_DIR / 'logs').exists() else BASE_DIR / 'logs'
 
-# Ensure logs directory exists
-os.makedirs(LOGS_DIR, exist_ok=True)
+# Ensure logs directory exists. On a read-only serverless filesystem fall back to /tmp,
+# the only writable location (LOGGING is switched to stdout below anyway).
+if IS_SERVERLESS:
+    LOGS_DIR = Path('/tmp/optical-erp-logs')
+try:
+    os.makedirs(LOGS_DIR, exist_ok=True)
+except OSError:
+    LOGS_DIR = Path('/tmp/optical-erp-logs')
+    os.makedirs(LOGS_DIR, exist_ok=True)
 
 # Load external database.json config if available
 db_config_file = CONFIG_DIR / 'database.json'
@@ -133,13 +145,23 @@ DB_USER = os.environ.get('DB_USER')
 DB_PASSWORD = os.environ.get('DB_PASSWORD')
 DB_HOST = os.environ.get('DB_HOST')
 DB_PORT = os.environ.get('DB_PORT', '5432')
-DATABASE_URL = os.environ.get('DATABASE_URL')
+# Vercel Postgres / Neon inject POSTGRES_URL(+ _NON_POOLING); other hosts use DATABASE_URL.
+# Prefer the non-pooling URL so `migrate` on boot runs on a direct connection.
+DATABASE_URL = (
+    os.environ.get('DATABASE_URL')
+    or os.environ.get('POSTGRES_URL_NON_POOLING')
+    or os.environ.get('POSTGRES_URL')
+)
 
 if DATABASE_URL:
     try:
         import importlib
         dj_database_url = importlib.import_module('dj_database_url')
-        DATABASES['default'] = dj_database_url.config(default=DATABASE_URL, conn_max_age=600)
+        DATABASES['default'] = dj_database_url.config(
+            default=DATABASE_URL,
+            conn_max_age=0 if IS_SERVERLESS else 600,
+            ssl_require=IS_SERVERLESS,
+        )
     except ImportError:
         from urllib.parse import urlparse
         url = urlparse(DATABASE_URL)
@@ -197,6 +219,14 @@ LOGGING = {
         },
     },
 }
+
+# Serverless: rotating file handlers are pointless (ephemeral FS) — log to stdout so the
+# platform captures it (Vercel "Runtime Logs", CloudWatch, etc.).
+if IS_SERVERLESS:
+    LOGGING['handlers'] = {
+        'console': {'level': 'INFO', 'class': 'logging.StreamHandler', 'formatter': 'verbose'},
+    }
+    LOGGING['loggers']['django']['handlers'] = ['console']
 
 
 # Password validation

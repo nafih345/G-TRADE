@@ -63,3 +63,27 @@ def run_startup_migrations():
         logger.warning("AUTO_MIGRATE: migrations applied successfully.")
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("AUTO_MIGRATE: failed to apply migrations: %s", exc)
+
+
+def run_migrations_now(reason=""):
+    """Apply pending migrations immediately, bypassing the once-per-process boot guard.
+
+    Called from a request handler (e.g. the Multi-Branch toggle) the moment a query hits
+    a missing table/column — meaning the deploy shipped code ahead of the schema and the
+    boot hook either never ran (the platform imports the app a different way) or ran before
+    the database was reachable. Best-effort; returns True only if `migrate` completed
+    without raising. Honours AUTO_MIGRATE=False like the boot hook.
+    """
+    global _ran
+    if not _enabled():
+        return False
+    try:
+        from django.core.management import call_command
+        logger.warning("Running migrations on demand%s", f": {reason}" if reason else "")
+        call_command('migrate', interactive=False, verbosity=1)
+        _ran = True
+        logger.warning("On-demand migrate completed.")
+        return True
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.exception("On-demand migrate failed: %s", exc)
+        return False
