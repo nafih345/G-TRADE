@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import QuickDatePickerField from '../components/common/QuickDatePickerField';
 import PurchaseEntryView from '../components/purchasing/PurchaseEntryView';
+import { printPurchaseReceipt } from '../utils/printPurchase';
 import { useDebounce } from '../hooks/useDebounce';
 import { 
   Box, Card, CardContent, Typography, Button, Tab, Tabs, 
@@ -23,7 +24,9 @@ import {
   Delete as DeleteIcon,
   CheckCircle as SuccessIcon,
   Warning as WarningIcon,
-  CloudUpload as CloudUploadIcon
+  CloudUpload as CloudUploadIcon,
+  Edit as EditIcon,
+  Print as PrintIcon
 } from '@mui/icons-material';
 
 import axios from 'axios';
@@ -44,6 +47,8 @@ export default function Purchases() {
   const [activeTab, setActiveTab] = useState(getTabFromPath(location.pathname));
   const [entryPrefillSupplierId, setEntryPrefillSupplierId] = useState('');
   const [entryPrefillPoId, setEntryPrefillPoId] = useState('');
+  // Non-empty while the Purchase Entry form is re-opened for an existing entry (Reports → Edit).
+  const [entryEditId, setEntryEditId] = useState('');
 
   useEffect(() => {
     setActiveTab(getTabFromPath(location.pathname));
@@ -59,8 +64,18 @@ export default function Purchases() {
   };
 
   const goToNewPurchaseEntry = (supplierId, poId) => {
+    setEntryEditId('');
     setEntryPrefillSupplierId(supplierId || '');
     setEntryPrefillPoId(poId || '');
+    setActiveTab('entry');
+    navigate('/purchase/entry');
+  };
+
+  // Reports → Edit: reopen a saved Purchase Entry in the entry form with its items intact.
+  const goToEditPurchaseEntry = (invoiceId) => {
+    setEntryPrefillSupplierId('');
+    setEntryPrefillPoId('');
+    setEntryEditId(invoiceId);
     setActiveTab('entry');
     navigate('/purchase/entry');
   };
@@ -68,6 +83,7 @@ export default function Purchases() {
   // Database State (Starts 100% Blank as requested)
   const [suppliers, setSuppliers] = useState([]);
   const [purchaseOrders, setPurchaseOrders] = useState([]);
+  const [purchaseEntries, setPurchaseEntries] = useState([]);
   const [stockReceives, setStockReceives] = useState([]);
   const [purchaseReturns, setPurchaseReturns] = useState([]);
   const [products, setProducts] = useState([]);
@@ -78,6 +94,7 @@ export default function Purchases() {
 
   // Modal Dialog States
   const [addSupplierOpen, setAddSupplierOpen] = useState(false);
+  const [editSupplierId, setEditSupplierId] = useState(null);
   const [returnOpen, setReturnOpen] = useState(false);
   const [createPoOpen, setCreatePoOpen] = useState(false);
   const [selectedPo, setSelectedPo] = useState(null);
@@ -305,27 +322,120 @@ export default function Purchases() {
     if (suppliers.length > 0) fetchPurchaseOrders();
   }, [suppliers]);
 
+  // Purchase Order Reports = every saved Purchase Entry (PurchaseInvoice)
+  const fetchPurchaseEntries = async () => {
+    try {
+      const res = await axios.get('/api/purchase/invoices/');
+      const raw = res.data?.results || res.data || [];
+      if (Array.isArray(raw)) {
+        setPurchaseEntries(raw.map(inv => ({
+          id: inv.id,
+          raw: inv,
+          invoiceNumber: inv.invoice_number,
+          supplierInvoiceNumber: inv.supplier_invoice_number || '',
+          supplier: inv.supplier_name
+            || suppliers.find(s => String(s.id) === String(inv.supplier))?.name
+            || 'Supplier',
+          date: inv.purchase_date,
+          itemCount: (inv.items || []).length,
+          qty: (inv.items || []).reduce((s, it) => s + (parseFloat(it.quantity) || 0), 0),
+          grandTotal: parseFloat(inv.grand_total || 0),
+          paidAmount: parseFloat(inv.paid_amount || 0),
+          balance: parseFloat(inv.balance_amount || 0),
+          paymentMethod: inv.payment_method || 'CASH',
+          status: inv.status,
+        })));
+      }
+    } catch (e) {}
+  };
+
+  useEffect(() => {
+    fetchPurchaseEntries();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
   // Handlers
+  const openAddSupplier = () => {
+    setEditSupplierId(null);
+    setSupplierInput({ name: '', supplierCode: '', contactPerson: '', phone: '', email: '', gstin: '', address: '', city: '', paymentTerms: 'Net 30', accountNumber: '' });
+    setAddSupplierOpen(true);
+  };
+
+  const openEditSupplier = (s) => {
+    setEditSupplierId(s.id);
+    setSupplierInput({
+      name: s.name || '',
+      supplierCode: s.supplierCode || '',
+      contactPerson: s.contactPerson || '',
+      phone: s.phone || '',
+      email: s.email || '',
+      gstin: s.gstin || '',
+      address: s.address || '',
+      city: s.city || '',
+      paymentTerms: s.paymentTerms || 'Net 30',
+      accountNumber: s.accountNumber || ''
+    });
+    setAddSupplierOpen(true);
+  };
+
   const handleSaveSupplier = async () => {
     if (!supplierInput.name) {
       alert("Please enter Supplier Company Name.");
       return;
     }
 
+    const payload = {
+      name: supplierInput.name,
+      supplier_code: supplierInput.supplierCode || undefined,
+      contact_person: supplierInput.contactPerson,
+      phone: supplierInput.phone,
+      email: supplierInput.email,
+      gstin: supplierInput.gstin,
+      address: supplierInput.address,
+      city: supplierInput.city,
+      payment_terms: supplierInput.paymentTerms,
+      account_number: supplierInput.accountNumber
+    };
+
+    // --- EDIT MODE: update an existing supplier in place ---
+    if (editSupplierId) {
+      const isLocalOnly = typeof editSupplierId === 'string' && (editSupplierId.startsWith('SUP-LOC') || editSupplierId.startsWith('SUP-EXCEL'));
+      let updated = null;
+      if (!isLocalOnly) {
+        try {
+          const res = await axios.patch(`/api/purchase/suppliers/${editSupplierId}/`, payload);
+          updated = res.data;
+        } catch (e) {
+          alert("Could not update the supplier in the database. Please try again.");
+          return;
+        }
+      }
+      const merged = updated ? {
+        id: updated.id,
+        supplierCode: updated.supplier_code,
+        name: updated.name,
+        contactPerson: updated.contact_person || '',
+        phone: updated.phone || '',
+        email: updated.email || '',
+        gstin: updated.gstin || '',
+        address: updated.address || '',
+        city: updated.city || '',
+        paymentTerms: updated.payment_terms || 'Net 30',
+        accountNumber: updated.account_number || '',
+        balance: parseFloat(updated.outstanding_balance || 0)
+      } : { ...supplierInput, id: editSupplierId };
+      setSuppliers(prev => prev.map(x => (String(x.id) === String(editSupplierId) ? { ...x, ...merged } : x)));
+      setSupplierInput({ name: '', supplierCode: '', contactPerson: '', phone: '', email: '', gstin: '', address: '', city: '', paymentTerms: 'Net 30', accountNumber: '' });
+      setEditSupplierId(null);
+      setAddSupplierOpen(false);
+      window.dispatchEvent(new Event('optical_suppliers_updated'));
+      alert(`Supplier '${merged.name}' updated successfully!`);
+      return;
+    }
+
     let created = null;
     try {
-      const res = await axios.post('/api/purchase/suppliers/', {
-        name: supplierInput.name,
-        supplier_code: supplierInput.supplierCode || undefined,
-        contact_person: supplierInput.contactPerson,
-        phone: supplierInput.phone,
-        email: supplierInput.email,
-        gstin: supplierInput.gstin,
-        address: supplierInput.address,
-        city: supplierInput.city,
-        payment_terms: supplierInput.paymentTerms,
-        account_number: supplierInput.accountNumber
-      });
+      const res = await axios.post('/api/purchase/suppliers/', payload);
       created = res.data;
     } catch (e) {
       alert("Could not save the supplier to the database. Please try again.");
@@ -638,14 +748,19 @@ export default function Purchases() {
         </Box>
         <Stack direction="row" spacing={1.5}>
           {activeTab === 'suppliers' && (
-            <Button variant="contained" startIcon={<AddIcon />} onClick={() => setAddSupplierOpen(true)} sx={{ backgroundColor: '#2563EB', fontWeight: 700 }}>
+            <Button variant="contained" startIcon={<AddIcon />} onClick={openAddSupplier} sx={{ backgroundColor: '#2563EB', fontWeight: 700 }}>
               + Add New Supplier
             </Button>
           )}
           {activeTab === 'orders' && (
-            <Button variant="contained" startIcon={<AddIcon />} onClick={() => setCreatePoOpen(true)} sx={{ backgroundColor: '#2563EB', fontWeight: 700 }}>
-              + Create Purchase Order
-            </Button>
+            <Stack direction="row" spacing={1.5}>
+              <Button variant="outlined" startIcon={<POIcon />} onClick={() => setCreatePoOpen(true)} sx={{ fontWeight: 700 }}>
+                Create Purchase Order
+              </Button>
+              <Button variant="contained" startIcon={<AddIcon />} onClick={() => goToNewPurchaseEntry()} sx={{ backgroundColor: '#2563EB', fontWeight: 700 }}>
+                + New Purchase Entry
+              </Button>
+            </Stack>
           )}
           {activeTab === 'receive' && (
             <Button variant="contained" startIcon={<AddIcon />} onClick={() => goToNewPurchaseEntry()} sx={{ backgroundColor: '#2563EB', fontWeight: 700 }}>
@@ -665,7 +780,7 @@ export default function Purchases() {
         <Tabs value={activeTab} onChange={handleTabChange} sx={{ px: 2, borderBottom: 1, borderColor: 'divider' }}>
           <Tab value="entry" label="Purchase Entry" icon={<AddIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab value="suppliers" label="Suppliers Directory" icon={<SupplierIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
-          <Tab value="orders" label="Purchase Orders" icon={<POIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
+          <Tab value="orders" label="Purchase Order Reports" icon={<POIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab value="receive" label="Stock Receive (GRN)" icon={<ReceiveIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab value="returns" label="Purchase Returns (RTV)" icon={<ReturnIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
         </Tabs>
@@ -678,13 +793,16 @@ export default function Purchases() {
           products={products}
           initialSupplierId={entryPrefillSupplierId}
           initialPurchaseOrderId={entryPrefillPoId}
-          onRequestAddSupplier={() => setAddSupplierOpen(true)}
+          editInvoiceId={entryEditId}
+          onRequestAddSupplier={openAddSupplier}
           onSaveComplete={(invoice) => {
             setEntryPrefillSupplierId('');
             setEntryPrefillPoId('');
+            setEntryEditId('');
             fetchPurchaseOrders();
+            fetchPurchaseEntries();
             const supplierName = invoice.supplierName || 'Supplier';
-            setPurchaseOrders(prev => [{
+            if (!invoice.wasEdit) setPurchaseOrders(prev => [{
               id: invoice.invoice_number,
               supplier: supplierName,
               item: `${invoice.items?.length || 0} item(s)`,
@@ -695,7 +813,7 @@ export default function Purchases() {
               total: parseFloat(invoice.grand_total || 0),
               status: invoice.status === 'DRAFT' ? 'Draft' : 'Completed'
             }, ...prev]);
-            setStockReceives(prev => [{
+            if (!invoice.wasEdit) setStockReceives(prev => [{
               id: `GRN-${invoice.invoice_number}`,
               poId: invoice.invoice_number,
               supplier: supplierName,
@@ -853,7 +971,7 @@ export default function Purchases() {
                               size="small" 
                               variant="contained" 
                               startIcon={<AddIcon />} 
-                              onClick={() => setAddSupplierOpen(true)} 
+                              onClick={openAddSupplier} 
                               sx={{ backgroundColor: '#2563EB', mt: 2 }}
                             >
                               + Add First Supplier
@@ -896,6 +1014,15 @@ export default function Purchases() {
                               >
                                 Create PO
                               </Button>
+                              <Tooltip title="Edit Supplier">
+                                <IconButton
+                                  size="small"
+                                  color="primary"
+                                  onClick={() => openEditSupplier(s)}
+                                >
+                                  <EditIcon fontSize="small" />
+                                </IconButton>
+                              </Tooltip>
                               <Tooltip title="Delete Supplier">
                                 <IconButton
                                   size="small"
@@ -917,18 +1044,23 @@ export default function Purchases() {
           </Stack>
         )}
 
-      {/* 2. PURCHASE ORDERS (PO) */}
+      {/* 2. PURCHASE ORDER REPORTS — every saved Purchase Entry, with Edit */}
       {activeTab === 'orders' && (() => {
-        const filteredOrders = purchaseOrders.filter(p => {
-          const searchLower = searchQuery.toLowerCase();
-          const matchesSearch = (p.id && p.id.toLowerCase().includes(searchLower)) ||
-                                (p.supplier && p.supplier.toLowerCase().includes(searchLower)) ||
-                                (p.item && p.item.toLowerCase().includes(searchLower));
-          const matchesStatus = statusFilter === 'All' || p.status === statusFilter;
+        const statusLabelOf = (s) => (s === 'CONFIRMED' ? 'Confirmed' : s === 'DRAFT' ? 'Draft' : 'Cancelled');
+        const searchLower = searchQuery.toLowerCase();
+        const filteredEntries = purchaseEntries.filter(p => {
+          const matchesSearch = !searchLower ||
+            (p.invoiceNumber && p.invoiceNumber.toLowerCase().includes(searchLower)) ||
+            (p.supplierInvoiceNumber && p.supplierInvoiceNumber.toLowerCase().includes(searchLower)) ||
+            (p.supplier && p.supplier.toLowerCase().includes(searchLower));
+          const matchesStatus = statusFilter === 'All' || statusLabelOf(p.status) === statusFilter;
           return matchesSearch && matchesStatus;
         });
 
-        const totalPoVal = purchaseOrders.reduce((sum, p) => sum + (parseFloat(p.total) || 0), 0);
+        const totalValue = purchaseEntries.reduce((sum, p) => sum + (p.grandTotal || 0), 0);
+        const totalOutstanding = purchaseEntries.reduce((sum, p) => sum + (p.balance || 0), 0);
+        const confirmedCount = purchaseEntries.filter(p => p.status === 'CONFIRMED').length;
+        const draftCount = purchaseEntries.filter(p => p.status === 'DRAFT').length;
 
         return (
           <Stack spacing={3}>
@@ -936,34 +1068,30 @@ export default function Purchases() {
             <Grid container spacing={2}>
               <Grid item xs={12} sm={6} md={3}>
                 <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: '4px solid #2563eb', bgcolor: '#ffffff' }}>
-                  <Typography variant="caption" color="text.secondary" fontWeight={700}>PURCHASE ORDERS</Typography>
-                  <Typography variant="h4" fontWeight={850} color="primary">{purchaseOrders.length}</Typography>
-                  <Typography variant="caption" color="text.secondary">Total POs issued</Typography>
-                </Paper>
-              </Grid>
-              <Grid item xs={12} sm={6} md={3}>
-                <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: '4px solid #f59e0b', bgcolor: '#ffffff' }}>
-                  <Typography variant="caption" color="text.secondary" fontWeight={700}>IN VENDOR TRANSIT</Typography>
-                  <Typography variant="h4" fontWeight={850} sx={{ color: '#d97706' }}>
-                    {purchaseOrders.filter(p => p.status === 'Sent to Vendor').length}
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary">Pending GRN receive</Typography>
+                  <Typography variant="caption" color="text.secondary" fontWeight={700}>PURCHASE ENTRIES</Typography>
+                  <Typography variant="h4" fontWeight={850} color="primary">{purchaseEntries.length}</Typography>
+                  <Typography variant="caption" color="text.secondary">Total entries recorded</Typography>
                 </Paper>
               </Grid>
               <Grid item xs={12} sm={6} md={3}>
                 <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: '4px solid #10b981', bgcolor: '#ffffff' }}>
-                  <Typography variant="caption" color="text.secondary" fontWeight={700}>COMPLETED POS</Typography>
-                  <Typography variant="h4" fontWeight={850} color="success.main">
-                    {purchaseOrders.filter(p => p.status === 'Completed').length}
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary">Fully received & stocked</Typography>
+                  <Typography variant="caption" color="text.secondary" fontWeight={700}>CONFIRMED</Typography>
+                  <Typography variant="h4" fontWeight={850} color="success.main">{confirmedCount}</Typography>
+                  <Typography variant="caption" color="text.secondary">Posted to stock & books</Typography>
+                </Paper>
+              </Grid>
+              <Grid item xs={12} sm={6} md={3}>
+                <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: '4px solid #f59e0b', bgcolor: '#ffffff' }}>
+                  <Typography variant="caption" color="text.secondary" fontWeight={700}>DRAFTS</Typography>
+                  <Typography variant="h4" fontWeight={850} sx={{ color: '#d97706' }}>{draftCount}</Typography>
+                  <Typography variant="caption" color="text.secondary">Not yet confirmed</Typography>
                 </Paper>
               </Grid>
               <Grid item xs={12} sm={6} md={3}>
                 <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: '4px solid #8b5cf6', bgcolor: '#ffffff' }}>
-                  <Typography variant="caption" color="text.secondary" fontWeight={700}>TOTAL PO VALUE</Typography>
-                  <Typography variant="h4" fontWeight={850} sx={{ color: '#7c3aed' }}>₹{totalPoVal.toFixed(2)}</Typography>
-                  <Typography variant="caption" color="text.secondary">Cumulative purchase order commitment</Typography>
+                  <Typography variant="caption" color="text.secondary" fontWeight={700}>TOTAL PURCHASE VALUE</Typography>
+                  <Typography variant="h4" fontWeight={850} sx={{ color: '#7c3aed' }}>₹{totalValue.toFixed(2)}</Typography>
+                  <Typography variant="caption" color="text.secondary">Outstanding ₹{totalOutstanding.toFixed(2)}</Typography>
                 </Paper>
               </Grid>
             </Grid>
@@ -971,29 +1099,30 @@ export default function Purchases() {
             {/* Toolbar */}
             <Card variant="outlined" sx={{ p: 2, px: 3, borderRadius: 4, backgroundColor: '#ffffff', borderColor: 'divider' }}>
               <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems="center">
-                <TextField 
-                  fullWidth 
-                  size="small" 
-                  placeholder="Search PO Number, Supplier Name, or Ordered Item..."
+                <TextField
+                  fullWidth
+                  size="small"
+                  placeholder="Search Invoice No, Supplier Invoice No, or Supplier Name..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  InputProps={{ 
+                  InputProps={{
                     startAdornment: <SearchIcon color="action" sx={{ mr: 1, fontSize: 20 }} />,
                     sx: { borderRadius: 3, height: 40, backgroundColor: '#f8fafc' }
                   }}
                 />
-                <TextField 
-                  select 
-                  size="small" 
-                  label="Filter Status" 
-                  value={statusFilter} 
+                <TextField
+                  select
+                  size="small"
+                  label="Filter Status"
+                  value={statusFilter}
                   onChange={(e) => setStatusFilter(e.target.value)}
                   sx={{ minWidth: 180 }}
                   InputProps={{ sx: { borderRadius: 3, height: 40 } }}
                 >
                   <MenuItem value="All">All Statuses</MenuItem>
-                  <MenuItem value="Sent to Vendor">Sent to Vendor</MenuItem>
-                  <MenuItem value="Completed">Completed / Received</MenuItem>
+                  <MenuItem value="Confirmed">Confirmed</MenuItem>
+                  <MenuItem value="Draft">Draft</MenuItem>
+                  <MenuItem value="Cancelled">Cancelled</MenuItem>
                 </TextField>
               </Stack>
             </Card>
@@ -1004,69 +1133,94 @@ export default function Purchases() {
                 <Table size="small">
                   <TableHead sx={{ backgroundColor: 'action.hover' }}>
                     <TableRow>
-                      <TableCell sx={{ fontWeight: 700 }}>PO Number</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>Invoice No</TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>Supplier</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }}>Item Ordered</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }}>Order Date</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }}>Expected Delivery</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }}>Total Value</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>Purchase Date</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>Items</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>Grand Total</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>Paid / Balance</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>Payment</TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>Status</TableCell>
-                      <TableCell align="right" sx={{ fontWeight: 700 }}>Quick Actions</TableCell>
+                      <TableCell align="right" sx={{ fontWeight: 700 }}>Actions</TableCell>
                     </TableRow>
                   </TableHead>
                   <TableBody>
-                    {filteredOrders.length === 0 ? (
+                    {filteredEntries.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={8} align="center" sx={{ py: 8 }}>
+                        <TableCell colSpan={9} align="center" sx={{ py: 8 }}>
                           <Typography variant="body2" color="text.secondary" fontWeight={500}>
-                            {searchQuery ? "No matching purchase orders found." : "No purchase orders created in the database."}
+                            {searchQuery ? "No matching purchase entries found." : "No purchase entries recorded yet."}
                           </Typography>
                           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
-                            {searchQuery ? "Try refining your search keyword." : "Click '+ Create Purchase Order' to send an order to a supplier."}
+                            {searchQuery ? "Try refining your search keyword." : "Record a purchase from the Purchase Entry screen and it will appear here."}
                           </Typography>
                           {!searchQuery && (
                             <Button
                               size="small"
                               variant="contained"
                               startIcon={<AddIcon />}
-                              onClick={() => setCreatePoOpen(true)}
+                              onClick={() => goToNewPurchaseEntry()}
                               sx={{ backgroundColor: '#2563EB', mt: 2 }}
                             >
-                              + Create Purchase Order
+                              + New Purchase Entry
                             </Button>
                           )}
                         </TableCell>
                       </TableRow>
                     ) : (
-                      filteredOrders.map(p => (
+                      filteredEntries.map(p => (
                         <TableRow key={p.id} hover>
-                          <TableCell sx={{ fontWeight: 700, color: 'primary.main' }}>{p.id}</TableCell>
-                          <TableCell sx={{ fontWeight: 600 }}>{p.supplier}</TableCell>
-                          <TableCell>
-                            <Typography variant="body2" fontWeight={600}>{p.item}</Typography>
-                            <Typography variant="caption" color="text.secondary">Qty: {p.qty} | Category: {p.category}</Typography>
+                          <TableCell sx={{ fontWeight: 700, color: 'primary.main' }}>
+                            {p.invoiceNumber}
+                            {p.supplierInvoiceNumber && (
+                              <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                                Supplier Inv: {p.supplierInvoiceNumber}
+                              </Typography>
+                            )}
                           </TableCell>
+                          <TableCell sx={{ fontWeight: 600 }}>{p.supplier}</TableCell>
                           <TableCell>{p.date}</TableCell>
-                          <TableCell>{p.expectedDate}</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>₹{(p.total || 0).toFixed(2)}</TableCell>
                           <TableCell>
-                            <Chip 
-                              label={p.status} 
-                              color={p.status === 'Completed' ? 'success' : 'warning'} 
-                              size="small" 
+                            <Typography variant="body2" fontWeight={600}>{p.itemCount} item(s)</Typography>
+                            <Typography variant="caption" color="text.secondary">Qty: {p.qty}</Typography>
+                          </TableCell>
+                          <TableCell sx={{ fontWeight: 700 }}>₹{p.grandTotal.toFixed(2)}</TableCell>
+                          <TableCell>
+                            <Typography variant="caption" color="success.main" sx={{ display: 'block', fontWeight: 700 }}>
+                              Paid ₹{p.paidAmount.toFixed(2)}
+                            </Typography>
+                            <Typography variant="caption" color={p.balance > 0 ? 'error.main' : 'text.secondary'} sx={{ fontWeight: 700 }}>
+                              Bal ₹{p.balance.toFixed(2)}
+                            </Typography>
+                          </TableCell>
+                          <TableCell><Chip label={p.paymentMethod} size="small" variant="outlined" /></TableCell>
+                          <TableCell>
+                            <Chip
+                              label={statusLabelOf(p.status)}
+                              color={p.status === 'CONFIRMED' ? 'success' : p.status === 'DRAFT' ? 'warning' : 'default'}
+                              size="small"
                               sx={{ fontWeight: 700 }}
                             />
                           </TableCell>
                           <TableCell align="right">
                             <Stack direction="row" spacing={1} justifyContent="flex-end">
-                              {p.status === 'Sent to Vendor' && (
-                                <Button size="small" variant="contained" color="success" onClick={() => goToNewPurchaseEntry(p.supplierId, p.poId)}>
-                                  Convert to Purchase
-                                </Button>
-                              )}
-                              <Button size="small" variant="outlined" onClick={() => setSelectedPo(p)}>
-                                Job Card
+                              <Button
+                                size="small"
+                                variant="contained"
+                                startIcon={<EditIcon />}
+                                sx={{ backgroundColor: '#2563EB' }}
+                                onClick={() => goToEditPurchaseEntry(p.id)}
+                              >
+                                Edit
                               </Button>
+                              <Tooltip title="Print Purchase Entry">
+                                <IconButton
+                                  size="small"
+                                  onClick={() => printPurchaseReceipt({ ...p.raw, supplierName: p.supplier, items: p.raw.items })}
+                                >
+                                  <PrintIcon fontSize="small" />
+                                </IconButton>
+                              </Tooltip>
                             </Stack>
                           </TableCell>
                         </TableRow>
@@ -1258,8 +1412,8 @@ export default function Purchases() {
       })()}
 
       {/* --- DIALOG: ADD NEW SUPPLIER --- */}
-      <Dialog open={addSupplierOpen} onClose={() => setAddSupplierOpen(false)} maxWidth="sm" fullWidth PaperProps={{ sx: { borderRadius: 4 } }}>
-        <DialogTitle sx={{ fontWeight: 800 }}>Register New Optical Supplier / Vendor</DialogTitle>
+      <Dialog open={addSupplierOpen} onClose={() => { setAddSupplierOpen(false); setEditSupplierId(null); }} maxWidth="sm" fullWidth PaperProps={{ sx: { borderRadius: 4 } }}>
+        <DialogTitle sx={{ fontWeight: 800 }}>{editSupplierId ? 'Edit Optical Supplier / Vendor' : 'Register New Optical Supplier / Vendor'}</DialogTitle>
         <DialogContent dividers>
           {/* Manual Registration Grid */}
           <Grid container spacing={2}>
@@ -1357,12 +1511,14 @@ export default function Purchases() {
             A Chart of Accounts ledger under "Sundry Creditors" is created automatically for this supplier, so their dues track individually in Financial → Chart of Accounts / General Ledger.
           </Typography>
 
+          {!editSupplierId && (
+          <>
           <Divider sx={{ my: 2.5 }}>
             <Chip label="OR BATCH IMPORT SUPPLIERS VIA EXCEL SHEET" size="small" sx={{ fontWeight: 800, fontSize: '0.65rem', color: 'primary.main' }} />
           </Divider>
 
           {/* --- EXCEL / CSV BATCH UPLOADER SECTION (MOVED TO BOTTOM) --- */}
-          <Paper 
+          <Paper
             variant="outlined" 
             sx={{ 
               p: 2, 
@@ -1412,12 +1568,14 @@ export default function Purchases() {
               </Stack>
             </Stack>
           </Paper>
+          </>
+          )}
         </DialogContent>
 
         <DialogActions sx={{ p: 2, justifyContent: 'space-between' }}>
-          <Button onClick={() => setAddSupplierOpen(false)}>Cancel</Button>
+          <Button onClick={() => { setAddSupplierOpen(false); setEditSupplierId(null); }}>Cancel</Button>
           <Button variant="contained" onClick={handleSaveSupplier} sx={{ backgroundColor: '#2563EB', fontWeight: 700, px: 3 }}>
-            Save Supplier to Database
+            {editSupplierId ? 'Update Supplier' : 'Save Supplier to Database'}
           </Button>
         </DialogActions>
       </Dialog>
@@ -1430,7 +1588,7 @@ export default function Purchases() {
             <Grid item xs={12}>
               <Box display="flex" justifyContent="space-between" alignItems="center" mb={0.5}>
                 <Typography variant="caption" fontWeight={700} color="text.secondary">Supplier Vendor *</Typography>
-                <Button size="small" sx={{ fontSize: '0.75rem', textTransform: 'none', py: 0 }} onClick={() => setAddSupplierOpen(true)}>
+                <Button size="small" sx={{ fontSize: '0.75rem', textTransform: 'none', py: 0 }} onClick={openAddSupplier}>
                   + Register New Supplier
                 </Button>
               </Box>
@@ -1515,7 +1673,7 @@ export default function Purchases() {
             <Grid item xs={6}>
               <Box display="flex" justifyContent="space-between" alignItems="center" mb={0.5}>
                 <Typography variant="caption" fontWeight={700} color="text.secondary">Supplier Name *</Typography>
-                <Button size="small" sx={{ fontSize: '0.75rem', textTransform: 'none', py: 0 }} onClick={() => setAddSupplierOpen(true)}>
+                <Button size="small" sx={{ fontSize: '0.75rem', textTransform: 'none', py: 0 }} onClick={openAddSupplier}>
                   + New Supplier
                 </Button>
               </Box>

@@ -6,12 +6,14 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.serializers import ModelSerializer, SerializerMethodField
 from .models import (
-    Customer, Invoice, InvoiceItem, Payment, EyeExamination, Appointment,
+    Customer, Invoice, InvoiceItem, Payment, EyeExamination, Appointment, Service,
     Dealer, WholesalePriceList, WholesaleQuotation, WholesaleOrder,
     WholesaleDeliveryChallan, WholesaleInvoice, WholesalePaymentCollection, WholesaleReturn
 )
 from .patient_utils import reserve_patient_codes, peek_next_patient_code, reserve_test_numbers, peek_next_test_no
 from apps.inventory.models import StockLedger
+from apps.inventory.stock_utils import adjust_branch_stock
+from apps.common.branch_mixins import BranchScopedViewSetMixin
 
 class CustomerSerializer(ModelSerializer):
     class Meta:
@@ -55,6 +57,14 @@ class PaymentSerializer(ModelSerializer):
     class Meta:
         model = Payment
         fields = '__all__'
+
+class ServiceSerializer(ModelSerializer):
+    class Meta:
+        model = Service
+        fields = '__all__'
+        # Auto-assigned in perform_create when omitted (same lesson as Invoice.invoice_number:
+        # DRF required-field validation runs before perform_create, so it must be optional here).
+        extra_kwargs = {'service_code': {'required': False}}
 
 class CustomerViewSet(viewsets.ModelViewSet):
     queryset = Customer.objects.all()
@@ -151,7 +161,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         test_no = reserve_test_numbers()[0]
         serializer.save(appointment_code=appointment_code, test_no=test_no)
 
-class InvoiceViewSet(viewsets.ModelViewSet):
+class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
     queryset = Invoice.objects.all()
     serializer_class = InvoiceSerializer
     # AllowAny to match every other ViewSet in this app — was previously the one exception left
@@ -165,7 +175,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         invoice_number = serializer.validated_data.get('invoice_number')
         if not invoice_number:
             invoice_number = f"INV-{int(time.time()) % 1000000}"
-        invoice = serializer.save(invoice_number=invoice_number)
+        invoice = serializer.save(invoice_number=invoice_number, **self._branch_stamp_kwargs(serializer))
         self._save_items(invoice)
         if invoice.status not in ('DRAFT', 'CANCELLED'):
             self._update_inventory(invoice)
@@ -188,6 +198,9 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             InvoiceItem.objects.create(
                 invoice=invoice,
                 product_id=raw.get('product') or None,
+                service_id=raw.get('service') or None,
+                item_type=raw.get('item_type') or raw.get('itemType') or 'PRODUCT',
+                service_details=raw.get('service_details') or raw.get('serviceDetails') or None,
                 description=raw.get('description') or raw.get('name') or '',
                 quantity=raw.get('quantity') or raw.get('qty') or 1,
                 unit_price=raw.get('unit_price') or raw.get('price') or 0,
@@ -197,28 +210,29 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             )
 
     def _update_inventory(self, invoice):
-        # Subtract stock from default warehouse
-        from apps.company.models import Warehouse
-        warehouse = Warehouse.objects.first()
-        if not warehouse:
-            return
+        # Deduct stock from the invoice's branch (falls back to the default branch for rows
+        # created before Multi-Branch existed). adjust_branch_stock keeps BranchStock,
+        # Product.stock and the StockLedger audit row consistent.
+        from apps.company.models import Branch
+        branch = invoice.branch or Branch.get_default()
 
         for item in invoice.items.all():
             # Custom/ad-hoc line items (no matching Product row) have nothing to deduct stock
             # from — only real catalog items move inventory.
             if not item.product_id:
                 continue
-            if not StockLedger.objects.filter(reference_id=invoice.id, product=item.product).exists():
-                StockLedger.objects.create(
-                    product=item.product,
-                    warehouse=warehouse,
-                    quantity=-item.quantity,
-                    transaction_type='OUT',
-                    reference_id=invoice.id,
-                    notes=f"Sold via Invoice {invoice.invoice_number}"
-                )
+            if StockLedger.objects.filter(reference_id=invoice.id, product=item.product).exists():
+                continue
+            adjust_branch_stock(
+                item.product, branch, -item.quantity,
+                ledger={
+                    'transaction_type': 'OUT',
+                    'reference_id': invoice.id,
+                    'notes': f"Sold via Invoice {invoice.invoice_number}",
+                },
+            )
 
-class PaymentViewSet(viewsets.ModelViewSet):
+class PaymentViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
     queryset = Payment.objects.all()
     serializer_class = PaymentSerializer
     permission_classes = [permissions.AllowAny]
@@ -227,7 +241,62 @@ class PaymentViewSet(viewsets.ModelViewSet):
         receipt_no = serializer.validated_data.get('receipt_no')
         if not receipt_no:
             receipt_no = f"RCP-{int(time.time()) % 1000000}"
-        serializer.save(receipt_no=receipt_no)
+        serializer.save(receipt_no=receipt_no, **self._branch_stamp_kwargs(serializer))
+
+def _next_service_code():
+    """Next 'SRVnnn' code, derived from the highest existing one (checks all_objects so a
+    soft-deleted service's code isn't reused). Good enough for a single-till optical shop;
+    ServiceViewSet.perform_create still retries on the unique constraint if two collide."""
+    from django.db.models import Max
+    last = Service.all_objects.aggregate(m=Max('service_code'))['m']
+    n = 0
+    if last and str(last).upper().startswith('SRV'):
+        try:
+            n = int(str(last)[3:])
+        except (TypeError, ValueError):
+            n = 0
+    return f"SRV{n + 1:03d}"
+
+
+class ServiceViewSet(viewsets.ModelViewSet):
+    queryset = Service.objects.all()
+    serializer_class = ServiceSerializer
+    permission_classes = [permissions.AllowAny]
+
+    def get_queryset(self):
+        # Seed the common optical services once so the New Sale service picker and the
+        # Service Master both open with a usable list instead of a blank table.
+        if not Service.objects.exists():
+            defaults = [
+                ('SRV001', 'Frame Repair', 'Repair of broken hinge, temple or frame front', 250, 18),
+                ('SRV002', 'Frame Fitting', 'Fitting and alignment of new spectacles', 100, 18),
+                ('SRV003', 'Frame Adjustment', 'Re-adjustment of frame for comfortable fit', 50, 18),
+                ('SRV004', 'Cleaning Service', 'Ultrasonic cleaning of frame and lenses', 50, 18),
+                ('SRV005', 'Parts Replacement', 'Replacement of nose pads, screws or temple tips', 0, 18),
+            ]
+            for code, name, desc, price, tax in defaults:
+                Service.objects.get_or_create(
+                    service_code=code,
+                    defaults={'name': name, 'description': desc, 'default_price': price, 'tax_percentage': tax},
+                )
+        return Service.objects.all()
+
+    def perform_create(self, serializer):
+        service_code = serializer.validated_data.get('service_code')
+        if not service_code or Service.all_objects.filter(service_code=service_code).exists():
+            service_code = _next_service_code()
+        attempts_left = 3
+        while True:
+            try:
+                with transaction.atomic():
+                    serializer.save(service_code=service_code)
+                return
+            except IntegrityError:
+                attempts_left -= 1
+                if attempts_left <= 0:
+                    raise
+                service_code = _next_service_code()
+
 
 import os
 import requests

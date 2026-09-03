@@ -145,7 +145,45 @@ function recalcRow(row, changedField, gstType, isInterstate) {
   return r;
 }
 
-export default function PurchaseEntryView({ suppliers = [], products = [], initialSupplierId = '', initialPurchaseOrderId = '', onSaveComplete, onRequestAddSupplier }) {
+// Rebuilds an editable grid row from a saved PurchaseInvoiceItem (snake_case, string
+// decimals) exactly as it was stored — the "Edit" flow must not silently alter any line.
+const rowFromInvoiceItem = (it) => {
+  const num = (v) => parseFloat(v) || 0;
+  return {
+    rowId: `row-${it.id || Date.now()}-${Math.floor(Math.random() * 10000)}`,
+    productId: it.product,
+    productName: it.product_name || 'Product',
+    barcode: it.barcode || '',
+    currentStock: 0,
+    lastRate: null,
+    batchNumber: it.batch_number || '',
+    hsnCode: it.hsn_code || '',
+    expiryDate: it.expiry_date || '',
+    quantity: num(it.quantity),
+    freeQuantity: num(it.free_quantity),
+    purchaseRate: num(it.purchase_rate),
+    discountPercent: num(it.discount_percent),
+    discountAmount: num(it.discount_amount),
+    gstPercent: num(it.gst_percent),
+    gstAmount: num(it.gst_amount),
+    cessPercent: num(it.cess_percent),
+    cessAmount: num(it.cess_amount),
+    vatPercent: num(it.vat_percent),
+    vatAmount: num(it.vat_amount),
+    cgstPercent: num(it.cgst_percent),
+    cgstAmount: num(it.cgst_amount),
+    sgstPercent: num(it.sgst_percent),
+    sgstAmount: num(it.sgst_amount),
+    igstPercent: num(it.igst_percent),
+    igstAmount: num(it.igst_amount),
+    mrp: num(it.mrp),
+    sellingPrice: num(it.selling_price),
+    marginPercent: num(it.margin_percent),
+    lineTotal: num(it.line_total)
+  };
+};
+
+export default function PurchaseEntryView({ suppliers = [], products = [], initialSupplierId = '', initialPurchaseOrderId = '', editInvoiceId = '', onSaveComplete, onRequestAddSupplier }) {
   const supplierInputRef = useRef(null);
   const dateInputRef = useRef(null);
   const productSearchRef = useRef(null);
@@ -153,6 +191,11 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
   const cellRefs = useRef({});
 
   // Header
+  // Non-empty only while re-opening a saved entry from Purchase Order Reports → Edit.
+  // When set, Save issues a PUT to that record instead of creating a new one.
+  const [editingId, setEditingId] = useState('');
+  const [editingLabel, setEditingLabel] = useState('');
+
   const [invoiceNumber, setInvoiceNumber] = useState(genInvoiceNumber());
   const [supplierInvoiceNumber, setSupplierInvoiceNumber] = useState('');
   const [selectedSupplierId, setSelectedSupplierId] = useState('');
@@ -318,6 +361,43 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
     }
   }, [initialPurchaseOrderId]);
 
+  // "Edit" from Purchase Order Reports: pull the whole saved entry back into the form,
+  // header + item grid, byte-for-byte as it was stored.
+  useEffect(() => {
+    if (!editInvoiceId) return;
+    let cancelled = false;
+    axios.get(`/api/purchase/invoices/${editInvoiceId}/`).then(res => {
+      if (cancelled) return;
+      const inv = res.data || {};
+      setEditingId(inv.id || editInvoiceId);
+      setEditingLabel(inv.invoice_number || '');
+      setInvoiceNumber(inv.invoice_number || genInvoiceNumber());
+      setSupplierInvoiceNumber(inv.supplier_invoice_number || '');
+      setSelectedSupplierId(inv.supplier || '');
+      setPurchaseDate(inv.purchase_date || todayStr());
+      setDueDate(inv.due_date || '');
+      setPurchaseType(inv.purchase_type || 'CASH');
+      setWarehouseId(inv.warehouse || '');
+      setBranchId(inv.branch || '');
+      setGstType(inv.gst_type || 'EXCLUSIVE');
+      setStatus(inv.status === 'CANCELLED' ? 'CONFIRMED' : (inv.status || 'CONFIRMED'));
+      setNotes(inv.notes || '');
+      setPoRef(inv.purchase_order_ref || '');
+      setReturnRef(inv.purchase_return_ref || '');
+      setSupplierVatNumber(inv.supplier_vat_number || '');
+      setOtherCharges(parseFloat(inv.other_charges) || 0);
+      setPaymentMethod(inv.payment_method || 'CASH');
+      setPaidAmount(parseFloat(inv.paid_amount) || 0);
+      const items = Array.isArray(inv.items) ? inv.items : [];
+      if (items.length) setDefaultGstPercent(parseFloat(items[0].gst_percent) || 18);
+      setRows(items.map(rowFromInvoiceItem));
+      cellRefs.current = {};
+    }).catch(() => {
+      alert('Could not load this purchase entry for editing.');
+    });
+    return () => { cancelled = true; };
+  }, [editInvoiceId]);
+
   useEffect(() => {
     Promise.all([
       axios.get('/api/company/warehouses/').catch(() => null),
@@ -452,13 +532,15 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
   // --- Duplicate detection ---
   const checkDuplicate = () => {
     if (!selectedSupplierId || !supplierInvoiceNumber) { setDuplicateWarning(null); return; }
-    axios.get('/api/purchase/invoices/check-duplicate/', { params: { supplier: selectedSupplierId, supplier_invoice_number: supplierInvoiceNumber } })
+    axios.get('/api/purchase/invoices/check-duplicate/', { params: { supplier: selectedSupplierId, supplier_invoice_number: supplierInvoiceNumber, exclude: editingId || undefined } })
       .then(res => setDuplicateWarning(res.data?.duplicate ? res.data : null))
       .catch(() => {});
   };
 
   // --- Reset form ---
   const resetForm = () => {
+    setEditingId('');
+    setEditingLabel('');
     setInvoiceNumber(genInvoiceNumber());
     setSupplierInvoiceNumber('');
     setSelectedSupplierId('');
@@ -629,7 +711,9 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
         return;
       }
       const payload = buildPayload(saveStatus, itemRows);
-      const res = await axios.post('/api/purchase/invoices/', payload);
+      const res = editingId
+        ? await axios.put(`/api/purchase/invoices/${editingId}/`, payload)
+        : await axios.post('/api/purchase/invoices/', payload);
       let saved = res.data;
 
       if (attachment) {
@@ -649,6 +733,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
 
       const printable = {
         ...saved,
+        wasEdit: Boolean(editingId),
         supplierName: selectedSupplier?.name || selectedSupplier?.company_name,
         items: rows.map(r => ({ ...r, productName: r.productName }))
       };
@@ -657,7 +742,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
 
       onSaveComplete?.(printable);
 
-      alert(`Purchase Entry ${saved.invoice_number} saved successfully!${saveStatus === 'DRAFT' ? ' (Draft)' : ''}`);
+      alert(`Purchase Entry ${saved.invoice_number} ${editingId ? 'updated' : 'saved'} successfully!${saveStatus === 'DRAFT' ? ' (Draft)' : ''}`);
 
       if (andNew || saveStatus !== 'DRAFT') resetForm();
     } catch (err) {
@@ -710,11 +795,24 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
     <Box>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, flexWrap: 'wrap', gap: 1 }}>
         <Box>
-          <Typography variant="h5" sx={{ fontWeight: 800, color: 'primary.main' }}>
-            Purchase Entry
-          </Typography>
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Typography variant="h5" sx={{ fontWeight: 800, color: 'primary.main' }}>
+              Purchase Entry
+            </Typography>
+            {editingLabel && (
+              <Chip
+                size="small"
+                color="warning"
+                label={`Editing ${editingLabel}`}
+                onDelete={resetForm}
+                sx={{ fontWeight: 700 }}
+              />
+            )}
+          </Stack>
           <Typography variant="caption" color="text.secondary">
-            Single-screen supplier purchase entry with live GST, discount & margin calculation
+            {editingLabel
+              ? 'Editing an existing purchase entry — items are loaded exactly as saved. Save to update.'
+              : 'Single-screen supplier purchase entry with live GST, discount & margin calculation'}
           </Typography>
         </Box>
         {selectedSupplier && (
@@ -1117,17 +1215,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
           <Typography variant="caption" color="text.secondary" sx={{ mr: 'auto', pl: 1 }}>
             {gstType === 'NO_GST' ? 'GST columns hidden — GST Type is set to No GST' : `GST columns shown — GST Type is ${gstType === 'INCLUSIVE' ? 'Inclusive' : 'Exclusive'}`}
           </Typography>
-          <Button variant="outlined" onClick={() => setItemsDialogOpen(false)}>Done</Button>
-          <Button
-            variant="contained"
-            color="primary"
-            startIcon={<SaveIcon />}
-            disabled={saving || rows.length === 0}
-            onClick={() => { setItemsDialogOpen(false); doSave(status); }}
-            sx={{ fontWeight: 800 }}
-          >
-            Save Item
-          </Button>
+          <Button variant="contained" color="primary" onClick={() => setItemsDialogOpen(false)} sx={{ fontWeight: 800 }}>Done</Button>
         </DialogActions>
       </Dialog>
 
@@ -1241,7 +1329,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
         <Button variant="outlined" startIcon={<DraftIcon />} onClick={() => doSave('DRAFT')} disabled={saving}>Draft</Button>
         <Button variant="outlined" color="primary" startIcon={<SaveIcon />} onClick={() => doSave(status, { andNew: true })} disabled={saving}>Save & New</Button>
         <Button variant="outlined" color="primary" startIcon={<PrintIcon />} onClick={() => doSave(status, { print: true })} disabled={saving}>Save & Print (Ctrl+P)</Button>
-        <Button variant="contained" color="primary" startIcon={<SaveIcon />} onClick={() => doSave(status)} disabled={saving} sx={{ fontWeight: 800 }}>Save Purchase (Ctrl+S)</Button>
+        <Button variant="contained" color="primary" startIcon={<SaveIcon />} onClick={() => doSave(status)} disabled={saving} sx={{ fontWeight: 800 }}>{editingId ? 'Update Purchase (Ctrl+S)' : 'Save Purchase (Ctrl+S)'}</Button>
       </Box>
 
       {/* Inline Product Master — create a brand-new product without leaving Purchase Entry */}

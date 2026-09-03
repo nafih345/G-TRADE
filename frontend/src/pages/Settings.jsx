@@ -12,12 +12,41 @@ import {
   Security as SecurityIcon,
   Save as SaveIcon,
   CloudUpload as UploadIcon,
-  CheckCircle as SuccessIcon
+  CheckCircle as SuccessIcon,
+  AccountTree as BranchTreeIcon
 } from '@mui/icons-material';
 import axios from 'axios';
+import { useBranch } from '../context/BranchContext';
+import ConfirmActionDialog from '../components/common/ConfirmActionDialog';
 
 export default function Settings() {
   const [activeTab, setActiveTab] = useState(0);
+  const { multiBranchEnabled, refresh: refreshBranchContext } = useBranch();
+  const [multiBranch, setMultiBranch] = useState(false);
+  const [confirmEnableOpen, setConfirmEnableOpen] = useState(false);
+  const [branchSavedAlert, setBranchSavedAlert] = useState(false);
+
+  useEffect(() => { setMultiBranch(multiBranchEnabled); }, [multiBranchEnabled]);
+
+  const persistMultiBranch = async (value) => {
+    setMultiBranch(value);
+    try {
+      await axios.patch('/api/company/business-settings/', { multi_branch_enabled: value });
+      await refreshBranchContext();
+      setBranchSavedAlert(true);
+      setTimeout(() => setBranchSavedAlert(false), 4000);
+    } catch (e) {
+      setMultiBranch(!value); // revert on failure
+    }
+  };
+
+  const handleToggleMultiBranch = (checked) => {
+    if (checked) {
+      setConfirmEnableOpen(true); // spec section 12 — confirm before enabling
+    } else {
+      persistMultiBranch(false);
+    }
+  };
 
   // Settings State initialized from localStorage (starts 100% blank by default)
   const [settings, setSettings] = useState(() => {
@@ -176,6 +205,7 @@ export default function Settings() {
           <Tab label="POS & Barcode Scanner" icon={<BarcodeIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab label="Clinical & Eye Exam Defaults" icon={<ClinicalIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab label="System Security & Backup" icon={<SecurityIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
+          <Tab label="Business Settings" icon={<BranchTreeIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
         </Tabs>
       </Card>
 
@@ -452,6 +482,60 @@ export default function Settings() {
               </Stack>
             </Grid>
           </Grid>
+        </Card>
+      )}
+
+      {/* TAB 5: BUSINESS SETTINGS — MULTI-BRANCH MANAGEMENT */}
+      {activeTab === 5 && (
+        <Card sx={{ p: 3, borderRadius: 4, border: '1px solid', borderColor: 'divider' }}>
+          <Typography variant="h6" fontWeight={800} sx={{ mb: 0.5 }}>Multi-Branch Management</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Manage multiple business branches from one ERP system.
+          </Typography>
+
+          {branchSavedAlert && (
+            <Alert severity="success" sx={{ mb: 2, borderRadius: 3, fontWeight: 600 }}>
+              Multi-Branch mode updated. {multiBranch ? 'Branch Management and the Branch Switcher are now active.' : 'The system is back in Single Branch mode.'}
+            </Alert>
+          )}
+
+          <Paper variant="outlined" sx={{ p: 2.5, borderRadius: 3, display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 3, flexWrap: 'wrap' }}>
+            <Box sx={{ maxWidth: 560 }}>
+              <Typography variant="subtitle1" fontWeight={800}>Enable Multi-Branch System</Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+                OFF → Single Branch Mode &nbsp;•&nbsp; ON → Multi-Branch Mode
+              </Typography>
+              <Stack spacing={0.5} sx={{ mt: 1 }}>
+                {['Create multiple branches', 'Manage branch-wise stock', 'Separate branch sales',
+                  'Assign users to branches', 'Switch between branches', 'View combined reports',
+                  'Control branch permissions'].map(line => (
+                  <Typography key={line} variant="body2" sx={{ color: 'text.secondary' }}>✓ {line}</Typography>
+                ))}
+              </Stack>
+            </Box>
+            <FormControlLabel
+              control={<Switch checked={multiBranch} onChange={(e) => handleToggleMultiBranch(e.target.checked)} color="primary" />}
+              label={multiBranch ? 'ON' : 'OFF'}
+              labelPlacement="bottom"
+              sx={{ m: 0, '& .MuiFormControlLabel-label': { fontWeight: 800, mt: 0.5 } }}
+            />
+          </Paper>
+
+          <Alert severity="info" sx={{ mt: 2, borderRadius: 3 }}>
+            Turning this off does not delete any branch data — it only hides the multi-branch
+            interface and routes every operation through the default branch.
+          </Alert>
+
+          <ConfirmActionDialog
+            open={confirmEnableOpen}
+            type="info"
+            title="Enable Multi-Branch System?"
+            message="This will activate branch management and branch-wise data access throughout the ERP."
+            confirmText="Enable"
+            cancelText="Cancel"
+            onConfirm={() => persistMultiBranch(true)}
+            onClose={() => setConfirmEnableOpen(false)}
+          />
         </Card>
       )}
     </Box>

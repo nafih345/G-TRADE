@@ -14,6 +14,7 @@ import {
   SwapHoriz as TransferIcon,
   Tune as AdjustIcon,
   Delete as DeleteIcon,
+  Edit as EditIcon,
   AutoAwesome as SparkleIcon
 } from '@mui/icons-material';
 import axios from 'axios';
@@ -76,6 +77,7 @@ export default function Products() {
   const [categoryFilter, setCategoryFilter] = useState('All');
   
   const [addProductCategory, setAddProductCategory] = useState('Frames');
+  const [editProduct, setEditProduct] = useState(null);
 
   const [adjustStock, setAdjustStock] = useState({ id: '', name: '', current: 0, change: 0, reason: 'Manual audit' });
   const [dbSuppliers, setDbSuppliers] = useState([]);
@@ -168,10 +170,19 @@ export default function Products() {
   }, []);
 
   const handleOpen = () => {
+    setEditProduct(null);
     setAddProductCategory('Frames');
     setOpen(true);
   };
-  const handleClose = () => setOpen(false);
+  const handleOpenEdit = (product) => {
+    setEditProduct(product);
+    setAddProductCategory(product.category || 'Frames');
+    setOpen(true);
+  };
+  const handleClose = () => {
+    setOpen(false);
+    setEditProduct(null);
+  };
 
   const handleProductCreated = (record) => {
     if (record) {
@@ -278,6 +289,7 @@ export default function Products() {
   };
 
   const handleOpenFastLens = () => {
+    setEditProduct(null);
     setAddProductCategory('Prescription Lenses');
     setOpen(true);
   };
@@ -549,6 +561,9 @@ export default function Products() {
                               </TableCell>
                               <TableCell align="center">
                                 <Stack direction="row" spacing={0.5} justifyContent="center">
+                                  <IconButton color="primary" title="Edit Product" onClick={() => handleOpenEdit(product)}>
+                                    <EditIcon fontSize="small" />
+                                  </IconButton>
                                   <IconButton
                                     color={product.barcode ? 'primary' : 'warning'}
                                     onClick={() => handleOpenBarcode(product)}
@@ -594,6 +609,7 @@ export default function Products() {
         onClose={handleClose}
         suppliers={dbSuppliers}
         defaultCategory={addProductCategory}
+        editProduct={editProduct}
         onCreated={handleProductCreated}
       />
 

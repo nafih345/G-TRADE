@@ -1,6 +1,8 @@
 from rest_framework import viewsets, permissions
 from rest_framework.serializers import ModelSerializer
 from .models import StockLedger, StockAdjustment, WarehouseTransfer
+from .stock_utils import adjust_branch_stock
+from apps.common.branch_mixins import BranchScopedViewSetMixin
 
 class StockLedgerSerializer(ModelSerializer):
     class Meta:
@@ -17,7 +19,7 @@ class WarehouseTransferSerializer(ModelSerializer):
         model = WarehouseTransfer
         fields = '__all__'
 
-class StockLedgerViewSet(viewsets.ReadOnlyModelViewSet):
+class StockLedgerViewSet(BranchScopedViewSetMixin, viewsets.ReadOnlyModelViewSet):
     queryset = StockLedger.objects.all()
     serializer_class = StockLedgerSerializer
     # AllowAny: see SupplierViewSet in apps.purchasing.views for why — the demo/offline
@@ -26,24 +28,25 @@ class StockLedgerViewSet(viewsets.ReadOnlyModelViewSet):
     authentication_classes = []
     permission_classes = [permissions.AllowAny]
 
-class StockAdjustmentViewSet(viewsets.ModelViewSet):
+class StockAdjustmentViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
     queryset = StockAdjustment.objects.all()
     serializer_class = StockAdjustmentSerializer
     authentication_classes = []
     permission_classes = [permissions.AllowAny]
 
     def perform_create(self, serializer):
-        adj = serializer.save()
-        # Log to ledger
+        from apps.company.models import Branch
+        adj = serializer.save(**self._branch_stamp_kwargs(serializer))
         tx_type = 'ADJ_ADD' if adj.adjustment_type == 'ADD' else 'ADJ_SUB'
         qty = adj.quantity if adj.adjustment_type == 'ADD' else -adj.quantity
-        StockLedger.objects.create(
-            product=adj.product,
-            warehouse=adj.warehouse,
-            quantity=qty,
-            transaction_type=tx_type,
-            reference_id=adj.id,
-            notes=adj.reason
+        adjust_branch_stock(
+            adj.product, adj.branch or Branch.get_default(), qty,
+            ledger={
+                'warehouse': adj.warehouse,
+                'transaction_type': tx_type,
+                'reference_id': adj.id,
+                'notes': adj.reason,
+            },
         )
 
 class WarehouseTransferViewSet(viewsets.ModelViewSet):

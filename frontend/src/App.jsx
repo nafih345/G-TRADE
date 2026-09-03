@@ -3,6 +3,7 @@ import { HashRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
 import { ThemeProvider, CssBaseline, Box, Typography, LinearProgress, useMediaQuery } from '@mui/material';
 import { getTheme } from './theme/theme';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { BranchProvider } from './context/BranchContext';
 import Sidebar from './components/Sidebar';
 import Header from './components/Header';
 import Login from './pages/Login';
@@ -241,6 +242,7 @@ function MainLayout() {
                 <Route path="/admin" element={<Administration />} />
                 <Route path="/admin/users" element={<Administration />} />
                 <Route path="/admin/doctors" element={<Administration />} />
+                <Route path="/admin/service-master" element={<Administration />} />
                 <Route path="/admin/branches" element={<Administration />} />
                 <Route path="/admin/excel-import" element={<Administration />} />
                 <Route path="/admin/barcode-printing" element={<Administration />} />
@@ -299,9 +301,11 @@ function PlaceholderPage({ title }) {
 export default function App() {
   return (
     <AuthProvider>
-      <Router>
-        <MainLayout />
-      </Router>
+      <BranchProvider>
+        <Router>
+          <MainLayout />
+        </Router>
+      </BranchProvider>
     </AuthProvider>
   );
 }

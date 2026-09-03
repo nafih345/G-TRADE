@@ -24,9 +24,11 @@ import {
 } from '@mui/icons-material';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
+import { useBranch } from '../context/BranchContext';
 
 export default function Header({ toggleTheme, mode, onMenuClick }) {
   const { user, logout } = useAuth();
+  const { multiBranchEnabled, branches, activeBranch, setActiveBranch } = useBranch();
   const navigate = useNavigate();
 
   // User Profile Menu Anchor
@@ -36,48 +38,10 @@ export default function Header({ toggleTheme, mode, onMenuClick }) {
   const [notifAnchorEl, setNotifAnchorEl] = useState(null);
   const [notifications, setNotifications] = useState([]);
 
-  // Branch State (Defaults strictly to Main Branch until user enters custom branch details)
-  const [selectedBranch, setSelectedBranch] = useState('main');
-  const [branchesList, setBranchesList] = useState([
-    { id: 'main', name: 'Main Branch' }
-  ]);
-
-  // Fetch Real Branches and Notifications from Database API
+  // Branch switcher is driven by BranchContext (see useBranch above). Only the notification
+  // feed is fetched here now.
   useEffect(() => {
-    const fetchHeaderData = async () => {
-      // 1. Fetch Branches from Database
-      try {
-        const branchRes = await axios.get('/api/company/branches/');
-        if (branchRes.data && Array.isArray(branchRes.data) && branchRes.data.length > 0) {
-          const formatted = branchRes.data.map(b => ({
-            id: b.id || b.code || b.name,
-            name: b.name
-          }));
-          setBranchesList(formatted);
-          if (formatted.length > 0) {
-            setSelectedBranch(formatted[0].id);
-          }
-        } else {
-          // Check local storage custom branches
-          const localBranches = JSON.parse(localStorage.getItem('optical_branches') || '[]');
-          if (localBranches.length > 0) {
-            setBranchesList(localBranches);
-          } else {
-            // Strictly only Main Branch until branch details are entered
-            setBranchesList([{ id: 'main', name: 'Main Branch' }]);
-          }
-        }
-      } catch (e) {
-        // Fallback: Strictly Main Branch only
-        const localBranches = JSON.parse(localStorage.getItem('optical_branches') || '[]');
-        if (localBranches.length > 0) {
-          setBranchesList(localBranches);
-        } else {
-          setBranchesList([{ id: 'main', name: 'Main Branch' }]);
-        }
-      }
-
-      // 2. Fetch Notifications from Database
+    const fetchNotifications = async () => {
       try {
         const notifRes = await axios.get('/api/company/notifications/');
         if (notifRes.data && Array.isArray(notifRes.data) && notifRes.data.length > 0) {
@@ -87,10 +51,7 @@ export default function Header({ toggleTheme, mode, onMenuClick }) {
         // No notifications available — leave the list empty.
       }
     };
-
-    fetchHeaderData();
-    window.addEventListener('optical_branches_updated', fetchHeaderData);
-    return () => window.removeEventListener('optical_branches_updated', fetchHeaderData);
+    fetchNotifications();
   }, []);
 
 
@@ -190,29 +151,36 @@ export default function Header({ toggleTheme, mode, onMenuClick }) {
         {/* Right side controls */}
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
           
-          {/* 📌 BRANCH SELECTOR (Strictly Main Branch until details are entered in DB) */}
-          <Box sx={{ display: { xs: 'none', md: 'flex' }, alignItems: 'center', gap: 1, bgcolor: mode === 'dark' ? 'rgba(255,255,255,0.04)' : '#f1f5f9', px: 1.5, py: 0.5, borderRadius: 2.5 }}>
-            <BranchIcon sx={{ color: 'primary.main', fontSize: 18 }} />
-            <Select
-              value={selectedBranch}
-              onChange={(e) => setSelectedBranch(e.target.value)}
-              size="small"
-              variant="standard"
-              disableUnderline
-              sx={{ 
-                fontSize: '0.875rem', 
-                fontWeight: 800, 
-                color: 'text.primary',
-                '& .MuiSelect-select': { py: 0.2 }
-              }}
-            >
-              {branchesList.map((b) => (
-                <MenuItem key={b.id} value={b.id} sx={{ fontWeight: 700, fontSize: '0.875rem' }}>
-                  {b.name}
-                </MenuItem>
-              ))}
-            </Select>
-          </Box>
+          {/* 📌 BRANCH SWITCHER — only shown when Multi-Branch Mode is ON (spec section 4) */}
+          {multiBranchEnabled && branches.length > 0 && (
+            <Box sx={{ display: { xs: 'none', md: 'flex' }, alignItems: 'center', gap: 1, bgcolor: mode === 'dark' ? 'rgba(255,255,255,0.04)' : '#f1f5f9', px: 1.5, py: 0.5, borderRadius: 2.5 }}>
+              <BranchIcon sx={{ color: 'primary.main', fontSize: 18 }} />
+              <Select
+                value={activeBranch?.id || ''}
+                onChange={(e) => {
+                  setActiveBranch(e.target.value);
+                  // Full reload so every open page re-fetches its data scoped to the new
+                  // branch (the X-Branch-Id header is already updated by setActiveBranch).
+                  window.location.reload();
+                }}
+                size="small"
+                variant="standard"
+                disableUnderline
+                sx={{
+                  fontSize: '0.875rem',
+                  fontWeight: 800,
+                  color: 'text.primary',
+                  '& .MuiSelect-select': { py: 0.2 }
+                }}
+              >
+                {branches.map((b) => (
+                  <MenuItem key={b.id} value={b.id} sx={{ fontWeight: 700, fontSize: '0.875rem' }}>
+                    {b.name}{b.is_default ? ' (Main)' : ''}
+                  </MenuItem>
+                ))}
+              </Select>
+            </Box>
+          )}
 
           {/* Theme Toggle Button */}
           <Tooltip title={mode === 'dark' ? "Switch to Light Mode" : "Switch to Dark Mode"}>

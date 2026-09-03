@@ -23,11 +23,19 @@ import {
   LocalHospital as HospitalIcon,
   CloudUpload as ImportIcon,
   Store as BranchIcon,
-  QrCode as BarcodeIcon
+  QrCode as BarcodeIcon,
+  Star as StarIcon,
+  StarBorder as StarBorderIcon,
+  GroupAdd as GroupAddIcon,
+  ToggleOn as ToggleOnIcon,
+  ToggleOff as ToggleOffIcon,
+  Build as ServiceIcon
 } from '@mui/icons-material';
 import axios from 'axios';
+import { useBranch } from '../context/BranchContext';
 import ExcelImportManager from '../components/admin/import/ExcelImportManager';
 import BarcodePrintingManager from '../components/admin/BarcodePrintingManager';
+import ServiceMasterDialog from '../components/sales/ServiceMasterDialog';
 
 // Default initial users database
 const defaultUsersList = [
@@ -46,12 +54,14 @@ const defaultUsersList = [
 export default function Administration() {
   const location = useLocation();
   const navigate = useNavigate();
+  const { multiBranchEnabled, refresh: refreshBranchContext } = useBranch();
 
   // Tab sync from path
   const getTabFromPath = (pathname) => {
     if (pathname.includes('/admin/excel-import') || pathname.includes('/admin/import')) return 'excel-import';
     if (pathname.includes('/admin/barcode-printing')) return 'barcode-printing';
     if (pathname.includes('/admin/doctors')) return 'doctors';
+    if (pathname.includes('/admin/service-master')) return 'service-master';
     if (pathname.includes('/admin/branches')) return 'branches';
     if (pathname.includes('/admin/roles')) return 'roles';
     if (pathname.includes('/admin/permissions')) return 'permissions';
@@ -69,6 +79,7 @@ export default function Administration() {
     setActiveTab(newValue);
     if (newValue === 'users') navigate('/admin/users');
     if (newValue === 'doctors') navigate('/admin/doctors');
+    if (newValue === 'service-master') navigate('/admin/service-master');
     if (newValue === 'branches') navigate('/admin/branches');
     if (newValue === 'excel-import') navigate('/admin/excel-import');
     if (newValue === 'barcode-printing') navigate('/admin/barcode-printing');
@@ -136,30 +147,103 @@ export default function Administration() {
     ];
   });
 
-  // Fetch branches from backend Database API
+  // Branch Management uses the backend as the source of truth (spec sections 2, 3, 8).
+  const mapApiBranch = (b) => ({
+    id: b.id,
+    code: b.code || '—',
+    name: b.name || '—',
+    phone: b.phone || '—',
+    email: b.email || '—',
+    manager: b.manager || '—',
+    address: b.address || '—',
+    gstin: b.gstin || '—',
+    city: b.city || '',
+    state: b.state || '',
+    country: b.country || '',
+    pinCode: b.pin_code || '',
+    isDefault: !!b.is_default,
+    isActive: b.is_active !== false,
+    status: b.is_active !== false ? 'Active' : 'Inactive',
+    createdDate: (b.created_at || '').split('T')[0] || new Date().toISOString().split('T')[0]
+  });
+
+  const refetchBranches = async () => {
+    try {
+      const res = await axios.get('/api/company/branches/');
+      const rows = Array.isArray(res.data) ? res.data : (res.data?.results || []);
+      if (rows.length > 0) setBranches(rows.map(mapApiBranch));
+    } catch (e) {}
+  };
+
+  const [branchAccessList, setBranchAccessList] = useState([]);
+  const refetchBranchAccess = async () => {
+    try {
+      const res = await axios.get('/api/company/user-branch-access/');
+      const rows = Array.isArray(res.data) ? res.data : (res.data?.results || []);
+      setBranchAccessList(rows);
+    } catch (e) {}
+  };
+
   useEffect(() => {
-    const fetchApiBranches = async () => {
-      try {
-        const res = await axios.get('/api/company/branches/');
-        if (res.data && Array.isArray(res.data) && res.data.length > 0) {
-          const apiBranches = res.data.map(b => ({
-            id: b.id || b.code || b.name,
-            code: b.code || 'MAIN',
-            name: b.name || 'Main Branch',
-            phone: b.phone || '—',
-            email: b.email || '—',
-            manager: b.manager || '—',
-            address: b.address || '—',
-            gstin: b.gstin || '—',
-            status: 'Active',
-            createdDate: new Date().toISOString().split('T')[0]
-          }));
-          setBranches(apiBranches);
-        }
-      } catch (e) {}
-    };
-    fetchApiBranches();
+    refetchBranches();
+    refetchBranchAccess();
   }, []);
+
+  // ---- Service Master (backend is the source of truth: /api/sales/services/) ----
+  // Uses the shared ServiceMasterDialog — the same Add / Edit form the New Sale page uses inline.
+  const [servicesList, setServicesList] = useState([]);
+  const [serviceDialogOpen, setServiceDialogOpen] = useState(false);
+  const [editingService, setEditingService] = useState(null);
+
+  const mapApiService = (s) => ({
+    id: s.id,
+    code: s.service_code || '—',
+    name: s.name || '—',
+    description: s.description || '',
+    price: parseFloat(s.default_price || 0),
+    defaultPrice: parseFloat(s.default_price || 0),
+    taxRate: parseFloat(s.tax_percentage || 0),
+    taxPercentage: parseFloat(s.tax_percentage || 0),
+    isActive: s.is_active !== false
+  });
+
+  const refetchServices = async () => {
+    try {
+      const res = await axios.get('/api/sales/services/');
+      const rows = Array.isArray(res.data) ? res.data : (res.data?.results || []);
+      setServicesList(rows.map(mapApiService));
+    } catch (e) {}
+  };
+
+  useEffect(() => { refetchServices(); }, []);
+
+  const openServiceDialog = (existing) => {
+    setEditingService(existing || null);
+    setServiceDialogOpen(true);
+  };
+
+  const handleDeleteService = async (svc) => {
+    if (!window.confirm(`Delete service '${svc.name}'? Past invoices keep their service line history.`)) return;
+    try {
+      await axios.delete(`/api/sales/services/${svc.id}/`);
+    } catch (e) {
+      alert(`Could not delete: ${e?.response?.data?.detail || e.message}`);
+      return;
+    }
+    await refetchServices();
+  };
+
+  const handleToggleServiceActive = async (svc) => {
+    const next = !svc.isActive;
+    // Optimistic flip so the ON/OFF switch responds instantly; reconciled by refetch below.
+    setServicesList(prev => prev.map(x => (x.id === svc.id ? { ...x, isActive: next } : x)));
+    try {
+      await axios.patch(`/api/sales/services/${svc.id}/`, { is_active: next });
+    } catch (e) {
+      alert(`Could not update status: ${e?.response?.data?.detail || e.message}`);
+    }
+    await refetchServices();
+  };
 
 
 
@@ -183,7 +267,7 @@ export default function Administration() {
   });
 
   // Form Inputs for Adding Branch
-  const [branchInput, setBranchInput] = useState({
+  const emptyBranchInput = () => ({
     code: `BR-${Math.floor(100 + Math.random() * 900)}`,
     name: '',
     phone: '',
@@ -191,8 +275,17 @@ export default function Administration() {
     manager: '',
     address: '',
     gstin: '',
+    city: '',
+    state: '',
+    country: '',
+    pinCode: '',
     status: 'Active'
   });
+  const [branchInput, setBranchInput] = useState(emptyBranchInput);
+
+  // Assign-Users-to-Branches dialog state
+  const [assignAccessOpen, setAssignAccessOpen] = useState(false);
+  const [accessInput, setAccessInput] = useState({ username: '', access_all_branches: false, branches: [], default_branch: '' });
 
 
   // Save doctors to localStorage & broadcast event
@@ -269,63 +362,110 @@ export default function Administration() {
     alert(`Doctor '${formattedName}' successfully registered in system database!`);
   };
 
-  // Handler to Save New Branch
+  // Handler to Save New Branch — backend is the source of truth
   const handleSaveBranch = async () => {
     if (!branchInput.name || !branchInput.code) {
       alert("Please enter Branch Name and Branch Code.");
       return;
     }
-
-    const newBranchObj = {
-      id: branchInput.code.toLowerCase().replace(/\s+/g, '-'),
-      code: branchInput.code.toUpperCase(),
-      name: branchInput.name.trim(),
-      phone: branchInput.phone || '—',
-      email: branchInput.email || '—',
-      manager: branchInput.manager || '—',
-      address: branchInput.address || '—',
-      gstin: branchInput.gstin || '—',
-      status: branchInput.status || 'Active',
-      createdDate: new Date().toISOString().split('T')[0]
-    };
-
-    const updatedBranches = [newBranchObj, ...branches];
-    setBranches(updatedBranches);
-
-    // Save to Backend API
     try {
       await axios.post('/api/company/branches/', {
-        code: newBranchObj.code,
-        name: newBranchObj.name,
-        phone: newBranchObj.phone,
-        address: newBranchObj.address
+        code: branchInput.code.toUpperCase(),
+        name: branchInput.name.trim(),
+        phone: branchInput.phone || null,
+        email: branchInput.email || null,
+        address: branchInput.address || null,
+        gstin: branchInput.gstin || null,
+        city: branchInput.city || null,
+        state: branchInput.state || null,
+        country: branchInput.country || null,
+        pin_code: branchInput.pinCode || null,
+        is_active: branchInput.status !== 'Inactive'
       });
-    } catch (e) {}
-
-    setAddBranchOpen(false);
-    setBranchInput({
-      code: `BR-${Math.floor(100 + Math.random() * 900)}`,
-      name: '',
-      phone: '',
-      email: '',
-      manager: '',
-      address: '',
-      gstin: '',
-      status: 'Active'
-    });
-
-
-    alert(`Branch '${newBranchObj.name}' added successfully! It is now available in the top header branch selector.`);
-  };
-
-  const handleDeleteBranch = (branchId) => {
-    if (branchId === 'main') {
-      alert("Main Branch cannot be deleted as it is the primary store.");
+    } catch (e) {
+      alert(`Could not save branch: ${e?.response?.data?.code || e?.response?.data?.detail || e.message}`);
       return;
     }
-    if (window.confirm("Are you sure you want to delete this branch?")) {
-      setBranches(branches.filter(b => b.id !== branchId));
+    await refetchBranches();
+    await refreshBranchContext();
+    setAddBranchOpen(false);
+    setBranchInput(emptyBranchInput());
+    alert(`Branch '${branchInput.name.trim()}' added. It is now available in the header branch switcher.`);
+  };
+
+  const handleDeleteBranch = async (branch) => {
+    if (branch.isDefault) {
+      alert("The default branch cannot be deleted. Set another branch as default first.");
+      return;
     }
+    if (!window.confirm(`Delete branch '${branch.name}'? Existing transactions keep their branch history.`)) return;
+    try {
+      await axios.delete(`/api/company/branches/${branch.id}/`);
+    } catch (e) {
+      alert(`Could not delete: ${e?.response?.data?.detail || e.message}`);
+      return;
+    }
+    await refetchBranches();
+    await refreshBranchContext();
+  };
+
+  const handleSetDefaultBranch = async (branch) => {
+    try {
+      await axios.post(`/api/company/branches/${branch.id}/set-default/`);
+    } catch (e) {
+      alert(`Could not set default: ${e?.response?.data?.detail || e.message}`);
+      return;
+    }
+    await refetchBranches();
+    await refreshBranchContext();
+  };
+
+  const handleToggleBranchActive = async (branch) => {
+    try {
+      await axios.post(`/api/company/branches/${branch.id}/${branch.isActive ? 'deactivate' : 'activate'}/`);
+    } catch (e) {
+      alert(`Could not update status: ${e?.response?.data?.detail || e.message}`);
+      return;
+    }
+    await refetchBranches();
+    await refreshBranchContext();
+  };
+
+  const openAssignAccess = (existing) => {
+    if (existing) {
+      setAccessInput({
+        id: existing.id,
+        username: existing.username,
+        access_all_branches: existing.access_all_branches,
+        branches: existing.branches || [],
+        default_branch: existing.default_branch || ''
+      });
+    } else {
+      setAccessInput({ username: '', access_all_branches: false, branches: [], default_branch: '' });
+    }
+    setAssignAccessOpen(true);
+  };
+
+  const handleSaveAccess = async () => {
+    if (!accessInput.username) { alert('Select or enter a username.'); return; }
+    const payload = {
+      username: accessInput.username,
+      access_all_branches: accessInput.access_all_branches,
+      branches: accessInput.access_all_branches ? [] : accessInput.branches,
+      default_branch: accessInput.default_branch || null
+    };
+    try {
+      if (accessInput.id) {
+        await axios.put(`/api/company/user-branch-access/${accessInput.id}/`, payload);
+      } else {
+        await axios.post('/api/company/user-branch-access/', payload);
+      }
+    } catch (e) {
+      alert(`Could not save access: ${e?.response?.data?.detail || e.message}`);
+      return;
+    }
+    await refetchBranchAccess();
+    setAssignAccessOpen(false);
   };
 
   // Form Inputs for Adding User
@@ -453,14 +593,24 @@ export default function Administration() {
             </Button>
           )}
           {activeTab === 'branches' && (
-            <Button 
-              variant="contained" 
+            <Button
+              variant="contained"
               color="success"
-              startIcon={<BranchIcon />} 
-              onClick={() => setAddBranchOpen(true)} 
+              startIcon={<BranchIcon />}
+              onClick={() => setAddBranchOpen(true)}
               sx={{ fontWeight: 700, px: 3, bgcolor: '#16a34a', '&:hover': { bgcolor: '#15803d' } }}
             >
               + Add New Branch
+            </Button>
+          )}
+          {activeTab === 'service-master' && (
+            <Button
+              variant="contained"
+              startIcon={<ServiceIcon />}
+              onClick={() => openServiceDialog(null)}
+              sx={{ fontWeight: 700, px: 3, bgcolor: '#7c3aed', '&:hover': { bgcolor: '#6d28d9' } }}
+            >
+              + Add Service
             </Button>
           )}
         </Stack>
@@ -471,6 +621,7 @@ export default function Administration() {
         <Tabs value={activeTab} onChange={handleTabChange} variant="scrollable" scrollButtons="auto" sx={{ px: 2, borderBottom: 1, borderColor: 'divider' }}>
           <Tab value="users" label="User Accounts Directory" icon={<UsersIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab value="doctors" label="Doctors & Optometrists Master" icon={<DoctorIcon />} iconPosition="start" sx={{ fontWeight: 700, color: '#0284c7' }} />
+          <Tab value="service-master" label="Service Master" icon={<ServiceIcon />} iconPosition="start" sx={{ fontWeight: 700, color: '#7c3aed' }} />
           <Tab value="branches" label="Branch Management (Add Branch)" icon={<BranchIcon />} iconPosition="start" sx={{ fontWeight: 700, color: '#16a34a' }} />
           <Tab value="excel-import" label="Excel Import Management" icon={<ImportIcon />} iconPosition="start" sx={{ fontWeight: 700, color: '#2563eb' }} />
           <Tab value="barcode-printing" label="Barcode Printing" icon={<BarcodeIcon />} iconPosition="start" sx={{ fontWeight: 700, color: '#7c3aed' }} />
@@ -627,6 +778,116 @@ export default function Administration() {
         );
       })()}
 
+      {/* 🔧 SERVICE MASTER TAB */}
+      {activeTab === 'service-master' && (() => {
+        const q = searchQuery.toLowerCase();
+        const filtered = servicesList.filter(s =>
+          (s.name && s.name.toLowerCase().includes(q)) ||
+          (s.code && s.code.toLowerCase().includes(q)) ||
+          (s.description && s.description.toLowerCase().includes(q))
+        );
+        return (
+          <Stack spacing={3}>
+            <Grid container spacing={2}>
+              <Grid item xs={12} sm={4}>
+                <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: '4px solid #7c3aed' }}>
+                  <Typography variant="caption" color="text.secondary" fontWeight={800}>TOTAL SERVICES</Typography>
+                  <Typography variant="h4" fontWeight={850} sx={{ color: '#7c3aed' }}>{servicesList.length}</Typography>
+                </Paper>
+              </Grid>
+              <Grid item xs={12} sm={4}>
+                <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: '4px solid #16a34a' }}>
+                  <Typography variant="caption" color="text.secondary" fontWeight={800}>ACTIVE SERVICES</Typography>
+                  <Typography variant="h4" fontWeight={850} color="success.main">{servicesList.filter(s => s.isActive).length}</Typography>
+                </Paper>
+              </Grid>
+              <Grid item xs={12} sm={4}>
+                <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: '4px solid #f59e0b' }}>
+                  <Typography variant="caption" color="text.secondary" fontWeight={800}>INACTIVE / HIDDEN</Typography>
+                  <Typography variant="h4" fontWeight={850} sx={{ color: '#d97706' }}>{servicesList.filter(s => !s.isActive).length}</Typography>
+                </Paper>
+              </Grid>
+            </Grid>
+
+            <TextField
+              placeholder="Search service by code, name, or description..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              size="small"
+              sx={{ maxWidth: 420, bgcolor: '#fff', borderRadius: 2 }}
+              InputProps={{ startAdornment: <SearchIcon sx={{ color: 'text.secondary', mr: 1 }} /> }}
+            />
+
+            <Card sx={{ borderRadius: 3.5, border: '1px solid', borderColor: '#cbd5e1' }}>
+              <TableContainer>
+                <Table size="small">
+                  <TableHead sx={{ backgroundColor: '#0f172a' }}>
+                    <TableRow>
+                      <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Service Code</TableCell>
+                      <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Service Name</TableCell>
+                      <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Description</TableCell>
+                      <TableCell sx={{ color: '#fff', fontWeight: 800 }} align="right">Default Price (₹)</TableCell>
+                      <TableCell sx={{ color: '#fff', fontWeight: 800 }} align="right">Tax %</TableCell>
+                      <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Status</TableCell>
+                      <TableCell sx={{ color: '#fff', fontWeight: 800 }} align="right">Actions</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {filtered.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={7} align="center" sx={{ py: 6 }}>
+                          <Typography variant="body2" color="text.secondary" fontWeight={600}>
+                            No services found. Click '+ Add Service' above to create one.
+                          </Typography>
+                        </TableCell>
+                      </TableRow>
+                    ) : filtered.map(s => (
+                      <TableRow key={s.id} hover>
+                        <TableCell sx={{ fontWeight: 850, color: '#7c3aed' }}>{s.code}</TableCell>
+                        <TableCell sx={{ fontWeight: 800 }}>{s.name}</TableCell>
+                        <TableCell sx={{ maxWidth: 280, fontSize: '0.82rem' }}>{s.description || '—'}</TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 800 }}>₹{s.defaultPrice.toFixed(2)}</TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 700 }}>{s.taxPercentage}%</TableCell>
+                        <TableCell>
+                          {/* ON = service is offered in New Sale → 🔧 Services; OFF hides it there. */}
+                          <FormControlLabel
+                            sx={{ m: 0 }}
+                            control={
+                              <Switch
+                                size="small"
+                                color="success"
+                                checked={s.isActive}
+                                onChange={() => handleToggleServiceActive(s)}
+                              />
+                            }
+                            label={
+                              <Typography variant="caption" fontWeight={900}
+                                sx={{ color: s.isActive ? 'success.main' : 'text.disabled' }}>
+                                {s.isActive ? 'ON' : 'OFF'}
+                              </Typography>
+                            }
+                          />
+                        </TableCell>
+                        <TableCell align="right">
+                          <Stack direction="row" spacing={0.5} justifyContent="flex-end">
+                            <IconButton size="small" color="primary" onClick={() => openServiceDialog(s)}>
+                              <EditIcon fontSize="small" />
+                            </IconButton>
+                            <IconButton size="small" color="error" onClick={() => handleDeleteService(s)}>
+                              <DeleteIcon fontSize="small" />
+                            </IconButton>
+                          </Stack>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            </Card>
+          </Stack>
+        );
+      })()}
+
       {/* 🏢 3. BRANCH MANAGEMENT (ADD BRANCH) TAB */}
       {activeTab === 'branches' && (() => {
         const filteredBranches = branches.filter(b => {
@@ -661,9 +922,11 @@ export default function Administration() {
 
               <Grid item xs={12} sm={6} md={3}>
                 <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: '4px solid #7c3aed', bgcolor: '#ffffff' }}>
-                  <Typography variant="caption" color="text.secondary" fontWeight={800}>PRIMARY STORE</Typography>
-                  <Typography variant="h4" fontWeight={850} sx={{ color: '#7c3aed', fontSize: '1.4rem' }}>Main Branch</Typography>
-                  <Typography variant="caption" color="text.secondary">Default billing hub</Typography>
+                  <Typography variant="caption" color="text.secondary" fontWeight={800}>DEFAULT / MAIN BRANCH</Typography>
+                  <Typography variant="h4" fontWeight={850} sx={{ color: '#7c3aed', fontSize: '1.4rem' }}>
+                    {(branches.find(b => b.isDefault) || {}).name || '—'}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">Used for every operation</Typography>
                 </Paper>
               </Grid>
 
@@ -706,16 +969,81 @@ export default function Administration() {
                     {filteredBranches.map(b => (
                       <TableRow key={b.id} hover>
                         <TableCell sx={{ fontWeight: 850, color: 'success.main' }}>{b.code}</TableCell>
-                        <TableCell sx={{ fontWeight: 800, color: 'primary.main' }}>{b.name}</TableCell>
+                        <TableCell sx={{ fontWeight: 800, color: 'primary.main' }}>
+                          {b.name}
+                          {b.isDefault && <Chip label="Default" size="small" color="secondary" sx={{ ml: 1, height: 18, fontWeight: 800 }} />}
+                        </TableCell>
                         <TableCell sx={{ fontWeight: 700 }}>{b.manager}</TableCell>
                         <TableCell>{b.phone}<br/><Typography variant="caption" color="text.secondary">{b.email}</Typography></TableCell>
                         <TableCell sx={{ fontWeight: 700 }}>{b.gstin}</TableCell>
-                        <TableCell sx={{ maxWidth: 220, fontSize: '0.82rem' }}>{b.address}</TableCell>
-                        <TableCell><Chip label={b.status} color="success" size="small" sx={{ fontWeight: 800 }} /></TableCell>
+                        <TableCell sx={{ maxWidth: 200, fontSize: '0.82rem' }} data-branch-loc>
+                          {[b.address, b.city, b.state, b.country, b.pinCode].filter(x => x && x !== '—').join(', ') || '—'}
+                        </TableCell>
+                        <TableCell><Chip label={b.status} color={b.isActive ? 'success' : 'default'} size="small" sx={{ fontWeight: 800 }} /></TableCell>
                         <TableCell align="right">
-                          <IconButton size="small" color="error" onClick={() => handleDeleteBranch(b.id)} disabled={b.id === 'main'}>
-                            <DeleteIcon fontSize="small" />
-                          </IconButton>
+                          <Stack direction="row" spacing={0.5} justifyContent="flex-end">
+                            <IconButton size="small" title={b.isDefault ? 'Default branch' : 'Set as default'}
+                              color={b.isDefault ? 'secondary' : 'default'}
+                              onClick={() => !b.isDefault && handleSetDefaultBranch(b)} disabled={b.isDefault}>
+                              {b.isDefault ? <StarIcon fontSize="small" /> : <StarBorderIcon fontSize="small" />}
+                            </IconButton>
+                            <IconButton size="small" title={b.isActive ? 'Deactivate' : 'Activate'}
+                              color={b.isActive ? 'success' : 'warning'}
+                              onClick={() => handleToggleBranchActive(b)} disabled={b.isDefault && b.isActive}>
+                              {b.isActive ? <ToggleOnIcon fontSize="small" /> : <ToggleOffIcon fontSize="small" />}
+                            </IconButton>
+                            <IconButton size="small" color="error" onClick={() => handleDeleteBranch(b)} disabled={b.isDefault}>
+                              <DeleteIcon fontSize="small" />
+                            </IconButton>
+                          </Stack>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            </Card>
+
+            {/* User → Branch Access (spec sections 5, 8) */}
+            <Card sx={{ borderRadius: 3.5, border: '1px solid', borderColor: '#cbd5e1' }}>
+              <Box sx={{ p: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 1 }}>
+                <Box>
+                  <Typography variant="subtitle1" fontWeight={850}>User Branch Access</Typography>
+                  <Typography variant="caption" color="text.secondary">Control which branches each staff member can open. Admins always see every branch.</Typography>
+                </Box>
+                <Button variant="outlined" size="small" startIcon={<GroupAddIcon />} onClick={() => openAssignAccess(null)}>
+                  Assign User to Branches
+                </Button>
+              </Box>
+              <TableContainer>
+                <Table size="small">
+                  <TableHead sx={{ backgroundColor: '#f1f5f9' }}>
+                    <TableRow>
+                      <TableCell sx={{ fontWeight: 800 }}>Username</TableCell>
+                      <TableCell sx={{ fontWeight: 800 }}>Access</TableCell>
+                      <TableCell sx={{ fontWeight: 800 }}>Default Branch</TableCell>
+                      <TableCell sx={{ fontWeight: 800 }} align="right">Actions</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {branchAccessList.length === 0 ? (
+                      <TableRow><TableCell colSpan={4}><Typography variant="body2" color="text.secondary" sx={{ py: 1 }}>No branch access rules yet — every user can see all branches until you add one.</Typography></TableCell></TableRow>
+                    ) : branchAccessList.map(a => (
+                      <TableRow key={a.id} hover>
+                        <TableCell sx={{ fontWeight: 700 }}>{a.username}</TableCell>
+                        <TableCell>
+                          {a.access_all_branches
+                            ? <Chip label="All branches" size="small" color="primary" sx={{ fontWeight: 700 }} />
+                            : (a.branches || []).map(bid => (branches.find(x => x.id === bid) || {}).name || '?').join(', ') || '—'}
+                        </TableCell>
+                        <TableCell>{(branches.find(x => x.id === a.default_branch) || {}).name || '—'}</TableCell>
+                        <TableCell align="right">
+                          <IconButton size="small" onClick={() => openAssignAccess(a)}><EditIcon fontSize="small" /></IconButton>
+                          <IconButton size="small" color="error" onClick={async () => {
+                            if (!window.confirm(`Remove branch access rule for '${a.username}'?`)) return;
+                            try { await axios.delete(`/api/company/user-branch-access/${a.id}/`); } catch (e) {}
+                            refetchBranchAccess();
+                          }}><DeleteIcon fontSize="small" /></IconButton>
                         </TableCell>
                       </TableRow>
                     ))}
@@ -793,6 +1121,14 @@ export default function Administration() {
           </TableContainer>
         </Card>
       )}
+
+      {/* ------------------ DIALOG: ADD / EDIT SERVICE (shared component) ------------------ */}
+      <ServiceMasterDialog
+        open={serviceDialogOpen}
+        service={editingService}
+        onClose={() => { setServiceDialogOpen(false); setEditingService(null); }}
+        onSaved={() => { setServiceDialogOpen(false); setEditingService(null); refetchServices(); }}
+      />
 
       {/* ------------------ DIALOG: ADD NEW BRANCH ------------------ */}
       <Dialog 
@@ -875,23 +1211,40 @@ export default function Administration() {
             </Grid>
 
             <Grid item xs={12}>
-              <TextField 
-                fullWidth 
+              <TextField
+                fullWidth
                 multiline
                 rows={2}
-                label="Full Branch Street Address" 
-                size="small" 
-                value={branchInput.address} 
+                label="Full Branch Street Address"
+                size="small"
+                value={branchInput.address}
                 onChange={(e) => setBranchInput({ ...branchInput, address: e.target.value })}
-                placeholder="Building No, Street Name, Landmark, City, Pincode"
+                placeholder="Building No, Street Name, Landmark"
               />
             </Grid>
 
+            <Grid item xs={12} sm={3}>
+              <TextField fullWidth label="City" size="small" value={branchInput.city}
+                onChange={(e) => setBranchInput({ ...branchInput, city: e.target.value })} />
+            </Grid>
+            <Grid item xs={12} sm={3}>
+              <TextField fullWidth label="State" size="small" value={branchInput.state}
+                onChange={(e) => setBranchInput({ ...branchInput, state: e.target.value })} />
+            </Grid>
+            <Grid item xs={12} sm={3}>
+              <TextField fullWidth label="Country" size="small" value={branchInput.country}
+                onChange={(e) => setBranchInput({ ...branchInput, country: e.target.value })} />
+            </Grid>
+            <Grid item xs={12} sm={3}>
+              <TextField fullWidth label="PIN Code" size="small" value={branchInput.pinCode}
+                onChange={(e) => setBranchInput({ ...branchInput, pinCode: e.target.value })} />
+            </Grid>
+
             <Grid item xs={12} sm={6}>
-              <TextField 
-                select 
-                fullWidth 
-                label="Branch Status" 
+              <TextField
+                select
+                fullWidth
+                label="Branch Status"
                 size="small" 
                 value={branchInput.status} 
                 onChange={(e) => setBranchInput({ ...branchInput, status: e.target.value })}
@@ -910,6 +1263,59 @@ export default function Administration() {
             sx={{ bgcolor: '#16a34a', '&:hover': { bgcolor: '#15803d' }, fontWeight: 800, px: 4 }}
           >
             Save New Branch
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* ------------------ DIALOG: ASSIGN USER TO BRANCHES ------------------ */}
+      <Dialog open={assignAccessOpen} onClose={() => setAssignAccessOpen(false)} maxWidth="sm" fullWidth PaperProps={{ sx: { borderRadius: 4 } }}>
+        <DialogTitle sx={{ fontWeight: 850, bgcolor: '#0f172a', color: '#fff', display: 'flex', alignItems: 'center', gap: 1 }}>
+          <GroupAddIcon sx={{ color: '#16a34a' }} /> Assign User to Branches
+        </DialogTitle>
+        <DialogContent dividers sx={{ p: 3 }}>
+          <Stack spacing={2.5}>
+            <TextField
+              fullWidth size="small" label="Username *"
+              value={accessInput.username}
+              disabled={!!accessInput.id}
+              onChange={(e) => setAccessInput({ ...accessInput, username: e.target.value })}
+              helperText="The username the user logs in with (see User Accounts). Super Admin / Administrator always get every branch."
+            />
+            <FormControlLabel
+              control={<Checkbox checked={accessInput.access_all_branches}
+                onChange={(e) => setAccessInput({ ...accessInput, access_all_branches: e.target.checked })} />}
+              label="Access All Branches"
+            />
+            {!accessInput.access_all_branches && (
+              <Box>
+                <Typography variant="caption" color="text.secondary" fontWeight={700}>Allowed branches</Typography>
+                <Stack sx={{ mt: 0.5 }}>
+                  {branches.map(b => (
+                    <FormControlLabel key={b.id}
+                      control={<Checkbox size="small" checked={accessInput.branches.includes(b.id)}
+                        onChange={(e) => setAccessInput(prev => ({
+                          ...prev,
+                          branches: e.target.checked
+                            ? [...prev.branches, b.id]
+                            : prev.branches.filter(x => x !== b.id)
+                        }))} />}
+                      label={`${b.name}${b.isDefault ? ' (Main)' : ''}`} />
+                  ))}
+                </Stack>
+              </Box>
+            )}
+            <TextField select fullWidth size="small" label="Default Branch for this user"
+              value={accessInput.default_branch}
+              onChange={(e) => setAccessInput({ ...accessInput, default_branch: e.target.value })}>
+              <MenuItem value="">— None —</MenuItem>
+              {branches.map(b => <MenuItem key={b.id} value={b.id}>{b.name}</MenuItem>)}
+            </TextField>
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ p: 2.5, justifyContent: 'space-between' }}>
+          <Button onClick={() => setAssignAccessOpen(false)}>Cancel</Button>
+          <Button variant="contained" onClick={handleSaveAccess} sx={{ bgcolor: '#16a34a', '&:hover': { bgcolor: '#15803d' }, fontWeight: 800, px: 4 }}>
+            Save Access
           </Button>
         </DialogActions>
       </Dialog>

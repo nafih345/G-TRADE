@@ -55,6 +55,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'apps.common.branch_context.BranchContextMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -256,6 +257,20 @@ SIMPLE_JWT = {
 # CORS Configuration
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
+
+# The frontend attaches Multi-Branch context headers to every API call (see
+# frontend/src/utils/apiClient.js). CORS_ALLOW_ALL_ORIGINS only whitelists the Origin, not
+# request headers — custom headers must be listed explicitly or the browser's preflight
+# (OPTIONS) fails and silently blocks the real request.
+try:
+    from corsheaders.defaults import default_headers as _cors_default_headers
+    CORS_ALLOW_HEADERS = (*_cors_default_headers, 'x-branch-id', 'x-user-name', 'x-user-role')
+except Exception:
+    CORS_ALLOW_HEADERS = [
+        'accept', 'accept-encoding', 'authorization', 'content-type', 'dnt', 'origin',
+        'user-agent', 'x-csrftoken', 'x-requested-with',
+        'x-branch-id', 'x-user-name', 'x-user-role',
+    ]
 
 # Media files
 MEDIA_URL = '/media/'

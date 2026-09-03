@@ -146,14 +146,44 @@ function Section({ title, icon, children }) {
 // Inventory → Products page, surfaced anywhere a new product needs to be created
 // inline (e.g. Purchase Entry). Saves to the products database and reports the
 // created product back through onCreated().
+const productToForm = (ep) => {
+  const isLensCat = (ep.category || '') === 'Prescription Lenses';
+  return blankProduct({
+  name: ep.name || '',
+  code: ep.code || ep.product_code || '',
+  hsnCode: ep.hsnCode || ep.hsn_code || '',
+  category: ep.category || 'Frames',
+  subCategory: ep.subCategory || '',
+  group: ep.group || '',
+  brand: ep.brand && ep.brand !== 'Generic' ? ep.brand : '',
+  size: ep.size || '',
+  color: ep.color || ep.colour || '',
+  material: ep.material || '',
+  frameType: isLensCat ? (ep.frameType || ep.refractive_index || '') : '',
+  lensType: isLensCat ? (ep.lensType || ep.lens_design || '') : '',
+  coating: isLensCat ? (ep.coating || '') : '',
+  supplier: ep.supplier || '',
+  warehouse: ep.warehouse || 'Main',
+  rack: ep.rack || '',
+  stock: (ep.stock ?? '') === '' ? '' : String(ep.stock),
+  purchasePrice: (ep.purchasePrice ?? '') === '' ? '' : String(ep.purchasePrice),
+  mrp: (ep.mrp ?? '') === '' ? '' : String(ep.mrp),
+  salePrice: (ep.salePrice ?? ep.sellingPrice ?? '') === '' ? '' : String(ep.salePrice ?? ep.sellingPrice),
+  gst: ep.gst || '18%',
+  barcode: ep.barcode || ''
+  });
+};
+
 export default function ProductMasterDialog({
   open,
   onClose,
   suppliers = [],
   defaultSupplier = '',
   defaultCategory = 'Frames',
+  editProduct = null,
   onCreated
 }) {
+  const isEdit = Boolean(editProduct && editProduct.id);
   const [p, setP] = useState(blankProduct());
   const [saving, setSaving] = useState(false);
   const [scanDialogOpen, setScanDialogOpen] = useState(false);
@@ -172,9 +202,11 @@ export default function ProductMasterDialog({
 
   useEffect(() => {
     if (!open) return;
-    setP(blankProduct({ supplier: defaultSupplier || '', category: defaultCategory || 'Frames' }));
+    setP(isEdit
+      ? productToForm(editProduct)
+      : blankProduct({ supplier: defaultSupplier || '', category: defaultCategory || 'Frames' }));
     setImageFile(null);
-    setImagePreview('');
+    setImagePreview(isEdit ? (editProduct.image || '') : '');
 
     axios.get('/api/masters/categories/')
       .then(r => {
@@ -186,7 +218,7 @@ export default function ProductMasterDialog({
         const names = (r.data?.results || r.data || []).map(b => b.name).filter(Boolean);
         if (names.length) setBrandOptions(Array.from(new Set([...names, ...opticalBrands])));
       }).catch(() => {});
-  }, [open, defaultSupplier, defaultCategory]);
+  }, [open, defaultSupplier, defaultCategory, isEdit, editProduct]);
 
   const persistCategory = async (name) => {
     setCategoryOptions(o => Array.from(new Set([name, ...o])));
@@ -263,14 +295,16 @@ export default function ProductMasterDialog({
       retail_price: salePrice,
       wholesale_price: mrp,
       stock,
-      opening_stock: stock,
       extra_data
     };
+    if (!isEdit) payload.opening_stock = stock;
 
-    let savedId = String(Date.now());
+    let savedId = isEdit ? String(editProduct.id) : String(Date.now());
     let savedBarcode = p.barcode || '';
     try {
-      const res = await axios.post('/api/products/items/', payload);
+      const res = isEdit
+        ? await axios.put(`/api/products/items/${editProduct.id}/`, payload)
+        : await axios.post('/api/products/items/', payload);
       if (res.data?.id) savedId = String(res.data.id);
       if (res.data?.barcode) savedBarcode = res.data.barcode;
 
@@ -282,7 +316,7 @@ export default function ProductMasterDialog({
         } catch (e) {}
       }
     } catch (err) {
-      console.log('Product saved to local store only (API unavailable).');
+      console.log(isEdit ? 'Product update failed on API (kept local copy).' : 'Product saved to local store only (API unavailable).');
     }
 
     const productRecord = {
@@ -311,18 +345,25 @@ export default function ProductMasterDialog({
       warehouse: p.warehouse || 'Main',
       hsnCode: p.hsnCode || '',
       image: imagePreview || '',
-      status: 'Active'
+      status: isEdit ? (editProduct.status || 'Active') : 'Active'
     };
 
     try {
       const local = JSON.parse(localStorage.getItem('optical_inventory_items') || '[]');
-      localStorage.setItem('optical_inventory_items', JSON.stringify([productRecord, ...local]));
+      const next = isEdit
+        ? local.map(it =>
+            String(it.id) === String(editProduct.id) || (productRecord.code && String(it.code) === String(productRecord.code))
+              ? { ...it, ...productRecord }
+              : it
+          )
+        : [productRecord, ...local];
+      localStorage.setItem('optical_inventory_items', JSON.stringify(next));
     } catch (e) {}
     window.dispatchEvent(new Event('optical_stock_updated'));
 
     setSaving(false);
     onCreated?.(productRecord);
-    alert(`Product '${productRecord.name}' saved to inventory database successfully!`);
+    alert(`Product '${productRecord.name}' ${isEdit ? 'updated' : 'saved to inventory database'} successfully!`);
     onClose?.();
   };
 
@@ -332,7 +373,9 @@ export default function ProductMasterDialog({
         <DialogTitle sx={{ fontWeight: 800, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 1, bgcolor: isLens ? '#0f172a' : '#ffffff', color: isLens ? '#facc15' : 'inherit', transition: 'all 0.3s ease' }}>
           <Stack direction="row" spacing={1.5} alignItems="center">
             <Typography variant="h6" fontWeight={900}>
-              {isLens ? '🔬 Add Ophthalmic Lens Product' : '📦 Add Optical Stock / Product'}
+              {isEdit
+                ? (isLens ? '🔬 Edit Ophthalmic Lens Product' : '📦 Edit Optical Stock / Product')
+                : (isLens ? '🔬 Add Ophthalmic Lens Product' : '📦 Add Optical Stock / Product')}
             </Typography>
             <Paper variant="outlined" sx={{ p: 0.3, display: 'flex', gap: 0.5, bgcolor: '#f1f5f9', borderRadius: 2 }}>
               <Button
@@ -543,9 +586,11 @@ export default function ProductMasterDialog({
                 “Generate Barcode” issues the next code in a running 13-digit EAN-13 series (e.g. 2000000000015, 2000000000022 …).
               </Typography>
               <BarcodeSection
-                mode="create"
+                mode={isEdit ? 'manage' : 'create'}
+                productId={isEdit ? editProduct.id : undefined}
                 value={p.barcode}
                 onChange={(val) => set({ barcode: val })}
+                onSaved={(val) => set({ barcode: val || '' })}
                 productName={p.name}
                 productCode={p.code}
                 productPrice={saleNum || mrpNum || 0}
@@ -616,7 +661,7 @@ export default function ProductMasterDialog({
         <DialogActions sx={{ p: 2, justifyContent: 'space-between', bgcolor: '#f1f5f9' }}>
           <Button onClick={onClose} disabled={saving}>Cancel</Button>
           <Button onClick={handleSave} variant="contained" disabled={saving} sx={{ backgroundColor: '#2563EB', px: 3.5, py: 1, fontWeight: 900, borderRadius: 2 }}>
-            {saving ? 'Saving…' : `Save ${isLens ? 'Lens Option' : 'Product'} to Database`}
+            {saving ? 'Saving…' : (isEdit ? `Update ${isLens ? 'Lens Option' : 'Product'}` : `Save ${isLens ? 'Lens Option' : 'Product'} to Database`)}
           </Button>
         </DialogActions>
       </Dialog>

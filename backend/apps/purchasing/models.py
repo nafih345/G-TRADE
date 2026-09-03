@@ -53,6 +53,7 @@ class PurchaseOrder(BaseUUIDModel):
 
     order_number = models.CharField(max_length=50, unique=True)
     supplier = models.ForeignKey(Supplier, on_delete=models.CASCADE, related_name='purchase_orders')
+    branch = models.ForeignKey('company.Branch', on_delete=models.SET_NULL, null=True, blank=True, db_index=True, related_name='+')
     order_date = models.DateField()
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='DRAFT')
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.0'))

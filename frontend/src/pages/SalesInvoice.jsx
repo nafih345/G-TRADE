@@ -90,6 +90,7 @@ export default function SalesInvoice() {
 
   // Master states
   const [products, setProducts] = useState(initialProducts);
+  const [services, setServices] = useState([]);
   const [customers, setCustomers] = useState(initialCustomers);
   const [orders, setOrders] = useState(initialOrders);
   const [payments, setPayments] = useState(initialPayments);
@@ -138,18 +139,32 @@ export default function SalesInvoice() {
       let apiInvoices = [];
       let apiPayments = [];
       try {
-        const [custRes, eyeExamRes, prodRes, invRes, payRes] = await Promise.all([
+        const [custRes, eyeExamRes, prodRes, invRes, payRes, svcRes] = await Promise.all([
           axios.get('/api/sales/customers/').catch(() => null),
           axios.get('/api/sales/eye-examinations/').catch(() => null),
           axios.get('/api/products/products/').catch(() => null),
           axios.get('/api/sales/invoices/').catch(() => null),
-          axios.get('/api/sales/payments/').catch(() => null)
+          axios.get('/api/sales/payments/').catch(() => null),
+          axios.get('/api/sales/services/').catch(() => null)
         ]);
         const custList = unwrap(custRes);
         const eyeExams = unwrap(eyeExamRes);
         const prodList = unwrap(prodRes);
         const invList = unwrap(invRes);
         const payList = unwrap(payRes);
+        const svcList = unwrap(svcRes);
+
+        if (Array.isArray(svcList) && svcList.length > 0) {
+          setServices(svcList.map(s => ({
+            id: String(s.id),
+            code: s.service_code || '',
+            name: s.name || '',
+            description: s.description || '',
+            price: parseFloat(s.default_price || 0),
+            taxRate: parseFloat(s.tax_percentage || 0),
+            isActive: s.is_active !== false
+          })));
+        }
 
         if (prodList.length > 0) {
           const apiFormatted = prodList.map(p => ({
@@ -592,6 +607,7 @@ export default function SalesInvoice() {
         <NewSaleWizard
           customers={customers}
           products={products}
+          services={services}
           onNavigateToEyeTest={() => navigate('/optical/eyetest')}
           onCheckoutComplete={(completedOrder) => {
             const newOrd = {

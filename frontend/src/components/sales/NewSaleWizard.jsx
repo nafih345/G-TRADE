@@ -36,9 +36,25 @@ import {
   ReceiptLong as BillIcon
 } from '@mui/icons-material';
 import PrintInvoiceModal from './PrintInvoiceModal';
+import ServiceMasterDialog from './ServiceMasterDialog';
 
 // Standard Indian GST slabs offered in the Tax % dropdowns.
 const TAX_SLABS = [0, 5, 12, 18, 28];
+
+// Quick-pick cards shown in the 🔧 Services entry panel. `match` is the Service Master name
+// each card maps onto (so clicking it pulls that service's default price/tax/description);
+// "Custom Service" carries no match and just opens blank fields for a one-off charge.
+const QUICK_SERVICE_CARDS = [
+  { label: 'Repair', icon: '🔧', match: 'Frame Repair', repair: true },
+  { label: 'Fitting', icon: '👓', match: 'Frame Fitting' },
+  { label: 'Adjustment', icon: '⚙️', match: 'Frame Adjustment' },
+  { label: 'Cleaning', icon: '🧹', match: 'Cleaning Service' },
+  { label: 'Parts Replacement', icon: '🔩', match: 'Parts Replacement' },
+  { label: 'Custom Service', icon: '➕', match: null },
+];
+
+// Repair job-card workflow stages (optional — only Repair-type services use them).
+const SERVICE_STATUS_OPTIONS = ['RECEIVED', 'PENDING', 'UNDER REPAIR', 'READY', 'DELIVERED'];
 
 // Resolve a numeric GST % for a product picked from the DB. `taxRate`/`gst` are the
 // numeric rates the product loaders derive; `tax` is a Tax-master UUID and must never
@@ -68,9 +84,23 @@ const taxSlabItems = (currentValue) => {
   ));
 };
 
+// One searchable string per product — name, barcode, SKU, brand, category and (for
+// imported items) model no / colour / size — so the Optical DB selector matches on
+// whichever detail the user actually typed.
+const productHaystack = (p) => {
+  const extra = p.extra_data || {};
+  return [
+    p.name, p.barcode, p.sku, p.brand, p.category, p.type,
+    p.hsn_code, p.colour, p.color, p.size, p.frameType,
+    extra.model_no, extra.modelNo, extra.color_code, extra.color, extra.size,
+    ...(p.extra_barcodes || []),
+  ].filter(Boolean).join(' ').toLowerCase();
+};
+
 export default function NewSaleWizard({
   customers = [],
   products = [],
+  services = [],
   onCheckoutComplete,
   onNavigateToEyeTest
 }) {
@@ -198,6 +228,30 @@ export default function NewSaleWizard({
   // (barcode/brand/category/stock/price) under the selector so staff can confirm they picked
   // the right one before it goes into the billing grid.
   const [selectedProductDetail, setSelectedProductDetail] = useState(null);
+  // Raw text currently typed into the Optical DB Product Selector. Drives a live preview row in
+  // the billing grid for the best-matching product even before the user commits a selection.
+  const [productSearchText, setProductSearchText] = useState('');
+
+  // --- ITEM CATEGORY MODE: Product | Lens | Services ---
+  // Drives the middle entry toolbar: 'product' shows the Optical DB selector, 'lens' opens the
+  // existing "+ NEW Lens" quick creator, 'service' shows the compact Services panel. All three
+  // feed the SAME billing grid / totals / checkout — services are never a separate invoice.
+  const [itemMode, setItemMode] = useState('product');
+  // Working copy of the Service Master so a service created from the inline dialog on THIS page
+  // shows up in the picker / search immediately, without waiting for a parent refetch.
+  const [serviceCatalog, setServiceCatalog] = useState(services);
+  const [serviceMasterOpen, setServiceMasterOpen] = useState(false);
+  useEffect(() => { setServiceCatalog(services); }, [services]);
+  const [serviceInput, setServiceInput] = useState({
+    serviceId: '', code: '', name: '', description: '',
+    qty: 1, price: '', discPercent: 0, taxPercent: 0
+  });
+  // Optional repair job-card fields — only shown when the Repair card (or the toggle) is on, so
+  // Fitting / Adjustment stay one-click.
+  const [showServiceRepair, setShowServiceRepair] = useState(false);
+  const [serviceRepair, setServiceRepair] = useState({
+    customerItem: '', problemDescription: '', estimatedDelivery: '', technician: '', serviceStatus: 'RECEIVED'
+  });
 
   // --- PART 3: BILLING ITEMS TABLE & FINANCIAL FOOTER ---
   const [itemsList, setItemsList] = useState([]);
@@ -517,6 +571,7 @@ export default function NewSaleWizard({
   const handleProductSelect = (selectedProd) => {
     if (!selectedProd) {
       setSelectedProductDetail(null);
+      setProductSearchText('');
       setEntryInput(prev => ({ ...prev, productId: '', barcode: '' }));
       return;
     }
@@ -550,53 +605,209 @@ export default function NewSaleWizard({
     setSelectedProductDetail(selectedProd);
   };
 
+  // Clears the pending Optical DB selection (and the live preview row it drives in the
+  // billing grid) without committing anything to the bill.
+  const handleClearEntrySelection = () => {
+    setEntryInput(prev => ({
+      ...prev,
+      productId: '', barcode: '', item: '', modelNo: '', color: '', size: '',
+      power: '', price: '', qty: 1, discPercent: 0, taxPercent: 0
+    }));
+    setSelectedProductDetail(null);
+    setProductSearchText('');
+  };
+
+  // Maps a raw Optical DB product record onto the entryInput shape so the billing-grid preview
+  // row and handleAddItem can consume a search match the same way they consume a real selection.
+  const buildEntryFromProduct = (p) => {
+    const extra = p.extra_data || {};
+    return {
+      productId: p.id || '',
+      barcode: String(p.barcode || p.id || p.code || ''),
+      item: p.name || '',
+      modelNo: extra.model_no || extra.modelNo || p.sku || '',
+      color: p.colour || p.color || extra.color_code || extra.color || '',
+      size: p.size || extra.size || '',
+      brand: p.brand || 'Generic',
+      category: (p.type || p.category || 'FRAME').toString().toUpperCase(),
+      group: entryInput.group || 'GENERIC',
+      power: '',
+      qty: 1,
+      price: p.price || p.sellingPrice || 0,
+      discPercent: 0,
+      taxPercent: 0
+    };
+  };
+
+  // Maps a Service Master record onto the entryInput shape so a service flows through the exact
+  // same computeEntryLine + handleAddItem path as a product — no parallel code, no separate bill.
+  const buildEntryFromService = (s) => ({
+    productId: '',
+    serviceId: s.id || '',
+    itemType: 'SERVICE',
+    barcode: s.code || 'SRV',
+    item: s.name || 'Service',
+    modelNo: '', color: '', size: '',
+    brand: 'SERVICE',
+    category: 'SERVICE',
+    group: 'SERVICE',
+    power: '',
+    qty: 1,
+    price: s.price || 0,
+    discPercent: 0,
+    taxPercent: s.taxRate || 0,
+  });
+
+  // Product / Lens / Services switch. 'lens' just reuses the existing "+ NEW Lens" creator.
+  const handleItemModeChange = (mode) => {
+    setItemMode(mode);
+    setQuickAddOpen(mode === 'lens');
+    if (mode !== 'service') {
+      setShowServiceRepair(false);
+    }
+  };
+
+  // Clicking a quick-service card: pull that service's defaults from the Service Master when it
+  // exists there, otherwise open blank fields for a one-off custom charge.
+  const handleSelectServiceCard = (card) => {
+    const master = (serviceCatalog || []).find(
+      s => s.name && card.match && s.name.toLowerCase() === card.match.toLowerCase()
+    );
+    if (master) {
+      setServiceInput({
+        serviceId: master.id || '',
+        code: master.code || '',
+        name: master.name || '',
+        description: master.description || '',
+        qty: 1,
+        price: master.price ?? '',
+        discPercent: 0,
+        taxPercent: master.taxRate || 0,
+      });
+    } else {
+      setServiceInput({
+        serviceId: '', code: '', name: card.match || '', description: '',
+        qty: 1, price: '', discPercent: 0, taxPercent: 0,
+      });
+    }
+    setShowServiceRepair(!!card.repair);
+  };
+
+  // Add the current service panel entry to the billing grid (same grid as products & lenses).
+  const handleAddService = () => {
+    if (!serviceInput.name.trim()) {
+      alert('Please choose a service or enter a service name first.');
+      return;
+    }
+    const repairFilled = showServiceRepair && Object.values(serviceRepair).some(v => v && String(v).trim());
+    const src = {
+      productId: '',
+      serviceId: serviceInput.serviceId || null,
+      itemType: 'SERVICE',
+      barcode: serviceInput.code || 'SRV',
+      item: serviceInput.name.trim(),
+      modelNo: '', color: '', size: '',
+      brand: 'SERVICE',
+      category: 'SERVICE',
+      group: 'SERVICE',
+      power: '',
+      qty: serviceInput.qty,
+      price: serviceInput.price,
+      discPercent: serviceInput.discPercent,
+      taxPercent: serviceInput.taxPercent,
+      serviceDescription: serviceInput.description || '',
+      serviceDetails: repairFilled ? { ...serviceRepair } : null,
+    };
+    handleAddItem(src);
+    setServiceInput({ serviceId: '', code: '', name: '', description: '', qty: 1, price: '', discPercent: 0, taxPercent: 0 });
+    setServiceRepair({ customerItem: '', problemDescription: '', estimatedDelivery: '', technician: '', serviceStatus: 'RECEIVED' });
+    setShowServiceRepair(false);
+  };
+
+  // A service saved from the inline Service Master dialog: merge it into the working catalog and
+  // pre-load the service panel with it so it's one click away from the bill.
+  const handleServiceSaved = (record) => {
+    if (!record) return;
+    setServiceCatalog(prev => {
+      const rest = (prev || []).filter(s => String(s.id) !== String(record.id));
+      return [...rest, record];
+    });
+    setServiceInput({
+      serviceId: record.id || '',
+      code: record.code || '',
+      name: record.name || '',
+      description: record.description || '',
+      qty: 1,
+      price: record.price ?? '',
+      discPercent: 0,
+      taxPercent: record.taxRate || 0,
+    });
+    setItemMode('service');
+  };
+
+  // Line-item math shared by handleAddItem and the billing-grid preview row so the numbers
+  // the user sees before adding match exactly what gets committed.
+  const computeEntryLine = (src) => {
+    const qty = parseInt(src.qty) || 1;
+    const price = parseFloat(src.price) || 0;
+    const discPercent = parseFloat(src.discPercent) || 0;
+    const taxPercent = parseFloat(src.taxPercent) || 0;
+    const gross = qty * price;
+    const disc = (gross * discPercent) / 100;
+    const taxable = gross - disc;
+    const tax = (taxable * taxPercent) / 100;
+    const total = taxable + tax;
+
+    let power = '—';
+    if (powerChecked) {
+      if (src.power) {
+        power = `${src.power} [Idx: ${lensIndex}]`;
+      } else if (rxData.sphOD || rxData.sphOS) {
+        power = `OD:${rxData.sphOD || '0'}/${rxData.cylOD || '0'} | OS:${rxData.sphOS || '0'}/${rxData.cylOS || '0'} [Idx: ${lensIndex}]`;
+      } else {
+        power = `Power Active [Idx: ${lensIndex}]`;
+      }
+    }
+
+    return { qty, price, discPercent, taxPercent, gross, disc, tax, total, power };
+  };
+
   // 2️⃣ PART 2 HANDLER: Add Item to Billing Grid
-  const handleAddItem = () => {
-    if (!entryInput.item) {
+  const handleAddItem = (srcOverride) => {
+    // srcOverride is passed by the "Add to bill" button on a search-driven preview row, before
+    // the product has been formally selected in the Autocomplete. A DOM click event (which has
+    // no `.item`) falls through to the live entryInput, same as the toolbar's "+ Add Item".
+    const src = srcOverride && srcOverride.item ? srcOverride : entryInput;
+    if (!src.item) {
       alert("Please select or enter an item description first.");
       return;
     }
 
-    const qty = parseInt(entryInput.qty) || 1;
-    const price = parseFloat(entryInput.price) || 0;
-    const disc = parseFloat(entryInput.discPercent) || 0;
-    const taxPercent = parseFloat(entryInput.taxPercent) || 0;
-    const gross = qty * price;
-    const discVal = (gross * disc) / 100;
-    const taxableAmount = gross - discVal;
-    const taxVal = (taxableAmount * taxPercent) / 100;
-    const total = taxableAmount + taxVal;
+    const { qty, price, discPercent, taxPercent, gross, disc, tax, total, power } = computeEntryLine(src);
 
-    // Power String auto-construct if Power checkbox is active
-    let formattedPower = '—';
-    if (powerChecked) {
-      if (entryInput.power) {
-        formattedPower = `${entryInput.power} [Idx: ${lensIndex}]`;
-      } else if (rxData.sphOD || rxData.sphOS) {
-        formattedPower = `OD:${rxData.sphOD || '0'}/${rxData.cylOD || '0'} | OS:${rxData.sphOS || '0'}/${rxData.cylOS || '0'} [Idx: ${lensIndex}]`;
-      } else {
-        formattedPower = `Power Active [Idx: ${lensIndex}]`;
-      }
-    }
-
+    const isService = (src.itemType === 'SERVICE') || src.category === 'SERVICE';
     const newItem = {
       id: `ITEM-${Date.now()}`,
-      productId: entryInput.productId || null,
-      barcode: entryInput.barcode || `BC-${Math.floor(1000 + Math.random() * 9000)}`,
-      item: entryInput.item,
-      modelNo: entryInput.modelNo || 'M-01',
-      color: entryInput.color || 'STANDARD',
-      size: entryInput.size || '50-18',
-      brand: entryInput.brand || 'OPTICAL',
-      category: entryInput.category || 'FRAME',
-      group: entryInput.group || 'GENERIC',
-      power: formattedPower,
+      productId: src.productId || null,
+      serviceId: src.serviceId || null,
+      itemType: isService ? 'SERVICE' : (src.itemType || 'PRODUCT'),
+      serviceDetails: src.serviceDetails || null,
+      barcode: src.barcode || `BC-${Math.floor(1000 + Math.random() * 9000)}`,
+      item: src.item,
+      modelNo: src.modelNo || (isService ? '—' : 'M-01'),
+      color: src.color || (isService ? '—' : 'STANDARD'),
+      size: src.size || (isService ? '—' : '50-18'),
+      brand: src.brand || (isService ? 'SERVICE' : 'OPTICAL'),
+      category: src.category || 'FRAME',
+      group: src.group || (isService ? 'SERVICE' : 'GENERIC'),
+      power: isService ? (src.serviceDescription || '—') : power,
+      serviceDescription: isService ? (src.serviceDescription || '') : undefined,
       qty,
       price,
-      disc: discVal,
+      disc,
       gross,
-      discPercent: disc,
-      tax: taxVal,
+      discPercent,
+      tax,
       taxPercent,
       total
     };
@@ -608,6 +819,7 @@ export default function NewSaleWizard({
       discPercent: 0, taxPercent: 0
     });
     setSelectedProductDetail(null);
+    setProductSearchText('');
   };
 
   // Hardware barcode scanner: looks up the product and adds it directly to the
@@ -740,6 +952,29 @@ export default function NewSaleWizard({
     else setCouponDisc(0);
   };
 
+  // Live, uncommitted line for a product formally chosen in the Optical DB selector — shown as
+  // a highlighted preview row in the billing grid so staff see the full detail line before Add.
+  const previewSource = entryInput.item ? entryInput : null;
+  const previewLine = previewSource ? computeEntryLine(previewSource) : null;
+
+  // While the user is still typing in the Optical DB selector (nothing selected/added yet),
+  // surface the matching products straight in the billing grid as ready-to-add rows — the same
+  // list the dropdown shows — so the details are visible right where the line will land and a
+  // single click on the row's ＋ drops it into the bill.
+  const searchQuery = productSearchText.trim().toLowerCase();
+  const searchMatches = (() => {
+    if (entryInput.item || searchQuery.length < 2) return [];
+    return products.filter(p => productHaystack(p).includes(searchQuery)).slice(0, 8);
+  })();
+  // Same live search, extended to the Service Master so one box finds Products, Lenses & Services.
+  const serviceMatches = (() => {
+    if (entryInput.item || searchQuery.length < 2) return [];
+    return (serviceCatalog || [])
+      .filter(s => s.isActive !== false &&
+        `${s.name || ''} ${s.code || ''} ${s.description || ''}`.toLowerCase().includes(searchQuery))
+      .slice(0, 6);
+  })();
+
   // 3️⃣ PART 3 FINANCIAL CALCULATIONS
   const totalQty = itemsList.reduce((sum, item) => sum + (parseInt(item.qty) || 0), 0);
   const grossTotal = itemsList.reduce((sum, item) => sum + (parseFloat(item.gross) || 0), 0);
@@ -820,6 +1055,9 @@ export default function NewSaleWizard({
           payment_method: paymentMode,
           items: itemsList.map(i => ({
             product: i.productId || null,
+            service: i.serviceId || null,
+            item_type: i.itemType || (i.category === 'SERVICE' ? 'SERVICE' : 'PRODUCT'),
+            service_details: i.serviceDetails || null,
             description: i.item,
             quantity: i.qty,
             unit_price: i.price,
@@ -1326,10 +1564,37 @@ export default function NewSaleWizard({
             )}
           </Paper>
 
-          {/* 🟡 PART 2 BAR: MIDDLE PRODUCT QUICK ENTRY TOOLBAR */}
+          {/* 🟡 PART 2 BAR: MIDDLE PRODUCT / LENS / SERVICE QUICK ENTRY TOOLBAR */}
           <Paper variant="outlined" sx={{ p: 1.2, mb: 1.5, borderRadius: 2.5, bgcolor: '#eff6ff', borderColor: '#bfdbfe' }}>
+
+            {/* Item category switch — Product | Lens | Services all feed the same billing grid */}
+            <Box sx={{ display: 'flex', gap: 0.75, mb: 1, flexWrap: 'wrap' }}>
+              {[
+                { key: 'product', label: '📦 Product' },
+                { key: 'lens', label: '👓 Lens' },
+                { key: 'service', label: '🔧 Services' },
+              ].map(m => (
+                <Button
+                  key={m.key}
+                  size="small"
+                  variant={itemMode === m.key ? 'contained' : 'outlined'}
+                  onClick={() => handleItemModeChange(m.key)}
+                  sx={{
+                    px: 2, py: 0.35, fontWeight: 900, fontSize: '0.75rem', borderRadius: 2, textTransform: 'none',
+                    bgcolor: itemMode === m.key ? '#0f172a' : 'transparent',
+                    color: itemMode === m.key ? '#facc15' : '#0f172a',
+                    borderColor: '#0f172a',
+                    '&:hover': { bgcolor: itemMode === m.key ? '#1e293b' : 'rgba(15,23,42,0.06)', borderColor: '#0f172a' }
+                  }}
+                >
+                  {m.label}
+                </Button>
+              ))}
+            </Box>
+
+            {itemMode !== 'service' && (
             <Grid container spacing={1} alignItems="center">
-              
+
               <Grid item xs={12} sm={0.8} md={0.8}>
                 <FormControlLabel 
                   control={<Checkbox size="small" checked={powerChecked} onChange={(e) => setPowerChecked(e.target.checked)} color="primary" />}
@@ -1355,75 +1620,16 @@ export default function NewSaleWizard({
                   category, and (for imported products) model no / color / size, so staff can
                   find an item by typing whichever detail they actually have on hand. */}
               <Grid item xs={12} sm={3.0} md={3.0}>
-                <Autocomplete
+                {/* Plain search box — no results popup. Typing here filters the product
+                    matches shown as rows in the billing grid below; click a row's + to add. */}
+                <TextField
+                  fullWidth
                   size="small"
-                  options={products}
-                  value={products.find(p => p.id === entryInput.productId) || null}
-                  onChange={(e, val) => handleProductSelect(val)}
-                  getOptionLabel={(p) => p?.name || ''}
-                  isOptionEqualToValue={(opt, val) => (opt.id || opt.code || opt.barcode) === (val?.id || val?.code || val?.barcode)}
-                  filterOptions={(options, state) => {
-                    const q = state.inputValue.toLowerCase().trim();
-                    if (!q) return options;
-                    return options.filter(p => {
-                      const extra = p.extra_data || {};
-                      const haystack = [
-                        p.name, p.barcode, p.sku, p.brand, p.category, p.type,
-                        p.hsn_code, p.colour, p.color, p.size, p.frameType,
-                        extra.model_no, extra.modelNo, extra.color_code, extra.color, extra.size,
-                        ...(p.extra_barcodes || [])
-                      ].filter(Boolean).join(' ').toLowerCase();
-                      return haystack.includes(q);
-                    });
-                  }}
-                  renderOption={(props, p) => {
-                    const extra = p.extra_data || {};
-                    const modelNo = extra.model_no || extra.modelNo || p.sku || '';
-                    const colour = p.colour || p.color || extra.color_code || extra.color || '';
-                    const size = p.size || extra.size || '';
-                    const stock = p.stock ?? p.qty;
-                    const meta = [
-                      p.brand || 'Generic',
-                      (p.category || p.type || '').toString().toUpperCase() || null,
-                      modelNo ? `Model ${modelNo}` : null,
-                      colour || null,
-                      size ? `Size ${size}` : null,
-                      p.hsn_code ? `HSN ${p.hsn_code}` : null,
-                    ].filter(Boolean).join('  •  ');
-                    return (
-                      <li {...props} key={p.id || p.code || p.barcode}>
-                        <Box sx={{ py: 0.4, width: '100%' }}>
-                          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 1 }}>
-                            <Typography variant="body2" fontWeight={800}>{p.name}</Typography>
-                            <Typography variant="body2" fontWeight={900} color="primary.main" sx={{ whiteSpace: 'nowrap' }}>
-                              ₹{p.price || p.sellingPrice || 0}
-                            </Typography>
-                          </Box>
-                          <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-                            {meta}
-                          </Typography>
-                          <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-                            Barcode: {p.barcode || '—'}
-                            {p.sku ? `  •  SKU: ${p.sku}` : ''}
-                            {stock != null ? `  •  ` : ''}
-                            {stock != null && (
-                              <Box component="span" sx={{ fontWeight: 800, color: parseInt(stock) > 0 ? 'success.main' : 'error.main' }}>
-                                Stock: {stock}
-                              </Box>
-                            )}
-                          </Typography>
-                        </Box>
-                      </li>
-                    );
-                  }}
-                  renderInput={(params) => (
-                    <TextField
-                      {...params}
-                      label="Optical DB Product Selector"
-                      placeholder="Search name, barcode, brand, model..."
-                      InputProps={{ ...params.InputProps, style: { fontSize: '0.78rem', fontWeight: 800, color: '#2563eb' } }}
-                    />
-                  )}
+                  label="Optical DB Selector"
+                  placeholder="🔍 Search Products, Lenses & Services..."
+                  value={productSearchText}
+                  onChange={(e) => setProductSearchText(e.target.value)}
+                  InputProps={{ style: { fontSize: '0.78rem', fontWeight: 800, color: '#2563eb' } }}
                 />
               </Grid>
 
@@ -1508,6 +1714,194 @@ export default function NewSaleWizard({
               </Grid>
 
             </Grid>
+            )}
+
+            {/* 🔧 SERVICES PANEL — compact, same navy/gold/blue styling as the rest of New Sale */}
+            {itemMode === 'service' && (
+              <Box sx={{ pt: 0.5 }}>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 1, mb: 1 }}>
+                  <Typography variant="caption" fontWeight={900} color="text.secondary">
+                    🔧 Quick services — click a card, or manage the Service Master
+                  </Typography>
+                  <Button
+                    size="small" variant="outlined"
+                    onClick={() => setServiceMasterOpen(true)} startIcon={<AddIcon />}
+                    sx={{ borderColor: '#7c3aed', color: '#7c3aed', fontWeight: 900, fontSize: '0.72rem', textTransform: 'none',
+                          '&:hover': { borderColor: '#6d28d9', bgcolor: 'rgba(124,58,237,0.06)' } }}
+                  >
+                    New Service (Service Master)
+                  </Button>
+                </Box>
+                <Box sx={{ display: 'flex', gap: 0.75, flexWrap: 'wrap', mb: 1.2 }}>
+                  {QUICK_SERVICE_CARDS.filter(card => {
+                    // Respect the Service Master ON/OFF switch: hide a quick card whose matching
+                    // service has been turned OFF. Cards with no match (Custom Service) or with no
+                    // Service Master entry at all stay visible.
+                    if (!card.match) return true;
+                    const master = (serviceCatalog || []).find(
+                      s => s.name && s.name.toLowerCase() === card.match.toLowerCase()
+                    );
+                    return !master || master.isActive !== false;
+                  }).map(card => {
+                    const active = serviceInput.name && card.match &&
+                      serviceInput.name.toLowerCase() === card.match.toLowerCase();
+                    return (
+                      <Button
+                        key={card.label}
+                        onClick={() => handleSelectServiceCard(card)}
+                        variant={active ? 'contained' : 'outlined'}
+                        sx={{
+                          px: 1.6, py: 0.7, borderRadius: 2, textTransform: 'none', fontWeight: 800, fontSize: '0.78rem',
+                          bgcolor: active ? '#2563eb' : '#ffffff',
+                          color: active ? '#ffffff' : '#0f172a',
+                          borderColor: '#bfdbfe',
+                          boxShadow: '0 1px 3px rgba(15,23,42,0.08)',
+                          '&:hover': { bgcolor: active ? '#1d4ed8' : '#eff6ff', borderColor: '#2563eb' }
+                        }}
+                      >
+                        <span style={{ marginRight: 6 }}>{card.icon}</span>{card.label}
+                      </Button>
+                    );
+                  })}
+                </Box>
+
+                <Grid container spacing={1} alignItems="center">
+                  <Grid item xs={12} sm={6} md={3}>
+                    <Autocomplete
+                      freeSolo
+                      options={(serviceCatalog || []).filter(s => s.isActive !== false).map(s => s.name)}
+                      value={serviceInput.name}
+                      onChange={(e, val) => {
+                        const master = (serviceCatalog || []).find(s => s.name === val);
+                        if (master) {
+                          setServiceInput({
+                            serviceId: master.id || '', code: master.code || '', name: master.name || '',
+                            description: master.description || '', qty: 1, price: master.price ?? '',
+                            discPercent: 0, taxPercent: master.taxRate || 0,
+                          });
+                        } else {
+                          setServiceInput({ ...serviceInput, serviceId: '', code: '', name: val || '' });
+                        }
+                      }}
+                      onInputChange={(e, val) => setServiceInput(prev => ({ ...prev, name: val }))}
+                      renderInput={(params) => (
+                        <TextField {...params} size="small" label="Service Name"
+                          placeholder="e.g. Frame Repair"
+                          inputProps={{ ...params.inputProps, style: { fontWeight: 800, fontSize: '0.8rem' } }} />
+                      )}
+                    />
+                  </Grid>
+
+                  <Grid item xs={12} sm={6} md={3.5}>
+                    <TextField
+                      fullWidth size="small" label="Service Description"
+                      placeholder="e.g. Repair broken hinge"
+                      value={serviceInput.description}
+                      onChange={(e) => setServiceInput({ ...serviceInput, description: e.target.value })}
+                      inputProps={{ style: { fontSize: '0.8rem' } }}
+                    />
+                  </Grid>
+
+                  <Grid item xs={4} sm={2} md={0.9}>
+                    <TextField
+                      fullWidth size="small" label="Qty" type="number"
+                      value={serviceInput.qty}
+                      onChange={(e) => setServiceInput({ ...serviceInput, qty: e.target.value })}
+                      inputProps={{ style: { fontWeight: 800, textAlign: 'center', fontSize: '0.8rem' } }}
+                    />
+                  </Grid>
+
+                  <Grid item xs={4} sm={3} md={1.3}>
+                    <TextField
+                      fullWidth size="small" label="Price (₹)" placeholder="0.00"
+                      value={serviceInput.price}
+                      onChange={(e) => setServiceInput({ ...serviceInput, price: e.target.value })}
+                      inputProps={{ style: { fontWeight: 800, fontSize: '0.8rem' } }}
+                    />
+                  </Grid>
+
+                  <Grid item xs={4} sm={3} md={1}>
+                    <TextField
+                      fullWidth size="small" label="Disc %" type="number" placeholder="0"
+                      value={serviceInput.discPercent}
+                      onChange={(e) => setServiceInput({ ...serviceInput, discPercent: e.target.value })}
+                      inputProps={{ min: 0, max: 100, style: { fontWeight: 800, textAlign: 'center', fontSize: '0.8rem', color: '#dc2626' } }}
+                    />
+                  </Grid>
+
+                  <Grid item xs={6} sm={3} md={1}>
+                    <Autocomplete
+                      freeSolo
+                      options={['0', '5', '12', '18', '28']}
+                      value={String(serviceInput.taxPercent ?? 0)}
+                      onChange={(e, val) => setServiceInput({ ...serviceInput, taxPercent: val == null ? 0 : val })}
+                      onInputChange={(e, val) => setServiceInput({ ...serviceInput, taxPercent: val })}
+                      renderInput={(params) => (
+                        <TextField {...params} fullWidth size="small" label="Tax %"
+                          inputProps={{ ...params.inputProps, inputMode: 'decimal', style: { fontWeight: 900, textAlign: 'center', fontSize: '0.8rem' } }} />
+                      )}
+                    />
+                  </Grid>
+
+                  <Grid item xs={6} sm={3} md={1.5}>
+                    <Button
+                      fullWidth variant="contained" size="small" color="primary"
+                      onClick={handleAddService} startIcon={<AddIcon />}
+                      sx={{ fontWeight: 900, py: 0.8, borderRadius: 2, textTransform: 'none', fontSize: '0.75rem', whiteSpace: 'nowrap' }}
+                    >
+                      + Add Service
+                    </Button>
+                  </Grid>
+                </Grid>
+
+                {/* Optional repair job card — collapsed by default so Fitting/Adjustment stay quick */}
+                <Box sx={{ mt: 1 }}>
+                  <FormControlLabel
+                    control={<Checkbox size="small" checked={showServiceRepair} onChange={(e) => setShowServiceRepair(e.target.checked)} color="primary" />}
+                    label={<Typography variant="caption" fontWeight={900} color="text.secondary">Add repair / job-card details (optional)</Typography>}
+                  />
+                  {showServiceRepair && (
+                    <Grid container spacing={1} sx={{ mt: 0.2 }}>
+                      <Grid item xs={12} sm={6} md={2.4}>
+                        <TextField fullWidth size="small" label="Customer Item"
+                          placeholder="e.g. Gold-rim frame"
+                          value={serviceRepair.customerItem}
+                          onChange={(e) => setServiceRepair({ ...serviceRepair, customerItem: e.target.value })}
+                          inputProps={{ style: { fontSize: '0.8rem' } }} />
+                      </Grid>
+                      <Grid item xs={12} sm={6} md={3.2}>
+                        <TextField fullWidth size="small" label="Problem Description"
+                          placeholder="e.g. Broken hinge, loose temple"
+                          value={serviceRepair.problemDescription}
+                          onChange={(e) => setServiceRepair({ ...serviceRepair, problemDescription: e.target.value })}
+                          inputProps={{ style: { fontSize: '0.8rem' } }} />
+                      </Grid>
+                      <Grid item xs={6} sm={4} md={2}>
+                        <TextField fullWidth size="small" type="date" label="Est. Delivery"
+                          InputLabelProps={{ shrink: true }}
+                          value={serviceRepair.estimatedDelivery}
+                          onChange={(e) => setServiceRepair({ ...serviceRepair, estimatedDelivery: e.target.value })}
+                          inputProps={{ style: { fontSize: '0.8rem' } }} />
+                      </Grid>
+                      <Grid item xs={6} sm={4} md={2}>
+                        <TextField fullWidth size="small" label="Technician"
+                          value={serviceRepair.technician}
+                          onChange={(e) => setServiceRepair({ ...serviceRepair, technician: e.target.value })}
+                          inputProps={{ style: { fontSize: '0.8rem' } }} />
+                      </Grid>
+                      <Grid item xs={12} sm={4} md={2.2}>
+                        <TextField select fullWidth size="small" label="Service Status"
+                          value={serviceRepair.serviceStatus}
+                          onChange={(e) => setServiceRepair({ ...serviceRepair, serviceStatus: e.target.value })}
+                          SelectProps={{ style: { fontWeight: 800, fontSize: '0.8rem' } }}>
+                          {SERVICE_STATUS_OPTIONS.map(s => <MenuItem key={s} value={s}>{s}</MenuItem>)}
+                        </TextField>
+                      </Grid>
+                    </Grid>
+                  )}
+                </Box>
+              </Box>
+            )}
 
             {/* Selected product's DB details — item name, brand, stock — shown so staff can
                 confirm they picked the right item before adding it to the bill (barcode, model
@@ -1813,7 +2207,7 @@ export default function NewSaleWizard({
 
           {/* 🟢 PART 3: CENTER BILLING ITEMS DATA GRID */}
           <Card variant="outlined" sx={{ borderRadius: 3, overflow: 'hidden', mb: 1.5, borderColor: '#cbd5e1' }}>
-            <TableContainer sx={{ maxH: 300 }}>
+            <TableContainer sx={{ maxHeight: 340 }}>
               <Table size="small" stickyHeader>
                 <TableHead sx={{ bgcolor: '#0f172a' }}>
                   <TableRow>
@@ -1835,24 +2229,167 @@ export default function NewSaleWizard({
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {itemsList.length === 0 ? (
+                  {itemsList.length === 0 && !previewLine && searchMatches.length === 0 && serviceMatches.length === 0 && (
                     <TableRow>
                       <TableCell colSpan={15} align="center" sx={{ py: 4 }}>
                         <Typography variant="body2" color="text.secondary" fontWeight={600}>
-                          Billing grid is blank. Select item from Optical DB above or enter details to add.
+                          Billing grid is blank. Search Products, Lenses &amp; Services in the Optical DB selector above — matches appear here — or enter details to add.
                         </Typography>
                       </TableCell>
                     </TableRow>
-                  ) : (
-                    itemsList.map((row) => (
-                      <TableRow key={row.id} hover sx={{ '&:nth-of-type(even)': { bgcolor: '#f8fafc' } }}>
-                        <TableCell sx={{ fontWeight: 800, color: 'primary.main', fontSize: '0.8rem' }}>{row.barcode}</TableCell>
+                  )}
+
+                  {searchMatches.length > 0 && (
+                    <TableRow sx={{ bgcolor: '#e0f2fe' }}>
+                      <TableCell colSpan={15} sx={{ py: 0.4, fontWeight: 900, fontSize: '0.68rem', letterSpacing: 0.5, color: '#0f172a' }}>
+                        📦 PRODUCTS &amp; 👓 LENSES
+                      </TableCell>
+                    </TableRow>
+                  )}
+
+                  {searchMatches.map((p) => {
+                    const src = buildEntryFromProduct(p);
+                    const line = computeEntryLine(src);
+                    const stock = p.stock ?? p.qty;
+                    return (
+                      <TableRow key={`match-${p.id || p.barcode || src.item}`} hover sx={{ bgcolor: '#f0f9ff', '& td': { borderBottom: '1px dashed #bfdbfe' } }}>
+                        <TableCell sx={{ fontWeight: 800, color: 'primary.main', fontSize: '0.8rem' }}>{src.barcode || '—'}</TableCell>
+                        <TableCell sx={{ fontWeight: 700, fontSize: '0.8rem' }}>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6, flexWrap: 'wrap' }}>
+                            <Chip label="MATCH" size="small" color="info" variant="outlined" sx={{ fontWeight: 900, height: 18, fontSize: '0.6rem' }} />
+                            {src.item}
+                            {stock != null && (
+                              <Box component="span" sx={{ fontSize: '0.65rem', fontWeight: 800, color: parseInt(stock) > 0 ? 'success.main' : 'error.main' }}>
+                                Stock: {stock}
+                              </Box>
+                            )}
+                          </Box>
+                        </TableCell>
+                        <TableCell sx={{ fontSize: '0.8rem' }}>{src.modelNo || '—'}</TableCell>
+                        <TableCell sx={{ fontSize: '0.8rem' }}>{src.color || '—'}</TableCell>
+                        <TableCell sx={{ fontSize: '0.8rem' }}>{src.size || '—'}</TableCell>
+                        <TableCell sx={{ fontSize: '0.8rem' }}>{src.brand || '—'}</TableCell>
+                        <TableCell sx={{ fontSize: '0.8rem' }}>
+                          <Chip label={src.category} size="small" color="primary" variant="outlined" sx={{ fontWeight: 800, height: 20, fontSize: '0.65rem' }} />
+                        </TableCell>
+                        <TableCell sx={{ fontSize: '0.8rem', color: '#2563eb', fontWeight: 700 }}>{line.power}</TableCell>
+                        <TableCell align="center" sx={{ fontWeight: 900, fontSize: '0.85rem' }}>{line.qty}</TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>₹{line.price.toFixed(2)}</TableCell>
+                        <TableCell align="right" sx={{ color: 'error.main', fontSize: '0.8rem' }}>₹{line.disc.toFixed(2)}</TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>₹{line.gross.toFixed(2)}</TableCell>
+                        <TableCell align="right" sx={{ fontSize: '0.8rem', color: '#0f766e' }}>₹{line.tax.toFixed(2)} ({line.taxPercent || 0}%)</TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 900, color: 'primary.main', fontSize: '0.85rem' }}>₹{line.total.toFixed(2)}</TableCell>
+                        <TableCell align="center">
+                          <Tooltip title="Add to bill">
+                            <IconButton size="small" color="success" onClick={() => handleAddItem(src)}>
+                              <AddIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+
+                  {serviceMatches.length > 0 && (
+                    <TableRow sx={{ bgcolor: '#fef3c7' }}>
+                      <TableCell colSpan={15} sx={{ py: 0.4, fontWeight: 900, fontSize: '0.68rem', letterSpacing: 0.5, color: '#0f172a' }}>
+                        🔧 SERVICES
+                      </TableCell>
+                    </TableRow>
+                  )}
+
+                  {serviceMatches.map((s) => {
+                    const src = buildEntryFromService(s);
+                    const line = computeEntryLine(src);
+                    return (
+                      <TableRow key={`svc-${s.id || s.code || s.name}`} hover sx={{ bgcolor: '#fffbeb', '& td': { borderBottom: '1px dashed #fcd34d' } }}>
+                        <TableCell sx={{ fontWeight: 800, color: '#b45309', fontSize: '0.8rem' }}>{src.barcode || '—'}</TableCell>
+                        <TableCell sx={{ fontWeight: 700, fontSize: '0.8rem' }}>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6, flexWrap: 'wrap' }}>
+                            <Chip label="SERVICE" size="small" color="warning" variant="outlined" sx={{ fontWeight: 900, height: 18, fontSize: '0.6rem' }} />
+                            {src.item}
+                          </Box>
+                        </TableCell>
+                        <TableCell sx={{ fontSize: '0.8rem' }}>—</TableCell>
+                        <TableCell sx={{ fontSize: '0.8rem' }}>—</TableCell>
+                        <TableCell sx={{ fontSize: '0.8rem' }}>—</TableCell>
+                        <TableCell sx={{ fontSize: '0.8rem' }}>SERVICE</TableCell>
+                        <TableCell sx={{ fontSize: '0.8rem' }}>
+                          <Chip label="SERVICE" size="small" color="warning" variant="outlined" sx={{ fontWeight: 800, height: 20, fontSize: '0.65rem' }} />
+                        </TableCell>
+                        <TableCell sx={{ fontSize: '0.8rem', color: '#92400e', fontWeight: 700 }}>{s.description || '—'}</TableCell>
+                        <TableCell align="center" sx={{ fontWeight: 900, fontSize: '0.85rem' }}>{line.qty}</TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>₹{line.price.toFixed(2)}</TableCell>
+                        <TableCell align="right" sx={{ color: 'error.main', fontSize: '0.8rem' }}>₹{line.disc.toFixed(2)}</TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>₹{line.gross.toFixed(2)}</TableCell>
+                        <TableCell align="right" sx={{ fontSize: '0.8rem', color: '#0f766e' }}>₹{line.tax.toFixed(2)} ({line.taxPercent || 0}%)</TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 900, color: '#b45309', fontSize: '0.85rem' }}>₹{line.total.toFixed(2)}</TableCell>
+                        <TableCell align="center">
+                          <Tooltip title="Add service to bill">
+                            <IconButton size="small" color="success" onClick={() => handleAddItem(src)}>
+                              <AddIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+
+                  {previewLine && (
+                    <TableRow sx={{ bgcolor: '#eff6ff', '& td': { borderBottom: '2px solid #bfdbfe' } }}>
+                      <TableCell sx={{ fontWeight: 800, color: 'primary.main', fontSize: '0.8rem' }}>
+                        {previewSource.barcode || '—'}
+                      </TableCell>
+                      <TableCell sx={{ fontWeight: 700, fontSize: '0.8rem' }}>
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6 }}>
+                          <Chip label="PREVIEW" size="small" color="info" sx={{ fontWeight: 900, height: 18, fontSize: '0.6rem' }} />
+                          {previewSource.item}
+                        </Box>
+                      </TableCell>
+                      <TableCell sx={{ fontSize: '0.8rem' }}>{previewSource.modelNo || '—'}</TableCell>
+                      <TableCell sx={{ fontSize: '0.8rem' }}>{previewSource.color || '—'}</TableCell>
+                      <TableCell sx={{ fontSize: '0.8rem' }}>{previewSource.size || '—'}</TableCell>
+                      <TableCell sx={{ fontSize: '0.8rem' }}>{previewSource.brand || '—'}</TableCell>
+                      <TableCell sx={{ fontSize: '0.8rem' }}>
+                        <Chip label={previewSource.category} size="small" color="primary" variant="outlined" sx={{ fontWeight: 800, height: 20, fontSize: '0.65rem' }} />
+                      </TableCell>
+                      <TableCell sx={{ fontSize: '0.8rem', color: '#2563eb', fontWeight: 700 }}>{previewLine.power}</TableCell>
+                      <TableCell align="center" sx={{ fontWeight: 900, fontSize: '0.85rem' }}>{previewLine.qty}</TableCell>
+                      <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>₹{previewLine.price.toFixed(2)}</TableCell>
+                      <TableCell align="right" sx={{ color: 'error.main', fontSize: '0.8rem' }}>
+                        ₹{previewLine.disc.toFixed(2)}{previewLine.discPercent ? ` (${previewLine.discPercent}%)` : ''}
+                      </TableCell>
+                      <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>₹{previewLine.gross.toFixed(2)}</TableCell>
+                      <TableCell align="right" sx={{ fontSize: '0.8rem', color: '#0f766e' }}>
+                        ₹{previewLine.tax.toFixed(2)} ({previewLine.taxPercent || 0}%)
+                      </TableCell>
+                      <TableCell align="right" sx={{ fontWeight: 900, color: 'primary.main', fontSize: '0.85rem' }}>₹{previewLine.total.toFixed(2)}</TableCell>
+                      <TableCell align="center">
+                        <Tooltip title="Add to bill">
+                          <IconButton size="small" color="success" onClick={() => handleAddItem(previewSource)}>
+                            <AddIcon fontSize="small" />
+                          </IconButton>
+                        </Tooltip>
+                        <Tooltip title="Clear selection">
+                          <IconButton size="small" color="error" onClick={handleClearEntrySelection}>
+                            <DeleteIcon fontSize="small" />
+                          </IconButton>
+                        </Tooltip>
+                      </TableCell>
+                    </TableRow>
+                  )}
+
+                  {itemsList.map((row) => {
+                      const isSvcRow = (row.itemType === 'SERVICE') || row.category === 'SERVICE';
+                      return (
+                      <TableRow key={row.id} hover sx={{ '&:nth-of-type(even)': { bgcolor: '#f8fafc' }, ...(isSvcRow ? { bgcolor: '#fffbeb' } : {}) }}>
+                        <TableCell sx={{ fontWeight: 800, color: isSvcRow ? '#b45309' : 'primary.main', fontSize: '0.8rem' }}>{row.barcode}</TableCell>
                         <TableCell sx={{ fontWeight: 700, fontSize: '0.8rem' }}>{row.item}</TableCell>
                         <TableCell sx={{ fontSize: '0.8rem' }}>{row.modelNo}</TableCell>
                         <TableCell sx={{ fontSize: '0.8rem' }}>{row.color}</TableCell>
                         <TableCell sx={{ fontSize: '0.8rem' }}>{row.size}</TableCell>
                         <TableCell sx={{ fontSize: '0.8rem' }}>{row.brand}</TableCell>
-                        <TableCell sx={{ fontSize: '0.8rem' }}><Chip label={row.category} size="small" color="primary" variant="outlined" sx={{ fontWeight: 800, height: 20, fontSize: '0.65rem' }} /></TableCell>
+                        <TableCell sx={{ fontSize: '0.8rem' }}><Chip label={isSvcRow ? 'SERVICE' : row.category} size="small" color={isSvcRow ? 'warning' : 'primary'} variant="outlined" sx={{ fontWeight: 800, height: 20, fontSize: '0.65rem' }} /></TableCell>
                         <TableCell sx={{ fontSize: '0.8rem', color: '#2563eb', fontWeight: 700 }}>{row.power}</TableCell>
                         <TableCell align="center" sx={{ fontWeight: 900, fontSize: '0.85rem' }}>{row.qty}</TableCell>
                         <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>₹{row.price.toFixed(2)}</TableCell>
@@ -1873,8 +2410,8 @@ export default function NewSaleWizard({
                           </IconButton>
                         </TableCell>
                       </TableRow>
-                    ))
-                  )}
+                      );
+                  })}
                 </TableBody>
               </Table>
             </TableContainer>
@@ -2185,6 +2722,13 @@ export default function NewSaleWizard({
         open={showBillOpen}
         onClose={() => setShowBillOpen(false)}
         invoice={showBillOpen ? buildInvoiceSnapshot() : null}
+      />
+
+      {/* Inline Service Master — register a new service without leaving the bill */}
+      <ServiceMasterDialog
+        open={serviceMasterOpen}
+        onClose={() => setServiceMasterOpen(false)}
+        onSaved={handleServiceSaved}
       />
 
     </Box>

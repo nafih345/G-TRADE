@@ -24,6 +24,7 @@ import {
   ExpandMore
 } from '@mui/icons-material';
 import { useAuth } from '../context/AuthContext';
+import { useBranch } from '../context/BranchContext';
 import GreensolLogo from './GreensolLogo';
 
 const DRAWER_WIDTH = 280;
@@ -71,7 +72,8 @@ const menuItems = [
       { text: 'Products', path: '/inventory/products' },
       { text: 'Categories', path: '/inventory/categories' },
       { text: 'Brands', path: '/inventory/brands' },
-      { text: 'Lens Catalog Matrix', path: '/inventory/lenses' }
+      { text: 'Lens Catalog Matrix', path: '/inventory/lenses' },
+      { text: 'Stock Transfer', path: '/inventory/stock-transfer', multiBranchOnly: true }
     ]
   },
   {
@@ -130,7 +132,8 @@ const menuItems = [
     subItems: [
       { text: 'Users', path: '/admin/users' },
       { text: 'Doctors Master', path: '/admin/doctors' },
-      { text: 'Branch Management (Add Branch)', path: '/admin/branches' },
+      { text: 'Service Master', path: '/admin/service-master' },
+      { text: 'Branch Management', path: '/admin/branches', multiBranchOnly: true },
       { text: 'Excel Import Management', path: '/admin/excel-import' },
       { text: 'Barcode Printing', path: '/admin/barcode-printing' },
       { text: 'Roles', path: '/admin/roles' },
@@ -158,6 +161,7 @@ const menuItems = [
 
 export default function Sidebar({ open, toggleSidebar, isMobile = false }) {
   const { user } = useAuth();
+  const { multiBranchEnabled } = useBranch();
   const navigate = useNavigate();
   const location = useLocation();
   const [expanded, setExpanded] = useState({});
@@ -197,7 +201,15 @@ export default function Sidebar({ open, toggleSidebar, isMobile = false }) {
     optical: true, sales: true, wholesale: true, inventory: true, purchase: true, financial: true, accounts: true, reports: true, admin: true
   };
 
-  const filteredMenu = menuItems.filter(item => {
+  const filteredMenu = menuItems
+    .map(item => {
+      // Drop sub-items flagged multiBranchOnly when Multi-Branch Mode is OFF (spec section 1).
+      if (item.subItems && !multiBranchEnabled) {
+        return { ...item, subItems: item.subItems.filter(s => !s.multiBranchOnly) };
+      }
+      return item;
+    })
+    .filter(item => {
     if (item.text === 'Optical Services' && permissions.optical === false) return false;
     if (item.text === 'Sales' && permissions.sales === false) return false;
     if ((item.text === 'Wholesale' || item.text === 'Wholesale Distribution') && permissions.wholesale === false) return false;

@@ -1,5 +1,5 @@
 import uuid
-from rest_framework import viewsets, permissions, status
+from rest_framework import viewsets, permissions, status, serializers
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.serializers import ModelSerializer
@@ -7,6 +7,8 @@ from django.db import transaction
 from .models import Supplier, PurchaseOrder, PurchaseOrderItem, PurchaseInvoice, PurchaseInvoiceItem
 from .supplier_utils import reserve_supplier_codes, get_or_create_supplier_ledger_account
 from apps.inventory.models import StockLedger
+from apps.inventory.stock_utils import adjust_branch_stock
+from apps.common.branch_mixins import BranchScopedViewSetMixin
 
 class SupplierSerializer(ModelSerializer):
     class Meta:
@@ -64,14 +66,14 @@ class SupplierViewSet(viewsets.ModelViewSet):
         supplier.ledger_account = get_or_create_supplier_ledger_account(supplier)
         supplier.save(update_fields=['ledger_account'])
 
-class PurchaseOrderViewSet(viewsets.ModelViewSet):
+class PurchaseOrderViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
     queryset = PurchaseOrder.objects.all()
     serializer_class = PurchaseOrderSerializer
     authentication_classes = []
     permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
-        qs = PurchaseOrder.objects.all().order_by('-order_date', '-created_at')
+        qs = super().get_queryset().order_by('-order_date', '-created_at')
         status_param = self.request.query_params.get('status')
         supplier_param = self.request.query_params.get('supplier')
         if status_param:
@@ -81,7 +83,7 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
         return qs
 
     def perform_create(self, serializer):
-        po = serializer.save()
+        po = serializer.save(**self._branch_stamp_kwargs(serializer))
         if po.status == 'RECEIVED':
             self._update_inventory(po)
 
@@ -91,24 +93,20 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
             self._update_inventory(po)
 
     def _update_inventory(self, po):
-        # When a PO is received, update stock ledger
-        # We need a default warehouse; for now we look up the first available warehouse.
-        from apps.company.models import Warehouse
-        warehouse = Warehouse.objects.first()
-        if not warehouse:
-            return
-
+        # When a PO is received, add stock to the PO's branch (default branch for legacy rows).
+        from apps.company.models import Branch
+        branch = po.branch or Branch.get_default()
         for item in po.items.all():
-            # Check if ledger entry already exists to avoid double entry
-            if not StockLedger.objects.filter(reference_id=po.id, product=item.product).exists():
-                StockLedger.objects.create(
-                    product=item.product,
-                    warehouse=warehouse,
-                    quantity=item.quantity,
-                    transaction_type='IN',
-                    reference_id=po.id,
-                    notes=f"Received via PO {po.order_number}"
-                )
+            if StockLedger.objects.filter(reference_id=po.id, product=item.product).exists():
+                continue
+            adjust_branch_stock(
+                item.product, branch, item.quantity,
+                ledger={
+                    'transaction_type': 'IN',
+                    'reference_id': po.id,
+                    'notes': f"Received via PO {po.order_number}",
+                },
+            )
 
     @action(detail=True, methods=['post'], url_path='mark-converted')
     def mark_converted(self, request, pk=None):
@@ -126,6 +124,11 @@ class PurchaseOrderViewSet(viewsets.ModelViewSet):
 # ==========================================
 
 class PurchaseInvoiceItemSerializer(ModelSerializer):
+    # Read-only convenience for the Purchase Order Reports list and the "Edit" flow:
+    # the raw model only stores the product UUID, but both the report table and the
+    # re-populated Purchase Entry grid need the product's display name.
+    product_name = serializers.CharField(source='product.name', read_only=True)
+
     class Meta:
         model = PurchaseInvoiceItem
         fields = '__all__'
@@ -134,6 +137,7 @@ class PurchaseInvoiceItemSerializer(ModelSerializer):
 
 class PurchaseInvoiceSerializer(ModelSerializer):
     items = PurchaseInvoiceItemSerializer(many=True)
+    supplier_name = serializers.CharField(source='supplier.name', read_only=True)
 
     class Meta:
         model = PurchaseInvoice
@@ -160,7 +164,7 @@ class PurchaseInvoiceSerializer(ModelSerializer):
         return instance
 
 
-class PurchaseInvoiceViewSet(viewsets.ModelViewSet):
+class PurchaseInvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
     queryset = PurchaseInvoice.objects.all().order_by('-purchase_date', '-created_at')
     serializer_class = PurchaseInvoiceSerializer
     authentication_classes = []
@@ -168,41 +172,49 @@ class PurchaseInvoiceViewSet(viewsets.ModelViewSet):
 
     @transaction.atomic
     def perform_create(self, serializer):
-        invoice = serializer.save()
+        invoice = serializer.save(**self._branch_stamp_kwargs(serializer))
         if invoice.status not in ('DRAFT', 'CANCELLED'):
             self._apply_stock_and_payables(invoice)
 
     @transaction.atomic
     def perform_update(self, serializer):
+        # Editing an existing entry (the "Edit" button on Purchase Order Reports).
+        # Reverse whatever credit balance the previous version added to the supplier
+        # before re-applying, so repeated edits don't keep inflating their payables.
+        old = PurchaseInvoice.objects.filter(pk=serializer.instance.pk).first()
+        if old and old.purchase_type == 'CREDIT' and old.balance_amount and old.status not in ('DRAFT', 'CANCELLED'):
+            supplier = old.supplier
+            supplier.outstanding_balance = (supplier.outstanding_balance or 0) - old.balance_amount
+            supplier.save(update_fields=['outstanding_balance'])
+
         invoice = serializer.save()
         if invoice.status not in ('DRAFT', 'CANCELLED'):
             self._apply_stock_and_payables(invoice)
 
     def _apply_stock_and_payables(self, invoice):
+        from apps.company.models import Branch
+        branch = invoice.branch or Branch.get_default()
         warehouse = invoice.warehouse
-        if not warehouse:
-            from apps.company.models import Warehouse
-            warehouse = Warehouse.objects.first()
 
         for item in invoice.items.all():
             product = item.product
             qty_in = (item.quantity or 0) + (item.free_quantity or 0)
 
-            product.stock = (product.stock or 0) + int(qty_in)
             if item.purchase_rate:
                 product.cost_price = item.purchase_rate
             if item.selling_price:
                 product.retail_price = item.selling_price
-            product.save()
+            product.save(update_fields=['cost_price', 'retail_price', 'updated_at'])
 
-            if warehouse and not StockLedger.objects.filter(reference_id=invoice.id, product=product).exists():
-                StockLedger.objects.create(
-                    product=product,
-                    warehouse=warehouse,
-                    quantity=int(qty_in),
-                    transaction_type='IN',
-                    reference_id=invoice.id,
-                    notes=f"Received via Purchase Entry {invoice.invoice_number}"
+            if not StockLedger.objects.filter(reference_id=invoice.id, product=product).exists():
+                adjust_branch_stock(
+                    product, branch, int(qty_in),
+                    ledger={
+                        'warehouse': warehouse,
+                        'transaction_type': 'IN',
+                        'reference_id': invoice.id,
+                        'notes': f"Received via Purchase Entry {invoice.invoice_number}",
+                    },
                 )
 
         if invoice.purchase_type == 'CREDIT' and invoice.balance_amount:

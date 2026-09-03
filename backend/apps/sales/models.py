@@ -52,6 +52,26 @@ class Customer(BaseUUIDModel):
         return self.name
 
 
+class Service(BaseUUIDModel):
+    """Service Master — dispensable optical services (frame repair, fitting, adjustment,
+    cleaning, parts replacement, ...) billed on the same Invoice as products and lenses.
+    Managed from Administration -> Service Master."""
+    # Human-readable code (SRV001, SRV002, ...) assigned atomically on create by
+    # ServiceViewSet.perform_create when the client doesn't send one.
+    service_code = models.CharField(max_length=20, unique=True, blank=True, db_index=True)
+    name = models.CharField(max_length=150)
+    description = models.TextField(blank=True, null=True)
+    default_price = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
+    tax_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0.0)  # Percentage
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ['service_code']
+
+    def __str__(self):
+        return f"{self.service_code} - {self.name}"
+
+
 class Invoice(BaseUUIDModel):
     STATUS_CHOICES = [
         ('DRAFT', 'Draft'),
@@ -71,6 +91,10 @@ class Invoice(BaseUUIDModel):
     # Customer later doesn't wipe out their purchase history.
     customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name='invoices')
     invoice_date = models.DateField()
+    # Branch this sale belongs to. Nullable + SET_NULL for backward compatibility with rows
+    # created before Multi-Branch existed (a data migration backfills them to the default
+    # branch). Stamped automatically by BranchScopedViewSetMixin from the active branch.
+    branch = models.ForeignKey('company.Branch', on_delete=models.SET_NULL, null=True, blank=True, db_index=True, related_name='+')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='UNPAID')
     # Separate from `status` on purpose: `status` tracks PAYMENT state (choice-restricted to
     # DRAFT/PAID/PARTIAL/UNPAID/CANCELLED) while the Orders tab tracks LAB/FULFILLMENT progress
@@ -98,6 +122,17 @@ class InvoiceItem(BaseUUIDModel):
     # either way, so the line item still reads correctly even when product is None or later
     # deleted from the catalog.
     product = models.ForeignKey('products.Product', on_delete=models.SET_NULL, null=True, blank=True)
+    # 'PRODUCT' | 'LENS' | 'SERVICE' — lets the billing grid, invoice print and reports tell a
+    # dispensed service (frame repair, fitting) apart from a stocked product without having to
+    # infer it from whether `product` is null. Plain CharField (no choices=) so the frontend
+    # stays free to extend the vocabulary, same rationale as Invoice.fulfillment_status.
+    item_type = models.CharField(max_length=20, default='PRODUCT')
+    # Set for SERVICE lines that came from the Service Master (null for ad-hoc / custom services).
+    service = models.ForeignKey('sales.Service', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    # Optional repair job-card details for SERVICE lines — customer_item, problem_description,
+    # estimated_delivery, technician, service_status. Free-form JSON so simple services
+    # (fitting, adjustment) can be added without filling any of it.
+    service_details = models.JSONField(blank=True, null=True)
     description = models.CharField(max_length=255, blank=True, null=True)
     quantity = models.IntegerField()
     unit_price = models.DecimalField(max_digits=12, decimal_places=2)
@@ -115,6 +150,7 @@ class Payment(BaseUUIDModel):
     # (advance at booking, balance on collection, etc.), and the Payments tab needs to list each
     # one individually.
     receipt_no = models.CharField(max_length=50, unique=True, blank=True, null=True, db_index=True)
+    branch = models.ForeignKey('company.Branch', on_delete=models.SET_NULL, null=True, blank=True, db_index=True, related_name='+')
     invoice = models.ForeignKey(Invoice, on_delete=models.SET_NULL, null=True, blank=True, related_name='payments')
     customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name='payments')
     # Denormalized snapshot so the receipt still displays correctly even if the Customer is

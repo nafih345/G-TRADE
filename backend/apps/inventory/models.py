@@ -12,6 +12,7 @@ class StockLedger(BaseUUIDModel):
 
     product = models.ForeignKey('products.Product', on_delete=models.CASCADE, related_name='stock_ledger')
     warehouse = models.ForeignKey('company.Warehouse', on_delete=models.CASCADE, related_name='stock_ledger')
+    branch = models.ForeignKey('company.Branch', on_delete=models.SET_NULL, null=True, blank=True, db_index=True, related_name='+')
     quantity = models.IntegerField()
     transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)
     reference_id = models.UUIDField(blank=True, null=True)  # Links to invoice, GRN, transfer, etc.
@@ -29,6 +30,7 @@ class StockAdjustment(BaseUUIDModel):
 
     product = models.ForeignKey('products.Product', on_delete=models.CASCADE)
     warehouse = models.ForeignKey('company.Warehouse', on_delete=models.CASCADE)
+    branch = models.ForeignKey('company.Branch', on_delete=models.SET_NULL, null=True, blank=True, db_index=True, related_name='+')
     quantity = models.IntegerField()
     adjustment_type = models.CharField(max_length=10, choices=ADJUSTMENT_TYPES)
     reason = models.TextField()
