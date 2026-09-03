@@ -21,10 +21,40 @@ def health_check_view(request):
         connection.ensure_connection()
     except Exception as e:
         db_status = f"error: {str(e)}"
-    
+
+    # Pending migrations are the usual reason the deployed app breaks after a release
+    # (code ahead of schema — e.g. the Multi-Branch columns/tables). Surface them here so
+    # the state is checkable without server-log access.
+    pending_migrations = []
+    migrations_status = "up_to_date"
+    try:
+        from django.db import connections, DEFAULT_DB_ALIAS
+        from django.db.migrations.executor import MigrationExecutor
+        executor = MigrationExecutor(connections[DEFAULT_DB_ALIAS])
+        plan = executor.migration_plan(executor.loader.graph.leaf_nodes())
+        pending_migrations = [f"{m.app_label}.{m.name}" for m, _ in plan]
+        if pending_migrations:
+            migrations_status = "pending"
+    except Exception as e:
+        migrations_status = f"error: {str(e)}"
+
+    multi_branch = None
+    try:
+        from apps.company.models import BusinessSettings, Branch
+        multi_branch = {
+            "enabled": bool(BusinessSettings.load().multi_branch_enabled),
+            "branch_count": Branch.objects.count(),
+            "has_default_branch": Branch.objects.filter(is_default=True).exists(),
+        }
+    except Exception as e:
+        multi_branch = {"error": str(e)}
+
     return JsonResponse({
-        "status": "ok",
+        "status": "ok" if db_status == "connected" and migrations_status == "up_to_date" else "degraded",
         "database": db_status,
+        "migrations": migrations_status,
+        "pending_migrations": pending_migrations,
+        "multi_branch": multi_branch,
         "app": "Optical ERP Backend",
         "version": "1.0.0"
     })

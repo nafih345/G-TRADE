@@ -282,8 +282,21 @@ def _branch_payload(branch):
 def branch_context(request):
     """Single call the frontend uses to hydrate BranchContext: the multi-branch flag, the
     active branch for this caller, and the list of branches this caller may switch between."""
+    from django.db.utils import OperationalError, ProgrammingError
     from apps.common.branch_context import get_allowed_branch_ids
 
+    try:
+        return _branch_context_payload(request, get_allowed_branch_ids)
+    except (ProgrammingError, OperationalError):
+        # Branch schema not migrated yet — behave as a single-branch install so the
+        # frontend loads. /api/health/ reports the pending migration.
+        return Response({
+            'multi_branch_enabled': False, 'is_admin': False,
+            'active_branch': None, 'default_branch': None, 'branches': [],
+        })
+
+
+def _branch_context_payload(request, get_allowed_branch_ids):
     settings_obj = BusinessSettings.load()
     default_branch = settings_obj.default_branch or Branch.get_default()
     active = getattr(request, 'active_branch', None) or default_branch

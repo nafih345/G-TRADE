@@ -14,7 +14,13 @@ Viewsets that define their own perform_create should merge _branch_stamp_kwargs(
 into their serializer.save(...) call; viewsets without one get stamping for free.
 """
 
+import logging
+
+from django.db.utils import OperationalError, ProgrammingError
+
 from apps.common.branch_context import get_active_branch, get_allowed_branch_ids
+
+logger = logging.getLogger('django')
 
 
 class BranchScopedViewSetMixin:
@@ -39,6 +45,19 @@ class BranchScopedViewSetMixin:
             return qs
         if not self._model_has_branch(qs.model):
             return qs
+        try:
+            return self._branch_scoped_queryset(qs, active)
+        except (ProgrammingError, OperationalError):
+            # The branch columns/tables aren't in the database yet (schema behind the
+            # deployed code). Fall back to the unscoped queryset so the app keeps working
+            # instead of 500ing; the missing migration is reported by /api/health/.
+            logger.exception(
+                "BranchScopedViewSetMixin: branch schema missing for %s; serving unscoped.",
+                qs.model.__name__,
+            )
+            return super().get_queryset()
+
+    def _branch_scoped_queryset(self, qs, active):
         if self._wants_all_branches():
             allowed = get_allowed_branch_ids(self.request)
             return qs.filter(**{f'{self.branch_field}_id__in': allowed}) if allowed is not None else qs
