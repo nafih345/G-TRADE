@@ -1071,7 +1071,10 @@ export default function NewSaleWizard({
     // table backs Quotation/Order/Invoice so a quote can later be converted in place from the
     // Orders section). Only a completed INVOICE actually commits stock + the accounting
     // journal entry — the backend gates that on document_type. A quotation stays DRAFT.
-    if (customerId) {
+    //
+    // Invoice.customer is nullable, so a walk-in with no resolved customer must still reach the
+    // backend — otherwise the sale (and its stock deduction) never leaves this browser.
+    {
       try {
         const status = docType === 'Quotation'
           ? 'DRAFT'

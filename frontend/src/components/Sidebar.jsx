@@ -61,7 +61,8 @@ const menuItems = [
     icon: <WholesaleIcon />,
     roles: ['*'],
     subItems: [
-      { text: 'Wholesale POS', path: '/wholesale/pos' }
+      { text: 'Wholesale POS', path: '/wholesale/pos' },
+      { text: 'Wholesale Reports', path: '/wholesale/reports' }
     ]
   },
   {

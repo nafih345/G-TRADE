@@ -13,6 +13,7 @@ import Dashboard from './pages/Dashboard';
 const Products = lazy(() => import('./pages/Products'));
 const SalesInvoice = lazy(() => import('./pages/SalesInvoice'));
 const WholesaleSales = lazy(() => import('./pages/WholesaleSales'));
+const WholesaleReports = lazy(() => import('./pages/WholesaleReports'));
 const AccountsCOA = lazy(() => import('./pages/AccountsCOA'));
 const FinancialManagement = lazy(() => import('./pages/FinancialManagement'));
 const OpticalServices = lazy(() => import('./pages/OpticalServices'));
@@ -200,7 +201,7 @@ function MainLayout() {
                 <Route path="/wholesale/collections" element={<WholesaleSales />} />
                 <Route path="/wholesale/returns" element={<WholesaleSales />} />
                 <Route path="/wholesale/outstanding" element={<WholesaleSales />} />
-                <Route path="/wholesale/reports" element={<WholesaleSales />} />
+                <Route path="/wholesale/reports" element={<WholesaleReports />} />
                 <Route path="/wholesale/settings" element={<WholesaleSales />} />
 
                 {/* Inventory Sub-Routes */}

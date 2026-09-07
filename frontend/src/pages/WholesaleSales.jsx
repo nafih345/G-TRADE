@@ -69,6 +69,8 @@ export default function WholesaleSales() {
   // --- CORE STATES ---
   const [customers, setCustomers] = useState([]);
   const [products, setProducts] = useState([]);
+  // Warehouse the backend attributes wholesale stock movements to (first one on file).
+  const [invWarehouseId, setInvWarehouseId] = useState('');
   const [selectedCustomer, setSelectedCustomer] = useState(null); // Blank by default
   const [customerDetailsExpanded, setCustomerDetailsExpanded] = useState(false); // Collapsible Section 1
   const [cartItems, setCartItems] = useState([]);
@@ -114,20 +116,99 @@ export default function WholesaleSales() {
     }
     setCustomers(localCusts);
 
-    let localProds = [];
-    try {
-      localProds = JSON.parse(localStorage.getItem('optical_inventory_items') || '[]');
-    } catch (e) {}
-    if (localProds.length === 0) {
-      localProds = INITIAL_DEMO_PRODUCTS;
-      localStorage.setItem('optical_inventory_items', JSON.stringify(INITIAL_DEMO_PRODUCTS));
-    }
-    setProducts(localProds);
-
     try {
       const savedHeld = JSON.parse(localStorage.getItem('optical_wholesale_held_invoices') || '[]');
       setHeldInvoices(savedHeld);
     } catch (e) {}
+  }, []);
+
+  // --- Live Inventory sync ---
+  // The wholesale catalogue and on-hand stock are pulled from the SAME backend Product list
+  // as the Inventory > Products screen, so a Purchase Entry, stock adjustment or retail sale
+  // is reflected here immediately (this is what "Stock, rate and GST are pulled live from
+  // inventory" means). localStorage is only a fallback for offline use / demo data / items
+  // created locally that never reached the API.
+  useEffect(() => {
+    let cancelled = false;
+
+    const mapBackendProduct = (p) => {
+      const stock = parseInt(p.stock ?? p.quantity ?? 0) || 0;
+      const gstNum = parseFloat(String(p.gst ?? p.tax_rate ?? '').replace('%', '').trim());
+      const extra = p.extra_data && typeof p.extra_data === 'object' ? p.extra_data : {};
+      return {
+        id: String(p.id),
+        code: p.product_code || p.sku || p.code || '',
+        sku: p.sku || '',
+        name: p.name || 'Unnamed',
+        brand: p.brand || 'Generic',
+        category: p.category || 'General',
+        modelNo: p.model_no || extra.model_no || '—',
+        color: p.colour || p.color || extra.color || '—',
+        size: p.size || extra.size || '—',
+        power: p.power || extra.power || '—',
+        availableStock: stock,
+        stock,
+        wholesalePrice: parseFloat(p.wholesale_price || p.price || p.retail_price || 0) || 0,
+        price: parseFloat(p.price || p.retail_price || 0) || 0,
+        gst: Number.isFinite(gstNum) ? gstNum : 18,
+        unit: p.unit || 'Pcs',
+        barcode: p.barcode || '',
+      };
+    };
+
+    const keyOf = (p) => String(p.barcode || p.code || p.sku || p.id || p.name || '').toLowerCase();
+
+    const syncInventory = async () => {
+      let local = [];
+      try { local = JSON.parse(localStorage.getItem('optical_inventory_items') || '[]'); } catch (e) {}
+
+      let backend = [];
+      try {
+        const res = await axios.get('/api/products/products/');
+        const raw = res.data?.results || res.data || [];
+        if (Array.isArray(raw)) backend = raw.map(mapBackendProduct);
+      } catch (e) {}
+
+      if (cancelled) return;
+
+      if (backend.length === 0) {
+        // API unreachable — keep whatever is in localStorage, seeding demo data on first run.
+        if (local.length === 0) {
+          setProducts(INITIAL_DEMO_PRODUCTS);
+          try { localStorage.setItem('optical_inventory_items', JSON.stringify(INITIAL_DEMO_PRODUCTS)); } catch (e) {}
+        } else {
+          setProducts(local);
+        }
+        return;
+      }
+
+      // Backend rows win on stock/price; keep any local-only items the API doesn't know about.
+      const backendKeys = new Set(backend.map(keyOf));
+      const backendIds = new Set(backend.map(p => String(p.id)));
+      const localOnly = local.filter(p => !backendKeys.has(keyOf(p)) && !backendIds.has(String(p.id)));
+
+      // Not persisted back to localStorage: the backend is the source of truth now, and other
+      // screens keep their own copy of that key. localStorage stays a read-only offline fallback.
+      setProducts([...backend, ...localOnly]);
+    };
+
+    const loadWarehouse = async () => {
+      try {
+        const res = await axios.get('/api/company/warehouses/');
+        const list = res.data?.results || res.data || [];
+        if (!cancelled && Array.isArray(list) && list.length) setInvWarehouseId(String(list[0].id));
+      } catch (e) {}
+    };
+
+    syncInventory();
+    loadWarehouse();
+    window.addEventListener('optical_stock_updated', syncInventory);
+    window.addEventListener('focus', syncInventory);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('optical_stock_updated', syncInventory);
+      window.removeEventListener('focus', syncInventory);
+    };
   }, []);
 
   // --- Real-Time Invoice Calculations ---
@@ -427,7 +508,7 @@ export default function WholesaleSales() {
       status: 'Paid'
     };
 
-    // 1. Decrement Inventory Stock
+    // 1. Decrement Inventory Stock (localStorage view first, for instant feedback)
     const updatedProducts = products.map(p => {
       const matchInCart = cartItems.find(item => item.id === p.id || item.code === p.code);
       if (matchInCart) {
@@ -438,6 +519,27 @@ export default function WholesaleSales() {
     });
     setProducts(updatedProducts);
     localStorage.setItem('optical_inventory_items', JSON.stringify(updatedProducts));
+
+    // Push the same decrement to the backend inventory so Inventory > Products, the retail
+    // POS and the next live-sync here all agree. Best-effort: the localStorage view above
+    // already reflects the sale even if the API is unreachable.
+    const isUuid = (v) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(v || ''));
+    if (invWarehouseId) {
+      await Promise.all(cartItems.map(async (item) => {
+        const prod = products.find(p => p.id === item.id || p.code === item.code);
+        if (!prod || !isUuid(prod.id) || !(item.qty > 0)) return;
+        try {
+          await axios.post('/api/inventory/adjustments/', {
+            product: prod.id,
+            warehouse: invWarehouseId,
+            quantity: Math.round(item.qty),
+            adjustment_type: 'SUB',
+            reason: `Wholesale POS sale ${invoiceNo}`,
+          });
+        } catch (e) {}
+      }));
+      window.dispatchEvent(new Event('optical_stock_updated'));
+    }
 
     // 2. Update Customer Ledger
     const updatedCustomers = customers.map(c => {
