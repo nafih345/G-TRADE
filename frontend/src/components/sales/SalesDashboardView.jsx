@@ -41,14 +41,19 @@ export default function SalesDashboardView({
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('All');
 
+  // The Sales > Orders section now splits Orders / Invoices / Quotations onto one Invoice
+  // table (document_type). The dashboard's revenue/collection figures should only count real
+  // tax invoices — not open quotations or unbilled lab orders.
+  const invoiceRows = orders.filter(o => ((o.documentType || o.docType || 'INVOICE').toUpperCase()) === 'INVOICE');
+
   // Real Database calculations (strictly from passed orders array)
-  const totalRevenue = orders.reduce((sum, o) => sum + (parseFloat(o.total) || parseFloat(o.amount) || 0), 0);
-  const totalInvoices = orders.length;
+  const totalRevenue = invoiceRows.reduce((sum, o) => sum + (parseFloat(o.total) || parseFloat(o.amount) || 0), 0);
+  const totalInvoices = invoiceRows.length;
   const avgOrderValue = totalInvoices > 0 ? Math.round(totalRevenue / totalInvoices) : 0;
-  const pendingCollections = orders.filter(o => (o.payment && (o.payment.includes('Partial') || o.payment === 'Unpaid'))).length;
+  const pendingCollections = invoiceRows.filter(o => (o.payment && (o.payment.includes('Partial') || o.payment === 'Unpaid'))).length;
 
   // Filtered orders list from database
-  const filteredOrders = orders.filter(o => {
+  const filteredOrders = invoiceRows.filter(o => {
     const custName = o.customer || o.customerName || 'Walk-in Customer';
     const matchesSearch = custName.toLowerCase().includes(searchQuery.toLowerCase()) ||
                           (o.id && o.id.toLowerCase().includes(searchQuery.toLowerCase())) ||

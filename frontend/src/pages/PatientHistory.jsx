@@ -351,7 +351,7 @@ export default function PatientHistory() {
 
       try {
         const [invRes, payRes, apptRes] = await Promise.all([
-          axios.get('/api/sales/invoices/').catch(() => null),
+          axios.get('/api/sales/invoices/?document_type=INVOICE').catch(() => null),
           axios.get('/api/sales/payments/').catch(() => null),
           axios.get('/api/sales/appointments/').catch(() => null)
         ]);

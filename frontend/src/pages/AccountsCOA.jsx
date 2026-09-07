@@ -106,7 +106,7 @@ export default function AccountsCOA() {
       } catch (e) {}
 
       try {
-        const invRes = await axios.get('/api/sales/invoices/');
+        const invRes = await axios.get('/api/sales/invoices/?document_type=INVOICE');
         if (invRes.data && Array.isArray(invRes.data)) {
           invRes.data.forEach(inv => {
             const paid = parseFloat(inv.paid_amount || inv.total || 0);

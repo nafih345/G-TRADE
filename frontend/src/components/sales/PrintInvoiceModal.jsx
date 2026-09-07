@@ -48,6 +48,22 @@ export default function PrintInvoiceModal({ open, onClose, invoice }) {
     parseFloat(multiPay.cash) || parseFloat(multiPay.cards) || parseFloat(multiPay.gpay) || parseFloat(multiPay.bank)
   ));
 
+  // What the customer actually paid vs. what is still owed. NewSaleWizard sends these through
+  // directly; for older/summary invoice shapes that only carry a total, fall back to treating
+  // the sale as fully paid so those receipts read exactly as they did before.
+  const advancePaid = parseFloat(invoice.advancePaid) || 0;
+  const amountPaid = invoice.totalPaidAmount !== undefined && invoice.totalPaidAmount !== null
+    ? parseFloat(invoice.totalPaidAmount) || 0
+    : (invoice.paidAmount !== undefined && invoice.paidAmount !== null
+      ? parseFloat(invoice.paidAmount) || 0
+      : grandTotal);
+  const balanceDue = invoice.balanceDue !== undefined && invoice.balanceDue !== null
+    ? parseFloat(invoice.balanceDue) || 0
+    : Math.max(0, grandTotal - amountPaid);
+  const isFullyPaid = balanceDue <= 0.009;
+  const paymentStatusLabel = invoice.paymentStatusLabel
+    || (isFullyPaid ? 'PAID' : (amountPaid > 0 ? 'PARTIALLY PAID' : 'UNPAID'));
+
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
       <DialogTitle className="no-print" sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', bgcolor: '#0f172a', color: '#fff', py: 1.5, flexWrap: 'wrap', gap: 1 }}>
@@ -152,7 +168,7 @@ export default function PrintInvoiceModal({ open, onClose, invoice }) {
                 <td className="meta-label">Optometrist:</td>
                 <td>{doctorName}</td>
                 <td className="meta-label">Payment Status:</td>
-                <td><strong style={{ color: '#059669' }}>PAID ({payMethod})</strong></td>
+                <td><strong style={{ color: isFullyPaid ? '#059669' : '#d97706' }}>{paymentStatusLabel} ({payMethod})</strong></td>
               </tr>
               {(diagnosis || icdCode) && (
                 <tr>
@@ -210,23 +226,33 @@ export default function PrintInvoiceModal({ open, onClose, invoice }) {
               </tr>
             </table>
 
-            {/* Payment Method Breakdown (when the sale was split across multiple modes) */}
-            {hasPaymentBreakdown && (
-              <table className="totals-table" style={{ marginTop: '6px' }}>
-                {parseFloat(multiPay.cash) > 0 && (
-                  <tr><td>Paid via Cash:</td><td style={{ textAlign: 'right' }}>₹{parseFloat(multiPay.cash).toFixed(2)}</td></tr>
-                )}
-                {parseFloat(multiPay.cards) > 0 && (
-                  <tr><td>Paid via Card:</td><td style={{ textAlign: 'right' }}>₹{parseFloat(multiPay.cards).toFixed(2)}</td></tr>
-                )}
-                {parseFloat(multiPay.gpay) > 0 && (
-                  <tr><td>Paid via GPay/UPI:</td><td style={{ textAlign: 'right' }}>₹{parseFloat(multiPay.gpay).toFixed(2)}</td></tr>
-                )}
-                {parseFloat(multiPay.bank) > 0 && (
-                  <tr><td>Paid via Bank Transfer:</td><td style={{ textAlign: 'right' }}>₹{parseFloat(multiPay.bank).toFixed(2)}</td></tr>
-                )}
-              </table>
-            )}
+            {/* Payment summary — always shown so the receipt states exactly how much was
+                collected and what (if anything) is still due. */}
+            <table className="totals-table" style={{ marginTop: '6px' }}>
+              {advancePaid > 0 && (
+                <tr><td>Advance Paid:</td><td style={{ textAlign: 'right' }}>₹{advancePaid.toFixed(2)}</td></tr>
+              )}
+              {hasPaymentBreakdown && parseFloat(multiPay.cash) > 0 && (
+                <tr><td>Paid via Cash:</td><td style={{ textAlign: 'right' }}>₹{parseFloat(multiPay.cash).toFixed(2)}</td></tr>
+              )}
+              {hasPaymentBreakdown && parseFloat(multiPay.cards) > 0 && (
+                <tr><td>Paid via Card:</td><td style={{ textAlign: 'right' }}>₹{parseFloat(multiPay.cards).toFixed(2)}</td></tr>
+              )}
+              {hasPaymentBreakdown && parseFloat(multiPay.gpay) > 0 && (
+                <tr><td>Paid via GPay/UPI:</td><td style={{ textAlign: 'right' }}>₹{parseFloat(multiPay.gpay).toFixed(2)}</td></tr>
+              )}
+              {hasPaymentBreakdown && parseFloat(multiPay.bank) > 0 && (
+                <tr><td>Paid via Bank Transfer:</td><td style={{ textAlign: 'right' }}>₹{parseFloat(multiPay.bank).toFixed(2)}</td></tr>
+              )}
+              <tr>
+                <td style={{ fontWeight: 800, borderTop: '1px solid #cbd5e1', paddingTop: '6px' }}>Amount Paid:</td>
+                <td style={{ textAlign: 'right', fontWeight: 800, color: '#059669', borderTop: '1px solid #cbd5e1', paddingTop: '6px' }}>₹{amountPaid.toFixed(2)}</td>
+              </tr>
+              <tr>
+                <td style={{ fontWeight: 800 }}>Balance Due:</td>
+                <td style={{ textAlign: 'right', fontWeight: 800, color: isFullyPaid ? '#059669' : '#dc2626' }}>₹{balanceDue.toFixed(2)}</td>
+              </tr>
+            </table>
 
             {/* Footer & Signature */}
             <div className="footer-notes">

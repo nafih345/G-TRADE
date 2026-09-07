@@ -49,6 +49,14 @@ function MainLayout() {
       // Exclude textareas so multiline clinical notes can use Enter for line breaks
       if (!target || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
 
+      // MUI Autocomplete owns Enter itself (selecting the highlighted option, or committing
+      // freeSolo text). Letting this generic "click the nearest primary-looking button"
+      // fallback also run on top of it was firing both: e.g. in Purchase Entry, the product
+      // search Paper has only one input plus a `variant="contained"` "Add New Product" button,
+      // which this handler misidentified as the search's submit action and clicked — opening
+      // that dialog *in addition to* the Autocomplete correctly adding the selected product.
+      if (target.closest('.MuiAutocomplete-root')) return;
+
       // The Optical Eye Test screen (single-screen + wizard layouts) has its own dedicated,
       // field-order-aware Enter-key handler. Layering this generic handler on top of it caused
       // a real bug: on the last input of a card, this handler's "find a contained/submit-looking

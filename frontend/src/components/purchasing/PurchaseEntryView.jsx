@@ -237,10 +237,11 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
 
   const [saving, setSaving] = useState(false);
   const [itemsDialogOpen, setItemsDialogOpen] = useState(false);
+  const [pendingFocusRow, setPendingFocusRow] = useState(null);
   const [addProductOpen, setAddProductOpen] = useState(false);
 
   const DEFAULT_COLUMN_VISIBILITY = {
-    batch: true, hsn: true, expiry: true, free: true,
+    barcode: true, batch: true, hsn: true, expiry: true, free: true,
     discPercent: true, discAmt: true,
     gst: true, cess: true, vat: true,
     mrp: true, selling: true, marginPercent: true
@@ -286,7 +287,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
       stock: parseInt(p.stock) || 0,
       taxRate: parseFloat(p.gst) || defaultGstPercent,
       hsnCode: p.hsnCode || ''
-    });
+    }, { openDialog: true });
   };
 
   const companyGstin = useMemo(() => {
@@ -309,7 +310,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
   const showCess = colVis.cess;
   const showVat = colVis.vat;
   const columnCount = 4 // #, Product, Qty, Rate — always shown
-    + (colVis.batch ? 1 : 0) + (colVis.hsn ? 1 : 0) + (colVis.expiry ? 1 : 0) + (colVis.free ? 1 : 0)
+    + (colVis.barcode ? 1 : 0) + (colVis.batch ? 1 : 0) + (colVis.hsn ? 1 : 0) + (colVis.expiry ? 1 : 0) + (colVis.free ? 1 : 0)
     + (colVis.discPercent ? 1 : 0) + (colVis.discAmt ? 1 : 0)
     + (showGst ? 2 + (isInterstate ? 1 : 2) : 0)
     + (showCess ? 2 : 0)
@@ -448,21 +449,48 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
     ).slice(0, 30);
   }, [products, debouncedSearch]);
 
-  const addProductToGrid = useCallback((product) => {
+  // Looks up the top match against the full (un-debounced) product list, keyed off
+  // whatever text is on screen right now. Used as the Enter-key fallback below, since
+  // `filteredProducts` lags the input by the search debounce and can still be stale/empty
+  // at the instant Enter is pressed, right after typing.
+  const findTopProductMatch = useCallback((query) => {
+    const q = (query || '').toLowerCase().trim();
+    if (!q) return null;
+    return products.find(p => (p.barcode && p.barcode.toLowerCase() === q) || (p.sku && p.sku.toLowerCase() === q))
+      || products.find(p =>
+        (p.barcode && p.barcode.toLowerCase().includes(q)) ||
+        (p.name && p.name.toLowerCase().includes(q)) ||
+        (p.sku && p.sku.toLowerCase().includes(q))
+      ) || null;
+  }, [products]);
+
+  // openDialog: pop the item-grid dialog open and land the cursor on the Quantity cell
+  // for the row just touched, so the user sees (and can immediately edit) qty/rate/etc
+  // instead of the product silently landing in the grid with default values.
+  const addProductToGrid = useCallback((product, opts = {}) => {
     if (!product) return;
-    setItemsDialogOpen(true);
+    setProductSearch('');
+    const refocusSearch = () => productSearchRef.current?.focus();
     const existingIdx = rows.findIndex(r => r.productId === product.id);
     if (existingIdx !== -1) {
       setRows(prev => prev.map((r, i) => i === existingIdx ? recalcRow({ ...r, quantity: (parseFloat(r.quantity) || 0) + 1 }, 'quantity', gstType, isInterstate) : r));
-      setTimeout(() => focusCell(existingIdx, 'quantity'), 50);
+      if (opts.openDialog) {
+        setPendingFocusRow(existingIdx);
+        setItemsDialogOpen(true);
+      } else {
+        setTimeout(refocusSearch, 50);
+      }
       return;
     }
+    const newRowIndex = rows.length;
     const newRow = recalcRow(blankRow(product, {}, defaultGstPercent, defaultCessPercent, defaultVatPercent), 'quantity', gstType, isInterstate);
-    setRows(prev => {
-      const next = [...prev, newRow];
-      setTimeout(() => focusCell(next.length - 1, 'quantity'), 50);
-      return next;
-    });
+    setRows(prev => [...prev, newRow]);
+    if (opts.openDialog) {
+      setPendingFocusRow(newRowIndex);
+      setItemsDialogOpen(true);
+    } else {
+      setTimeout(refocusSearch, 50);
+    }
 
     if (!isBackendId(product.id)) return; // local-only product — no purchase history to look up
     axios.get('/api/purchase/invoices/last-rate/', { params: { product: product.id, supplier: selectedSupplierId || undefined } })
@@ -697,7 +725,11 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
 
   const doSave = async (saveStatus, { print = false, andNew = false } = {}) => {
     if (!selectedSupplierId) { alert('Please select a supplier.'); supplierInputRef.current?.focus(); return; }
-    if (saveStatus !== 'DRAFT' && rows.length === 0) { alert('Please add at least one product line.'); productSearchRef.current?.focus(); return; }
+    // Only enforce "must have items" for brand-new confirmed entries. An existing entry
+    // being edited (editingId set) may already have zero items — e.g. PINV-41159240 — and
+    // blocking the save here made it impossible to update ANY field (Purchase Type included)
+    // on that invoice ever again.
+    if (!editingId && saveStatus !== 'DRAFT' && rows.length === 0) { alert('Please add at least one product line.'); productSearchRef.current?.focus(); return; }
 
     setSaving(true);
     try {
@@ -1003,11 +1035,25 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
         <Autocomplete
           fullWidth
           freeSolo
+          autoHighlight
           options={filteredProducts}
           getOptionLabel={(o) => (typeof o === 'string' ? o : o.name || '')}
           inputValue={productSearch}
-          onInputChange={(e, val) => setProductSearch(val)}
-          onChange={(e, val) => { if (val && typeof val !== 'string') addProductToGrid(val); }}
+          onInputChange={(e, val, reason) => {
+            // MUI fires this again with reason 'reset' right after a selection, syncing the
+            // visible text to the picked option's label — ignoring that keeps the box cleared
+            // (as addProductToGrid already set it) instead of it snapping back to the product name.
+            if (reason === 'input' || reason === 'clear') setProductSearch(val);
+          }}
+          onChange={(e, val) => {
+            if (!val) return;
+            // autoHighlight normally makes Enter select the highlighted product object; this
+            // is a fallback for when freeSolo still hands back the raw typed text (e.g. Enter
+            // pressed before the debounced option list catches up) so the top match still
+            // gets added instead of silently doing nothing.
+            const product = typeof val !== 'string' ? val : findTopProductMatch(val);
+            if (product) addProductToGrid(product, { openDialog: true });
+          }}
           renderOption={(props, option) => (
             <li {...props} key={option.id}>
               <Box>
@@ -1072,7 +1118,21 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
         </Stack>
       </Card>
 
-      <Dialog open={itemsDialogOpen} onClose={() => setItemsDialogOpen(false)} maxWidth="xl" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
+      <Dialog
+        open={itemsDialogOpen}
+        onClose={() => setItemsDialogOpen(false)}
+        maxWidth="xl"
+        fullWidth
+        PaperProps={{ sx: { borderRadius: 3 } }}
+        TransitionProps={{
+          onEntered: () => {
+            if (pendingFocusRow != null) {
+              focusCell(pendingFocusRow, 'quantity');
+              setPendingFocusRow(null);
+            }
+          }
+        }}
+      >
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontWeight: 800 }}>
           Purchase Items
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
@@ -1084,7 +1144,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
         </DialogTitle>
         <Menu anchorEl={columnMenuAnchor} open={Boolean(columnMenuAnchor)} onClose={() => setColumnMenuAnchor(null)}>
           {[
-            ['batch', 'Batch'], ['hsn', 'HSN/SAC'], ['expiry', 'Expiry'], ['free', 'Free Qty'],
+            ['barcode', 'Barcode'], ['batch', 'Batch'], ['hsn', 'HSN/SAC'], ['expiry', 'Expiry'], ['free', 'Free Qty'],
             ['discPercent', 'Disc %'], ['discAmt', 'Disc Amt'],
             ['gst', 'GST % / GST Amt / CGST / SGST / IGST'], ['cess', 'Cess % / Cess Amt'], ['vat', 'VAT % / VAT Amt'],
             ['mrp', 'MRP'], ['selling', 'Selling Price'], ['marginPercent', 'Margin %']
@@ -1104,6 +1164,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
               <TableHead>
                 <TableRow sx={{ '& th': { fontWeight: 700, fontSize: '0.72rem', bgcolor: 'action.hover', whiteSpace: 'nowrap' } }}>
                   <TableCell>#</TableCell>
+                  {colVis.barcode && <TableCell>Barcode</TableCell>}
                   <TableCell>Product</TableCell>
                   {colVis.batch && <TableCell>Batch</TableCell>}
                   {colVis.hsn && <TableCell>HSN/SAC</TableCell>}
@@ -1157,6 +1218,9 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
                 ) : rows.map((row, idx) => (
                   <TableRow key={row.rowId} hover>
                     <TableCell sx={{ fontSize: '0.75rem' }}>{idx + 1}</TableCell>
+                    {colVis.barcode && (
+                      <TableCell sx={{ fontSize: '0.75rem', whiteSpace: 'nowrap' }}>{row.barcode || '-'}</TableCell>
+                    )}
                     <TableCell sx={{ minWidth: 150 }}>
                       <Typography variant="body2" fontWeight={700} noWrap>{row.productName}</Typography>
                       <Typography variant="caption" color="text.secondary" noWrap sx={{ display: 'block' }}>

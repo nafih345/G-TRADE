@@ -138,6 +138,11 @@ class PurchaseInvoiceItemSerializer(ModelSerializer):
 class PurchaseInvoiceSerializer(ModelSerializer):
     items = PurchaseInvoiceItemSerializer(many=True)
     supplier_name = serializers.CharField(source='supplier.name', read_only=True)
+    # Validate against every supplier, not just active ones: the default `Supplier.objects`
+    # manager hides soft-deleted rows, so a PurchaseInvoice whose supplier was later deleted
+    # would otherwise fail PK validation on every future save ("object does not exist"),
+    # permanently locking that invoice out of edits even though it still reads back fine.
+    supplier = serializers.PrimaryKeyRelatedField(queryset=Supplier.all_objects.all())
 
     class Meta:
         model = PurchaseInvoice
@@ -179,17 +184,35 @@ class PurchaseInvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
     @transaction.atomic
     def perform_update(self, serializer):
         # Editing an existing entry (the "Edit" button on Purchase Order Reports).
-        # Reverse whatever credit balance the previous version added to the supplier
-        # before re-applying, so repeated edits don't keep inflating their payables.
+        # Reverse whatever stock and credit balance the previous version applied
+        # *before* the serializer deletes/recreates the item rows below — otherwise
+        # a quantity edit never reaches BranchStock: _apply_stock_and_payables skips
+        # any product that already has a StockLedger row for this invoice, which
+        # every re-saved line always does.
         old = PurchaseInvoice.objects.filter(pk=serializer.instance.pk).first()
-        if old and old.purchase_type == 'CREDIT' and old.balance_amount and old.status not in ('DRAFT', 'CANCELLED'):
-            supplier = old.supplier
-            supplier.outstanding_balance = (supplier.outstanding_balance or 0) - old.balance_amount
-            supplier.save(update_fields=['outstanding_balance'])
+        if old and old.status not in ('DRAFT', 'CANCELLED'):
+            self._reverse_stock_and_payables(old)
 
         invoice = serializer.save()
         if invoice.status not in ('DRAFT', 'CANCELLED'):
             self._apply_stock_and_payables(invoice)
+
+    def _reverse_stock_and_payables(self, invoice):
+        from apps.company.models import Branch
+        branch = invoice.branch or Branch.get_default()
+
+        for item in invoice.items.all():
+            ledger_row = StockLedger.objects.filter(reference_id=invoice.id, product=item.product, branch=branch).first()
+            if not ledger_row:
+                continue
+            qty_in = (item.quantity or 0) + (item.free_quantity or 0)
+            adjust_branch_stock(item.product, branch, -int(qty_in))
+            ledger_row.delete()
+
+        if invoice.purchase_type == 'CREDIT' and invoice.balance_amount:
+            supplier = invoice.supplier
+            supplier.outstanding_balance = (supplier.outstanding_balance or 0) - invoice.balance_amount
+            supplier.save(update_fields=['outstanding_balance'])
 
     def _apply_stock_and_payables(self, invoice):
         from apps.company.models import Branch

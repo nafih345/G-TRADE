@@ -49,9 +49,48 @@ class InvoiceSerializer(ModelSerializer):
     # handle the nested item list manually instead, reading it straight from request.data.
     items = InvoiceItemSerializer(many=True, read_only=True)
 
+    # Read-only convenience fields so the Orders section list (and its Update dialog) can show
+    # the real customer and frame/lens without a second lookup — `customer` itself is just the
+    # FK UUID. Without these the Orders table always rendered "Walk-in Customer / Prescribed
+    # Frame / Prescribed Lens" for every backend invoice.
+    customer_name = SerializerMethodField()
+    customer_phone = SerializerMethodField()
+    customer_code = SerializerMethodField()
+    frame_name = SerializerMethodField()
+    lens_name = SerializerMethodField()
+
     class Meta:
         model = Invoice
         fields = '__all__'
+
+    def get_customer_name(self, obj):
+        return obj.customer.name if obj.customer_id and obj.customer else None
+
+    def get_customer_phone(self, obj):
+        return obj.customer.phone if obj.customer_id and obj.customer else None
+
+    def get_customer_code(self, obj):
+        return obj.customer.patient_code if obj.customer_id and obj.customer else None
+
+    def _item_by_kind(self, obj, kind):
+        # kind: 'LENS' matches lens lines; anything else returns the first non-lens product line.
+        items = list(obj.items.all())
+        if kind == 'LENS':
+            for it in items:
+                if (it.item_type or '').upper() == 'LENS' or 'lens' in (it.description or '').lower():
+                    return it.description or (it.product.name if it.product else None)
+            return None
+        for it in items:
+            if (it.item_type or '').upper() == 'LENS' or 'lens' in (it.description or '').lower():
+                continue
+            return it.description or (it.product.name if it.product else None)
+        return None
+
+    def get_frame_name(self, obj):
+        return self._item_by_kind(obj, 'FRAME')
+
+    def get_lens_name(self, obj):
+        return self._item_by_kind(obj, 'LENS')
 
 class PaymentSerializer(ModelSerializer):
     class Meta:
@@ -171,13 +210,36 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
     # so retail sales never actually reached the database at all.
     permission_classes = [permissions.AllowAny]
 
+    def get_queryset(self):
+        # One table backs Quotations, Orders and Invoices (see Invoice.document_type). Callers
+        # that only want real tax invoices — the Sales dashboard, Accounts, patient billing
+        # history — pass ?document_type=INVOICE; the Orders section omits it to get all three.
+        qs = super().get_queryset()
+        doc_type = self.request.query_params.get('document_type')
+        if doc_type and doc_type.lower() != 'all':
+            qs = qs.filter(document_type=doc_type.upper())
+        return qs
+
+    # QUOTATION -> QTN, ORDER -> ORD, INVOICE (and anything else) -> INV, so an auto-generated
+    # number reads correctly for whichever of the three documents this row currently is.
+    _DOC_PREFIX = {'QUOTATION': 'QTN', 'ORDER': 'ORD', 'INVOICE': 'INV'}
+
+    def _doc_prefix(self, doc_type):
+        return self._DOC_PREFIX.get((doc_type or 'INVOICE').upper(), 'INV')
+
+    def _commits_stock(self, invoice):
+        # Only a real INVOICE moves inventory + feeds accounting — a quotation is just an
+        # estimate and an order isn't a sale until it's converted/billed.
+        return invoice.document_type == 'INVOICE' and invoice.status not in ('DRAFT', 'CANCELLED')
+
     def perform_create(self, serializer):
+        doc_type = serializer.validated_data.get('document_type') or 'INVOICE'
         invoice_number = serializer.validated_data.get('invoice_number')
         if not invoice_number:
-            invoice_number = f"INV-{int(time.time()) % 1000000}"
+            invoice_number = f"{self._doc_prefix(doc_type)}-{int(time.time()) % 1000000}"
         invoice = serializer.save(invoice_number=invoice_number, **self._branch_stamp_kwargs(serializer))
         self._save_items(invoice)
-        if invoice.status not in ('DRAFT', 'CANCELLED'):
+        if self._commits_stock(invoice):
             self._update_inventory(invoice)
 
     def perform_update(self, serializer):
@@ -187,8 +249,32 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
         if 'items' in self.request.data:
             invoice.items.all().delete()
             self._save_items(invoice)
-        if invoice.status not in ('DRAFT', 'CANCELLED'):
+        if self._commits_stock(invoice):
             self._update_inventory(invoice)
+
+    @action(detail=True, methods=['post'], url_path='convert')
+    def convert(self, request, pk=None):
+        """Convert this document in place: Quotation -> Order -> Invoice (or back).
+
+        Keeps the same row/items/history; only re-labels it and, when the target is INVOICE,
+        commits stock. Pass {"document_type": "ORDER", "renumber": true} to also mint a fresh
+        prefix-matching number.
+        """
+        invoice = self.get_object()
+        target = (request.data.get('document_type') or '').upper()
+        if target not in ('QUOTATION', 'ORDER', 'INVOICE'):
+            return Response(
+                {'detail': 'document_type must be QUOTATION, ORDER or INVOICE'}, status=400
+            )
+        invoice.document_type = target
+        if request.data.get('renumber'):
+            invoice.invoice_number = f"{self._doc_prefix(target)}-{int(time.time()) % 1000000}"
+        if target == 'ORDER' and not invoice.fulfillment_status:
+            invoice.fulfillment_status = 'Order Received'
+        invoice.save()
+        if self._commits_stock(invoice):
+            self._update_inventory(invoice)
+        return Response(self.get_serializer(invoice).data)
 
     def _save_items(self, invoice):
         # `items` is read-only on the serializer (see InvoiceSerializer) since ModelSerializer

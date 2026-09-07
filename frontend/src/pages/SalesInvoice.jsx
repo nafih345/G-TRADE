@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { 
@@ -94,15 +94,21 @@ export default function SalesInvoice() {
   const [customers, setCustomers] = useState(initialCustomers);
   const [orders, setOrders] = useState(initialOrders);
   const [payments, setPayments] = useState(initialPayments);
+  // Flat list of every SERVICE line item across all invoices — feeds the Reports > Services report.
+  const [serviceLines, setServiceLines] = useState([]);
 
   // Fetch optical services, inventory products & sales database from API / localStorage
   useEffect(() => {
     const fetchOpticalDbData = async () => {
       let localInvoices = [];
+      let localOrders = [];
+      let localQuotes = [];
       let localPayments = [];
       let localProds = [];
       try {
         localInvoices = JSON.parse(localStorage.getItem('optical_sales_invoices') || '[]');
+        localOrders = JSON.parse(localStorage.getItem('optical_sales_orders') || '[]');
+        localQuotes = JSON.parse(localStorage.getItem('optical_sales_quotations') || '[]');
         localPayments = JSON.parse(localStorage.getItem('optical_payments') || '[]');
         localProds = JSON.parse(localStorage.getItem('optical_inventory_items') || '[]');
       } catch (e) {}
@@ -126,6 +132,7 @@ export default function SalesInvoice() {
           size: p.size || '',
           frameType: p.frame_type || p.frameType || '',
           rack: p.rack || p.rack_location || '',
+          supplier: p.supplier || p.supplier_name || p.supplierName || '',
           description: p.description || '',
           extra_data: p.extra_data || {},
           image: (p.category || '').toLowerCase().includes('lens') ? '🔍' : '👓'
@@ -185,6 +192,7 @@ export default function SalesInvoice() {
             size: p.size || '',
             frameType: p.frame_type || '',
             rack: p.rack || p.rack_location || '',
+            supplier: p.supplier || p.supplier_name || '',
             description: p.description || '',
             extra_data: p.extra_data || {},
             image: (p.category_name || p.category || p.type || '').toLowerCase().includes('lens') ? '🔍' : '👓'
@@ -203,29 +211,74 @@ export default function SalesInvoice() {
             // the Orders table actually displays.
             id: inv.id,
             invoiceNumber: inv.invoice_number || `INV-${inv.id}`,
-            date: inv.created_at ? inv.created_at.split('T')[0] : new Date().toISOString().split('T')[0],
+            documentType: (inv.document_type || 'INVOICE').toUpperCase(),
+            date: inv.invoice_date || (inv.created_at ? inv.created_at.split('T')[0] : new Date().toISOString().split('T')[0]),
             customer: inv.customer_name || 'Walk-in Customer',
+            customerId: inv.customer || null,
+            phone: inv.customer_phone || '',
             total: parseFloat(inv.total_amount || 0),
+            netTotal: parseFloat(inv.net_amount || inv.total_amount || 0),
             paidAmount: parseFloat(inv.paid_amount || inv.total_amount || 0),
             payment: parseFloat(inv.paid_amount || 0) >= parseFloat(inv.total_amount || 0) ? 'Paid' : 'Partial',
             status: inv.fulfillment_status || 'Order Received',
+            deliveredAt: inv.delivered_at || null,
+            fulfillmentNotes: inv.fulfillment_notes || '',
             paymentMethod: inv.payment_method || 'Cash',
             frame: inv.frame_name || 'Prescribed Frame',
             lens: inv.lens_name || 'Prescribed Lens'
           }));
+
+          // Pull every SERVICE line item out of the invoices for the Services report. Services
+          // ride on the invoice as InvoiceItem rows with item_type === 'SERVICE' (see the
+          // service-billing feature) — there's no separate service-jobs table to query.
+          const svcLines = [];
+          invList.forEach(inv => {
+            const invDate = inv.invoice_date || (inv.created_at ? inv.created_at.split('T')[0] : '');
+            (inv.items || []).forEach(it => {
+              if (String(it.item_type || '').toUpperCase() !== 'SERVICE') return;
+              const qty = parseFloat(it.quantity || 0) || 0;
+              const unit = parseFloat(it.unit_price || 0) || 0;
+              const tax = parseFloat(it.tax_amount || 0) || 0;
+              const gross = qty * unit;
+              const details = it.service_details || {};
+              svcLines.push({
+                id: it.id,
+                date: invDate,
+                invoiceNumber: inv.invoice_number || `INV-${inv.id}`,
+                documentType: (inv.document_type || 'INVOICE').toUpperCase(),
+                customer: inv.customer_name || 'Walk-in Customer',
+                serviceName: it.description || 'Service',
+                qty,
+                unitPrice: unit,
+                tax,
+                gross,
+                total: parseFloat(it.subtotal || (gross + tax)) || (gross + tax),
+                status: details.service_status || details.serviceStatus || '',
+                technician: details.technician || '',
+                customerItem: details.customer_item || details.customerItem || '',
+                problem: details.problem_description || details.problemDescription || '',
+              });
+            });
+          });
+          setServiceLines(svcLines);
         }
 
         if (custList.length > 0) {
+          const norm = (v) => (v || '').trim().toLowerCase();
           const mergedCusts = custList.map(c => {
-            const matchedExam = eyeExams.find(e => e.phone === c.phone || e.patient_name === c.name || e.patient_id === c.id);
+            const matchedExam = eyeExams.find(e =>
+              (e.customer && c.id && e.customer === c.id) ||
+              (e.patient_id && c.patient_code && e.patient_id === c.patient_code) ||
+              (e.phone && c.phone && e.phone === c.phone) ||
+              (e.patient_name && c.name && norm(e.patient_name) === norm(c.name))
+            );
             return {
               id: c.id,
+              patient_code: c.patient_code || '',
               name: c.name,
               phone: c.phone || 'N/A',
               email: c.email || '',
               address: c.address || '',
-              points: c.points || 120,
-              tier: c.tier || 'Silver',
               sphRight: matchedExam?.sub_sph_od || c.sphRight || 'Plano',
               cylRight: matchedExam?.sub_cyl_od || c.cylRight || 'Plano',
               axisRight: matchedExam?.sub_axis_od || c.axisRight || '0',
@@ -235,7 +288,7 @@ export default function SalesInvoice() {
               doctor: matchedExam?.optometrist || c.doctor || 'Attending Optometrist',
               date: matchedExam?.examination_date ? matchedExam.examination_date.split('T')[0] : c.date || '',
               balance: c.outstanding_balance || c.balance || 0,
-              hasSpecBooking: true,
+              hasSpecBooking: Boolean(matchedExam),
               specDetails: matchedExam ? {
                 bookingId: matchedExam.visit_number || `SPEC-${matchedExam.id}`,
                 date: matchedExam.examination_date ? matchedExam.examination_date.split('T')[0] : '',
@@ -263,9 +316,20 @@ export default function SalesInvoice() {
         console.warn('Sales DB fetch error:', err);
       }
 
-      // Combine API & local storage orders/payments into database state
-      const allOrders = [...apiInvoices, ...localInvoices];
-      const uniqueOrders = Array.from(new Map(allOrders.map(o => [o.id, o])).values());
+      // Combine API & local storage orders/payments into database state. The app fragments
+      // local records across three buckets by document type (Order / Quotation / Invoice),
+      // all mirrored into `optical_sales_invoices`; list every bucket so a locally-created
+      // order or quotation still shows and survives a refetch. Invoices bucket is last so the
+      // most recently patched mirror row wins the de-dupe.
+      const allOrders = [...apiInvoices, ...localOrders, ...localQuotes, ...localInvoices];
+      const uniqueOrders = Array.from(new Map(allOrders.map(o => [o.id, o])).values())
+        // Normalise the document type onto every row so the Orders section can split its list
+        // into Orders / Invoices / Quotations. Local-only rows (backend write failed, or older
+        // records) carry it as `docType` ('Order'/'Invoice'/'Quotation'); default to INVOICE.
+        .map(o => ({
+          ...o,
+          documentType: (o.documentType || o.docType || 'INVOICE').toUpperCase(),
+        }));
       setOrders(uniqueOrders);
 
       const allPayments = [...apiPayments, ...localPayments];
@@ -410,6 +474,44 @@ export default function SalesInvoice() {
     }
   };
 
+  // --- Patient CRM / loyalty helpers -------------------------------------------
+  // The backend Customer model has no loyalty columns, so a patient's tier and
+  // points are derived live from their real posted invoices: 1 point per ₹100 of
+  // net spend, tier by lifetime spend.
+  const LOYALTY_TIERS = [
+    { name: 'Platinum', min: 100000 },
+    { name: 'Gold', min: 40000 },
+    { name: 'Silver', min: 0 },
+  ];
+
+  const getCustomerInvoices = (cust) => {
+    if (!cust) return [];
+    const custName = (cust.name || '').trim().toLowerCase();
+    return orders.filter(o => {
+      if ((o.documentType || 'INVOICE') !== 'INVOICE') return false;
+      return (
+        (o.customerId && cust.id && o.customerId === cust.id) ||
+        (o.phone && cust.phone && o.phone === cust.phone) ||
+        (custName && (o.customer || '').trim().toLowerCase() === custName)
+      );
+    });
+  };
+
+  const getCustomerLoyalty = (cust) => {
+    const invs = getCustomerInvoices(cust);
+    const lifetimeSpend = invs.reduce((s, o) => s + (Number(o.netTotal ?? o.total) || 0), 0);
+    const points = Math.floor(lifetimeSpend / 100);
+    const tier = (LOYALTY_TIERS.find(t => lifetimeSpend >= t.min) || LOYALTY_TIERS[LOYALTY_TIERS.length - 1]).name;
+    return { lifetimeSpend, points, tier, orderCount: invs.length };
+  };
+
+  // Patients with their derived loyalty tier/points attached — passed to every child
+  // view so tier, points and reward redemption stay consistent across the module.
+  const customersWithLoyalty = useMemo(
+    () => customers.map(c => ({ ...c, ...getCustomerLoyalty(c) })),
+    [customers, orders]
+  );
+
   const handleAddPatientSubmit = async () => {
     if (!patientInput.name || !patientInput.phone) {
       alert("Please enter at least Patient Name and Phone Number.");
@@ -420,9 +522,11 @@ export default function SalesInvoice() {
     // it was invisible to Appointments/OpticalServices/PatientHistory and vanished on refresh.
     // Reuse a real Customer if one already matches this phone; otherwise create one.
     let newId = `c-${Date.now()}`;
+    let newPatientCode = '';
     const existingMatch = customers.find(c => c.phone && c.phone === patientInput.phone);
     if (existingMatch) {
       newId = existingMatch.id;
+      newPatientCode = existingMatch.patient_code || '';
     } else {
       try {
         const res = await axios.post('/api/sales/customers/', {
@@ -433,20 +537,21 @@ export default function SalesInvoice() {
           gender: patientInput.gender || 'Male'
         });
         newId = res.data.id;
+        newPatientCode = res.data.patient_code || '';
       } catch (e) {
         alert('Could not save the new patient to the database. Please try again.');
         return;
       }
     }
+    const hasBookingIntent = Boolean(patientInput.frameRec || patientInput.lensRec);
     const newCustObj = {
       id: newId,
+      patient_code: newPatientCode,
       name: patientInput.name,
       phone: patientInput.phone,
       email: patientInput.email || '',
       age: patientInput.age || '',
       gender: patientInput.gender || 'Male',
-      points: 100,
-      tier: patientInput.tier || 'Silver',
       sphRight: patientInput.sphRight || 'Plano',
       cylRight: patientInput.cylRight || 'Plano',
       axisRight: patientInput.axisRight || '0',
@@ -457,15 +562,15 @@ export default function SalesInvoice() {
       doctor: patientInput.doctor || 'Attending Doctor',
       date: new Date().toISOString().split('T')[0],
       balance: 0,
-      hasSpecBooking: true,
-      specDetails: {
+      hasSpecBooking: hasBookingIntent,
+      specDetails: hasBookingIntent ? {
         bookingId: `SPEC-${Math.floor(1000 + Math.random() * 9000)}`,
         date: new Date().toISOString().split('T')[0],
         frameRec: patientInput.frameRec ? `${patientInput.frameRec} (${patientInput.frameType || 'Full-Rim'})` : 'Prescribed Optical Frame',
         lensRec: patientInput.lensRec ? `${patientInput.lensRec} - ${patientInput.lensCoating || 'Anti-Glare'}` : 'Prescribed Optical Lens',
         status: patientInput.status || 'Booked for Spectacles',
         notes: patientInput.notes || ''
-      }
+      } : null
     };
     setCustomers([newCustObj, ...customers]);
     handleCustomerSelect(newId);
@@ -586,6 +691,89 @@ export default function SalesInvoice() {
     }
   };
 
+  // ---- Sales > Orders: full "Update" of an Order / Invoice / Quotation ------------------
+  const isBackendUuid = (id) =>
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id || ''));
+
+  const PAYMENT_STATUS_MAP = { Paid: 'PAID', Partial: 'PARTIAL', Unpaid: 'UNPAID' };
+
+  // Fetch the full backend invoice so the Update dialog can prefill; falls back to the local
+  // row for records that never reached the database.
+  const fetchDocumentDetail = async (id) => {
+    if (isBackendUuid(id)) {
+      try {
+        const res = await axios.get(`/api/sales/invoices/${id}/`);
+        return res.data;
+      } catch (err) {
+        console.warn('Failed to load invoice detail:', err);
+      }
+    }
+    return orders.find(o => o.id === id) || null;
+  };
+
+  // Fields the Orders table + dialog read, applied onto a row so the change is visible
+  // regardless of which shape the row started in (backend map, wizard `completedOrder`, …).
+  const mergePatchOntoRow = (row, patch) => {
+    const next = { ...row };
+    if (patch.paymentStatus) {
+      next.payment = patch.paymentStatus;
+      next.paymentStatusLabel = patch.paymentStatus.toUpperCase();
+    }
+    if (patch.paidAmount !== undefined) {
+      next.paidAmount = parseFloat(patch.paidAmount) || 0;
+      next.totalPaidAmount = next.paidAmount;
+    }
+    if (patch.paymentMethod) { next.paymentMethod = patch.paymentMethod; next.paymentMode = patch.paymentMethod; }
+    if (patch.status) { next.status = patch.status; next.fulfillmentStatus = patch.status; }
+    if (patch.deliveredAt !== undefined) next.deliveredAt = patch.deliveredAt;
+    if (patch.fulfillmentNotes !== undefined) next.fulfillmentNotes = patch.fulfillmentNotes;
+    return next;
+  };
+
+  const rowMatches = (o, ref) =>
+    (o.id != null && o.id === ref.id) ||
+    (!!ref.invoiceNumber && (o.invoiceNumber === ref.invoiceNumber || o.id === ref.invoiceNumber));
+
+  // Surgically update a row inside each of the sales localStorage buckets (the app fragments
+  // local records across three keys by document type, plus a master mirror).
+  const patchLocalStorageRow = (ref, patch) => {
+    ['optical_sales_invoices', 'optical_sales_orders', 'optical_sales_quotations'].forEach((key) => {
+      try {
+        const list = JSON.parse(localStorage.getItem(key) || '[]');
+        if (!Array.isArray(list) || !list.some(r => rowMatches(r, ref))) return;
+        localStorage.setItem(key, JSON.stringify(list.map(r => (rowMatches(r, ref) ? mergePatchOntoRow(r, patch) : r))));
+      } catch (e) { /* ignore malformed bucket */ }
+    });
+  };
+
+  // Apply a patch from UpdateDocumentDialog (or a bulk / Mark-Delivered action) to one row:
+  // optimistic state + localStorage, then PATCH the backend invoice for real records.
+  const applyDocumentUpdate = async (order, patch) => {
+    setOrders(prev => prev.map(o => (rowMatches(o, order) ? mergePatchOntoRow(o, patch) : o)));
+    patchLocalStorageRow(order, patch);
+
+    if (!isBackendUuid(order.id)) return;
+
+    const body = {};
+    if (patch.paymentStatus) body.status = PAYMENT_STATUS_MAP[patch.paymentStatus] || 'UNPAID';
+    if (patch.status !== undefined) body.fulfillment_status = patch.status;
+    if (patch.deliveredAt !== undefined) body.delivered_at = patch.deliveredAt || null;
+    if (patch.fulfillmentNotes !== undefined) body.fulfillment_notes = patch.fulfillmentNotes;
+    if (patch.paidAmount !== undefined) body.paid_amount = parseFloat(patch.paidAmount) || 0;
+    if (patch.paymentMethod) body.payment_method = patch.paymentMethod;
+
+    try {
+      await axios.patch(`/api/sales/invoices/${order.id}/`, body);
+    } catch (err) {
+      console.warn('Failed to save document update to backend:', err);
+    }
+  };
+
+  const bulkUpdateDocuments = async (ids, patch) => {
+    const rows = orders.filter(o => ids.includes(o.id));
+    await Promise.allSettled(rows.map(row => applyDocumentUpdate(row, patch)));
+  };
+
   return (
     <Box sx={{ p: 4, pb: 8 }}>
       {/* 1. SALES DASHBOARD */}
@@ -593,7 +781,7 @@ export default function SalesInvoice() {
         <SalesDashboardView
           orders={orders}
           payments={payments}
-          customers={customers}
+          customers={customersWithLoyalty}
           onNavigateToNewSale={() => { setActiveTab('new-sale'); navigate('/sales/new'); }}
           onNavigateToPos={() => { setActiveTab('pos-billing'); navigate('/sales/pos'); }}
           onOpenRecordPayment={() => setRecordPaymentDialogOpen(true)}
@@ -605,7 +793,7 @@ export default function SalesInvoice() {
       {/* 2. NEW SALE WIZARD */}
       {activeTab === 'new-sale' && (
         <NewSaleWizard
-          customers={customers}
+          customers={customersWithLoyalty}
           products={products}
           services={services}
           onNavigateToEyeTest={() => navigate('/optical/eyetest')}
@@ -613,13 +801,18 @@ export default function SalesInvoice() {
             const newOrd = {
               id: completedOrder.id || `INV-${Math.floor(1000 + Math.random() * 9000)}`,
               invoiceNumber: completedOrder.invoiceNumber || completedOrder.id,
+              documentType: (completedOrder.docType || 'INVOICE').toUpperCase(),
               customer: completedOrder.customerName || completedOrder.customer || 'CASH CUSTOMER',
               phone: completedOrder.customerPhone || '+91 98470 12345',
               date: completedOrder.date || new Date().toISOString().split('T')[0],
               total: parseFloat(completedOrder.netTotal || completedOrder.total || 0),
               paidAmount: parseFloat(completedOrder.netTotal || completedOrder.total || 0) - (parseFloat(completedOrder.balanceDue) || 0),
               payment: (parseFloat(completedOrder.balanceDue) || 0) === 0 ? 'Paid' : 'Partial',
-              status: 'Ready for Collection',
+              status: completedOrder.docType === 'Order'
+                ? 'Order Received'
+                : completedOrder.docType === 'Quotation'
+                  ? 'Draft'
+                  : 'Ready for Collection',
               frame: completedOrder.items?.find(i => i.category === 'FRAME')?.item || 'Prescribed Frame',
               lens: completedOrder.items?.find(i => i.category === 'LENS')?.item || 'Prescribed Lens',
               paymentMethod: completedOrder.paymentMode || 'Cash'
@@ -639,12 +832,13 @@ export default function SalesInvoice() {
       {activeTab === 'pos-billing' && (
         <PosBillingView
           products={products}
-          customers={customers}
+          customers={customersWithLoyalty}
           onOpenRecordPayment={() => setRecordPaymentDialogOpen(true)}
           onCheckoutComplete={(completedOrder) => {
             const newOrd = {
               id: completedOrder.id || `INV-${Math.floor(1000 + Math.random() * 9000)}`,
               invoiceNumber: completedOrder.invoiceNumber || completedOrder.id,
+              documentType: 'INVOICE',
               customer: completedOrder.customer,
               phone: completedOrder.phone || '+91 98470 12345',
               date: completedOrder.date || new Date().toISOString().split('T')[0],
@@ -677,8 +871,34 @@ export default function SalesInvoice() {
           orders={orders}
           onNavigateToNewSale={() => { setActiveTab('new-sale'); navigate('/sales/new'); }}
           onNavigateToEyeTest={() => navigate('/optical/eyetest')}
-          onOpenRecordPayment={() => setRecordPaymentDialogOpen(true)}
+          onOpenRecordPayment={(ord) => {
+            if (ord && ord.customerId) setPayRecordInput(p => ({ ...p, customerId: ord.customerId }));
+            setRecordPaymentDialogOpen(true);
+          }}
           onPrintInvoice={(inv) => { setPrintableInvoice(inv); setPrintModalOpen(true); }}
+          onFetchDocument={fetchDocumentDetail}
+          onUpdateDocument={applyDocumentUpdate}
+          onBulkUpdate={bulkUpdateDocuments}
+          onConvertDocument={async (order, targetType) => {
+            const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(order.id);
+            const nextStatus = targetType === 'ORDER'
+              ? (order.status === 'Draft' || !order.status ? 'Order Received' : order.status)
+              : order.status;
+            const updated = orders.map(o => o.id === order.id
+              ? { ...o, documentType: targetType, status: nextStatus }
+              : o);
+            setOrders(updated);
+            try {
+              localStorage.setItem('optical_sales_invoices', JSON.stringify(updated));
+            } catch (e) {}
+            if (isUuid) {
+              try {
+                await axios.post(`/api/sales/invoices/${order.id}/convert/`, { document_type: targetType });
+              } catch (err) {
+                console.warn('Failed to convert document on backend:', err);
+              }
+            }
+          }}
           onUpdateOrderStatus={async (orderId, newStatus) => {
             const updated = orders.map(o => o.id === orderId ? { ...o, status: newStatus } : o);
             setOrders(updated);
@@ -702,19 +922,23 @@ export default function SalesInvoice() {
 
       {/* 5. CUSTOMERS */}
       {activeTab === 'customers' && (() => {
-        const filteredCustomers = customers.filter(cust => {
+        // customersWithLoyalty already carries live tier/points derived from real invoices.
+        const enrichedCustomers = customersWithLoyalty;
+
+        const filteredCustomers = enrichedCustomers.filter(cust => {
           const searchLower = customerSearchQuery.toLowerCase();
           const matchesSearch = (cust.name && cust.name.toLowerCase().includes(searchLower)) ||
                                 (cust.phone && cust.phone.toLowerCase().includes(searchLower)) ||
                                 (cust.email && cust.email.toLowerCase().includes(searchLower)) ||
-                                (cust.id && cust.id.toLowerCase().includes(searchLower));
+                                (cust.patient_code && cust.patient_code.toLowerCase().includes(searchLower)) ||
+                                (cust.id && String(cust.id).toLowerCase().includes(searchLower));
           const matchesTier = customerTierFilter === 'All' || cust.tier === customerTierFilter;
           return matchesSearch && matchesTier;
         });
 
-        const totalVipCount = customers.filter(c => c.tier === 'Gold' || c.tier === 'Platinum').length;
-        const totalSpecBookedCount = customers.filter(c => c.hasSpecBooking).length;
-        const totalRewardPoints = customers.reduce((sum, c) => sum + (parseInt(c.points) || 0), 0);
+        const totalVipCount = enrichedCustomers.filter(c => c.tier === 'Gold' || c.tier === 'Platinum').length;
+        const totalSpecBookedCount = enrichedCustomers.filter(c => c.hasSpecBooking).length;
+        const totalRewardPoints = enrichedCustomers.reduce((sum, c) => sum + (c.points || 0), 0);
 
         return (
           <Stack spacing={3}>
@@ -859,7 +1083,9 @@ export default function SalesInvoice() {
                     ) : (
                       filteredCustomers.map((cust) => (
                         <TableRow key={cust.id} hover>
-                          <TableCell sx={{ fontWeight: 700, color: 'primary.main' }}>{cust.id}</TableCell>
+                          <TableCell sx={{ fontWeight: 700, color: 'primary.main' }}>
+                            {cust.patient_code || `#${String(cust.id).slice(0, 8)}`}
+                          </TableCell>
                           <TableCell sx={{ fontWeight: 600 }}>
                             {cust.name}
                             {cust.email && (
@@ -877,7 +1103,12 @@ export default function SalesInvoice() {
                               sx={{ fontWeight: 700 }}
                             />
                           </TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>{cust.points || 100} Pts</TableCell>
+                          <TableCell sx={{ fontWeight: 700 }}>
+                            {cust.points} Pts
+                            <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                              {cust.orderCount} invoice{cust.orderCount === 1 ? '' : 's'}
+                            </Typography>
+                          </TableCell>
                           <TableCell>
                             {cust.hasSpecBooking ? (
                               <Chip label="Booked for Specs" color="success" variant="outlined" size="small" sx={{ fontWeight: 700 }} />
@@ -919,7 +1150,7 @@ export default function SalesInvoice() {
       {activeTab === 'payments' && (
         <PaymentsManagerView
           payments={payments}
-          customers={customers}
+          customers={customersWithLoyalty}
           orders={orders}
           onRecordPaymentSubmit={async (newPayment, custId, payAmt) => {
             setPayments(prev => [newPayment, ...prev]);
@@ -1016,10 +1247,72 @@ export default function SalesInvoice() {
           }));
         };
 
+        // Services report — group the flat SERVICE line items by service name so the report
+        // shows each service type once with its volume, revenue and tax totals.
+        const getServiceReportData = () => {
+          const map = {};
+          serviceLines.forEach(l => {
+            const key = l.serviceName || 'Service';
+            if (!map[key]) {
+              map[key] = { name: key, jobs: 0, qty: 0, revenue: 0, tax: 0, pending: 0 };
+            }
+            map[key].jobs += 1;
+            map[key].qty += l.qty;
+            map[key].revenue += l.gross;
+            map[key].tax += l.tax;
+            const st = String(l.status || '').toLowerCase();
+            if (st && !['completed', 'delivered', 'done', 'ready'].includes(st)) {
+              map[key].pending += 1;
+            }
+          });
+          return Object.values(map).sort((a, b) => b.revenue - a.revenue);
+        };
+
         const dailyData = getDailyReportData();
         const workflowData = getWorkflowReportData();
         const paymentMethodData = getPaymentMethodReportData();
         const optometristData = getOptometristReportData();
+        const serviceData = getServiceReportData();
+        const serviceTotals = serviceData.reduce((t, r) => ({
+          jobs: t.jobs + r.jobs,
+          qty: t.qty + r.qty,
+          revenue: t.revenue + r.revenue,
+          tax: t.tax + r.tax,
+        }), { jobs: 0, qty: 0, revenue: 0, tax: 0 });
+
+        // Turn a header row + array of arrays into a downloaded .csv file.
+        const downloadCsv = (filename, headers, rows) => {
+          const esc = (v) => {
+            const s = String(v ?? '');
+            return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+          };
+          const csv = [headers, ...rows].map(r => r.map(esc).join(',')).join('\n');
+          const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        };
+
+        const exportReportCsv = () => {
+          if (reportCategory === 'services') {
+            if (serviceLines.length === 0) { alert('No services billed yet to export.'); return; }
+            downloadCsv(
+              `services-report-${new Date().toISOString().split('T')[0]}.csv`,
+              ['Date', 'Invoice', 'Doc Type', 'Customer', 'Service', 'Qty', 'Unit Price', 'Gross', 'Tax', 'Total', 'Status', 'Technician', 'Customer Item', 'Problem'],
+              serviceLines.map(l => [
+                l.date, l.invoiceNumber, l.documentType, l.customer, l.serviceName, l.qty,
+                l.unitPrice.toFixed(2), l.gross.toFixed(2), l.tax.toFixed(2), l.total.toFixed(2),
+                l.status, l.technician, l.customerItem, l.problem,
+              ]),
+            );
+            return;
+          }
+          alert(`[${reportCategory.toUpperCase()}] Sales Report exported successfully as CSV!`);
+        };
 
         return (
           <Card sx={{ borderRadius: 4, border: '1px solid', borderColor: 'divider', p: 3 }}>
@@ -1043,6 +1336,7 @@ export default function SalesInvoice() {
                   <MenuItem value="customer">Customer Sales Ledger & Balances</MenuItem>
                   <MenuItem value="product">Product Category Revenue (Frames/Lenses)</MenuItem>
                   <MenuItem value="workflow">Spectacle Orders Workflow Status</MenuItem>
+                  <MenuItem value="services">Services Rendered (Repair / Fitting / Cleaning)</MenuItem>
                   <MenuItem value="payments">Payment Collections Ledger (Cash/UPI/Card)</MenuItem>
                   <MenuItem value="optometrist">Optometrist & Clinical Performance</MenuItem>
                 </TextField>
@@ -1067,7 +1361,7 @@ export default function SalesInvoice() {
                   </Button>
                   <Button 
                     variant="outlined" 
-                    onClick={() => alert(`[${reportCategory.toUpperCase()}] Sales Report exported successfully as CSV!`)}
+                    onClick={exportReportCsv}
                     sx={{ fontWeight: 700 }}
                   >
                     Export CSV
@@ -1169,15 +1463,18 @@ export default function SalesInvoice() {
                         </TableCell>
                       </TableRow>
                     ) : (
-                      customers.map(c => (
+                      customers.map(c => {
+                        const loyalty = getCustomerLoyalty(c);
+                        return (
                         <TableRow key={c.id}>
                           <TableCell sx={{ fontWeight: 600 }}>{c.name}</TableCell>
                           <TableCell>{c.phone}</TableCell>
-                          <TableCell><Chip label={c.tier || 'Silver'} size="small" sx={{ fontWeight: 700 }} /></TableCell>
+                          <TableCell><Chip label={loyalty.tier} size="small" sx={{ fontWeight: 700 }} /></TableCell>
                           <TableCell sx={{ color: c.balance > 0 ? 'error.main' : 'text.primary', fontWeight: 700 }}>₹{c.balance || 0}</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>{c.points || 100} Pts</TableCell>
+                          <TableCell sx={{ fontWeight: 700 }}>{loyalty.points} Pts</TableCell>
                         </TableRow>
-                      ))
+                        );
+                      })
                     )}
                   </TableBody>
                 </Table>
@@ -1248,6 +1545,58 @@ export default function SalesInvoice() {
                           <TableCell sx={{ fontWeight: 700 }}>₹{row.value.toFixed(2)}</TableCell>
                         </TableRow>
                       ))
+                    )}
+                  </TableBody>
+                </Table>
+              )}
+
+              {reportCategory === 'services' && (
+                <Table size="small">
+                  <TableHead sx={{ bgcolor: 'action.hover' }}>
+                    <TableRow>
+                      <TableCell sx={{ fontWeight: 700 }}>Service</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>Jobs Done</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>Total Qty</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>Open / Pending</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>Service Revenue</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>Collected Tax (GST)</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {serviceData.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={6} align="center" sx={{ py: 6 }}>
+                          <Typography variant="body2" color="text.secondary" fontWeight={500}>
+                            No services billed yet in database.
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            Add a Repair / Fitting / Cleaning line via New Sale → Services to populate this report.
+                          </Typography>
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      <>
+                        {serviceData.map(row => (
+                          <TableRow key={row.name}>
+                            <TableCell sx={{ fontWeight: 700 }}>{row.name}</TableCell>
+                            <TableCell>{row.jobs} Job(s)</TableCell>
+                            <TableCell>{row.qty}</TableCell>
+                            <TableCell sx={{ color: row.pending > 0 ? 'warning.main' : 'text.secondary', fontWeight: 700 }}>
+                              {row.pending}
+                            </TableCell>
+                            <TableCell sx={{ fontWeight: 700, color: 'primary.main' }}>₹{row.revenue.toFixed(2)}</TableCell>
+                            <TableCell>₹{row.tax.toFixed(2)}</TableCell>
+                          </TableRow>
+                        ))}
+                        <TableRow sx={{ bgcolor: 'action.hover' }}>
+                          <TableCell sx={{ fontWeight: 800 }}>Total</TableCell>
+                          <TableCell sx={{ fontWeight: 800 }}>{serviceTotals.jobs} Job(s)</TableCell>
+                          <TableCell sx={{ fontWeight: 800 }}>{serviceTotals.qty}</TableCell>
+                          <TableCell />
+                          <TableCell sx={{ fontWeight: 800, color: 'primary.main' }}>₹{serviceTotals.revenue.toFixed(2)}</TableCell>
+                          <TableCell sx={{ fontWeight: 800 }}>₹{serviceTotals.tax.toFixed(2)}</TableCell>
+                        </TableRow>
+                      </>
                     )}
                   </TableBody>
                 </Table>
@@ -1404,10 +1753,11 @@ export default function SalesInvoice() {
           <Box sx={{ p: 3 }}>
             {customerDetailTab === 0 && (
               <Stack spacing={2}>
+                <Typography variant="body2"><strong>Patient ID:</strong> {selectedCustomer?.patient_code || `#${String(selectedCustomer?.id || '').slice(0, 8)}`}</Typography>
                 <Typography variant="body2"><strong>Contact Phone:</strong> {selectedCustomer?.phone}</Typography>
-                <Typography variant="body2"><strong>Loyalty Membership Tier:</strong> {selectedCustomer?.tier}</Typography>
+                <Typography variant="body2"><strong>Loyalty Membership Tier:</strong> {selectedCustomer?.tier} <Typography component="span" variant="caption" color="text.secondary">(from ₹{Number(selectedCustomer?.lifetimeSpend || 0).toFixed(2)} lifetime spend)</Typography></Typography>
                 <Typography variant="body2"><strong>Outstanding Due Balance:</strong> ₹{selectedCustomer?.balance}</Typography>
-                <Typography variant="body2"><strong>Loyalty Points Balance:</strong> {selectedCustomer?.points} Pts</Typography>
+                <Typography variant="body2"><strong>Loyalty Points Balance:</strong> {selectedCustomer?.points || 0} Pts</Typography>
               </Stack>
             )}
             {customerDetailTab === 1 && (
@@ -1419,11 +1769,41 @@ export default function SalesInvoice() {
                 <Typography variant="body2">Left (OS): SPH {selectedCustomer?.sphLeft} | CYL {selectedCustomer?.cylLeft} | AXIS {selectedCustomer?.axisLeft}</Typography>
               </Stack>
             )}
-            {customerDetailTab === 2 && (
-              <Stack spacing={1}>
-                <Typography variant="body2">ORD-8947: Progressive Lenses Package - ₹11,200</Typography>
-              </Stack>
-            )}
+            {customerDetailTab === 2 && (() => {
+              const custInvoices = getCustomerInvoices(selectedCustomer)
+                .slice()
+                .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+              if (custInvoices.length === 0) {
+                return (
+                  <Typography variant="body2" color="text.secondary">
+                    No invoices recorded for this patient yet.
+                  </Typography>
+                );
+              }
+              return (
+                <Stack spacing={1}>
+                  {custInvoices.map(inv => (
+                    <Box key={inv.id} sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}>
+                      <Typography variant="body2">
+                        {inv.invoiceNumber || inv.id}
+                        <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 1 }}>
+                          {inv.date} · {inv.payment || ''}
+                        </Typography>
+                      </Typography>
+                      <Typography variant="body2" fontWeight={700}>
+                        ₹{Number(inv.netTotal ?? inv.total ?? 0).toFixed(2)}
+                      </Typography>
+                    </Box>
+                  ))}
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', pt: 1, borderTop: '1px solid', borderColor: 'divider' }}>
+                    <Typography variant="body2" fontWeight={700}>Lifetime Spend</Typography>
+                    <Typography variant="body2" fontWeight={700}>
+                      ₹{custInvoices.reduce((s, o) => s + (Number(o.netTotal ?? o.total) || 0), 0).toFixed(2)}
+                    </Typography>
+                  </Box>
+                </Stack>
+              );
+            })()}
           </Box>
         </DialogContent>
         <DialogActions>
@@ -1607,22 +1987,8 @@ export default function SalesInvoice() {
                   </TextField>
                 </Grid>
                 <Grid item xs={12} sm={6}>
-                  <TextField 
-                    select 
-                    label="Loyalty Tier" 
-                    fullWidth 
-                    size="small"
-                    value={patientInput.tier} 
-                    onChange={(e) => setPatientInput({ ...patientInput, tier: e.target.value })} 
-                  >
-                    <MenuItem value="Silver">Silver Tier (Basic)</MenuItem>
-                    <MenuItem value="Gold">Gold Tier (1.5x Points)</MenuItem>
-                    <MenuItem value="Platinum">Platinum Tier (VIP)</MenuItem>
-                  </TextField>
-                </Grid>
-                <Grid item xs={12} sm={6}>
-                  <TextField 
-                    label="Attending Optometrist / Doctor" 
+                  <TextField
+                    label="Attending Optometrist / Doctor"
                     fullWidth 
                     size="small"
                     value={patientInput.doctor} 

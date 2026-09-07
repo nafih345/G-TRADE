@@ -95,6 +95,17 @@ class Invoice(BaseUUIDModel):
     # created before Multi-Branch existed (a data migration backfills them to the default
     # branch). Stamped automatically by BranchScopedViewSetMixin from the active branch.
     branch = models.ForeignKey('company.Branch', on_delete=models.SET_NULL, null=True, blank=True, db_index=True, related_name='+')
+    # QUOTATION | ORDER | INVOICE — one physical table backs all three retail documents so a
+    # quote can be converted to an order and then to a tax invoice in place (keeping its id,
+    # items and history) rather than being re-keyed into a separate model. Only an INVOICE
+    # commits stock and feeds the accounting journal; the Orders section splits its list by
+    # this field. Plain CharField (no choices=) for the same reason as fulfillment_status.
+    DOCUMENT_TYPE_CHOICES = [
+        ('QUOTATION', 'Quotation'),
+        ('ORDER', 'Order'),
+        ('INVOICE', 'Invoice'),
+    ]
+    document_type = models.CharField(max_length=20, default='INVOICE')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='UNPAID')
     # Separate from `status` on purpose: `status` tracks PAYMENT state (choice-restricted to
     # DRAFT/PAID/PARTIAL/UNPAID/CANCELLED) while the Orders tab tracks LAB/FULFILLMENT progress
@@ -109,6 +120,14 @@ class Invoice(BaseUUIDModel):
     
     paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
     payment_method = models.CharField(max_length=50, blank=True, null=True)  # Cash, Card, Bank, UPI
+
+    # Stamped by the Orders section's "Mark Delivered" quick action (and settable from the
+    # Update dialog) — the date the finished spectacle/goods were actually handed to the
+    # customer. Distinct from invoice_date (billing date) and fulfillment_status (the
+    # workflow stage label): this is the concrete hand-over date shown on the job slip.
+    delivered_at = models.DateField(null=True, blank=True)
+    # Free-text note attached when updating fulfillment (who collected, courier ref, remarks).
+    fulfillment_notes = models.CharField(max_length=255, blank=True, null=True)
 
     def __str__(self):
         return f"Inv: {self.invoice_number}"

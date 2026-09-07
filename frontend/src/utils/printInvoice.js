@@ -23,20 +23,38 @@ export const printSalesInvoiceReceipt = (invoice, paperSize = 'A4') => {
   const subtotal = hasRealTax ? grandTotal - gstAmount : grandTotal / 1.18;
 
   const multiPay = invoice.multiPay;
-  const paymentRows = multiPay ? [
-    ['Cash', multiPay.cash],
-    ['Card', multiPay.cards],
-    ['GPay / UPI', multiPay.gpay],
-    ['Bank Transfer', multiPay.bank]
-  ].filter(([, val]) => parseFloat(val) > 0) : [];
+  const advancePaid = parseFloat(invoice.advancePaid) || 0;
+  const paymentRows = [
+    ...(advancePaid > 0 ? [['Advance', advancePaid]] : []),
+    ...(multiPay ? [
+      ['Cash', multiPay.cash],
+      ['Card', multiPay.cards],
+      ['GPay / UPI', multiPay.gpay],
+      ['Bank Transfer', multiPay.bank]
+    ] : [])
+  ].filter(([, val]) => parseFloat(val) > 0);
+
+  // What was actually collected vs. still owed. NewSaleWizard passes these through; for older
+  // summary invoices that only carry a total, fall back to fully-paid so they read unchanged.
+  const amountPaid = invoice.totalPaidAmount !== undefined && invoice.totalPaidAmount !== null
+    ? parseFloat(invoice.totalPaidAmount) || 0
+    : (invoice.paidAmount !== undefined && invoice.paidAmount !== null
+      ? parseFloat(invoice.paidAmount) || 0
+      : grandTotal);
+  const balanceDue = invoice.balanceDue !== undefined && invoice.balanceDue !== null
+    ? parseFloat(invoice.balanceDue) || 0
+    : Math.max(0, grandTotal - amountPaid);
+  const isFullyPaid = balanceDue <= 0.009;
+  const paymentStatusLabel = invoice.paymentStatusLabel
+    || (isFullyPaid ? 'PAID' : (amountPaid > 0 ? 'PARTIALLY PAID' : 'UNPAID'));
 
   const isA5 = paperSize === 'A5';
   const isThermal = paperSize === 'Thermal';
   const printWindow = window.open('', '_blank', isThermal ? 'width=400,height=700' : 'width=850,height=800');
 
   const htmlContent = isThermal
-    ? buildThermalReceiptHtml({ invNo, invDate, patientName, patientPhone, patientAge, patientGender, diagnosis, icdCode, doctorName, payMethod, items, grandTotal, gstAmount, subtotal, paymentRows })
-    : buildStandardReceiptHtml({ isA5, invNo, invDate, patientName, patientPhone, patientAge, patientGender, patientAddress, diagnosis, icdCode, doctorName, payMethod, items, grandTotal, gstAmount, subtotal, hasRealTax, paymentRows });
+    ? buildThermalReceiptHtml({ invNo, invDate, patientName, patientPhone, patientAge, patientGender, diagnosis, icdCode, doctorName, payMethod, items, grandTotal, gstAmount, subtotal, paymentRows, amountPaid, balanceDue, isFullyPaid, paymentStatusLabel })
+    : buildStandardReceiptHtml({ isA5, invNo, invDate, patientName, patientPhone, patientAge, patientGender, patientAddress, diagnosis, icdCode, doctorName, payMethod, items, grandTotal, gstAmount, subtotal, hasRealTax, paymentRows, amountPaid, balanceDue, isFullyPaid, paymentStatusLabel });
 
   if (printWindow) {
     printWindow.document.open();
@@ -71,7 +89,7 @@ export const printSalesInvoiceReceipt = (invoice, paperSize = 'A4') => {
 // A4 has ~2x the printable area of A5 — every size-sensitive value below is tuned per paper
 // size (not just scaled down) so A5 fits its content without overflowing to a second page, and
 // A4 doesn't leave the receipt looking small/adrift on a much bigger sheet.
-function buildStandardReceiptHtml({ isA5, invNo, invDate, patientName, patientPhone, patientAge, patientGender, patientAddress, diagnosis, icdCode, doctorName, payMethod, items, grandTotal, gstAmount, subtotal, hasRealTax, paymentRows }) {
+function buildStandardReceiptHtml({ isA5, invNo, invDate, patientName, patientPhone, patientAge, patientGender, patientAddress, diagnosis, icdCode, doctorName, payMethod, items, grandTotal, gstAmount, subtotal, hasRealTax, paymentRows, amountPaid, balanceDue, isFullyPaid, paymentStatusLabel }) {
   return `
     <!DOCTYPE html>
     <html>
@@ -142,7 +160,7 @@ function buildStandardReceiptHtml({ isA5, invNo, invDate, patientName, patientPh
               <td class="info-label">Optometrist:</td>
               <td>${doctorName}</td>
               <td class="info-label">Payment Status:</td>
-              <td><strong style="color:#059669;">PAID (${payMethod})</strong></td>
+              <td><strong style="color:${isFullyPaid ? '#059669' : '#d97706'};">${paymentStatusLabel} (${payMethod})</strong></td>
             </tr>
             ${(diagnosis || icdCode) ? `
             <tr>
@@ -193,12 +211,19 @@ function buildStandardReceiptHtml({ isA5, invNo, invDate, patientName, patientPh
             </tr>
           </table>
 
-          ${paymentRows.length > 0 ? `
           <table class="totals-table" style="margin-top:-8px;">
             ${paymentRows.map(([label, val]) => `
               <tr><td>Paid via ${label}:</td><td style="text-align:right;">₹${parseFloat(val).toFixed(2)}</td></tr>
             `).join('')}
-          </table>` : ''}
+            <tr>
+              <td style="font-weight:800; border-top:1px solid #cbd5e1; padding-top:6px;">Amount Paid:</td>
+              <td style="text-align:right; font-weight:800; color:#059669; border-top:1px solid #cbd5e1; padding-top:6px;">₹${amountPaid.toFixed(2)}</td>
+            </tr>
+            <tr>
+              <td style="font-weight:800;">Balance Due:</td>
+              <td style="text-align:right; font-weight:800; color:${isFullyPaid ? '#059669' : '#dc2626'};">₹${balanceDue.toFixed(2)}</td>
+            </tr>
+          </table>
 
           <div class="footer-section">
             <div>
@@ -220,7 +245,7 @@ function buildStandardReceiptHtml({ isA5, invNo, invDate, patientName, patientPh
 // Thermal rolls (typically 80mm wide) have no fixed page height — @page uses `auto` height so
 // the printer just cuts after the content ends, and the whole layout is a single narrow column
 // (the standard receipt's side-by-side info-table simply doesn't fit 80mm).
-function buildThermalReceiptHtml({ invNo, invDate, patientName, patientPhone, patientAge, patientGender, diagnosis, icdCode, doctorName, payMethod, items, grandTotal, gstAmount, subtotal, paymentRows }) {
+function buildThermalReceiptHtml({ invNo, invDate, patientName, patientPhone, patientAge, patientGender, diagnosis, icdCode, doctorName, payMethod, items, grandTotal, gstAmount, subtotal, paymentRows, amountPaid, balanceDue, isFullyPaid, paymentStatusLabel }) {
   const line = () => '<div class="dashed"></div>';
   const row = (label, value) => `<div class="row"><span>${label}</span><span>${value}</span></div>`;
 
@@ -288,7 +313,11 @@ function buildThermalReceiptHtml({ invNo, invDate, patientName, patientPhone, pa
         <div class="dashed"></div>
         <div class="row grand-total"><span>NET TOTAL:</span><span>₹${grandTotal.toFixed(2)}</span></div>
         ${row('Payment:', payMethod)}
-        ${paymentRows.length > 0 ? line() + paymentRows.map(([label, val]) => row(`${label}:`, `₹${parseFloat(val).toFixed(2)}`)).join('') : ''}
+        ${line()}
+        ${paymentRows.map(([label, val]) => row(`Paid via ${label}:`, `₹${parseFloat(val).toFixed(2)}`)).join('')}
+        <div class="row bold"><span>Amount Paid:</span><span>₹${amountPaid.toFixed(2)}</span></div>
+        <div class="row bold"><span>Balance Due:</span><span>₹${balanceDue.toFixed(2)}</span></div>
+        <div class="center bold" style="margin-top:4px;">${paymentStatusLabel}</div>
         ${line()}
         <div class="footer">
           1-Year warranty on frames against manufacturing defects.<br/>
@@ -314,9 +343,22 @@ export const downloadPdfInvoice = (invoice) => {
     { name: invoice.item || invoice.frame || 'Prescribed Spectacle Frame & Optical Lens', qty: 1, price: invoice.total || invoice.net_amount || 0 }
   ];
 
-  const grandTotal = parseFloat(invoice.total || invoice.net_amount || 0);
-  const subtotal = (grandTotal / 1.18);
-  const gstAmount = grandTotal - subtotal;
+  const grandTotal = parseFloat(invoice.netTotal || invoice.total || invoice.net_amount || 0);
+  const hasRealTax = invoice.totalTax !== undefined && invoice.totalTax !== null;
+  const gstAmount = hasRealTax ? parseFloat(invoice.totalTax) : grandTotal - (grandTotal / 1.18);
+  const subtotal = grandTotal - gstAmount;
+
+  const amountPaid = invoice.totalPaidAmount !== undefined && invoice.totalPaidAmount !== null
+    ? parseFloat(invoice.totalPaidAmount) || 0
+    : (invoice.paidAmount !== undefined && invoice.paidAmount !== null
+      ? parseFloat(invoice.paidAmount) || 0
+      : grandTotal);
+  const balanceDue = invoice.balanceDue !== undefined && invoice.balanceDue !== null
+    ? parseFloat(invoice.balanceDue) || 0
+    : Math.max(0, grandTotal - amountPaid);
+  const isFullyPaid = balanceDue <= 0.009;
+  const paymentStatusLabel = invoice.paymentStatusLabel
+    || (isFullyPaid ? 'PAID' : (amountPaid > 0 ? 'PARTIALLY PAID' : 'UNPAID'));
 
   const pdfWindow = window.open('', '_blank', 'width=850,height=800');
 
@@ -384,7 +426,7 @@ export const downloadPdfInvoice = (invoice) => {
               <td class="info-label">Optometrist:</td>
               <td>${doctorName}</td>
               <td class="info-label">Payment Status:</td>
-              <td><strong style="color:#059669;">PAID (${payMethod})</strong></td>
+              <td><strong style="color:${isFullyPaid ? '#059669' : '#d97706'};">${paymentStatusLabel} (${payMethod})</strong></td>
             </tr>
           </table>
 
@@ -415,12 +457,20 @@ export const downloadPdfInvoice = (invoice) => {
               <td style="text-align:right; font-weight:bold;">₹${subtotal.toFixed(2)}</td>
             </tr>
             <tr>
-              <td>GST Tax (18%):</td>
+              <td>${hasRealTax ? 'GST (as per item tax rates):' : 'GST Tax (18%):'}</td>
               <td style="text-align:right; font-weight:bold;">₹${gstAmount.toFixed(2)}</td>
             </tr>
             <tr class="grand-total-row">
-              <td>Net Amount Paid:</td>
+              <td>Net Amount:</td>
               <td style="text-align:right;">₹${grandTotal.toFixed(2)}</td>
+            </tr>
+            <tr>
+              <td style="font-weight:800; border-top:1px solid #cbd5e1; padding-top:6px;">Amount Paid:</td>
+              <td style="text-align:right; font-weight:800; color:#059669; border-top:1px solid #cbd5e1; padding-top:6px;">₹${amountPaid.toFixed(2)}</td>
+            </tr>
+            <tr>
+              <td style="font-weight:800;">Balance Due:</td>
+              <td style="text-align:right; font-weight:800; color:${isFullyPaid ? '#059669' : '#dc2626'};">₹${balanceDue.toFixed(2)}</td>
             </tr>
           </table>
 

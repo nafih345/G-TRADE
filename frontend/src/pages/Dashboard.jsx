@@ -44,7 +44,7 @@ export default function Dashboard() {
       } catch (e) {}
 
       try {
-        const invRes = await axios.get('/api/sales/invoices/');
+        const invRes = await axios.get('/api/sales/invoices/?document_type=INVOICE');
         if (invRes.data && Array.isArray(invRes.data) && invRes.data.length > 0) {
           setSalesInvoices(invRes.data);
         }

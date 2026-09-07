@@ -45,11 +45,11 @@ import ConfirmActionDialog from '../components/common/ConfirmActionDialog';
 
 // Mock initial demo data
 const INITIAL_DEMO_PRODUCTS = [
-  { id: '101', code: 'OPT-RAY-001', name: 'Ray-Ban Aviator Classic (RB3025)', brand: 'Ray-Ban', category: 'Sunglasses', availableStock: 25, wholesalePrice: 4200, gst: 18, unit: 'Pcs', barcode: '805289602057' },
-  { id: '102', code: 'OPT-OAK-002', name: 'Oakley Holbrook Prizm Black', brand: 'Oakley', category: 'Sunglasses', availableStock: 14, wholesalePrice: 5100, gst: 18, unit: 'Pcs', barcode: '888392237841' },
-  { id: '103', code: 'OPT-ESS-003', name: 'Essilor Crizal Sapphire 1.56 Lens', brand: 'Essilor', category: 'Optical Lens', availableStock: 50, wholesalePrice: 1850, gst: 18, unit: 'Pair', barcode: '366282001092' },
-  { id: '104', code: 'OPT-GUCCI-004', name: 'Gucci Square Acetate Optical Frame', brand: 'Gucci', category: 'Frames', availableStock: 8, wholesalePrice: 12500, gst: 18, unit: 'Pcs', barcode: '889652104921' },
-  { id: '105', code: 'OPT-ACU-005', name: 'Acuvue Oasys 1-Day (30 Pack)', brand: 'Johnson & Johnson', category: 'Contact Lens', availableStock: 40, wholesalePrice: 2200, gst: 18, unit: 'Box', barcode: '073390558102' }
+  { id: '101', code: 'OPT-RAY-001', name: 'Ray-Ban Aviator Classic (RB3025)', brand: 'Ray-Ban', category: 'Sunglasses', modelNo: 'RB3025', color: 'Gold / Green', size: '58-14-135', power: '—', availableStock: 25, wholesalePrice: 4200, gst: 18, unit: 'Pcs', barcode: '805289602057' },
+  { id: '102', code: 'OPT-OAK-002', name: 'Oakley Holbrook Prizm Black', brand: 'Oakley', category: 'Sunglasses', modelNo: 'OO9102', color: 'Matte Black', size: '55-18-137', power: '—', availableStock: 14, wholesalePrice: 5100, gst: 18, unit: 'Pcs', barcode: '888392237841' },
+  { id: '103', code: 'OPT-ESS-003', name: 'Essilor Crizal Sapphire 1.56 Lens', brand: 'Essilor', category: 'Optical Lens', modelNo: 'CRZ-1.56', color: 'Clear', size: '—', power: '-2.00 / -0.75', availableStock: 50, wholesalePrice: 1850, gst: 18, unit: 'Pair', barcode: '366282001092' },
+  { id: '104', code: 'OPT-GUCCI-004', name: 'Gucci Square Acetate Optical Frame', brand: 'Gucci', category: 'Frames', modelNo: 'GG0516O', color: 'Havana', size: '52-20-145', power: '—', availableStock: 8, wholesalePrice: 12500, gst: 18, unit: 'Pcs', barcode: '889652104921' },
+  { id: '105', code: 'OPT-ACU-005', name: 'Acuvue Oasys 1-Day (30 Pack)', brand: 'Johnson & Johnson', category: 'Contact Lens', modelNo: 'OASYS-1D', color: 'Clear', size: '8.5 BC', power: '-3.00', availableStock: 40, wholesalePrice: 2200, gst: 18, unit: 'Box', barcode: '073390558102' }
 ];
 
 const INITIAL_DEMO_CUSTOMERS = [
@@ -140,7 +140,11 @@ export default function WholesaleSales() {
       return acc + (lineBase * ((parseFloat(item.discount) || 0) / 100));
     }, 0);
     const netBase = subtotal - totalDiscount;
-    const totalGst = netBase * 0.18;
+    const totalGst = cartItems.reduce((acc, item) => {
+      const lineBase = (parseFloat(item.rate) || 0) * (parseFloat(item.qty) || 0);
+      const lineGross = lineBase - (lineBase * ((parseFloat(item.discount) || 0) / 100));
+      return acc + (lineGross * ((parseFloat(item.gst) || 0) / 100));
+    }, 0);
     const charges = parseFloat(additionalCharges) || 0;
     const rawTotal = netBase + totalGst + charges;
     const grandTotal = Math.round(rawTotal);
@@ -254,6 +258,10 @@ export default function WholesaleSales() {
           name: prod.name,
           brand: prod.brand || 'Generic',
           category: prod.category || 'Optical',
+          modelNo: prod.modelNo || prod.model_no || prod.model || '',
+          color: prod.color || prod.colour || '',
+          size: prod.size || '',
+          power: prod.power || '',
           unit: prod.unit || 'Pcs',
           availableStock: avail,
           qty: 1,
@@ -915,24 +923,30 @@ export default function WholesaleSales() {
 
               {/* POS CART PRODUCTS DATA TABLE WITH STOCK OVER-LIMIT RED HIGHLIGHT */}
               <TableContainer component={Paper} elevation={0} sx={{ overflowX: 'auto', maxHeight: 420 }}>
-                <Table stickyHeader sx={{ minWidth: 900 }}>
-                  <TableHead sx={{ '& th': { bgcolor: '#f1f5f9', fontWeight: 800, py: 1.5, whiteSpace: 'nowrap' } }}>
+                <Table stickyHeader sx={{ minWidth: 1180 }}>
+                  <TableHead sx={{ '& th': { bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 1, fontSize: '0.75rem', whiteSpace: 'nowrap' } }}>
                     <TableRow>
-                      <TableCell sx={{ minWidth: 130 }}>Barcode / Code</TableCell>
-                      <TableCell sx={{ minWidth: 220 }}>Product Description</TableCell>
-                      <TableCell sx={{ minWidth: 100 }}>Live Stock</TableCell>
-                      <TableCell sx={{ minWidth: 135, textAlign: 'center' }}>Quantity</TableCell>
-                      <TableCell sx={{ minWidth: 100, textAlign: 'right' }}>Rate (₹)</TableCell>
-                      <TableCell sx={{ minWidth: 80, textAlign: 'center' }}>Disc %</TableCell>
-                      <TableCell sx={{ minWidth: 75, textAlign: 'center' }}>GST %</TableCell>
-                      <TableCell sx={{ minWidth: 120, textAlign: 'right' }}>Total (₹)</TableCell>
-                      <TableCell sx={{ minWidth: 60 }} align="center">Action</TableCell>
+                      <TableCell sx={{ minWidth: 120 }}>Barcode</TableCell>
+                      <TableCell sx={{ minWidth: 230 }}>Item Description</TableCell>
+                      <TableCell sx={{ minWidth: 110 }}>Model No</TableCell>
+                      <TableCell sx={{ minWidth: 100 }}>Color</TableCell>
+                      <TableCell sx={{ minWidth: 90 }}>Size</TableCell>
+                      <TableCell sx={{ minWidth: 110 }}>Brand</TableCell>
+                      <TableCell sx={{ minWidth: 110 }}>Category</TableCell>
+                      <TableCell sx={{ minWidth: 90 }}>Power</TableCell>
+                      <TableCell align="center" sx={{ minWidth: 135 }}>Qty</TableCell>
+                      <TableCell align="right" sx={{ minWidth: 100 }}>Price</TableCell>
+                      <TableCell align="right" sx={{ minWidth: 80 }}>Disc.</TableCell>
+                      <TableCell align="right" sx={{ minWidth: 100 }}>Gross</TableCell>
+                      <TableCell align="right" sx={{ minWidth: 90 }}>Tax</TableCell>
+                      <TableCell align="right" sx={{ minWidth: 110 }}>Total</TableCell>
+                      <TableCell align="center" sx={{ minWidth: 60 }}>Action</TableCell>
                     </TableRow>
                   </TableHead>
                   <TableBody>
                     {cartItems.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={9} align="center" sx={{ py: 6 }}>
+                        <TableCell colSpan={15} align="center" sx={{ py: 6 }}>
                           <Typography variant="body2" color="text.secondary" fontWeight={600}>
                             No products added to POS cart yet. Scan a barcode (F3) or search live inventory above.
                           </Typography>
@@ -943,24 +957,29 @@ export default function WholesaleSales() {
                         const isStockExceeded = item.qty > item.availableStock;
                         const lineBase = (parseFloat(item.rate) || 0) * (parseFloat(item.qty) || 0);
                         const lineDisc = lineBase * ((parseFloat(item.discount) || 0) / 100);
-                        const lineGst = (lineBase - lineDisc) * 0.18;
-                        const lineTotal = lineBase - lineDisc + lineGst;
+                        const lineGross = lineBase - lineDisc;
+                        const lineGst = lineGross * ((parseFloat(item.gst) || 0) / 100);
+                        const lineTotal = lineGross + lineGst;
 
                         return (
                           <TableRow key={item.id || idx} hover sx={{ bgcolor: isStockExceeded ? '#fef2f2' : 'inherit', '& td': { py: 1.2, verticalAlign: 'middle', whiteSpace: 'nowrap' } }}>
-                            <TableCell sx={{ fontFamily: 'monospace', fontWeight: 700 }}>{item.code}</TableCell>
+                            <TableCell sx={{ fontFamily: 'monospace', fontWeight: 700, color: 'primary.main' }}>{item.barcode || item.code}</TableCell>
                             <TableCell sx={{ whiteSpace: 'normal' }}>
                               <Typography variant="body2" fontWeight={700}>{item.name}</Typography>
-                              <Typography variant="caption" color="text.secondary">{item.brand} • {item.category}</Typography>
+                              <Typography
+                                variant="caption"
+                                fontWeight={800}
+                                sx={{ display: 'block', color: isStockExceeded ? 'error.main' : 'success.main' }}
+                              >
+                                🟢 Live Stock: {item.availableStock} Free
+                              </Typography>
                             </TableCell>
-                            <TableCell>
-                              <Chip
-                                label={`🟢 ${item.availableStock} Free`}
-                                color={isStockExceeded ? 'error' : 'success'}
-                                size="small"
-                                sx={{ fontWeight: 700, height: 22, fontSize: '0.72rem' }}
-                              />
-                            </TableCell>
+                            <TableCell sx={{ fontWeight: 600 }}>{item.modelNo || '—'}</TableCell>
+                            <TableCell sx={{ fontWeight: 600 }}>{item.color || '—'}</TableCell>
+                            <TableCell sx={{ fontWeight: 600 }}>{item.size || '—'}</TableCell>
+                            <TableCell sx={{ fontWeight: 600 }}>{item.brand || '—'}</TableCell>
+                            <TableCell sx={{ fontWeight: 600 }}>{item.category || '—'}</TableCell>
+                            <TableCell sx={{ fontWeight: 600 }}>{item.power || '—'}</TableCell>
                             <TableCell align="center">
                               <Box>
                                 <Stack direction="row" alignItems="center" justifyContent="center" spacing={0.5}>
@@ -1002,17 +1021,23 @@ export default function WholesaleSales() {
                                 sx={{ width: 85, '& .MuiInputBase-input': { py: 0.5, px: 0.5, textAlign: 'right', fontWeight: 600 } }}
                               />
                             </TableCell>
-                            <TableCell align="center">
+                            <TableCell align="right">
                               <TextField
                                 size="small"
                                 type="number"
                                 value={item.discount}
                                 onChange={(e) => handleUpdateItemField(idx, 'discount', parseFloat(e.target.value) || 0)}
-                                sx={{ width: 60, '& .MuiInputBase-input': { py: 0.5, px: 0.5, textAlign: 'center' } }}
+                                sx={{ width: 60, '& .MuiInputBase-input': { py: 0.5, px: 0.5, textAlign: 'right' } }}
                               />
                             </TableCell>
-                            <TableCell align="center">
-                              <Typography variant="body2" fontWeight={600}>{item.gst}%</Typography>
+                            <TableCell align="right" sx={{ fontWeight: 600 }}>
+                              ₹{lineGross.toFixed(2)}
+                            </TableCell>
+                            <TableCell align="right" sx={{ fontWeight: 600, color: '#b45309' }}>
+                              ₹{lineGst.toFixed(2)}
+                              <Box component="span" sx={{ display: 'block', fontSize: '0.6rem', fontWeight: 700, color: 'text.secondary' }}>
+                                {item.gst || 0}% GST
+                              </Box>
                             </TableCell>
                             <TableCell align="right" sx={{ fontWeight: 850, color: 'primary.main' }}>
                               ₹{lineTotal.toFixed(2)}
@@ -1030,7 +1055,7 @@ export default function WholesaleSales() {
                   {cartItems.length > 0 && (
                     <TableFooter sx={{ position: 'sticky', bottom: 0, bgcolor: '#f8fafc', '& td': { borderTop: '2px solid #e2e8f0' } }}>
                       <TableRow>
-                        <TableCell colSpan={3} sx={{ fontWeight: 800, color: '#475569' }}>
+                        <TableCell colSpan={8} sx={{ fontWeight: 800, color: '#475569' }}>
                           {summary.totalItems} item{summary.totalItems === 1 ? '' : 's'} in cart
                         </TableCell>
                         <TableCell align="center" sx={{ fontWeight: 800, color: '#475569' }}>
@@ -1039,10 +1064,13 @@ export default function WholesaleSales() {
                         <TableCell align="right" sx={{ fontWeight: 700, color: '#475569' }}>
                           ₹{summary.subtotal.toFixed(2)}
                         </TableCell>
-                        <TableCell align="center" sx={{ fontWeight: 700, color: '#dc2626' }}>
+                        <TableCell align="right" sx={{ fontWeight: 700, color: '#dc2626' }}>
                           −₹{summary.totalDiscount.toFixed(2)}
                         </TableCell>
-                        <TableCell align="center" sx={{ fontWeight: 700, color: '#475569' }}>
+                        <TableCell align="right" sx={{ fontWeight: 700, color: '#475569' }}>
+                          ₹{(summary.subtotal - summary.totalDiscount).toFixed(2)}
+                        </TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 700, color: '#b45309' }}>
                           ₹{summary.totalGst.toFixed(2)}
                         </TableCell>
                         <TableCell align="right" sx={{ fontWeight: 900, fontSize: '0.95rem', color: 'primary.main' }}>

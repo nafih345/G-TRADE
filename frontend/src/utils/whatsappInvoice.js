@@ -29,10 +29,21 @@ export const sendInvoiceWhatsApp = (invoice, customPhone = null) => {
 
   const frameName = invoice.frame || invoice.items?.[0]?.name || 'Prescribed Optical Frame';
   const lensName = invoice.lens || invoice.items?.[1]?.name || 'Prescribed Optical Lens';
-  const totalAmount = parseFloat(invoice.total || invoice.net_amount || 0).toLocaleString();
-  const payStatus = invoice.payment || invoice.paymentMethod || 'Paid';
+  const grandTotal = parseFloat(invoice.netTotal || invoice.total || invoice.net_amount || 0);
+  const totalAmount = grandTotal.toLocaleString();
 
-  const message = 
+  const amountPaidNum = invoice.totalPaidAmount !== undefined && invoice.totalPaidAmount !== null
+    ? parseFloat(invoice.totalPaidAmount) || 0
+    : (invoice.paidAmount !== undefined && invoice.paidAmount !== null
+      ? parseFloat(invoice.paidAmount) || 0
+      : grandTotal);
+  const balanceDueNum = invoice.balanceDue !== undefined && invoice.balanceDue !== null
+    ? parseFloat(invoice.balanceDue) || 0
+    : Math.max(0, grandTotal - amountPaidNum);
+  const payStatus = invoice.paymentStatusLabel
+    || (balanceDueNum <= 0.009 ? 'PAID' : (amountPaidNum > 0 ? 'PARTIALLY PAID' : 'UNPAID'));
+
+  const message =
 `👓 *GREENSOL OPTICALS - TAX INVOICE RECEIPT*
 -----------------------------------------
 Dear *${patientName}*,
@@ -43,7 +54,9 @@ Thank you for choosing Greensol Super Speciality Eye Care! Here are your optical
 📅 *Date:* ${invDate}
 👓 *Frame:* ${frameName}
 🔍 *Lens:* ${lensName}
-💳 *Total Amount:* ₹${totalAmount} (${payStatus})
+💳 *Total Amount:* ₹${totalAmount}
+✅ *Amount Paid:* ₹${amountPaidNum.toLocaleString()}
+🧾 *Balance Due:* ₹${balanceDueNum.toLocaleString()} (${payStatus})
 
 We hope you enjoy your new eyewear! For frame alignment or warranty support, visit our branch or call +91 98470 12345.
 -----------------------------------------

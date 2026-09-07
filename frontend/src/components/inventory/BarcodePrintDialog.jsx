@@ -3,11 +3,13 @@ import {
   Dialog, DialogTitle, DialogContent, DialogActions, Button, Box, Grid,
   ToggleButton, ToggleButtonGroup, FormControl, InputLabel, Select, MenuItem,
   RadioGroup, FormControlLabel, Radio, TextField, Checkbox, FormGroup, Typography,
-  Alert, Divider, Stack
+  Alert, Divider, Stack, FormHelperText
 } from '@mui/material';
 import {
-  THERMAL_SIZES, A4_SHEET_LAYOUTS, BARCODE_TYPES, LABEL_STYLES,
-  getLayout, getTotalLabelCount, renderBarcodeMarkup, buildLabelInnerHtml,
+  THERMAL_SIZES, A4_SHEET_LAYOUTS, BARCODE_TYPES, LABEL_STYLES, BARCODE_SIZES,
+  BARCODE_CUSTOM_MIN, BARCODE_CUSTOM_MAX, clampBarcodeCustomPercent,
+  CUSTOM_THERMAL_DEFAULTS, CUSTOM_A4_DEFAULTS, resolveLayout, getBarcodeTypeHint,
+  getTotalLabelCount, getBarcodeScale, renderBarcodeMarkup, buildLabelInnerHtml,
   buildStyleBlock, printBarcodeLabels
 } from '../../utils/printBarcodeLabels';
 
@@ -17,6 +19,10 @@ const DEFAULT_SETTINGS = {
   printerType: 'thermal',
   sizeId: 'roll_50x25_1up',
   barcodeType: 'EAN13',
+  barcodeSize: 'M',
+  barcodeCustomScale: 100,
+  customThermal: { ...CUSTOM_THERMAL_DEFAULTS },
+  customA4: { ...CUSTOM_A4_DEFAULTS },
   labelStyle: 'jewel',
   quantityMode: 'custom',
   customQuantity: 1,
@@ -32,6 +38,26 @@ const DEFAULT_SETTINGS = {
 };
 
 const EMPTY_EPHEMERAL = { discountPriceValue: '', expiryDate: '', batchNo: '', customBarcode: '' };
+
+// Field editors shown when "Custom" size is picked, per printer type.
+const CUSTOM_DIM_FIELDS = {
+  thermal: [
+    { key: 'widthMm', label: 'Label width (mm)' },
+    { key: 'heightMm', label: 'Label height (mm)' },
+    { key: 'cols', label: 'Labels across', step: 1 },
+    { key: 'gapMm', label: 'Gap between (mm)' },
+  ],
+  a4: [
+    { key: 'widthMm', label: 'Label width (mm)' },
+    { key: 'heightMm', label: 'Label height (mm)' },
+    { key: 'cols', label: 'Columns', step: 1 },
+    { key: 'rows', label: 'Rows', step: 1 },
+    { key: 'marginTopMm', label: 'Top margin (mm)' },
+    { key: 'marginLeftMm', label: 'Left margin (mm)' },
+    { key: 'colGapMm', label: 'Column gap (mm)' },
+    { key: 'rowGapMm', label: 'Row gap (mm)' },
+  ],
+};
 
 const BARCODE_STANDARD_MAP = {
   'EAN-13': 'EAN13', EAN13: 'EAN13',
@@ -93,10 +119,16 @@ export default function BarcodePrintDialog({ open, onClose, products }) {
   }, [open]);
 
   const fullSettings = { ...settings, ...ephemeral };
-  const layout = getLayout(fullSettings.printerType, fullSettings.sizeId);
+  const layout = resolveLayout(fullSettings);
   const sizeOptions = fullSettings.printerType === 'a4' ? A4_SHEET_LAYOUTS : THERMAL_SIZES;
   const totalCount = getTotalLabelCount(validProducts, fullSettings);
-  const previewCss = useMemo(() => buildStyleBlock(layout, fullSettings.printerType), [layout, fullSettings.printerType]);
+  const previewCss = useMemo(
+    () => buildStyleBlock(
+      layout, fullSettings.printerType,
+      getBarcodeScale(fullSettings.barcodeSize, fullSettings.barcodeCustomScale)
+    ),
+    [layout, fullSettings.printerType, fullSettings.barcodeSize, fullSettings.barcodeCustomScale]
+  );
   // Scale each label up to a roughly consistent on-screen size regardless of
   // its true mm dimensions (25mm thermal vs 13.5mm A4-80up render very differently otherwise),
   // but never so wide it overflows the preview box (long dumbbell jewellery tags).
@@ -139,6 +171,15 @@ export default function BarcodePrintDialog({ open, onClose, products }) {
       }
       return next;
     });
+  };
+
+  // Updates one dimension inside the custom-size bucket for the active printer type.
+  const updateCustomDim = (field, value) => {
+    const bucket = settings.printerType === 'a4' ? 'customA4' : 'customThermal';
+    setSettings((prev) => ({
+      ...prev,
+      [bucket]: { ...prev[bucket], [field]: value },
+    }));
   };
 
   const handlePrint = async () => {
@@ -196,7 +237,37 @@ export default function BarcodePrintDialog({ open, onClose, products }) {
                   </Select>
                 </FormControl>
 
-                <FormControl size="small" fullWidth>
+                {fullSettings.sizeId === 'custom' && (
+                  <Box sx={{ p: 1.5, border: '1px dashed', borderColor: 'divider', borderRadius: 1 }}>
+                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+                      Enter the exact dimensions from your label sheet / roll (in millimetres).
+                    </Typography>
+                    <Grid container spacing={1.5}>
+                      {CUSTOM_DIM_FIELDS[fullSettings.printerType].map((f) => {
+                        const bucket = fullSettings.printerType === 'a4'
+                          ? fullSettings.customA4 : fullSettings.customThermal;
+                        return (
+                          <Grid item xs={6} key={f.key}>
+                            <TextField
+                              size="small"
+                              type="number"
+                              fullWidth
+                              label={f.label}
+                              value={bucket?.[f.key] ?? ''}
+                              onChange={(e) => updateCustomDim(f.key, e.target.value)}
+                              inputProps={{ min: 0, step: f.step || 0.1 }}
+                            />
+                          </Grid>
+                        );
+                      })}
+                    </Grid>
+                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+                      {layout.label}
+                    </Typography>
+                  </Box>
+                )}
+
+                <FormControl size="small" fullWidth error={!!previewSymbol.error}>
                   <InputLabel>Barcode Type</InputLabel>
                   <Select
                     label="Barcode Type"
@@ -207,7 +278,58 @@ export default function BarcodePrintDialog({ open, onClose, products }) {
                       <MenuItem key={opt.id} value={opt.id}>{opt.label}</MenuItem>
                     ))}
                   </Select>
+                  <FormHelperText>{getBarcodeTypeHint(fullSettings.barcodeType)}</FormHelperText>
                 </FormControl>
+
+                {previewSymbol.error && (
+                  <Alert severity="warning" sx={{ py: 0.5 }}>
+                    {previewSymbol.error} This product's barcode is{' '}
+                    <b>{String(previewBarcodeValue || '').length} character(s)</b>. Choose{' '}
+                    <b>Code 128</b> (accepts any value) or a matching format, or edit the product's barcode.
+                  </Alert>
+                )}
+
+                <Box>
+                  <Typography variant="subtitle2" fontWeight={700} gutterBottom>Barcode Size</Typography>
+                  <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap" useFlexGap>
+                    <ToggleButtonGroup
+                      exclusive
+                      size="small"
+                      value={fullSettings.barcodeSize || 'M'}
+                      onChange={(e, val) => {
+                        if (!val) return;
+                        updateSetting('barcodeSize', val);
+                        if (val === 'custom' && !fullSettings.barcodeCustomScale) {
+                          updateSetting('barcodeCustomScale', 100);
+                        }
+                      }}
+                    >
+                      {BARCODE_SIZES.map((s) => (
+                        <ToggleButton key={s.id} value={s.id}>{s.label.replace(/\s*\(default\)/, '')}</ToggleButton>
+                      ))}
+                      <ToggleButton value="custom" aria-label="Custom barcode size">+</ToggleButton>
+                    </ToggleButtonGroup>
+
+                    {fullSettings.barcodeSize === 'custom' && (
+                      <TextField
+                        size="small"
+                        type="number"
+                        label="Custom size"
+                        value={fullSettings.barcodeCustomScale ?? 100}
+                        onChange={(e) => updateSetting('barcodeCustomScale', e.target.value)}
+                        onBlur={(e) => updateSetting('barcodeCustomScale', clampBarcodeCustomPercent(e.target.value))}
+                        InputProps={{ endAdornment: <Typography variant="body2" color="text.secondary">%</Typography> }}
+                        inputProps={{ min: BARCODE_CUSTOM_MIN, max: BARCODE_CUSTOM_MAX, step: 5 }}
+                        sx={{ width: 130 }}
+                      />
+                    )}
+                  </Stack>
+                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                    {fullSettings.barcodeSize === 'custom'
+                      ? `Bar height as a percentage of normal (${BARCODE_CUSTOM_MIN}–${BARCODE_CUSTOM_MAX}%). 100% = Medium.`
+                      : 'Adjusts how tall the barcode bars print on each label. Use + for an exact percentage.'}
+                  </Typography>
+                </Box>
 
                 {layout.tag !== 'jewellery' && layout.tag !== 'rattail' && (
                   <Box>
@@ -411,7 +533,11 @@ export default function BarcodePrintDialog({ open, onClose, products }) {
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose}>Cancel</Button>
-        <Button variant="contained" disabled={totalCount === 0 || printing} onClick={handlePrint}>
+        <Button
+          variant="contained"
+          disabled={totalCount === 0 || printing || !!previewSymbol.error}
+          onClick={handlePrint}
+        >
           {printing ? 'Preparing...' : `Print ${totalCount} Label${totalCount === 1 ? '' : 's'}`}
         </Button>
       </DialogActions>

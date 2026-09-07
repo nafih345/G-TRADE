@@ -61,7 +61,7 @@ const genCode = (name, len = 3) =>
   + Math.floor(10 + Math.random() * 89);
 
 const blankProduct = (overrides = {}) => ({
-  name: '', code: '', hsnCode: '',
+  name: '', code: '', modelNo: '', hsnCode: '',
   category: 'Frames', subCategory: '', group: '', brand: '',
   size: '', color: '', material: '',
   frameType: '', lensType: '', coating: '',
@@ -151,6 +151,7 @@ const productToForm = (ep) => {
   return blankProduct({
   name: ep.name || '',
   code: ep.code || ep.product_code || '',
+  modelNo: ep.modelNo || ep.model_no || '',
   hsnCode: ep.hsnCode || ep.hsn_code || '',
   category: ep.category || 'Frames',
   subCategory: ep.subCategory || '',
@@ -269,6 +270,7 @@ export default function ProductMasterDialog({
     const extra_data = {
       mrp,
       sale_price: salePrice,
+      model_no: p.modelNo || '',
       sub_category: p.subCategory || '',
       group: p.group || '',
       size: p.size || '',
@@ -322,6 +324,7 @@ export default function ProductMasterDialog({
     const productRecord = {
       id: savedId,
       code,
+      modelNo: p.modelNo || '',
       barcode: savedBarcode,
       name: p.name.trim(),
       brand: p.brand || '',
@@ -458,6 +461,14 @@ export default function ProductMasterDialog({
                   />
                 </Grid>
                 <Grid item xs={12} sm={3}>
+                  <TextField
+                    label="Model Number" fullWidth size="small"
+                    placeholder="e.g. RB3025-001"
+                    value={p.modelNo}
+                    onChange={(e) => set({ modelNo: e.target.value })}
+                  />
+                </Grid>
+                <Grid item xs={12} sm={6}>
                   <TextField
                     label="HSN / SAC Code" fullWidth size="small"
                     value={p.hsnCode}

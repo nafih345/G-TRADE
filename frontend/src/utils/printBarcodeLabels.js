@@ -41,6 +41,7 @@ export const THERMAL_SIZES = [
   // panel; the rest of the width is the details panel.
   { id: 'roll_rattail_54x13', label: 'Jewellery Rat-Tail Tag 90 x 13mm (barcode + details + blank tail)', widthMm: 90, heightMm: 13, cols: 1, gapMm: 0, tag: 'rattail', tailMm: 40, scanMm: 22 },
   { id: 'roll_rattail_75x10', label: 'Jewellery Rat-Tail Tag 75 x 12mm (shorter tail)', widthMm: 75, heightMm: 12, cols: 1, gapMm: 0, tag: 'rattail', tailMm: 30, scanMm: 20 },
+  { id: 'custom', label: 'Custom roll size…', custom: true },
 ];
 
 export const A4_SHEET_LAYOUTS = [
@@ -57,22 +58,167 @@ export const A4_SHEET_LAYOUTS = [
   // details panel + blank tail (see the thermal rat-tail entries above). Tuned
   // to fill the full A4 sheet — 2 columns x 21 rows, near-edge margins.
   { id: 'a4_rattail_38up', label: 'A4 - Jewellery Rat-Tail Tags 42/Sheet (97 x 13mm, fills the sheet)', cols: 2, rows: 21, widthMm: 97, heightMm: 13, marginTopMm: 9, marginLeftMm: 6, colGapMm: 4, rowGapMm: 0, tag: 'rattail', tailMm: 44, scanMm: 24 },
+  { id: 'custom', label: 'Custom sheet layout…', custom: true },
 ];
 
+// Default dimensions (mm) seeded into the "Custom" size editor the first time
+// it's opened — the fields for each are shown in BarcodePrintDialog.
+export const CUSTOM_THERMAL_DEFAULTS = { widthMm: 50, heightMm: 25, cols: 1, gapMm: 2 };
+export const CUSTOM_A4_DEFAULTS = {
+  widthMm: 63.5, heightMm: 33.9, cols: 3, rows: 8,
+  marginTopMm: 10, marginLeftMm: 7, colGapMm: 2.5, rowGapMm: 0,
+};
+
+// Turns the user's typed custom dimensions into a full layout object shaped like
+// the preset entries, coercing every field to a sane number so the mm-arithmetic
+// in buildStyleBlock never sees a string or a non-positive size.
+export function buildCustomLayout(printerType, dims = {}) {
+  const pos = (v, d) => {
+    const n = parseFloat(v);
+    return Number.isFinite(n) && n > 0 ? n : d;
+  };
+  const nonNeg = (v, d) => {
+    const n = parseFloat(v);
+    return Number.isFinite(n) && n >= 0 ? n : d;
+  };
+
+  if (printerType === 'a4') {
+    const d = CUSTOM_A4_DEFAULTS;
+    const cols = Math.max(1, Math.round(pos(dims.cols, d.cols)));
+    const rows = Math.max(1, Math.round(pos(dims.rows, d.rows)));
+    const widthMm = pos(dims.widthMm, d.widthMm);
+    const heightMm = pos(dims.heightMm, d.heightMm);
+    return {
+      id: 'custom', custom: true,
+      label: `Custom — ${cols} × ${rows} labels, ${widthMm} × ${heightMm} mm`,
+      cols, rows, widthMm, heightMm,
+      marginTopMm: nonNeg(dims.marginTopMm, d.marginTopMm),
+      marginLeftMm: nonNeg(dims.marginLeftMm, d.marginLeftMm),
+      colGapMm: nonNeg(dims.colGapMm, d.colGapMm),
+      rowGapMm: nonNeg(dims.rowGapMm, d.rowGapMm),
+    };
+  }
+
+  const d = CUSTOM_THERMAL_DEFAULTS;
+  const cols = Math.max(1, Math.round(pos(dims.cols, d.cols)));
+  const widthMm = pos(dims.widthMm, d.widthMm);
+  const heightMm = pos(dims.heightMm, d.heightMm);
+  return {
+    id: 'custom', custom: true,
+    label: `Custom — ${cols}-up, ${widthMm} × ${heightMm} mm`,
+    cols, widthMm, heightMm,
+    gapMm: nonNeg(dims.gapMm, d.gapMm),
+  };
+}
+
+// Single entry point the dialog and the print job both use to get the active
+// layout: a preset from the lists, or a synthesised custom one.
+export function resolveLayout(settings) {
+  if (settings && settings.sizeId === 'custom') {
+    const dims = settings.printerType === 'a4' ? settings.customA4 : settings.customThermal;
+    return buildCustomLayout(settings.printerType, dims);
+  }
+  return getLayout(settings?.printerType, settings?.sizeId);
+}
+
 export const BARCODE_TYPES = [
-  { id: 'CODE128', label: 'Code 128' },
-  { id: 'CODE39', label: 'Code 39' },
-  { id: 'EAN13', label: 'EAN-13' },
-  { id: 'EAN8', label: 'EAN-8' },
-  { id: 'UPC', label: 'UPC-A' },
-  { id: 'UPCE', label: 'UPC-E' },
-  { id: 'QRCODE', label: 'QR Code' },
+  { id: 'CODE128', label: 'Code 128', hint: 'Any letters, digits or symbols — works with every barcode value.' },
+  { id: 'CODE39', label: 'Code 39', hint: 'Uppercase A–Z, digits and - . $ / + % and space.' },
+  { id: 'EAN13', label: 'EAN-13', hint: 'Numbers only — exactly 12 or 13 digits.' },
+  { id: 'EAN8', label: 'EAN-8', hint: 'Numbers only — exactly 7 or 8 digits.' },
+  { id: 'UPC', label: 'UPC-A', hint: 'Numbers only — exactly 11 or 12 digits.' },
+  { id: 'UPCE', label: 'UPC-E', hint: 'Numbers only — exactly 6, 7 or 8 digits.' },
+  { id: 'QRCODE', label: 'QR Code', hint: 'Any text.' },
 ];
+
+export function getBarcodeTypeHint(id) {
+  const found = BARCODE_TYPES.find((t) => t.id === id);
+  return found ? found.hint || '' : '';
+}
+
+// Quick client-side check of whether `value` can be encoded as `barcodeType`,
+// mirroring JsBarcode's own rules. Used to warn (and block the Print button)
+// before the user sends a batch of un-scannable "Invalid value" labels to the
+// printer. `null` = fine, otherwise a short human-readable reason.
+export function barcodeValueProblem(barcodeType, value) {
+  const v = String(value ?? '').trim();
+  if (!v) return 'No barcode value.';
+  const digits = /^\d+$/.test(v);
+  switch (barcodeType) {
+    case 'EAN13':
+      if (!digits || (v.length !== 12 && v.length !== 13)) return 'EAN-13 needs exactly 12 or 13 digits.';
+      break;
+    case 'EAN8':
+      if (!digits || (v.length !== 7 && v.length !== 8)) return 'EAN-8 needs exactly 7 or 8 digits.';
+      break;
+    case 'UPC':
+      if (!digits || (v.length !== 11 && v.length !== 12)) return 'UPC-A needs exactly 11 or 12 digits.';
+      break;
+    case 'UPCE':
+      if (!digits || v.length < 6 || v.length > 8) return 'UPC-E needs 6 to 8 digits.';
+      break;
+    case 'CODE39':
+      if (!/^[0-9A-Z\-. $/+%]+$/.test(v)) return 'Code 39 allows only A–Z, 0–9 and - . $ / + % space.';
+      break;
+    default:
+      break;
+  }
+  return null;
+}
 
 export const LABEL_STYLES = [
   { id: 'jewel', label: 'Jewellery Card (sectioned)' },
   { id: 'standard', label: 'Standard (stacked)' },
 ];
+
+// User-selectable barcode symbol size. `scale` multiplies the printed height of
+// the barcode / QR image on every label style (taller bars scan more reliably;
+// smaller frees room for text on tiny tags). Applied as a CSS override appended
+// after the base label CSS in buildStyleBlock.
+export const BARCODE_SIZES = [
+  { id: 'S', label: 'Small', scale: 0.8 },
+  { id: 'M', label: 'Medium (default)', scale: 1 },
+  { id: 'L', label: 'Large', scale: 1.25 },
+  { id: 'XL', label: 'Extra Large', scale: 1.55 },
+];
+
+// The custom ("+") option lets the user type an exact percentage instead of
+// picking a preset. Clamped so the symbol can't collapse to nothing or blow far
+// past the label box.
+export const BARCODE_CUSTOM_MIN = 40;
+export const BARCODE_CUSTOM_MAX = 300;
+
+export function clampBarcodeCustomPercent(value) {
+  const n = parseFloat(value);
+  if (!Number.isFinite(n)) return 100;
+  return Math.min(BARCODE_CUSTOM_MAX, Math.max(BARCODE_CUSTOM_MIN, n));
+}
+
+// Resolves the height multiplier for the barcode symbol. `sizeId` is a preset id
+// ('S'/'M'/'L'/'XL') or 'custom', in which case `customPercent` (a number like
+// 130 = 130%) is used instead.
+export function getBarcodeScale(sizeId, customPercent) {
+  if (sizeId === 'custom') {
+    return clampBarcodeCustomPercent(customPercent) / 100;
+  }
+  const found = BARCODE_SIZES.find((s) => s.id === sizeId);
+  return found ? found.scale : 1;
+}
+
+// CSS that resizes the rendered barcode/QR SVG for each label renderer. Emitted
+// last in the style block so it overrides the per-renderer defaults by source
+// order. Width stays auto / clamped to the label so the symbol never overflows
+// the (overflow:hidden) label box.
+function barcodeSizeOverrideCss(scale) {
+  if (!scale || Math.abs(scale - 1) < 0.001) return '';
+  const mm = (base) => `${(base * scale).toFixed(2)}mm`;
+  return `
+    .lbl-symbol svg { height: ${mm(11)}; width: auto; max-width: 100%; }
+    .jc-symbol svg { height: ${mm(8)}; width: auto; max-width: 100%; }
+    .jtag-symbol svg { height: ${mm(6.5)}; width: auto; max-width: 100%; }
+    .rt-symbol svg { height: ${mm(9)}; max-width: 100%; }
+  `;
+}
 
 export function getLayout(printerType, sizeId) {
   const list = printerType === 'a4' ? A4_SHEET_LAYOUTS : THERMAL_SIZES;
@@ -155,6 +301,11 @@ export async function renderBarcodeMarkup(barcodeType, value) {
     }
   }
 
+  const preCheck = barcodeValueProblem(barcodeType, safeValue);
+  if (preCheck) {
+    return { markup: '', error: preCheck };
+  }
+
   const box = getSandbox();
   const svgEl = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   box.appendChild(svgEl);
@@ -168,7 +319,7 @@ export async function renderBarcodeMarkup(barcodeType, value) {
     const markup = new XMLSerializer().serializeToString(svgEl);
     return { markup, error: null };
   } catch (e) {
-    return { markup: '', error: `Invalid value for ${barcodeType}` };
+    return { markup: '', error: `This barcode value can't be printed as ${barcodeType}.` };
   } finally {
     box.removeChild(svgEl);
   }
@@ -526,7 +677,8 @@ function ratTailCss(layout) {
 
 // Pagination is chunked in JS (not left to CSS fragmentation) because CSS
 // Grid does not reliably split across @page boundaries in Chromium print.
-export function buildStyleBlock(layout, printerType) {
+export function buildStyleBlock(layout, printerType, barcodeScale = 1) {
+  const sizeOverride = barcodeSizeOverrideCss(barcodeScale);
   if (printerType === 'a4') {
     const pageWidthMm = layout.cols * layout.widthMm + layout.colGapMm * (layout.cols - 1) + layout.marginLeftMm;
     const pageHeightMm = layout.rows * layout.heightMm + layout.rowGapMm * (layout.rows - 1) + layout.marginTopMm;
@@ -536,6 +688,7 @@ export function buildStyleBlock(layout, printerType) {
       ${JEWEL_CARD_CSS}
       ${layout.tag === 'jewellery' ? JEWELLERY_TAG_CSS : ''}
       ${layout.tag === 'rattail' ? ratTailCss(layout) : ''}
+      ${sizeOverride}
       .sheet {
         box-sizing: border-box;
         width: ${Math.max(210, pageWidthMm)}mm;
@@ -560,6 +713,7 @@ export function buildStyleBlock(layout, printerType) {
     ${LABEL_BASE_CSS}
     ${JEWEL_CARD_CSS}
     ${layout.tag === 'rattail' ? ratTailCss(layout) : ''}
+    ${sizeOverride}
     .sheet {
       display: flex; flex-direction: row; gap: ${layout.gapMm}mm;
       page-break-after: always;
@@ -582,7 +736,7 @@ export async function printBarcodeLabels(products, settings, businessName) {
     return { printed: 0, skipped };
   }
 
-  const layout = getLayout(settings.printerType, settings.sizeId);
+  const layout = resolveLayout(settings);
 
   // Manual override (single-product print only): the exact value the user typed
   // in the dialog prints on every label, and the per-label auto series is skipped.
@@ -627,6 +781,17 @@ export async function printBarcodeLabels(products, settings, businessName) {
     symbolCache.set(val, await renderBarcodeMarkup(settings.barcodeType, val));
   }
 
+  // Don't send a batch of un-scannable "invalid value" labels to the printer.
+  const failed = uniqueValues.filter((v) => symbolCache.get(v)?.error);
+  if (failed.length === uniqueValues.length) {
+    const reason = symbolCache.get(uniqueValues[0])?.error || 'the values are not compatible with it';
+    window.alert(
+      `Can't print with the "${settings.barcodeType}" barcode type — ${reason}\n\n` +
+      'Pick a different Barcode Type (Code 128 accepts any value) or fix the product barcode.'
+    );
+    return { printed: 0, skipped };
+  }
+
   const labelHtmlList = flatEntries.map((p) => {
     const { markup, error } = symbolCache.get(p.barcode) || {};
     return buildLabelInnerHtml(p, settings, businessName, markup, error, layout);
@@ -648,7 +813,7 @@ export async function printBarcodeLabels(products, settings, businessName) {
     <html>
       <head>
         <title>Barcode Labels</title>
-        <style>${buildStyleBlock(layout, settings.printerType)}</style>
+        <style>${buildStyleBlock(layout, settings.printerType, getBarcodeScale(settings.barcodeSize, settings.barcodeCustomScale))}</style>
       </head>
       <body>${sheetsHtml}</body>
     </html>

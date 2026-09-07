@@ -16,10 +16,9 @@ import {
   Person as PersonIcon,
   Search as SearchIcon,
   Add as AddIcon,
-  Edit as EditIcon,
+  OpenInFull as WindowEditIcon,
   Delete as DeleteIcon,
   Print as PrintIcon,
-  CheckCircle as SuccessIcon,
   QrCodeScanner as ScannerIcon,
   ShoppingCart as CartIcon,
   History as HistoryIcon,
@@ -37,6 +36,7 @@ import {
 } from '@mui/icons-material';
 import PrintInvoiceModal from './PrintInvoiceModal';
 import ServiceMasterDialog from './ServiceMasterDialog';
+import ProductMasterDialog from '../inventory/ProductMasterDialog';
 
 // Standard Indian GST slabs offered in the Tax % dropdowns.
 const TAX_SLABS = [0, 5, 12, 18, 28];
@@ -92,10 +92,27 @@ const productHaystack = (p) => {
   return [
     p.name, p.barcode, p.sku, p.brand, p.category, p.type,
     p.hsn_code, p.colour, p.color, p.size, p.frameType,
+    p.supplier, p.supplier_name, p.rack, p.rack_location,
     extra.model_no, extra.modelNo, extra.color_code, extra.color, extra.size,
     ...(p.extra_barcodes || []),
   ].filter(Boolean).join(' ').toLowerCase();
 };
+
+// Compact always-on in-cell editor for the billing grid — every row's cells are live inputs,
+// no "edit mode" toggle. onBlur tidies the row (coerce numbers, dash-fill blanks).
+const GridCellInput = ({ value, onChange, onBlur, type = 'text', width = 88, align = 'left' }) => (
+  <TextField
+    size="small"
+    variant="standard"
+    type={type}
+    value={value ?? ''}
+    onChange={(e) => onChange(e.target.value)}
+    onBlur={onBlur}
+    onFocus={(e) => e.target.select()}
+    inputProps={type === 'number' ? { min: 0 } : undefined}
+    sx={{ width, '& input': { fontSize: '0.75rem', py: 0.3, textAlign: align, fontWeight: 700 } }}
+  />
+);
 
 export default function NewSaleWizard({
   customers = [],
@@ -215,6 +232,9 @@ export default function NewSaleWizard({
     color: '',
     size: '',
     brand: '',
+    supplier: '',
+    rack: '',
+    stock: null,
     category: 'FRAME',
     group: 'GENERIC',
     power: '',
@@ -271,100 +291,40 @@ export default function NewSaleWizard({
     bank: ''
   });
 
-  // --- NEW QUICK ERP LENS & ITEM CREATOR STATE (IMAGE MODEL 2 FORMAT) ---
-  const [quickAddOpen, setQuickAddOpen] = useState(false);
-  const [quickForm, setQuickForm] = useState({
-    description: '',
-    descriptionL: '',
-    category: 'LENS',
-    subCat: 'Single Vision',
-    group: 'GENERIC',
-    brand: 'Essilor',
-    modelNo: 'M-101',
-    power: '',
-    size: '50-18-140',
-    color: 'Anti-Blue Cut',
-    barcode2: '',
-    salesPr: '',
-    costPr: '',
-    taxPercent: '18.00'
-  });
+  // --- NEW LENS CREATOR ---
+  // "+ NEW Lens" opens the full Product Master dialog (the same "Add Optical Stock / Product"
+  // form used on Inventory → Products), forced into 🔬 Lens Mode. The saved lens is written to
+  // the products database by that dialog and then dropped straight into this sale's billing grid
+  // via onCreated → handleLensCreated.
+  const [lensDialogOpen, setLensDialogOpen] = useState(false);
 
-  // Auto-Fill Power from Prescription Grid into Quick Form
-  const handleAutoFillPower = () => {
-    let pStr = '';
-    if (rxData.sphOD || rxData.sphOS) {
-      pStr = `OD:${rxData.sphOD || '0'}/${rxData.cylOD || '0'} | OS:${rxData.sphOS || '0'}/${rxData.cylOS || '0'} [ADD:${rxData.addOD || '0'}]`;
-    } else {
-      pStr = 'OD:0.00 | OS:0.00';
-    }
-    setQuickForm({
-      ...quickForm,
-      power: pStr,
-      descriptionL: quickForm.descriptionL || `${quickForm.subCat || 'Single Vision'} Lens [Idx:${lensIndex}] ${pStr}`
-    });
-  };
-
-  // Save Quick Lens/Item & Inject directly to Billing Grid Cart
-  const handleSaveQuickItem = () => {
-    if (!quickForm.description && !quickForm.descriptionL) {
-      alert("Please enter Item Description or Lens Specification.");
-      return;
-    }
-
-    const price = parseFloat(quickForm.salesPr) || 0;
-    const gross = price * 1;
-    const itemTitle = quickForm.description || quickForm.descriptionL || 'New Optical Item';
-
-    const newItem = {
-      id: `ITEM-${Date.now()}`,
-      barcode: quickForm.barcode2 || `BC-${Math.floor(100000 + Math.random() * 900000)}`,
-      item: itemTitle,
-      modelNo: quickForm.modelNo || 'M-01',
-      color: quickForm.color || 'STANDARD',
-      size: quickForm.size || '50-18',
-      brand: quickForm.brand || 'OPTICAL',
-      category: quickForm.category || 'LENS',
-      group: quickForm.group || 'GENERIC',
-      power: quickForm.power || quickForm.descriptionL || '—',
-      qty: 1,
-      price,
-      disc: 0,
-      gross,
-      tax: 0,
-      taxPercent: parseFloat(quickForm.taxPercent) || 18,
-      total: gross
-    };
-
-    // 1. Inject directly into billing items list
-    setItemsList([...itemsList, newItem]);
-
-    // 2. Save to inventory database local storage
-    try {
-      const stored = JSON.parse(localStorage.getItem('optical_inventory_items') || '[]');
-      localStorage.setItem('optical_inventory_items', JSON.stringify([newItem, ...stored]));
-    } catch (e) {}
-
-    // Reset Form
-    setQuickForm({
-      description: '',
-      descriptionL: '',
+  // A lens just saved from ProductMasterDialog — map its record onto an entry line and push it
+  // into the billing grid (same computeEntryLine + handleAddItem path as any product).
+  const handleLensCreated = (record) => {
+    if (!record) return;
+    const taxPercent = parseFloat(String(record.gst ?? '').replace('%', '').trim()) || 0;
+    handleAddItem({
+      productId: record.id || null,
+      itemType: 'PRODUCT',
+      barcode: String(record.barcode || record.code || ''),
+      item: record.name || 'Lens',
+      modelNo: record.modelNo || '',
+      color: record.color || record.colour || '',
+      size: record.size || '',
+      brand: record.brand || '',
+      supplier: record.supplier || '',
+      rack: record.rack || '',
+      stock: record.stock ?? null,
       category: 'LENS',
-      subCat: 'Single Vision',
-      group: 'GENERIC',
-      brand: 'Essilor',
-      modelNo: 'M-101',
+      group: record.group || 'GENERIC',
       power: '',
-      size: '50-18-140',
-      color: 'Anti-Blue Cut',
-      barcode2: '',
-      salesPr: '',
-      costPr: '',
-      taxPercent: '18.00'
+      qty: 1,
+      price: record.salePrice || record.sellingPrice || record.mrp || 0,
+      discPercent: 0,
+      taxPercent,
     });
-
-    setQuickAddOpen(false);
-    alert(`⚡ Item '${itemTitle}' saved to inventory & added directly to sale cart!`);
+    setLensDialogOpen(false);
+    if (itemMode === 'lens') setItemMode('product');
   };
 
   // 1️⃣ PART 1 HANDLER: Test No Auto-Lookup in PostgreSQL Eye Exams DB & LocalStorage
@@ -594,6 +554,9 @@ export default function NewSaleWizard({
       color: selectedProd.colour || selectedProd.color || extra.color_code || extra.color || '',
       size: selectedProd.size || extra.size || '',
       brand: selectedProd.brand || 'Generic',
+      supplier: selectedProd.supplier || selectedProd.supplier_name || extra.supplier || '',
+      rack: selectedProd.rack || selectedProd.rack_location || extra.rack || extra.rack_location || '',
+      stock: selectedProd.stock ?? selectedProd.qty ?? null,
       category: (selectedProd.type || selectedProd.category || 'FRAME').toUpperCase(),
       price: selectedProd.price || selectedProd.sellingPrice || 0,
       discPercent: 0,
@@ -611,6 +574,7 @@ export default function NewSaleWizard({
     setEntryInput(prev => ({
       ...prev,
       productId: '', barcode: '', item: '', modelNo: '', color: '', size: '',
+      supplier: '', rack: '', stock: null,
       power: '', price: '', qty: 1, discPercent: 0, taxPercent: 0
     }));
     setSelectedProductDetail(null);
@@ -629,6 +593,9 @@ export default function NewSaleWizard({
       color: p.colour || p.color || extra.color_code || extra.color || '',
       size: p.size || extra.size || '',
       brand: p.brand || 'Generic',
+      supplier: p.supplier || p.supplier_name || extra.supplier || '',
+      rack: p.rack || p.rack_location || extra.rack || extra.rack_location || '',
+      stock: p.stock ?? p.qty ?? null,
       category: (p.type || p.category || 'FRAME').toString().toUpperCase(),
       group: entryInput.group || 'GENERIC',
       power: '',
@@ -649,6 +616,7 @@ export default function NewSaleWizard({
     item: s.name || 'Service',
     modelNo: '', color: '', size: '',
     brand: 'SERVICE',
+    supplier: '', rack: '', stock: null,
     category: 'SERVICE',
     group: 'SERVICE',
     power: '',
@@ -658,10 +626,10 @@ export default function NewSaleWizard({
     taxPercent: s.taxRate || 0,
   });
 
-  // Product / Lens / Services switch. 'lens' just reuses the existing "+ NEW Lens" creator.
+  // Product / Lens / Services switch. 'lens' opens the full Product Master dialog in Lens Mode.
   const handleItemModeChange = (mode) => {
     setItemMode(mode);
-    setQuickAddOpen(mode === 'lens');
+    setLensDialogOpen(mode === 'lens');
     if (mode !== 'service') {
       setShowServiceRepair(false);
     }
@@ -794,10 +762,16 @@ export default function NewSaleWizard({
       serviceDetails: src.serviceDetails || null,
       barcode: src.barcode || `BC-${Math.floor(1000 + Math.random() * 9000)}`,
       item: src.item,
-      modelNo: src.modelNo || (isService ? '—' : 'M-01'),
-      color: src.color || (isService ? '—' : 'STANDARD'),
-      size: src.size || (isService ? '—' : '50-18'),
-      brand: src.brand || (isService ? 'SERVICE' : 'OPTICAL'),
+      // Keep the item's real attributes as-is — fall back to a plain dash rather than
+      // fake placeholders (M-01 / STANDARD / 50-18 / OPTICAL) that made a freshly added
+      // row look like it carried stale details from a previous product.
+      modelNo: src.modelNo || '—',
+      color: src.color || '—',
+      size: src.size || '—',
+      brand: src.brand || (isService ? 'SERVICE' : '—'),
+      supplier: src.supplier || '',
+      rack: src.rack || '',
+      stock: src.stock ?? null,
       category: src.category || 'FRAME',
       group: src.group || (isService ? 'SERVICE' : 'GENERIC'),
       power: isService ? (src.serviceDescription || '—') : power,
@@ -815,7 +789,8 @@ export default function NewSaleWizard({
     setItemsList([...itemsList, newItem]);
     setEntryInput({
       ...entryInput,
-      productId: '', barcode: '', item: '', modelNo: '', color: '', size: '', qty: 1, price: '', power: '',
+      productId: '', barcode: '', item: '', modelNo: '', color: '', size: '',
+      supplier: '', rack: '', stock: null, qty: 1, price: '', power: '',
       discPercent: 0, taxPercent: 0
     });
     setSelectedProductDetail(null);
@@ -846,10 +821,13 @@ export default function NewSaleWizard({
       productId: found.id || null,
       barcode: String(found.barcode || found.id || found.code || ''),
       item: found.name || '',
-      modelNo: found.modelNo || 'M-01',
-      color: found.color || 'STANDARD',
-      size: found.size || '50-18',
-      brand: found.brand || 'OPTICAL',
+      modelNo: found.modelNo || found.model_no || found.sku || '—',
+      color: found.colour || found.color || '—',
+      size: found.size || '—',
+      brand: found.brand || '—',
+      supplier: found.supplier || found.supplier_name || '',
+      rack: found.rack || found.rack_location || '',
+      stock: found.stock ?? found.qty ?? null,
       category: (found.type || found.category || 'FRAME').toUpperCase(),
       group: found.group || 'GENERIC',
       power: '—',
@@ -872,9 +850,72 @@ export default function NewSaleWizard({
     setItemsList(itemsList.filter(item => item.id !== id));
   };
 
-  // 3️⃣ PART 3 HANDLER: Edit an already-added row's Qty/Price/Discount/Tax without deleting
-  // and re-entering it — recomputes disc/tax/gross/total the same way handleAddItem does.
-  const [editingItem, setEditingItem] = useState(null);
+  // 3️⃣ PART 3 HANDLER: Edit an already-added billing row. Every cell in the grid is a live
+  // input — no "edit mode" toggle — and there's also a 🗔 popup with the same fields. Edits
+  // write straight into itemsList; amounts (disc / gross / tax / total) recompute live the
+  // same way handleAddItem does. Blur / closing the popup runs coerceItemRow to tidy up.
+  const [editDialogId, setEditDialogId] = useState(null);
+  const editDialogRow = itemsList.find(r => r.id === editDialogId) || null;
+
+  const updateItemField = (id, field, value) => {
+    setItemsList(prev => prev.map(item => {
+      if (item.id !== id) return item;
+      const next = { ...item, [field]: value };
+      if (['qty', 'price', 'discPercent', 'taxPercent'].includes(field)) {
+        const qty = parseInt(next.qty) || 0;
+        const price = parseFloat(next.price) || 0;
+        const discPercent = parseFloat(next.discPercent) || 0;
+        const taxPercent = parseFloat(next.taxPercent) || 0;
+        const gross = qty * price;
+        const disc = (gross * discPercent) / 100;
+        const taxable = gross - disc;
+        const tax = (taxable * taxPercent) / 100;
+        next.gross = gross;
+        next.disc = disc;
+        next.tax = tax;
+        next.total = taxable + tax;
+      }
+      return next;
+    }));
+  };
+
+  // Leaving edit mode (inline or popup): tidy any blank descriptive cell back to a dash so a
+  // saved row never shows an empty gap, coerce the number inputs (which leave strings behind)
+  // so the read-only renderer's .toFixed() calls don't blow up, and mirror a service row's
+  // Power text into serviceDescription.
+  const coerceItemRow = (id) => {
+    if (!id) return;
+    setItemsList(prev => prev.map(item => {
+      if (item.id !== id) return item;
+      const isSvc = (item.itemType === 'SERVICE') || item.category === 'SERVICE';
+      const clean = (v, fallback) => (v ?? '').toString().trim() || fallback;
+      const qty = parseInt(item.qty) || 0;
+      const price = parseFloat(item.price) || 0;
+      const discPercent = parseFloat(item.discPercent) || 0;
+      const taxPercent = parseFloat(item.taxPercent) || 0;
+      const gross = qty * price;
+      const disc = (gross * discPercent) / 100;
+      const taxable = gross - disc;
+      const tax = (taxable * taxPercent) / 100;
+      return {
+        ...item,
+        qty, price, discPercent, taxPercent,
+        gross, disc, tax, total: taxable + tax,
+        modelNo: clean(item.modelNo, '—'),
+        color: clean(item.color, '—'),
+        size: clean(item.size, '—'),
+        brand: clean(item.brand, isSvc ? 'SERVICE' : '—'),
+        category: clean(item.category, item.category).toUpperCase(),
+        power: clean(item.power, '—'),
+        serviceDescription: isSvc ? clean(item.power, item.serviceDescription || '') : item.serviceDescription,
+      };
+    }));
+  };
+
+  const closeEditDialog = () => {
+    coerceItemRow(editDialogId);
+    setEditDialogId(null);
+  };
 
   // "Show Bill" — a read-only invoice preview of the current billing grid before the sale is
   // completed/persisted. Reuses the same PrintInvoiceModal the post-checkout flow uses, fed a
@@ -902,10 +943,12 @@ export default function NewSaleWizard({
     netTotal,
     advancePaid: parseFloat(advancePaid) || 0,
     balanceDue,
+    paidAmount: totalPaidAmount,
+    totalPaidAmount,
+    paymentStatusLabel,
     paymentMode,
     paymentMethod: paymentMode,
     multiPay,
-    totalPaidAmount,
     salesman,
     rxData
   });
@@ -918,29 +961,6 @@ export default function NewSaleWizard({
     setShowBillOpen(true);
   };
 
-  const handleOpenEditItem = (row) => {
-    setEditingItem({ ...row });
-  };
-
-  const handleSaveEditItem = () => {
-    if (!editingItem) return;
-    const qty = parseInt(editingItem.qty) || 1;
-    const price = parseFloat(editingItem.price) || 0;
-    const discPercent = parseFloat(editingItem.discPercent) || 0;
-    const taxPercent = parseFloat(editingItem.taxPercent) || 0;
-    const gross = qty * price;
-    const discVal = (gross * discPercent) / 100;
-    const taxableAmount = gross - discVal;
-    const taxVal = (taxableAmount * taxPercent) / 100;
-    const total = taxableAmount + taxVal;
-
-    setItemsList(prev => prev.map(item => item.id === editingItem.id ? {
-      ...item,
-      qty, price, discPercent, taxPercent,
-      disc: discVal, gross, tax: taxVal, total
-    } : item));
-    setEditingItem(null);
-  };
 
   // 3️⃣ PART 3 HANDLER: Coupon Code Auto-Calculation
   const handleCouponChange = (code) => {
@@ -982,12 +1002,23 @@ export default function NewSaleWizard({
   const totalTax = itemsList.reduce((sum, item) => sum + (parseFloat(item.tax) || 0), 0);
   const netTotal = Math.max(0, grossTotal - itemDiscounts - couponDisc - overallDisc + totalTax);
   
-  const totalPaidAmount = (parseFloat(multiPay.cash) || 0) + 
-                          (parseFloat(multiPay.cards) || 0) + 
-                          (parseFloat(multiPay.gpay) || 0) + 
+  // Money taken across the individual pay modes (Cash / Cards / GPay / Bank).
+  const modePaidAmount = (parseFloat(multiPay.cash) || 0) +
+                          (parseFloat(multiPay.cards) || 0) +
+                          (parseFloat(multiPay.gpay) || 0) +
                           (parseFloat(multiPay.bank) || 0);
 
-  const balanceDue = Math.max(0, netTotal - (parseFloat(advancePaid) || 0) - totalPaidAmount);
+  // "Total Paid" = whatever the customer has actually handed over = any advance already
+  // collected + everything entered in the pay-mode split. The footer, the bill preview and the
+  // printed receipt all read this one figure so they can never disagree.
+  const advanceAmount = parseFloat(advancePaid) || 0;
+  const totalPaidAmount = advanceAmount + modePaidAmount;
+
+  const balanceDue = Math.max(0, netTotal - totalPaidAmount);
+  // PAID once nothing is owed, PARTIAL while some money is in, UNPAID when nothing is.
+  const paymentStatusLabel = balanceDue <= 0.009
+    ? 'PAID'
+    : (totalPaidAmount > 0 ? 'PARTIALLY PAID' : 'UNPAID');
 
   // 3️⃣ PART 3 HANDLER: Complete & Print Invoice (F10)
   // Handle Document Type Switch (Order vs Invoice vs Quotation)
@@ -1036,14 +1067,19 @@ export default function NewSaleWizard({
 
     let backendInvoiceId = null;
     let backendInvoiceNumber = billNo;
-    // Orders/Quotations aren't real sales yet (no payment, stock not committed) — only a
-    // completed Invoice actually persists to the backend Invoice/InvoiceItem tables and drives
-    // stock deduction + the accounting journal entry.
-    if (docType === 'Invoice' && customerId) {
+    // All three document types now persist to the backend Invoice/InvoiceItem tables (one
+    // table backs Quotation/Order/Invoice so a quote can later be converted in place from the
+    // Orders section). Only a completed INVOICE actually commits stock + the accounting
+    // journal entry — the backend gates that on document_type. A quotation stays DRAFT.
+    if (customerId) {
       try {
-        const status = balanceDue > 0 ? (totalPaidAmount > 0 ? 'PARTIAL' : 'UNPAID') : 'PAID';
+        const status = docType === 'Quotation'
+          ? 'DRAFT'
+          : (balanceDue > 0 ? (totalPaidAmount > 0 ? 'PARTIAL' : 'UNPAID') : 'PAID');
         const res = await axios.post('/api/sales/invoices/', {
           invoice_number: billNo,
+          document_type: docType.toUpperCase(),
+          fulfillment_status: docType === 'Order' ? 'Order Received' : undefined,
           customer: customerId,
           invoice_date: new Date().toISOString().split('T')[0],
           status,
@@ -1096,9 +1132,11 @@ export default function NewSaleWizard({
       netTotal,
       advancePaid: parseFloat(advancePaid) || 0,
       balanceDue,
+      paidAmount: totalPaidAmount,
+      totalPaidAmount,
+      paymentStatusLabel,
       paymentMode,
       multiPay,
-      totalPaidAmount,
       salesman,
       rxData
     };
@@ -1701,15 +1739,15 @@ export default function NewSaleWizard({
               <Grid item xs={12} sm={1.2} md={1.2}>
                 <Button
                   fullWidth variant="contained" size="small"
-                  onClick={() => setQuickAddOpen(!quickAddOpen)} startIcon={<AddIcon />}
+                  onClick={() => setLensDialogOpen(true)} startIcon={<AddIcon />}
                   sx={{
                     fontWeight: 900, py: 0.8, borderRadius: 2, textTransform: 'none', fontSize: '0.75rem',
-                    bgcolor: quickAddOpen ? '#3f4c28' : '#0f172a', color: '#facc15',
+                    bgcolor: '#0f172a', color: '#facc15',
                     whiteSpace: 'nowrap',
                     '&:hover': { bgcolor: '#2a351a' }
                   }}
                 >
-                  {quickAddOpen ? 'Close NEW' : '+ NEW Lens'}
+                  + NEW Lens
                 </Button>
               </Grid>
 
@@ -1913,6 +1951,9 @@ export default function NewSaleWizard({
                 </Typography>
                 <Chip size="small" label={entryInput.item || selectedProductDetail.name} color="primary" sx={{ fontWeight: 800, fontSize: '0.7rem' }} />
                 <Chip size="small" label={`Brand: ${selectedProductDetail.brand || 'Generic'}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
+                {(selectedProductDetail.supplier || selectedProductDetail.supplier_name) && (
+                  <Chip size="small" label={`Supplier: ${selectedProductDetail.supplier || selectedProductDetail.supplier_name}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
+                )}
                 {(selectedProductDetail.category || selectedProductDetail.type) && (
                   <Chip size="small" label={`Category: ${(selectedProductDetail.category || selectedProductDetail.type).toString().toUpperCase()}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
                 )}
@@ -1950,260 +1991,6 @@ export default function NewSaleWizard({
             )}
           </Paper>
 
-          {/* 🌟 IMAGE MODEL 2 FORMAT: EXPANDABLE QUICK LENS & ITEM CREATOR PANEL */}
-          {quickAddOpen && (
-            <Paper 
-              variant="outlined" 
-              sx={{ 
-                p: 2, mb: 2, borderRadius: 3, 
-                bgcolor: '#fffdf0', borderColor: '#d4cf96',
-                border: '2px solid #556b2f',
-                boxShadow: '0 4px 20px rgba(85, 107, 47, 0.15)' 
-              }}
-            >
-              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1.5 }}>
-                <Stack direction="row" spacing={1} alignItems="center">
-                  <Chip label="NEW ITEM & LENS ENTRY (MODEL 2)" size="small" sx={{ bgcolor: '#3f4c28', color: '#facc15', fontWeight: 900 }} />
-                  <Typography variant="caption" color="text.secondary" fontWeight={700}>
-                    Directly registers new lens specs or inventory items & injects them into sale cart
-                  </Typography>
-                </Stack>
-                <Button 
-                  size="small" variant="outlined" 
-                  onClick={handleAutoFillPower}
-                  sx={{ borderColor: '#3f4c28', color: '#3f4c28', fontWeight: 900, fontSize: '0.72rem', textTransform: 'none' }}
-                >
-                  ⚡ Auto-Fill Power from Rx Grid
-                </Button>
-              </Box>
-
-              <Grid container spacing={1.2} alignItems="center">
-                
-                {/* Row 1: Description & Description L */}
-                <Grid item xs={12} sm={6}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                    <Typography variant="caption" sx={{ minWidth: 80, fontWeight: 900, color: '#3f4c28' }}>Description</Typography>
-                    <TextField 
-                      fullWidth size="small" placeholder="Enter product description"
-                      value={quickForm.description} onChange={(e) => setQuickForm({ ...quickForm, description: e.target.value })}
-                      inputProps={{ style: { bgcolor: '#ffffff', fontWeight: 700, fontSize: '0.82rem', padding: '5px 8px' } }}
-                    />
-                  </Box>
-                </Grid>
-
-                <Grid item xs={12} sm={6}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                    <Typography variant="caption" sx={{ minWidth: 95, fontWeight: 900, color: '#3f4c28' }}>Description L</Typography>
-                    <TextField 
-                      fullWidth size="small" placeholder="Lens detail / prescription label"
-                      value={quickForm.descriptionL} onChange={(e) => setQuickForm({ ...quickForm, descriptionL: e.target.value })}
-                      inputProps={{ style: { bgcolor: '#ffffff', fontWeight: 700, fontSize: '0.82rem', padding: '5px 8px' } }}
-                    />
-                  </Box>
-                </Grid>
-
-                {/* Row 2: Category, SubCat, Group */}
-                <Grid item xs={12} sm={4}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
-                    <Paper elevation={0} sx={{ px: 1, py: 0.5, bgcolor: '#3f4c28', color: '#facc15', fontWeight: 900, fontSize: '0.72rem', borderRadius: 1 }}>
-                      Category
-                    </Paper>
-                    <TextField 
-                      select fullWidth size="small" 
-                      value={quickForm.category} onChange={(e) => setQuickForm({ ...quickForm, category: e.target.value })}
-                      SelectProps={{ style: { bgcolor: '#ffffff', fontWeight: 800, fontSize: '0.8rem', padding: '4px' } }}
-                    >
-                      <MenuItem value="LENS">LENS</MenuItem>
-                      <MenuItem value="FRAME">FRAME</MenuItem>
-                      <MenuItem value="CONTACT LENS">CONTACT LENS</MenuItem>
-                      <MenuItem value="ACCESSORY">ACCESSORY</MenuItem>
-                    </TextField>
-                  </Box>
-                </Grid>
-
-                <Grid item xs={12} sm={4}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
-                    <Paper elevation={0} sx={{ px: 1, py: 0.5, bgcolor: '#3f4c28', color: '#facc15', fontWeight: 900, fontSize: '0.72rem', borderRadius: 1 }}>
-                      SubCat
-                    </Paper>
-                    <TextField 
-                      select fullWidth size="small" 
-                      value={quickForm.subCat} onChange={(e) => setQuickForm({ ...quickForm, subCat: e.target.value })}
-                      SelectProps={{ style: { bgcolor: '#ffffff', fontWeight: 800, fontSize: '0.8rem', padding: '4px' } }}
-                    >
-                      <MenuItem value="Single Vision">Single Vision</MenuItem>
-                      <MenuItem value="Progressive Digital">Progressive Digital</MenuItem>
-                      <MenuItem value="Bifocal D-Seg">Bifocal D-Seg</MenuItem>
-                      <MenuItem value="Full Rim">Full Rim</MenuItem>
-                      <MenuItem value="Rimless">Rimless</MenuItem>
-                    </TextField>
-                  </Box>
-                </Grid>
-
-                <Grid item xs={12} sm={4}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
-                    <Paper elevation={0} sx={{ px: 1, py: 0.5, bgcolor: '#3f4c28', color: '#facc15', fontWeight: 900, fontSize: '0.72rem', borderRadius: 1 }}>
-                      Group
-                    </Paper>
-                    <TextField 
-                      select fullWidth size="small" 
-                      value={quickForm.group} onChange={(e) => setQuickForm({ ...quickForm, group: e.target.value })}
-                      SelectProps={{ style: { bgcolor: '#ffffff', fontWeight: 800, fontSize: '0.8rem', padding: '4px' } }}
-                    >
-                      <MenuItem value="GENERIC">GENERIC</MenuItem>
-                      <MenuItem value="ESSILOR">ESSILOR</MenuItem>
-                      <MenuItem value="ZEISS">ZEISS</MenuItem>
-                      <MenuItem value="HOYA">HOYA</MenuItem>
-                      <MenuItem value="PREMIUM">PREMIUM</MenuItem>
-                    </TextField>
-                  </Box>
-                </Grid>
-
-                {/* Row 3: Brand, Model No, Power, Size */}
-                <Grid item xs={12} sm={3}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
-                    <Paper elevation={0} sx={{ px: 1, py: 0.5, bgcolor: '#3f4c28', color: '#facc15', fontWeight: 900, fontSize: '0.72rem', borderRadius: 1 }}>
-                      Brand
-                    </Paper>
-                    <TextField 
-                      select fullWidth size="small" 
-                      value={quickForm.brand} onChange={(e) => setQuickForm({ ...quickForm, brand: e.target.value })}
-                      SelectProps={{ style: { bgcolor: '#ffffff', fontWeight: 800, fontSize: '0.8rem', padding: '4px' } }}
-                    >
-                      <MenuItem value="Essilor">Essilor</MenuItem>
-                      <MenuItem value="Zeiss">Zeiss</MenuItem>
-                      <MenuItem value="Hoya">Hoya</MenuItem>
-                      <MenuItem value="Crizal">Crizal</MenuItem>
-                      <MenuItem value="RayBan">RayBan</MenuItem>
-                      <MenuItem value="Generic">Generic</MenuItem>
-                    </TextField>
-                  </Box>
-                </Grid>
-
-                <Grid item xs={12} sm={3}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
-                    <Typography variant="caption" sx={{ minWidth: 60, fontWeight: 900, color: '#3f4c28' }}>Model No</Typography>
-                    <TextField 
-                      fullWidth size="small" placeholder="M-101"
-                      value={quickForm.modelNo} onChange={(e) => setQuickForm({ ...quickForm, modelNo: e.target.value })}
-                      inputProps={{ style: { bgcolor: '#ffffff', fontWeight: 700, fontSize: '0.8rem', padding: '5px' } }}
-                    />
-                  </Box>
-                </Grid>
-
-                <Grid item xs={12} sm={3}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
-                    <Typography variant="caption" sx={{ minWidth: 45, fontWeight: 900, color: '#3f4c28' }}>Power</Typography>
-                    <TextField 
-                      fullWidth size="small" placeholder="OD/OS Power"
-                      value={quickForm.power} onChange={(e) => setQuickForm({ ...quickForm, power: e.target.value })}
-                      inputProps={{ style: { bgcolor: '#ffffff', fontWeight: 700, fontSize: '0.8rem', padding: '5px' } }}
-                    />
-                  </Box>
-                </Grid>
-
-                <Grid item xs={12} sm={3}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
-                    <Typography variant="caption" sx={{ minWidth: 35, fontWeight: 900, color: '#3f4c28' }}>Size</Typography>
-                    <TextField 
-                      fullWidth size="small" placeholder="50-18"
-                      value={quickForm.size} onChange={(e) => setQuickForm({ ...quickForm, size: e.target.value })}
-                      inputProps={{ style: { bgcolor: '#ffffff', fontWeight: 700, fontSize: '0.8rem', padding: '5px' } }}
-                    />
-                  </Box>
-                </Grid>
-
-                {/* Row 4: Colour, Colour description, Barcode 2, Save button */}
-                <Grid item xs={12} sm={3}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
-                    <Paper elevation={0} sx={{ px: 1, py: 0.5, bgcolor: '#3f4c28', color: '#facc15', fontWeight: 900, fontSize: '0.72rem', borderRadius: 1 }}>
-                      Colour
-                    </Paper>
-                    <TextField 
-                      fullWidth size="small" placeholder="Color code"
-                      value={quickForm.color} onChange={(e) => setQuickForm({ ...quickForm, color: e.target.value })}
-                      inputProps={{ style: { bgcolor: '#ffffff', fontWeight: 700, fontSize: '0.8rem', padding: '5px' } }}
-                    />
-                  </Box>
-                </Grid>
-
-                <Grid item xs={12} sm={5}>
-                  <TextField 
-                    fullWidth size="small" placeholder="Detailed Color / Coating spec"
-                    value={quickForm.color} onChange={(e) => setQuickForm({ ...quickForm, color: e.target.value })}
-                    inputProps={{ style: { bgcolor: '#fffde7', fontWeight: 700, fontSize: '0.8rem', padding: '5px' } }}
-                  />
-                </Grid>
-
-                <Grid item xs={12} sm={4}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
-                    <Typography variant="caption" sx={{ minWidth: 70, fontWeight: 900, color: '#3f4c28' }}>Barcode 2</Typography>
-                    <TextField 
-                      fullWidth size="small" placeholder="Secondary Barcode"
-                      value={quickForm.barcode2} onChange={(e) => setQuickForm({ ...quickForm, barcode2: e.target.value })}
-                      inputProps={{ style: { bgcolor: '#ffffff', fontWeight: 700, fontSize: '0.8rem', padding: '5px' } }}
-                    />
-                  </Box>
-                </Grid>
-
-                {/* Row 5: Sales Pr, Cost Pr, Tax %, Save Button (Gold/Dark Green matching Image 2) */}
-                <Grid item xs={12} sm={3}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
-                    <Typography variant="caption" sx={{ minWidth: 55, fontWeight: 900, color: '#3f4c28' }}>Sales Pr</Typography>
-                    <TextField 
-                      fullWidth size="small" type="number" placeholder="0.00"
-                      value={quickForm.salesPr} onChange={(e) => setQuickForm({ ...quickForm, salesPr: e.target.value })}
-                      inputProps={{ style: { bgcolor: '#ffffff', fontWeight: 900, color: '#2563eb', fontSize: '0.85rem', padding: '5px' } }}
-                    />
-                  </Box>
-                </Grid>
-
-                <Grid item xs={12} sm={3}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
-                    <Typography variant="caption" sx={{ minWidth: 55, fontWeight: 900, color: '#3f4c28' }}>Cost Pr</Typography>
-                    <TextField 
-                      fullWidth size="small" type="number" placeholder="0.00"
-                      value={quickForm.costPr} onChange={(e) => setQuickForm({ ...quickForm, costPr: e.target.value })}
-                      inputProps={{ style: { bgcolor: '#ffffff', fontWeight: 800, fontSize: '0.85rem', padding: '5px' } }}
-                    />
-                  </Box>
-                </Grid>
-
-                <Grid item xs={12} sm={3}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
-                    <Typography variant="caption" sx={{ minWidth: 40, fontWeight: 900, color: '#3f4c28' }}>Tax %</Typography>
-                    <TextField 
-                      select fullWidth size="small" 
-                      value={quickForm.taxPercent} onChange={(e) => setQuickForm({ ...quickForm, taxPercent: e.target.value })}
-                      SelectProps={{ style: { bgcolor: '#ffffff', fontWeight: 800, fontSize: '0.8rem', padding: '4px' } }}
-                    >
-                      <MenuItem value="18.00">18.00%</MenuItem>
-                      <MenuItem value="12.00">12.00%</MenuItem>
-                      <MenuItem value="5.00">5.00%</MenuItem>
-                      <MenuItem value="0.00">0.00%</MenuItem>
-                    </TextField>
-                  </Box>
-                </Grid>
-
-                <Grid item xs={12} sm={3}>
-                  <Button 
-                    fullWidth variant="contained" 
-                    onClick={handleSaveQuickItem}
-                    sx={{ 
-                      bgcolor: '#3f4c28', color: '#facc15', fontWeight: 900, 
-                      fontSize: '0.95rem', py: 0.8, borderRadius: 2, 
-                      textTransform: 'none', border: '1px solid #556b2f',
-                      boxShadow: '0 4px 12px rgba(63, 76, 40, 0.3)',
-                      '&:hover': { bgcolor: '#2a351a' } 
-                    }}
-                  >
-                    Save & Add ➔
-                  </Button>
-                </Grid>
-
-              </Grid>
-            </Paper>
-          )}
 
           {/* 🟢 PART 3: CENTER BILLING ITEMS DATA GRID */}
           <Card variant="outlined" sx={{ borderRadius: 3, overflow: 'hidden', mb: 1.5, borderColor: '#cbd5e1' }}>
@@ -2264,6 +2051,13 @@ export default function NewSaleWizard({
                               </Box>
                             )}
                           </Box>
+                          {(src.supplier || src.rack) && (
+                            <Box sx={{ fontSize: '0.62rem', fontWeight: 700, color: 'text.secondary', mt: 0.2 }}>
+                              {src.supplier ? `Supplier: ${src.supplier}` : ''}
+                              {src.supplier && src.rack ? '  ·  ' : ''}
+                              {src.rack ? `Rack: ${src.rack}` : ''}
+                            </Box>
+                          )}
                         </TableCell>
                         <TableCell sx={{ fontSize: '0.8rem' }}>{src.modelNo || '—'}</TableCell>
                         <TableCell sx={{ fontSize: '0.8rem' }}>{src.color || '—'}</TableCell>
@@ -2341,10 +2135,22 @@ export default function NewSaleWizard({
                         {previewSource.barcode || '—'}
                       </TableCell>
                       <TableCell sx={{ fontWeight: 700, fontSize: '0.8rem' }}>
-                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6 }}>
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6, flexWrap: 'wrap' }}>
                           <Chip label="PREVIEW" size="small" color="info" sx={{ fontWeight: 900, height: 18, fontSize: '0.6rem' }} />
                           {previewSource.item}
+                          {previewSource.stock != null && (
+                            <Box component="span" sx={{ fontSize: '0.65rem', fontWeight: 800, color: parseInt(previewSource.stock) > 0 ? 'success.main' : 'error.main' }}>
+                              Stock: {previewSource.stock}
+                            </Box>
+                          )}
                         </Box>
+                        {(previewSource.supplier || previewSource.rack) && (
+                          <Box sx={{ fontSize: '0.62rem', fontWeight: 700, color: 'text.secondary', mt: 0.2 }}>
+                            {previewSource.supplier ? `Supplier: ${previewSource.supplier}` : ''}
+                            {previewSource.supplier && previewSource.rack ? '  ·  ' : ''}
+                            {previewSource.rack ? `Rack: ${previewSource.rack}` : ''}
+                          </Box>
+                        )}
                       </TableCell>
                       <TableCell sx={{ fontSize: '0.8rem' }}>{previewSource.modelNo || '—'}</TableCell>
                       <TableCell sx={{ fontSize: '0.8rem' }}>{previewSource.color || '—'}</TableCell>
@@ -2381,30 +2187,58 @@ export default function NewSaleWizard({
 
                   {itemsList.map((row) => {
                       const isSvcRow = (row.itemType === 'SERVICE') || row.category === 'SERVICE';
+                      const set = (field) => (val) => updateItemField(row.id, field, val);
+                      const tidy = () => coerceItemRow(row.id);
+                      // Only the pricing block is editable in-grid (Qty / Price / Disc % / Tax %).
+                      // Everything descriptive is read-only here — use the 🗔 popup to change it.
+                      const cellInput = (field, opts = {}) => (
+                        <GridCellInput value={row[field]} onChange={set(field)} onBlur={tidy} {...opts} />
+                      );
                       return (
                       <TableRow key={row.id} hover sx={{ '&:nth-of-type(even)': { bgcolor: '#f8fafc' }, ...(isSvcRow ? { bgcolor: '#fffbeb' } : {}) }}>
                         <TableCell sx={{ fontWeight: 800, color: isSvcRow ? '#b45309' : 'primary.main', fontSize: '0.8rem' }}>{row.barcode}</TableCell>
-                        <TableCell sx={{ fontWeight: 700, fontSize: '0.8rem' }}>{row.item}</TableCell>
+                        <TableCell sx={{ fontWeight: 700, fontSize: '0.8rem' }}>
+                          {row.item}
+                          {!isSvcRow && (row.supplier || row.rack || row.stock != null) && (
+                            <Box sx={{ fontSize: '0.62rem', fontWeight: 700, color: 'text.secondary', mt: 0.2 }}>
+                              {row.supplier ? `Supplier: ${row.supplier}` : ''}
+                              {row.supplier && row.rack ? '  ·  ' : ''}
+                              {row.rack ? `Rack: ${row.rack}` : ''}
+                              {(row.supplier || row.rack) && row.stock != null ? '  ·  ' : ''}
+                              {row.stock != null ? `Stock: ${row.stock}` : ''}
+                            </Box>
+                          )}
+                        </TableCell>
                         <TableCell sx={{ fontSize: '0.8rem' }}>{row.modelNo}</TableCell>
                         <TableCell sx={{ fontSize: '0.8rem' }}>{row.color}</TableCell>
                         <TableCell sx={{ fontSize: '0.8rem' }}>{row.size}</TableCell>
                         <TableCell sx={{ fontSize: '0.8rem' }}>{row.brand}</TableCell>
-                        <TableCell sx={{ fontSize: '0.8rem' }}><Chip label={isSvcRow ? 'SERVICE' : row.category} size="small" color={isSvcRow ? 'warning' : 'primary'} variant="outlined" sx={{ fontWeight: 800, height: 20, fontSize: '0.65rem' }} /></TableCell>
+                        <TableCell sx={{ fontSize: '0.8rem' }}>
+                          <Chip label={isSvcRow ? 'SERVICE' : row.category} size="small" color={isSvcRow ? 'warning' : 'primary'} variant="outlined" sx={{ fontWeight: 800, height: 20, fontSize: '0.65rem' }} />
+                        </TableCell>
                         <TableCell sx={{ fontSize: '0.8rem', color: '#2563eb', fontWeight: 700 }}>{row.power}</TableCell>
-                        <TableCell align="center" sx={{ fontWeight: 900, fontSize: '0.85rem' }}>{row.qty}</TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>₹{row.price.toFixed(2)}</TableCell>
+                        <TableCell align="center" sx={{ fontWeight: 900, fontSize: '0.85rem' }}>
+                          {cellInput('qty', { type: 'number', width: 44, align: 'center' })}
+                        </TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>
+                          {cellInput('price', { type: 'number', width: 64, align: 'right' })}
+                        </TableCell>
                         <TableCell align="right" sx={{ color: 'error.main', fontSize: '0.8rem' }}>
-                          ₹{row.disc.toFixed(2)}{row.discPercent ? ` (${row.discPercent}%)` : ''}
+                          {cellInput('discPercent', { type: 'number', width: 48, align: 'right' })}
+                          <Box component="span" sx={{ fontSize: '0.62rem', color: 'text.secondary', display: 'block' }}>₹{(row.disc || 0).toFixed(2)}</Box>
                         </TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>₹{row.gross.toFixed(2)}</TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>₹{(row.gross || 0).toFixed(2)}</TableCell>
                         <TableCell align="right" sx={{ fontSize: '0.8rem', color: '#0f766e' }}>
-                          ₹{(row.tax || 0).toFixed(2)} ({row.taxPercent || 0}%)
+                          {cellInput('taxPercent', { type: 'number', width: 44, align: 'right' })}
+                          <Box component="span" sx={{ fontSize: '0.62rem', color: 'text.secondary', display: 'block' }}>₹{(row.tax || 0).toFixed(2)}</Box>
                         </TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 900, color: 'primary.main', fontSize: '0.85rem' }}>₹{row.total.toFixed(2)}</TableCell>
-                        <TableCell align="center">
-                          <IconButton size="small" color="primary" onClick={() => handleOpenEditItem(row)}>
-                            <EditIcon fontSize="small" />
-                          </IconButton>
+                        <TableCell align="right" sx={{ fontWeight: 900, color: 'primary.main', fontSize: '0.85rem' }}>₹{(row.total || 0).toFixed(2)}</TableCell>
+                        <TableCell align="center" sx={{ whiteSpace: 'nowrap' }}>
+                          <Tooltip title="Edit in a window">
+                            <IconButton size="small" color="primary" onClick={() => setEditDialogId(row.id)}>
+                              <WindowEditIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
                           <IconButton size="small" color="error" onClick={() => handleRemoveItem(row.id)}>
                             <DeleteIcon fontSize="small" />
                           </IconButton>
@@ -2417,51 +2251,87 @@ export default function NewSaleWizard({
             </TableContainer>
           </Card>
 
-          {/* Edit Billing Row — Qty / Price / Discount % / Tax %, recomputed on save */}
-          <Dialog open={!!editingItem} onClose={() => setEditingItem(null)} maxWidth="xs" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
-            <DialogTitle sx={{ fontWeight: 800 }}>Edit Item — {editingItem?.item}</DialogTitle>
-            {editingItem && (
-              <DialogContent>
-                <Stack spacing={2} sx={{ mt: 1 }}>
-                  <Grid container spacing={2}>
-                    <Grid item xs={6}>
-                      <TextField
-                        fullWidth size="small" label="Qty" type="number"
-                        value={editingItem.qty}
-                        onChange={(e) => setEditingItem({ ...editingItem, qty: e.target.value })}
-                      />
+          {/* Popup editor — same live row data as the inline ✏️, just in a window */}
+          <Dialog open={!!editDialogRow} onClose={closeEditDialog} maxWidth="sm" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
+            <DialogTitle sx={{ fontWeight: 800 }}>Edit Item — {editDialogRow?.item}</DialogTitle>
+            {editDialogRow && (() => {
+              const isSvc = (editDialogRow.itemType === 'SERVICE') || editDialogRow.category === 'SERVICE';
+              const fld = (field) => (e) => updateItemField(editDialogId, field, e.target.value);
+              return (
+                <DialogContent>
+                  <Stack spacing={2} sx={{ mt: 1 }}>
+                    <Typography variant="caption" fontWeight={900} color="text.secondary">ITEM DETAILS</Typography>
+                    <Grid container spacing={2}>
+                      <Grid item xs={12} sm={8}>
+                        <TextField fullWidth size="small" label="Item Description" value={editDialogRow.item || ''} onChange={fld('item')} />
+                      </Grid>
+                      <Grid item xs={12} sm={4}>
+                        <TextField fullWidth size="small" label="Barcode" value={editDialogRow.barcode || ''} onChange={fld('barcode')} />
+                      </Grid>
+                      <Grid item xs={6} sm={4}>
+                        <TextField fullWidth size="small" label="Model No" value={editDialogRow.modelNo || ''} onChange={fld('modelNo')} />
+                      </Grid>
+                      <Grid item xs={6} sm={4}>
+                        <TextField fullWidth size="small" label="Color" value={editDialogRow.color || ''} onChange={fld('color')} />
+                      </Grid>
+                      <Grid item xs={6} sm={4}>
+                        <TextField fullWidth size="small" label="Size" value={editDialogRow.size || ''} onChange={fld('size')} />
+                      </Grid>
+                      <Grid item xs={6} sm={4}>
+                        <TextField fullWidth size="small" label="Brand" value={editDialogRow.brand || ''} onChange={fld('brand')} />
+                      </Grid>
+                      <Grid item xs={6} sm={4}>
+                        <TextField fullWidth size="small" label="Category" value={editDialogRow.category || ''} onChange={fld('category')} />
+                      </Grid>
+                      <Grid item xs={6} sm={4}>
+                        <TextField fullWidth size="small" label="Power" value={editDialogRow.power || ''} onChange={fld('power')} />
+                      </Grid>
+                      {!isSvc && (
+                        <>
+                          <Grid item xs={6} sm={6}>
+                            <TextField fullWidth size="small" label="Supplier" value={editDialogRow.supplier || ''} onChange={fld('supplier')} />
+                          </Grid>
+                          <Grid item xs={6} sm={6}>
+                            <TextField fullWidth size="small" label="Rack No" value={editDialogRow.rack || ''} onChange={fld('rack')} />
+                          </Grid>
+                        </>
+                      )}
                     </Grid>
-                    <Grid item xs={6}>
-                      <TextField
-                        fullWidth size="small" label="Price (₹)" type="number"
-                        value={editingItem.price}
-                        onChange={(e) => setEditingItem({ ...editingItem, price: e.target.value })}
-                      />
+
+                    <Divider />
+                    <Typography variant="caption" fontWeight={900} color="text.secondary">PRICING</Typography>
+                    <Grid container spacing={2}>
+                      <Grid item xs={6}>
+                        <TextField fullWidth size="small" label="Qty" type="number" value={editDialogRow.qty} onChange={fld('qty')} />
+                      </Grid>
+                      <Grid item xs={6}>
+                        <TextField fullWidth size="small" label="Price (₹)" type="number" value={editDialogRow.price} onChange={fld('price')} />
+                      </Grid>
+                      <Grid item xs={6}>
+                        <TextField fullWidth size="small" label="Discount %" type="number" value={editDialogRow.discPercent}
+                          onChange={fld('discPercent')} inputProps={{ min: 0, max: 100 }} />
+                      </Grid>
+                      <Grid item xs={6}>
+                        <TextField select fullWidth size="small" label="Tax %" value={editDialogRow.taxPercent} onChange={fld('taxPercent')}>
+                          {taxSlabItems(editDialogRow.taxPercent)}
+                        </TextField>
+                      </Grid>
                     </Grid>
-                    <Grid item xs={6}>
-                      <TextField
-                        fullWidth size="small" label="Discount %" type="number"
-                        value={editingItem.discPercent}
-                        onChange={(e) => setEditingItem({ ...editingItem, discPercent: e.target.value })}
-                        inputProps={{ min: 0, max: 100 }}
-                      />
-                    </Grid>
-                    <Grid item xs={6}>
-                      <TextField
-                        select fullWidth size="small" label="Tax %"
-                        value={editingItem.taxPercent}
-                        onChange={(e) => setEditingItem({ ...editingItem, taxPercent: e.target.value })}
-                      >
-                        {taxSlabItems(editingItem.taxPercent)}
-                      </TextField>
-                    </Grid>
-                  </Grid>
-                </Stack>
-              </DialogContent>
-            )}
+
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', bgcolor: '#f8fafc', borderRadius: 2, p: 1.2 }}>
+                      <Typography variant="body2" fontWeight={700} color="text.secondary">
+                        Gross ₹{(editDialogRow.gross || 0).toFixed(2)} · Disc ₹{(editDialogRow.disc || 0).toFixed(2)} · Tax ₹{(editDialogRow.tax || 0).toFixed(2)}
+                      </Typography>
+                      <Typography variant="body2" fontWeight={900} color="primary.main">
+                        Total ₹{(editDialogRow.total || 0).toFixed(2)}
+                      </Typography>
+                    </Box>
+                  </Stack>
+                </DialogContent>
+              );
+            })()}
             <DialogActions sx={{ p: 2 }}>
-              <Button onClick={() => setEditingItem(null)}>Cancel</Button>
-              <Button variant="contained" onClick={handleSaveEditItem}>Save Changes</Button>
+              <Button variant="contained" onClick={closeEditDialog}>Done</Button>
             </DialogActions>
           </Dialog>
 
@@ -2586,9 +2456,18 @@ export default function NewSaleWizard({
                     <FormControlLabel control={<Checkbox size="small" checked={sendSms} onChange={(e) => setSendSms(e.target.checked)} color="primary" />} label={<Typography variant="caption" fontWeight={800}>SMS 🟢</Typography>} />
                   </Box>
 
-                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', px: 1 }}>
-                    <Typography variant="caption" fontWeight={900}>Total Paid:</Typography>
-                    <Typography variant="subtitle1" fontWeight={900} color="success.main">₹{totalPaidAmount.toFixed(2)}</Typography>
+                  <Box sx={{ px: 1 }}>
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <Typography variant="caption" fontWeight={900}>Total Paid:</Typography>
+                      <Typography variant="subtitle1" fontWeight={900} color="success.main">₹{totalPaidAmount.toFixed(2)}</Typography>
+                    </Box>
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <Typography variant="caption" fontWeight={900} color="error.main">Balance Due:</Typography>
+                      <Typography variant="subtitle1" fontWeight={900} color="error.main">₹{balanceDue.toFixed(2)}</Typography>
+                    </Box>
+                    <Typography variant="caption" fontWeight={800} sx={{ display: 'block', textAlign: 'right', color: balanceDue <= 0.009 ? 'success.main' : 'warning.main' }}>
+                      {paymentStatusLabel}
+                    </Typography>
                   </Box>
 
                   <Button
@@ -2729,6 +2608,18 @@ export default function NewSaleWizard({
         open={serviceMasterOpen}
         onClose={() => setServiceMasterOpen(false)}
         onSaved={handleServiceSaved}
+      />
+
+      {/* "+ NEW Lens" — full Product Master form, forced into Lens Mode. Saves the lens to the
+          products DB and drops it straight into this sale's billing grid via handleLensCreated. */}
+      <ProductMasterDialog
+        open={lensDialogOpen}
+        onClose={() => {
+          setLensDialogOpen(false);
+          if (itemMode === 'lens') setItemMode('product');
+        }}
+        defaultCategory="Prescription Lenses"
+        onCreated={handleLensCreated}
       />
 
     </Box>
