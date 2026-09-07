@@ -70,6 +70,7 @@ class ProductSerializer(ModelSerializer):
     supplier = SerializerMethodField()
     rack = SerializerMethodField()
     tax_rate = SerializerMethodField()
+    gst = SerializerMethodField()
     extra_barcodes = SerializerMethodField()
     colour = SerializerMethodField()
     size = SerializerMethodField()
@@ -109,18 +110,38 @@ class ProductSerializer(ModelSerializer):
         # any physical tag from a label sheet resolves back to this product.
         return [b.code for b in obj.extra_barcodes.all()]
 
-    def get_tax_rate(self, obj):
-        # The item-entry screens (Sales / Purchase) need a numeric GST % to pre-fill the
-        # Tax dropdown when a product is picked. Prefer the linked Tax master rate; fall
-        # back to the product category's configured GST percentage (stored as e.g. "18%").
+    def _resolve_gst_percent(self, obj):
+        # Single source of truth for a product's GST %. Checked in priority order:
+        #   1. the linked Tax master rate,
+        #   2. the rate captured on the Product Master / Purchase Entry screens, which is
+        #      persisted only inside extra_data (e.g. "5%" or "5") — NOT on a real column,
+        #   3. the product category's configured GST percentage (e.g. "18%").
+        # Returns a float, or None when nothing usable is on file.
         if getattr(obj, 'tax', None) and obj.tax.rate is not None:
             return float(obj.tax.rate)
+        raw = self._extra_value(obj, 'gst', 'gst_percent', 'gst_rate', 'gst_percentage', 'tax_rate')
+        if raw:
+            try:
+                return float(str(raw).replace('%', '').strip())
+            except (TypeError, ValueError):
+                pass
         if getattr(obj, 'category', None) and obj.category.gst_percentage:
             try:
                 return float(str(obj.category.gst_percentage).replace('%', '').strip())
             except (TypeError, ValueError):
                 pass
         return None
+
+    def get_tax_rate(self, obj):
+        # Numeric GST % used by the Sales / Purchase item grids to pre-fill the Tax dropdown.
+        return self._resolve_gst_percent(obj)
+
+    def get_gst(self, obj):
+        # Display string ("5%") used by the Products list and to re-hydrate the Product
+        # Master "GST Tax Rate" select when editing. Kept as a string so the frontend's
+        # `product.gst || '18%'` fallback only kicks in when the rate is genuinely unknown.
+        pct = self._resolve_gst_percent(obj)
+        return None if pct is None else f"{pct:g}%"
 
     def get_category(self, obj):
         cat_val = obj.category_name or (obj.category.name if obj.category else None)
@@ -185,7 +206,7 @@ class ProductSerializer(ModelSerializer):
 
 
 class ProductViewSet(viewsets.ModelViewSet):
-    queryset = Product.objects.all().prefetch_related('extra_barcodes').order_by('-created_at')
+    queryset = Product.objects.all().select_related('tax', 'category', 'brand').prefetch_related('extra_barcodes').order_by('-created_at')
     serializer_class = ProductSerializer
     authentication_classes = []
     permission_classes = [permissions.AllowAny]

@@ -1,4 +1,5 @@
 import time
+import uuid
 
 from django.db import IntegrityError, transaction
 from rest_framework import viewsets, permissions
@@ -280,10 +281,26 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
         # `items` is read-only on the serializer (see InvoiceSerializer) since ModelSerializer
         # can't write a reverse-FK nested list on its own — read the raw list straight from the
         # request body instead.
+        from apps.products.models import Product
+
+        def _resolve_product_id(value):
+            # The product pickers can still surface legacy localStorage-only items whose id is
+            # not a real Product UUID (see the "local vs backend product ids" gotcha). Passing
+            # one straight to product_id raises and 500s the whole sale, so drop the link and
+            # keep the line as a plain description instead of losing the invoice.
+            if not value:
+                return None
+            try:
+                uuid.UUID(str(value))
+            except (ValueError, TypeError, AttributeError):
+                return None
+            return value if Product.objects.filter(pk=value).exists() else None
+
         for raw in self.request.data.get('items', []):
+            product_id = _resolve_product_id(raw.get('product'))
             InvoiceItem.objects.create(
                 invoice=invoice,
-                product_id=raw.get('product') or None,
+                product_id=product_id,
                 service_id=raw.get('service') or None,
                 item_type=raw.get('item_type') or raw.get('itemType') or 'PRODUCT',
                 service_details=raw.get('service_details') or raw.get('serviceDetails') or None,
