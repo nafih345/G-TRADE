@@ -27,12 +27,17 @@ async function resolveLabelSeries(product, qty) {
   }
 }
 
+// Thermal roll = ONE label across the roll, each label its own physical print
+// page (see buildThermalLabelCss / printThermalLabels). `cols` is always 1 —
+// there is no "labels across" for a thermal roll. `gapMm` is the die-cut liner
+// gap between labels on gap/mark media; it is added to the @page height so the
+// printer's gap sensor lands on the next label, never an A4 canvas.
 export const THERMAL_SIZES = [
-  { id: 'roll_50x25_1up', label: '50 x 25mm (1-Up)', widthMm: 50, heightMm: 25, cols: 1, gapMm: 0 },
-  { id: 'roll_38x25_1up', label: '38 x 25mm (1-Up)', widthMm: 38, heightMm: 25, cols: 1, gapMm: 0 },
-  { id: 'roll_50x25_2up', label: '50 x 25mm (2-Up)', widthMm: 50, heightMm: 25, cols: 2, gapMm: 2 },
-  { id: 'roll_38x25_2up', label: '38 x 25mm (2-Up)', widthMm: 38, heightMm: 25, cols: 2, gapMm: 2 },
-  { id: 'roll_38x25_3up', label: '38 x 25mm (3-Up)', widthMm: 38, heightMm: 25, cols: 3, gapMm: 2 },
+  { id: 'roll_38x25', label: '38 × 25 mm', widthMm: 38, heightMm: 25, cols: 1, gapMm: 0 },
+  { id: 'roll_40x30', label: '40 × 30 mm', widthMm: 40, heightMm: 30, cols: 1, gapMm: 0 },
+  { id: 'roll_50x25', label: '50 × 25 mm', widthMm: 50, heightMm: 25, cols: 1, gapMm: 0 },
+  { id: 'roll_50x30', label: '50 × 30 mm', widthMm: 50, heightMm: 30, cols: 1, gapMm: 0 },
+  { id: 'roll_60x40', label: '60 × 40 mm', widthMm: 60, heightMm: 40, cols: 1, gapMm: 0 },
   // Jewellery "rat-tail" tags (the physical tag the shop uses). Three sections
   // in strip order: [ barcode panel ][ price + product details panel ][ blank
   // tail ] — printed borderless as one continuous strip. The two printed panels
@@ -63,7 +68,11 @@ export const A4_SHEET_LAYOUTS = [
 
 // Default dimensions (mm) seeded into the "Custom" size editor the first time
 // it's opened — the fields for each are shown in BarcodePrintDialog.
-export const CUSTOM_THERMAL_DEFAULTS = { widthMm: 50, heightMm: 25, cols: 1, gapMm: 2 };
+export const CUSTOM_THERMAL_DEFAULTS = { widthMm: 38, heightMm: 25, gapMm: 0 };
+
+// Presets surfaced in the Thermal Roll size picker (plus a "Custom roll size…"
+// entry the dialog appends). Kept in sync with the first entries of THERMAL_SIZES.
+export const THERMAL_PRESETS = THERMAL_SIZES.filter((s) => !s.custom && !s.tag);
 export const CUSTOM_A4_DEFAULTS = {
   widthMm: 63.5, heightMm: 33.9, cols: 3, rows: 8,
   marginTopMm: 10, marginLeftMm: 7, colGapMm: 2.5, rowGapMm: 0,
@@ -100,14 +109,35 @@ export function buildCustomLayout(printerType, dims = {}) {
   }
 
   const d = CUSTOM_THERMAL_DEFAULTS;
-  const cols = Math.max(1, Math.round(pos(dims.cols, d.cols)));
   const widthMm = pos(dims.widthMm, d.widthMm);
   const heightMm = pos(dims.heightMm, d.heightMm);
   return {
     id: 'custom', custom: true,
-    label: `Custom — ${cols}-up, ${widthMm} × ${heightMm} mm`,
-    cols, widthMm, heightMm,
+    label: `Custom — ${widthMm} × ${heightMm} mm`,
+    cols: 1, widthMm, heightMm,
     gapMm: nonNeg(dims.gapMm, d.gapMm),
+  };
+}
+
+// Thermal printer calibration — nudges where the whole label prints on the
+// physical stock (to correct a printer that feeds a mm or two off) WITHOUT
+// altering the label design itself. Lives at the top level of settings so it
+// stays put no matter which roll size / preset is picked.
+export const THERMAL_CALIBRATION_DEFAULTS = {
+  hOffsetMm: 0,
+  vOffsetMm: 0,
+  barcodeHeightMm: 0,
+};
+
+export function resolveThermalCalibration(settings = {}) {
+  const num = (v, d = 0) => {
+    const n = parseFloat(v);
+    return Number.isFinite(n) ? n : d;
+  };
+  return {
+    hOffsetMm: num(settings.thermalHOffsetMm),
+    vOffsetMm: num(settings.thermalVOffsetMm),
+    barcodeHeightMm: Math.max(0, num(settings.thermalBarcodeHeightMm)),
   };
 }
 
@@ -769,19 +799,93 @@ export function buildStyleBlock(layout, printerType, barcodeScale = 1) {
     `;
   }
 
-  const rowWidthMm = layout.cols * layout.widthMm + layout.gapMm * (layout.cols - 1);
+  // Thermal Roll — delegated to the dedicated true-label-page builder. No A4
+  // canvas, no grid, one label = one physical page.
+  return buildThermalLabelCss(layout, { barcodeScale });
+}
+
+function trimNum(n) {
+  return String(Math.round((Number(n) || 0) * 1000) / 1000);
+}
+
+// ---------------------------------------------------------------------------
+// THERMAL ROLL print CSS — completely independent of the A4 path.
+// ---------------------------------------------------------------------------
+// Every label is its own physical print page. The @page box is generated
+// dynamically from the label's mm dimensions (never hard-coded, never A4).
+// `gapMm` (die-cut liner gap) is added to the @page HEIGHT so the printer's
+// gap/black-mark sensor advances to the next label — it does NOT create a
+// bigger canvas. Calibration offsets shift the printed content inside the
+// label without changing the design.
+//
+//   width = 38, height = 25  ->  @page { size: 38mm 25mm; margin: 0; }
+//
+export function buildThermalLabelCss(layout, opts = {}) {
+  const {
+    barcodeScale = 1,
+    calibration = THERMAL_CALIBRATION_DEFAULTS,
+    preview = false,
+  } = opts;
+
+  const w = Math.max(1, Number(layout.widthMm) || 38);
+  const h = Math.max(1, Number(layout.heightMm) || 25);
+  const gap = Math.max(0, Number(layout.gapMm) || 0);
+  const pageH = h + gap; // liner gap lives in the page, not the label box
+  const hOff = Number(calibration.hOffsetMm) || 0;
+  const vOff = Number(calibration.vOffsetMm) || 0;
+  const barcodeHeightMm = Math.max(0, Number(calibration.barcodeHeightMm) || 0);
+
+  const sizeOverride = barcodeSizeOverrideCss(barcodeScale);
+  const barcodeHeightCss = barcodeHeightMm
+    ? `.thermal-label .lbl-symbol svg,
+       .thermal-label .jc-symbol svg,
+       .thermal-label .jtag-symbol svg,
+       .thermal-label .rt-symbol svg {
+         height: ${trimNum(barcodeHeightMm)}mm !important; width: auto; max-width: 100%;
+       }`
+    : '';
+
   return `
-    @page { size: ${rowWidthMm}mm ${layout.heightMm}mm; margin: 0; }
+    ${preview ? '' : `
+      @page { size: ${trimNum(w)}mm ${trimNum(pageH)}mm; margin: 0; }
+      html, body { margin: 0; padding: 0; background: #fff; }
+      * { box-sizing: border-box; }
+    `}
     ${LABEL_BASE_CSS}
     ${JEWEL_CARD_CSS}
+    ${layout.tag === 'jewellery' ? JEWELLERY_TAG_CSS : ''}
     ${layout.tag === 'rattail' ? ratTailCss(layout) : ''}
     ${sizeOverride}
-    .sheet {
-      display: flex; flex-direction: row; gap: ${layout.gapMm}mm;
+    ${barcodeHeightCss}
+    .thermal-label {
+      width: ${trimNum(w)}mm;
+      height: ${trimNum(h)}mm;
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      overflow: hidden;
+      position: relative;
+      background: #fff;
       page-break-after: always;
+      break-after: page;
+      page-break-inside: avoid;
+      break-inside: avoid;
     }
-    .sheet:last-child { page-break-after: auto; }
-    .label { width: ${layout.widthMm}mm; height: ${layout.heightMm}mm; }
+    /* No trailing blank page after the last label. */
+    .thermal-label:last-child { page-break-after: auto; break-after: auto; }
+    .thermal-label .tl-shift {
+      position: absolute;
+      top: ${trimNum(vOff)}mm;
+      left: ${trimNum(hOff)}mm;
+      width: 100%;
+      height: 100%;
+    }
+    .thermal-label .label {
+      width: 100%;
+      height: 100%;
+      border: ${preview ? '0.2mm dashed #cbd5e1' : '0'};
+    }
+    /* jcard / jlabel / rtlabel keep their own design borders. */
   `;
 }
 
@@ -859,44 +963,102 @@ export async function printBarcodeLabels(products, settings, businessName) {
     return buildLabelInnerHtml(p, settings, businessName, markup, error, layout);
   });
 
-  // Leave the already-used slots on a partial sheet blank so the first real
-  // label lands on the chosen row/column (A4) or after N positions (thermal).
-  const startSkip = getStartSkip(layout, settings, settings.printerType);
+  const barcodeScale = getBarcodeScale(settings.barcodeSize, settings.barcodeCustomScale);
+
+  // ---- THERMAL ROLL: one label = one physical page. No A4 canvas, no grid,
+  // no start-position skipping (that is an A4-sheet concept only). --------------
+  if (settings.printerType !== 'a4') {
+    const css = buildThermalLabelCss(layout, {
+      barcodeScale,
+      calibration: resolveThermalCalibration(settings),
+    });
+    const body = labelHtmlList
+      .map((inner) => `<div class="thermal-label"><div class="tl-shift">${inner}</div></div>`)
+      .join('');
+    const ok = openPrintDocument('Barcode Labels', css, body);
+    if (!ok) {
+      window.alert('Popup blocked — please allow popups for this site to print barcode labels.');
+      return { printed: 0, skipped };
+    }
+    return { printed: flatEntries.length, skipped };
+  }
+
+  // ---- A4 SHEET: grid of labels on A4 pages, with optional partial-sheet
+  // resume (start row / column). Kept entirely separate from the thermal path.
+  const startSkip = getStartSkip(layout, settings, 'a4');
   const paddedHtmlList = startSkip > 0
     ? [...Array(startSkip).fill('<div class="label label--blank"></div>'), ...labelHtmlList]
     : labelHtmlList;
 
-  const perPage = settings.printerType === 'a4' ? layout.cols * layout.rows : layout.cols;
+  const perPage = layout.cols * layout.rows;
   const sheetsHtml = chunk(paddedHtmlList, perPage)
     .map((pageLabels) => `<div class="sheet">${pageLabels.join('')}</div>`)
     .join('');
 
-  const printWindow = window.open('', '_blank', 'width=900,height=700');
-  if (!printWindow) {
+  const ok = openPrintDocument(
+    'Barcode Labels',
+    buildStyleBlock(layout, 'a4', barcodeScale),
+    sheetsHtml
+  );
+  if (!ok) {
     window.alert('Popup blocked — please allow popups for this site to print barcode labels.');
     return { printed: 0, skipped };
   }
 
-  const htmlContent = `
-    <!DOCTYPE html>
-    <html>
-      <head>
-        <title>Barcode Labels</title>
-        <style>${buildStyleBlock(layout, settings.printerType, getBarcodeScale(settings.barcodeSize, settings.barcodeCustomScale))}</style>
-      </head>
-      <body>${sheetsHtml}</body>
-    </html>
-  `;
+  return { printed: flatEntries.length, skipped };
+}
 
+// Opens a detached window, writes a minimal print document and fires the browser
+// print dialog. Shared by the real print job, the test label and the feed. The
+// @page rule inside `css` is the single source of truth for the paper size —
+// nothing here imposes A4.
+function openPrintDocument(title, css, bodyHtml) {
+  const printWindow = window.open('', '_blank', 'width=720,height=560');
+  if (!printWindow) return false;
   printWindow.document.open();
-  printWindow.document.write(htmlContent);
+  printWindow.document.write(
+    `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>` +
+    `<style>${css}</style></head><body>${bodyHtml}</body></html>`
+  );
   printWindow.document.close();
   setTimeout(() => {
     try {
       printWindow.focus();
       printWindow.print();
-    } catch (e) {}
-  }, 300);
+    } catch (e) { /* user can still print from the window */ }
+  }, 350);
+  return true;
+}
 
-  return { printed: flatEntries.length, skipped };
+// Prints exactly ONE label at the currently selected thermal dimensions — the
+// calibration aid. Uses a real product when one is supplied, otherwise a dummy
+// so the operator can check registration / offsets without wasting a live tag.
+export async function printThermalTestLabel(settings, businessName, product = null) {
+  const layout = resolveLayout({ ...settings, printerType: 'thermal' });
+  const sample = product && product.barcode
+    ? product
+    : { name: 'TEST LABEL', barcode: '1234567890128', sellingPrice: 0, colour: 'Black', size: 'M', code: 'TEST' };
+
+  const { markup, error } = await renderBarcodeMarkup(settings.barcodeType, sample.barcode);
+  const inner = buildLabelInnerHtml(sample, settings, businessName, markup, error, layout);
+  const css = buildThermalLabelCss(layout, {
+    barcodeScale: getBarcodeScale(settings.barcodeSize, settings.barcodeCustomScale),
+    calibration: resolveThermalCalibration(settings),
+  });
+  const ok = openPrintDocument(
+    'Thermal Test Label',
+    css,
+    `<div class="thermal-label"><div class="tl-shift">${inner}</div></div>`
+  );
+  if (!ok) window.alert('Popup blocked — allow popups to print a test label.');
+  return ok;
+}
+
+// Feeds a single blank label (advances the roll by exactly one label pitch).
+export function feedOneThermalLabel(settings) {
+  const layout = resolveLayout({ ...settings, printerType: 'thermal' });
+  const css = buildThermalLabelCss(layout, { calibration: resolveThermalCalibration(settings) });
+  const ok = openPrintDocument('Feed Label', css, '<div class="thermal-label"><div class="tl-shift"></div></div>');
+  if (!ok) window.alert('Popup blocked — allow popups to feed a label.');
+  return ok;
 }

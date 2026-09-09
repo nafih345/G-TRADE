@@ -10,7 +10,8 @@ import {
   BARCODE_CUSTOM_MIN, BARCODE_CUSTOM_MAX, clampBarcodeCustomPercent,
   CUSTOM_THERMAL_DEFAULTS, CUSTOM_A4_DEFAULTS, resolveLayout, getBarcodeTypeHint,
   getTotalLabelCount, getBarcodeScale, renderBarcodeMarkup, buildLabelInnerHtml,
-  buildStyleBlock, printBarcodeLabels,
+  buildStyleBlock, buildThermalLabelCss, printBarcodeLabels,
+  printThermalTestLabel, feedOneThermalLabel, resolveThermalCalibration,
   loadCustomLayouts, saveCustomLayout, deleteCustomLayout, getStartSkip
 } from '../../utils/printBarcodeLabels';
 
@@ -18,12 +19,17 @@ const SETTINGS_STORAGE_KEY = 'optical_barcode_print_settings';
 
 const DEFAULT_SETTINGS = {
   printerType: 'thermal',
-  sizeId: 'roll_50x25_1up',
+  sizeId: 'roll_38x25',
   barcodeType: 'EAN13',
   barcodeSize: 'M',
   barcodeCustomScale: 100,
   customThermal: { ...CUSTOM_THERMAL_DEFAULTS },
   customA4: { ...CUSTOM_A4_DEFAULTS },
+  // Thermal printer setup / calibration — independent of the roll size chosen.
+  thermalPrinterName: '',
+  thermalHOffsetMm: 0,
+  thermalVOffsetMm: 0,
+  thermalBarcodeHeightMm: 0,
   startPositionEnabled: false,
   startRow: 1,
   startCol: 1,
@@ -49,8 +55,7 @@ const CUSTOM_DIM_FIELDS = {
   thermal: [
     { key: 'widthMm', label: 'Label width (mm)' },
     { key: 'heightMm', label: 'Label height (mm)' },
-    { key: 'cols', label: 'Labels across', step: 1 },
-    { key: 'gapMm', label: 'Gap between (mm)' },
+    { key: 'gapMm', label: 'Label gap (mm)' },
   ],
   a4: [
     { key: 'widthMm', label: 'Label width (mm)' },
@@ -88,11 +93,30 @@ function getBusinessName() {
   }
 }
 
+// Old builds used thermal size ids like 'roll_50x25_1up' / '..._2up'. Those are
+// gone (thermal is always 1-up now) — map anything unrecognised back to a preset
+// so the dialog never opens stuck on a blank "Custom".
+function normalizeThermalSizeId(id) {
+  if (!id || String(id).startsWith('tpl:') || id === 'custom') return id;
+  if (THERMAL_SIZES.some((s) => s.id === id)) return id;
+  const m = String(id).match(/(\d+)x(\d+)/);
+  if (m) {
+    const hit = THERMAL_SIZES.find((s) => s.widthMm === +m[1] && s.heightMm === +m[2]);
+    if (hit) return hit.id;
+  }
+  return 'roll_38x25';
+}
+
 function getInitialPersistedSettings() {
   const savedRaw = localStorage.getItem(SETTINGS_STORAGE_KEY);
   if (savedRaw) {
     try {
-      return { ...DEFAULT_SETTINGS, ...JSON.parse(savedRaw) };
+      const merged = { ...DEFAULT_SETTINGS, ...JSON.parse(savedRaw) };
+      merged.customThermal = { ...CUSTOM_THERMAL_DEFAULTS, ...(merged.customThermal || {}) };
+      if ((merged.printerType || 'thermal') !== 'a4') {
+        merged.sizeId = normalizeThermalSizeId(merged.sizeId);
+      }
+      return merged;
     } catch {}
   }
   // First-ever use: seed the barcode format from the store-wide preference set in Settings.
@@ -179,23 +203,33 @@ export default function BarcodePrintDialog({ open, onClose, products }) {
       ? fullSettings.sizeId
       : 'custom';
 
-  const startSkip = getStartSkip(layout, fullSettings, fullSettings.printerType);
+  const isThermal = fullSettings.printerType !== 'a4';
+  const thermalCalibration = resolveThermalCalibration(fullSettings);
+
+  const startSkip = isThermal ? 0 : getStartSkip(layout, fullSettings, 'a4');
   const resumeRow = layout.cols ? Math.floor(startSkip / layout.cols) + 1 : 1;
   const resumeCol = layout.cols ? (startSkip % layout.cols) + 1 : 1;
+
+  const barcodeScale = getBarcodeScale(fullSettings.barcodeSize, fullSettings.barcodeCustomScale);
   const previewCss = useMemo(
-    () => buildStyleBlock(
-      layout, fullSettings.printerType,
-      getBarcodeScale(fullSettings.barcodeSize, fullSettings.barcodeCustomScale)
-    ),
-    [layout, fullSettings.printerType, fullSettings.barcodeSize, fullSettings.barcodeCustomScale]
+    () => (isThermal
+      ? buildThermalLabelCss(layout, { barcodeScale, calibration: thermalCalibration, preview: true })
+      : buildStyleBlock(layout, 'a4', barcodeScale)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [layout, isThermal, barcodeScale, thermalCalibration.hOffsetMm, thermalCalibration.vOffsetMm, thermalCalibration.barcodeHeightMm]
   );
-  // Scale each label up to a roughly consistent on-screen size regardless of
-  // its true mm dimensions (25mm thermal vs 13.5mm A4-80up render very differently otherwise),
-  // but never so wide it overflows the preview box (long dumbbell jewellery tags).
-  const previewScale = Math.min(
-    Math.max(1.5, Math.min(4, 170 / (layout.heightMm * 3.78))),
-    300 / (layout.widthMm * 3.78)
-  );
+
+  // On-screen preview scale.
+  // Thermal: render the label at its TRUE aspect ratio, sized to fit the preview
+  // box (~230px wide / ~190px tall). A4-tag: keep the old "make it a readable
+  // size" heuristic.
+  const PX_PER_MM = 3.7795;
+  const previewScale = isThermal
+    ? Math.min(230 / (layout.widthMm * PX_PER_MM), 190 / (layout.heightMm * PX_PER_MM))
+    : Math.min(
+        Math.max(1.5, Math.min(4, 170 / (layout.heightMm * 3.78))),
+        300 / (layout.widthMm * 3.78)
+      );
 
   // A manually typed value (single-product print only) overrides the product's
   // saved barcode / auto series for this batch — driving both the preview and
@@ -312,6 +346,19 @@ export default function BarcodePrintDialog({ open, onClose, products }) {
     setSettings((prev) => ({ ...prev, sizeId: 'custom' }));
   };
 
+  const handlePrintTestLabel = async () => {
+    setPrinting(true);
+    try {
+      await printThermalTestLabel(fullSettings, businessName, validProducts[0] || null);
+    } finally {
+      setPrinting(false);
+    }
+  };
+
+  const handleFeedLabel = () => {
+    feedOneThermalLabel(fullSettings);
+  };
+
   const handlePrint = async () => {
     setPrinting(true);
     try {
@@ -409,6 +456,12 @@ export default function BarcodePrintDialog({ open, onClose, products }) {
                     </Grid>
                     <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
                       {layout.label}
+                      {isThermal && (
+                        <> — each label prints as its own {layout.widthMm}&nbsp;×&nbsp;{layout.heightMm}&nbsp;mm page.
+                        {(layout.gapMm || 0) > 0
+                          ? ` Gap adds ${layout.gapMm} mm below each label (die-cut liner gap).`
+                          : ' Set the gap only if a die-cut roll drifts between labels.'}</>
+                      )}
                     </Typography>
 
                     <Divider sx={{ my: 1.5 }} />
@@ -448,79 +501,125 @@ export default function BarcodePrintDialog({ open, onClose, products }) {
                   </Box>
                 )}
 
-                <Box>
-                  <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mb: 1 }}>
-                    <Typography variant="subtitle2" fontWeight={700}>
-                      Start Position
+                {/* THERMAL ROLL — printer setup + calibration. No A4 rows /
+                    columns / start-position logic here. */}
+                {isThermal && (
+                  <Box sx={{ p: 1.5, border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
+                    <Typography variant="subtitle2" fontWeight={700} gutterBottom>
+                      Thermal Printer &amp; Calibration
                     </Typography>
-                    <ToggleButtonGroup
-                      exclusive
-                      size="small"
-                      value={fullSettings.startPositionEnabled ? 'on' : 'off'}
-                      onChange={(e, val) => val && updateSetting('startPositionEnabled', val === 'on')}
-                    >
-                      <ToggleButton value="off">Off</ToggleButton>
-                      <ToggleButton value="on">On</ToggleButton>
-                    </ToggleButtonGroup>
-                  </Stack>
-
-                  {!fullSettings.startPositionEnabled ? (
-                    <Typography variant="caption" color="text.secondary">
-                      Off — every job starts on a fresh sheet. Turn on to resume printing on a
-                      partly-used label sheet.
-                    </Typography>
-                  ) : fullSettings.printerType === 'a4' ? (
-                    <>
+                    <Stack spacing={1.5}>
+                      <TextField
+                        size="small"
+                        fullWidth
+                        label="Printer (for your reference)"
+                        placeholder="e.g. TSC TE244 / Xprinter XP-365B"
+                        value={fullSettings.thermalPrinterName || ''}
+                        onChange={(e) => updateSetting('thermalPrinterName', e.target.value)}
+                        helperText="Pick this exact printer in the browser print dialog when it opens."
+                      />
                       <Stack direction="row" spacing={1.5}>
                         <TextField
-                          select
-                          size="small"
-                          label="Start row"
-                          value={Math.min(fullSettings.startRow || 1, layout.rows || 1)}
-                          onChange={(e) => updateSetting('startRow', Number(e.target.value))}
-                          sx={{ width: 120 }}
-                        >
-                          {Array.from({ length: layout.rows || 1 }, (_, i) => (
-                            <MenuItem key={i} value={i + 1}>{i + 1}</MenuItem>
-                          ))}
-                        </TextField>
+                          size="small" type="number" fullWidth
+                          label="Horizontal offset (mm)"
+                          value={fullSettings.thermalHOffsetMm ?? 0}
+                          onChange={(e) => updateSetting('thermalHOffsetMm', e.target.value)}
+                          inputProps={{ step: 0.5 }}
+                        />
                         <TextField
-                          select
-                          size="small"
-                          label="Start column"
-                          value={Math.min(fullSettings.startCol || 1, layout.cols || 1)}
-                          onChange={(e) => updateSetting('startCol', Number(e.target.value))}
-                          sx={{ width: 120 }}
-                        >
-                          {Array.from({ length: layout.cols || 1 }, (_, i) => (
-                            <MenuItem key={i} value={i + 1}>{i + 1}</MenuItem>
-                          ))}
-                        </TextField>
+                          size="small" type="number" fullWidth
+                          label="Vertical offset (mm)"
+                          value={fullSettings.thermalVOffsetMm ?? 0}
+                          onChange={(e) => updateSetting('thermalVOffsetMm', e.target.value)}
+                          inputProps={{ step: 0.5 }}
+                        />
                       </Stack>
-                      <StartPositionGrid rows={layout.rows} cols={layout.cols} skip={startSkip} />
-                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-                        {startSkip === 0
-                          ? 'First label prints in the top-left cell.'
-                          : `${startSkip} used label slot${startSkip === 1 ? '' : 's'} left blank; printing resumes at row ${resumeRow}, column ${resumeCol}.`}
-                      </Typography>
-                    </>
-                  ) : (
-                    <Stack direction="row" spacing={1.5} alignItems="center">
                       <TextField
-                        type="number"
-                        size="small"
-                        label="Skip first labels"
-                        value={fullSettings.skipLabels ?? 0}
-                        onChange={(e) => updateSetting('skipLabels', Math.max(0, parseInt(e.target.value, 10) || 0))}
-                        inputProps={{ min: 0, step: 1 }}
-                        sx={{ width: 150 }}
+                        size="small" type="number" fullWidth
+                        label="Barcode height (mm) — 0 = auto"
+                        value={fullSettings.thermalBarcodeHeightMm ?? 0}
+                        onChange={(e) => updateSetting('thermalBarcodeHeightMm', e.target.value)}
+                        inputProps={{ min: 0, step: 0.5 }}
+                        helperText="Forces an exact bar height. Leave 0 to size from the label."
                       />
+                      <Stack direction="row" spacing={1.5} flexWrap="wrap" useFlexGap>
+                        <Button size="small" variant="outlined" onClick={handlePrintTestLabel} disabled={printing}>
+                          Print Test Label
+                        </Button>
+                        <Button size="small" variant="outlined" onClick={handleFeedLabel} disabled={printing}>
+                          Feed One Label
+                        </Button>
+                      </Stack>
                       <Typography variant="caption" color="text.secondary">
-                        Leaves this many label positions blank before the first barcode.
+                        Offsets nudge where the label prints on the stock without changing the design.
+                        In the print dialog set <b>Margins: None</b>, <b>Scale: 100%</b> (not “Fit to page”)
+                        and turn <b>off</b> headers &amp; footers.
                       </Typography>
                     </Stack>
-                  )}
-                </Box>
+                  </Box>
+                )}
+
+                {/* A4 SHEET — partial-sheet resume (rows / columns). */}
+                {!isThermal && (
+                  <Box>
+                    <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mb: 1 }}>
+                      <Typography variant="subtitle2" fontWeight={700}>
+                        Start Position
+                      </Typography>
+                      <ToggleButtonGroup
+                        exclusive
+                        size="small"
+                        value={fullSettings.startPositionEnabled ? 'on' : 'off'}
+                        onChange={(e, val) => val && updateSetting('startPositionEnabled', val === 'on')}
+                      >
+                        <ToggleButton value="off">Off</ToggleButton>
+                        <ToggleButton value="on">On</ToggleButton>
+                      </ToggleButtonGroup>
+                    </Stack>
+
+                    {!fullSettings.startPositionEnabled ? (
+                      <Typography variant="caption" color="text.secondary">
+                        Off — every job starts on a fresh sheet. Turn on to resume printing on a
+                        partly-used label sheet.
+                      </Typography>
+                    ) : (
+                      <>
+                        <Stack direction="row" spacing={1.5}>
+                          <TextField
+                            select
+                            size="small"
+                            label="Start row"
+                            value={Math.min(fullSettings.startRow || 1, layout.rows || 1)}
+                            onChange={(e) => updateSetting('startRow', Number(e.target.value))}
+                            sx={{ width: 120 }}
+                          >
+                            {Array.from({ length: layout.rows || 1 }, (_, i) => (
+                              <MenuItem key={i} value={i + 1}>{i + 1}</MenuItem>
+                            ))}
+                          </TextField>
+                          <TextField
+                            select
+                            size="small"
+                            label="Start column"
+                            value={Math.min(fullSettings.startCol || 1, layout.cols || 1)}
+                            onChange={(e) => updateSetting('startCol', Number(e.target.value))}
+                            sx={{ width: 120 }}
+                          >
+                            {Array.from({ length: layout.cols || 1 }, (_, i) => (
+                              <MenuItem key={i} value={i + 1}>{i + 1}</MenuItem>
+                            ))}
+                          </TextField>
+                        </Stack>
+                        <StartPositionGrid rows={layout.rows} cols={layout.cols} skip={startSkip} />
+                        <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                          {startSkip === 0
+                            ? 'First label prints in the top-left cell.'
+                            : `${startSkip} used label slot${startSkip === 1 ? '' : 's'} left blank; printing resumes at row ${resumeRow}, column ${resumeCol}.`}
+                        </Typography>
+                      </>
+                    )}
+                  </Box>
+                )}
 
                 <FormControl size="small" fullWidth error={!!previewSymbol.error}>
                   <InputLabel>Barcode Type</InputLabel>
@@ -745,23 +844,61 @@ export default function BarcodePrintDialog({ open, onClose, products }) {
                 sx={{
                   border: '1px dashed #94a3b8', borderRadius: 1, p: 2,
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  bgcolor: '#f8fafc', height: 210, overflow: 'hidden'
+                  bgcolor: '#f8fafc', minHeight: 210, overflow: 'hidden'
                 }}
               >
                 <style>{previewCss}</style>
-                <Box
-                  sx={{ transform: `scale(${previewScale})` }}
-                  dangerouslySetInnerHTML={{
-                    __html: buildLabelInnerHtml(
-                      previewProductForLabel, fullSettings, businessName,
-                      previewSymbol.markup, previewSymbol.error, layout
-                    )
-                  }}
-                />
+                {isThermal ? (
+                  // True-to-ratio thermal preview: a box at the real W:H ratio
+                  // holding the actual .thermal-label scaled down to fit.
+                  <Box
+                    sx={{
+                      width: layout.widthMm * 3.7795 * previewScale,
+                      height: layout.heightMm * 3.7795 * previewScale,
+                      position: 'relative',
+                      boxShadow: '0 1px 6px rgba(15,23,42,0.18)',
+                      bgcolor: '#fff',
+                    }}
+                  >
+                    <Box
+                      sx={{
+                        transform: `scale(${previewScale})`,
+                        transformOrigin: 'top left',
+                        position: 'absolute', top: 0, left: 0,
+                      }}
+                      dangerouslySetInnerHTML={{
+                        __html:
+                          `<div class="thermal-label"><div class="tl-shift">` +
+                          buildLabelInnerHtml(
+                            previewProductForLabel, fullSettings, businessName,
+                            previewSymbol.markup, previewSymbol.error, layout
+                          ) +
+                          `</div></div>`,
+                      }}
+                    />
+                  </Box>
+                ) : (
+                  <Box
+                    sx={{ transform: `scale(${previewScale})` }}
+                    dangerouslySetInnerHTML={{
+                      __html: buildLabelInnerHtml(
+                        previewProductForLabel, fullSettings, businessName,
+                        previewSymbol.markup, previewSymbol.error, layout
+                      )
+                    }}
+                  />
+                )}
               </Box>
-              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-                {layout.label}
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1, fontWeight: 700 }}>
+                {isThermal
+                  ? `Actual label: ${layout.widthMm} × ${layout.heightMm} mm`
+                  : layout.label}
               </Typography>
+              {isThermal && (layout.gapMm || 0) > 0 && (
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                  + {layout.gapMm} mm gap between labels — page height {(+layout.heightMm + +layout.gapMm)} mm.
+                </Typography>
+              )}
               {fullSettings.sizeId === 'a4_80up' && (
                 <Alert severity="info" sx={{ mt: 1, py: 0 }}>
                   80-up dimensions vary by vendor — verify against your label sheet packaging before a large run.
