@@ -13,11 +13,13 @@ import {
   Save as SaveIcon,
   CloudUpload as UploadIcon,
   CheckCircle as SuccessIcon,
-  AccountTree as BranchTreeIcon
+  AccountTree as BranchTreeIcon,
+  DesignServices as DesignerIcon
 } from '@mui/icons-material';
 import axios from 'axios';
 import { useBranch } from '../context/BranchContext';
 import ConfirmActionDialog from '../components/common/ConfirmActionDialog';
+import BillDesignerDashboard from '../components/settings/billing/BillDesignerDashboard';
 
 export default function Settings() {
   const [activeTab, setActiveTab] = useState(0);
@@ -222,8 +224,12 @@ export default function Settings() {
           <Tab label="Clinical & Eye Exam Defaults" icon={<ClinicalIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab label="System Security & Backup" icon={<SecurityIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab label="Business Settings" icon={<BranchTreeIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
+          <Tab label="Bill & Invoice Designer" icon={<DesignerIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
         </Tabs>
       </Card>
+
+      {/* TAB 6: BILL & INVOICE DESIGNER */}
+      {activeTab === 6 && <BillDesignerDashboard />}
 
       {/* TAB 0: STORE PROFILE */}
       {activeTab === 0 && (

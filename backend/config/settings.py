@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     'apps.common',
     'apps.authentication',
     'apps.company',
+    'apps.billing',
     'apps.masters',
     'apps.products',
     'apps.inventory',

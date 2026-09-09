@@ -42,6 +42,8 @@ import {
 import axios from 'axios';
 import QuickDatePickerField from '../components/common/QuickDatePickerField';
 import ConfirmActionDialog from '../components/common/ConfirmActionDialog';
+import BillPreview from '../billing/BillPreview';
+import { printBill } from '../billing/printBill';
 
 // Mock initial demo data
 const INITIAL_DEMO_PRODUCTS = [
@@ -58,6 +60,39 @@ const INITIAL_DEMO_CUSTOMERS = [
   { id: 'c3', code: 'WCUST-103', name: 'Spectrum Spectacles Wholesale Hub', contactPerson: 'Karan Patel', phone: '+91 97310 99887', email: 'karan@spectrumwholesale.com', gstin: '29KLMNO9012P1Z3', creditLimit: 500000, outstanding: 0, creditDays: 45, salesExec: 'Suresh V', lastPurchaseDate: '2026-07-28', totalPurchases: '₹ 34,10,000' }
 ];
 
+// Treat inventory placeholder dashes as "no value" so empty columns stay blank.
+const cellText = (v) => (v == null || v === '' || v === '—' || v === '-' ? '' : v);
+
+// One "label: value" row used across the compact invoice summary / credit panel.
+function SummaryLine({ label, value, valueColor, dense }) {
+  return (
+    <Stack direction="row" justifyContent="space-between" alignItems="center" sx={dense ? { py: 0.15 } : undefined}>
+      <Typography variant="body2" color="text.secondary" sx={{ fontSize: dense ? '0.78rem' : undefined }}>{label}</Typography>
+      <Typography variant="body2" fontWeight={700} sx={{ color: valueColor || '#0f172a', fontSize: dense ? '0.78rem' : undefined }}>{value}</Typography>
+    </Stack>
+  );
+}
+
+// A single field in the selected-customer info card (only rendered when it has a value).
+function CustomerBit({ label, value, valueColor }) {
+  return (
+    <Grid item xs={6} sm={4}>
+      <Typography variant="caption" color="text.secondary" display="block" sx={{ lineHeight: 1.3 }}>{label}</Typography>
+      <Typography variant="body2" fontWeight={700} sx={{ color: valueColor || '#0f172a', wordBreak: 'break-word' }}>{value}</Typography>
+    </Grid>
+  );
+}
+
+// Due / Change tiles under the cash amount field.
+function MiniStat({ label, value, color }) {
+  return (
+    <Box sx={{ flex: 1, p: 1, borderRadius: 2, bgcolor: '#f8fafc', border: '1px solid #e2e8f0' }}>
+      <Typography variant="caption" color="text.secondary" display="block">{label}</Typography>
+      <Typography variant="body2" fontWeight={800} sx={{ color }}>{value}</Typography>
+    </Box>
+  );
+}
+
 export default function WholesaleSales() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -72,9 +107,10 @@ export default function WholesaleSales() {
   // Warehouse the backend attributes wholesale stock movements to (first one on file).
   const [invWarehouseId, setInvWarehouseId] = useState('');
   const [selectedCustomer, setSelectedCustomer] = useState(null); // Blank by default
-  const [customerDetailsExpanded, setCustomerDetailsExpanded] = useState(false); // Collapsible Section 1
   const [cartItems, setCartItems] = useState([]);
   const [barcodeInput, setBarcodeInput] = useState('');
+  // Cosmetic running invoice number shown in the header (the posted invoice keeps its own no.)
+  const [headerInvoiceNo] = useState(() => `WS-${new Date().getFullYear()}-${String(Math.floor(1000 + Math.random() * 9000))}`);
   
   // Payment Panel States
   const [payMode, setPayMode] = useState('Cash'); // Cash, UPI, Card, Bank Transfer, Credit Sale
@@ -322,6 +358,12 @@ export default function WholesaleSales() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [addCustomerOpen, heldModalOpen, printModalOpen, creditLimitConfirmOpen, clearCartConfirmOpen, selectedCustomer, cartItems]);
 
+  // Park the cursor in the barcode field on load so a scanner works without a click.
+  useEffect(() => {
+    const t = setTimeout(() => barcodeSearchInputRef.current?.focus(), 300);
+    return () => clearTimeout(t);
+  }, []);
+
   // --- Handlers ---
   const handleAddProductToCart = (prod) => {
     if (!prod) return;
@@ -364,19 +406,24 @@ export default function WholesaleSales() {
 
   const handleBarcodeScan = (e) => {
     if (e.key === 'Enter' && barcodeInput.trim()) {
-      e.preventDefault();
       const code = barcodeInput.trim().toLowerCase();
-      const matched = products.find(p => 
+      const matched = products.find(p =>
         (p.barcode && p.barcode.toLowerCase() === code) ||
         (p.code && p.code.toLowerCase() === code)
       );
       if (matched) {
+        // Exact barcode / code hit — add it and keep the Autocomplete from also selecting.
+        e.preventDefault();
+        e.stopPropagation();
         handleAddProductToCart(matched);
         setBarcodeInput('');
         showToast(`Added: ${matched.name}`, 'success');
-      } else {
+        setTimeout(() => barcodeSearchInputRef.current?.focus(), 0);
+      } else if (/^\d{6,}$/.test(code)) {
+        // Looks like a scanned barcode but nothing matched.
         showToast(`No product found matching barcode "${barcodeInput}"`, 'error');
       }
+      // Otherwise it's a name/partial search — let the Autocomplete handle Enter.
     }
   };
 
@@ -617,40 +664,31 @@ export default function WholesaleSales() {
 
   return (
     <Box sx={{ p: 2.5, bgcolor: '#f8fafc', minHeight: '100vh' }}>
-      {/* HEADER TOOLBAR */}
-      <Paper
-        elevation={0}
-        variant="outlined"
-        sx={{
-          p: 2,
-          px: 3,
-          mb: 2.5,
-          borderRadius: 4,
-          bgcolor: '#ffffff',
-          borderColor: '#cbd5e1',
-          boxShadow: '0 2px 8px rgba(0, 0, 0, 0.04)',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          flexWrap: 'wrap',
-          gap: 2
-        }}
+      {/* HEADER */}
+      <Stack
+        direction={{ xs: 'column', sm: 'row' }}
+        justifyContent="space-between"
+        alignItems={{ xs: 'flex-start', sm: 'center' }}
+        spacing={1.5}
+        sx={{ mb: 2 }}
       >
-        <Stack direction="row" spacing={2} alignItems="center">
-          <Avatar sx={{ bgcolor: '#4f46e5', width: 44, height: 44 }}>
-            <WholesaleIcon sx={{ color: '#ffffff' }} />
-          </Avatar>
-          <Box>
-            <Typography variant="h6" fontWeight={850} color="#0f172a">
-              Wholesale POS Billing
+        <Box>
+          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+            <Typography variant="h6" fontWeight={800} color="#0f172a">
+              Wholesale Sale
             </Typography>
-            <Typography variant="caption" color="text.secondary" fontWeight={600}>
-              High-Speed B2B Customer Sales & Live Inventory Billing Terminal
-            </Typography>
-          </Box>
-        </Stack>
+            <Chip
+              label={`Invoice #${headerInvoiceNo}`}
+              size="small"
+              sx={{ height: 20, fontSize: '0.7rem', fontWeight: 700, bgcolor: '#eef2ff', color: '#4f46e5' }}
+            />
+          </Stack>
+          <Typography variant="caption" color="text.secondary">
+            Create a wholesale invoice
+          </Typography>
+        </Box>
 
-        <Stack direction="row" spacing={1.5} alignItems="center">
+        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
           {heldInvoices.length > 0 && (
             <Button
               variant="outlined"
@@ -658,23 +696,20 @@ export default function WholesaleSales() {
               size="small"
               startIcon={<ResumeIcon />}
               onClick={() => setHeldModalOpen(true)}
-              sx={{ fontWeight: 800, borderRadius: 3 }}
+              sx={{ fontWeight: 700, textTransform: 'none' }}
             >
-              Held Invoices ({heldInvoices.length})
+              Held ({heldInvoices.length})
             </Button>
           )}
-
           <Button
             variant="outlined"
             size="small"
-            color="primary"
             startIcon={<PersonAddIcon />}
             onClick={() => setAddCustomerOpen(true)}
-            sx={{ fontWeight: 800, borderRadius: 3 }}
+            sx={{ fontWeight: 700, textTransform: 'none' }}
           >
-            + Add Wholesale Customer
+            Add Wholesale Customer
           </Button>
-
           <Button
             variant="outlined"
             size="small"
@@ -682,388 +717,205 @@ export default function WholesaleSales() {
             startIcon={<ClearIcon />}
             disabled={cartItems.length === 0}
             onClick={() => setClearCartConfirmOpen(true)}
-            endIcon={<Chip label="Esc" size="small" sx={{ height: 18, fontSize: '0.65rem', fontWeight: 800, bgcolor: '#fee2e2', color: '#dc2626' }} />}
-            sx={{ fontWeight: 800, borderRadius: 3 }}
+            sx={{ fontWeight: 700, textTransform: 'none' }}
           >
             Clear Cart
           </Button>
         </Stack>
-      </Paper>
+      </Stack>
 
       {/* TOAST ALERT */}
       {toast.open && (
-        <Alert severity={toast.severity} sx={{ mb: 2, borderRadius: 3, fontWeight: 700 }}>
+        <Alert severity={toast.severity} sx={{ mb: 2, borderRadius: 2, fontWeight: 600 }}>
           {toast.message}
         </Alert>
       )}
 
-      {/* MAIN SINGLE-PAGE POS LAYOUT — FULL-WIDTH STACKED SECTIONS (1 → 2 → 3 → 4) */}
-      <Stack spacing={2.5}>
-            {/* SECTION 1 — WHOLESALE CUSTOMER INFORMATION (WITH COLLAPSIBLE SUMMARY LINE) */}
-            <Card variant="outlined" sx={{ p: 2.5, borderRadius: 4, bgcolor: '#ffffff', borderColor: '#e2e8f0' }}>
-              <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: selectedCustomer && !customerDetailsExpanded ? 0 : 2 }}>
-                <Stack direction="row" spacing={1.5} alignItems="center">
-                  <Typography variant="subtitle1" fontWeight={850} color="#0f172a">
-                    Section 1: Customer Information
-                  </Typography>
-                  <Chip label="F2" size="small" sx={{ height: 20, fontSize: '0.68rem', fontWeight: 800, bgcolor: '#e2e8f0', color: '#475569' }} />
-                </Stack>
-
-                <Stack direction="row" spacing={1} alignItems="center">
-                  {selectedCustomer && (
-                    <Chip
-                      label={`Code: ${selectedCustomer.code}`}
-                      size="small"
-                      color="primary"
-                      variant="outlined"
-                      sx={{ fontWeight: 700 }}
-                    />
-                  )}
-                  {selectedCustomer && (
-                    <Button
-                      size="small"
-                      variant="text"
-                      color="primary"
-                      onClick={() => setCustomerDetailsExpanded(prev => !prev)}
-                      endIcon={customerDetailsExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-                      sx={{ fontWeight: 800, textTransform: 'none' }}
-                    >
-                      {customerDetailsExpanded ? 'Collapse' : '▾ Details'}
-                    </Button>
-                  )}
-                </Stack>
+      <Grid container spacing={2.5} alignItems="flex-start">
+        {/* ================= LEFT: CUSTOMER + PRODUCTS ================= */}
+        <Grid item xs={12} lg={8}>
+          <Stack spacing={2.5}>
+            {/* CUSTOMER */}
+            <Card variant="outlined" sx={{ p: 2, borderRadius: 3, bgcolor: '#ffffff', borderColor: '#e2e8f0' }}>
+              <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}>
+                <Typography variant="subtitle2" fontWeight={800} color="#0f172a">Customer</Typography>
+                <Chip label="F2" size="small" sx={{ height: 18, fontSize: '0.65rem', fontWeight: 700, bgcolor: '#f1f5f9', color: '#64748b' }} />
               </Stack>
 
-              {/* COMPACT SINGLE SUMMARY LINE WHEN COLLAPSED */}
-              {selectedCustomer && !customerDetailsExpanded ? (
-                <Paper variant="outlined" sx={{ p: 1.5, px: 2, borderRadius: 3, bgcolor: '#f8fafc', borderColor: '#cbd5e1' }}>
-                  <Grid container spacing={1.5} alignItems="center">
-                    <Grid item xs={12} sm={4}>
-                      <Typography variant="subtitle2" fontWeight={850} color="primary.main">
-                        {selectedCustomer.name}
-                      </Typography>
-                    </Grid>
-                    <Grid item xs={6} sm={2.5}>
-                      <Typography variant="caption" color="text.secondary" display="block">GSTIN:</Typography>
-                      <Typography variant="body2" fontWeight={700}>{selectedCustomer.gstin || 'N/A'}</Typography>
-                    </Grid>
-                    <Grid item xs={6} sm={2.5}>
-                      <Typography variant="caption" color="text.secondary" display="block">Credit Limit:</Typography>
-                      <Typography variant="body2" fontWeight={700}>₹ {parseFloat(selectedCustomer.creditLimit || 0).toLocaleString('en-IN')}</Typography>
-                    </Grid>
-                    <Grid item xs={6} sm={2.5}>
-                      <Typography variant="caption" color="text.secondary" display="block">Terms:</Typography>
-                      <Typography variant="body2" fontWeight={700}>{selectedCustomer.creditDays || 30} Days Credit</Typography>
-                    </Grid>
-                  </Grid>
-                </Paper>
-              ) : (
-                /* FULL EXPANDED FIELD VIEW */
-                <Grid container spacing={2}>
-                  <Grid item xs={12} md={6}>
-                    <Autocomplete
-                      options={customers}
-                      getOptionLabel={(option) => `${option.name} (${option.code}) • ${option.contactPerson || ''}`}
-                      value={selectedCustomer}
-                      onChange={(e, newVal) => setSelectedCustomer(newVal)}
-                      renderInput={(params) => (
-                        <TextField
-                          {...params}
-                          inputRef={customerSearchInputRef}
-                          size="small"
-                          label="Search Wholesale Customer * (Press F2)"
-                          placeholder="Search & select customer by name or code..."
-                          InputLabelProps={{ shrink: true }}
-                          InputProps={{
-                            ...params.InputProps,
-                            startAdornment: (
-                              <>
-                                <SearchIcon color="action" sx={{ mr: 1, fontSize: 18 }} />
-                                {params.InputProps.startAdornment}
-                              </>
-                            )
-                          }}
-                        />
-                      )}
+              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems={{ sm: 'center' }}>
+                <Autocomplete
+                  fullWidth
+                  options={customers}
+                  getOptionLabel={(o) => (o ? `${o.name}${o.code ? ` (${o.code})` : ''}` : '')}
+                  isOptionEqualToValue={(o, v) => o.id === v.id}
+                  value={selectedCustomer}
+                  onChange={(e, newVal) => setSelectedCustomer(newVal)}
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      inputRef={customerSearchInputRef}
+                      size="small"
+                      placeholder="Search customer by name, code or phone..."
+                      InputProps={{
+                        ...params.InputProps,
+                        startAdornment: (
+                          <>
+                            <SearchIcon sx={{ color: '#94a3b8', mr: 0.5, fontSize: 18 }} />
+                            {params.InputProps.startAdornment}
+                          </>
+                        )
+                      }}
                     />
-                  </Grid>
+                  )}
+                />
+                <Button
+                  variant="outlined"
+                  size="small"
+                  startIcon={<AddIcon />}
+                  onClick={() => setAddCustomerOpen(true)}
+                  sx={{ fontWeight: 700, textTransform: 'none', whiteSpace: 'nowrap', flexShrink: 0 }}
+                >
+                  New Customer
+                </Button>
+              </Stack>
 
-                  <Grid item xs={6} md={3}>
-                    <TextField 
-                      fullWidth 
-                      size="small" 
-                      label="Contact Number" 
-                      placeholder="-" 
-                      value={selectedCustomer?.phone || ''} 
-                      InputLabelProps={{ shrink: true }}
-                      InputProps={{ readOnly: true }} 
-                      sx={{ bgcolor: '#f8fafc' }} 
+              {selectedCustomer && (
+                <Box sx={{ mt: 1.5, p: 1.5, borderRadius: 2, bgcolor: '#f8fafc', border: '1px solid #e2e8f0' }}>
+                  <Typography variant="subtitle2" fontWeight={800} color="#0f172a">{selectedCustomer.name}</Typography>
+                  <Grid container spacing={1} sx={{ mt: 0.25 }}>
+                    {selectedCustomer.phone ? <CustomerBit label="Phone" value={selectedCustomer.phone} /> : null}
+                    {selectedCustomer.gstin ? <CustomerBit label="GSTIN" value={selectedCustomer.gstin} /> : null}
+                    <CustomerBit
+                      label="Outstanding"
+                      value={`₹${(parseFloat(selectedCustomer.outstanding) || 0).toLocaleString('en-IN')}`}
+                      valueColor={outstandingColor}
                     />
+                    {selectedCustomer.creditLimit ? (
+                      <CustomerBit label="Credit Limit" value={`₹${(parseFloat(selectedCustomer.creditLimit) || 0).toLocaleString('en-IN')}`} />
+                    ) : null}
+                    <CustomerBit label="Payment Terms" value={`${selectedCustomer.creditDays || 30} Days`} />
+                    {selectedCustomer.salesExec ? <CustomerBit label="Sales Executive" value={selectedCustomer.salesExec} /> : null}
                   </Grid>
-                  <Grid item xs={6} md={3}>
-                    <TextField 
-                      fullWidth 
-                      size="small" 
-                      label="GSTIN Number" 
-                      placeholder="-" 
-                      value={selectedCustomer?.gstin || ''} 
-                      InputLabelProps={{ shrink: true }}
-                      InputProps={{ readOnly: true }} 
-                      sx={{ bgcolor: '#f8fafc' }} 
-                    />
-                  </Grid>
-                  <Grid item xs={6} md={3}>
-                    <TextField 
-                      fullWidth 
-                      size="small" 
-                      label="Credit Limit" 
-                      placeholder="-" 
-                      value={selectedCustomer ? `₹ ${parseFloat(selectedCustomer.creditLimit || 0).toLocaleString('en-IN')}` : ''} 
-                      InputLabelProps={{ shrink: true }}
-                      InputProps={{ readOnly: true }} 
-                      sx={{ bgcolor: '#f8fafc' }} 
-                    />
-                  </Grid>
-
-                  {/* OUTSTANDING BALANCE FIELD WITH DYNAMIC GREEN/AMBER/RED WARNING COLORING */}
-                  <Grid item xs={6} md={3}>
-                    <TextField 
-                      fullWidth 
-                      size="small" 
-                      label="Outstanding Balance" 
-                      placeholder="-" 
-                      value={selectedCustomer ? `₹ ${parseFloat(selectedCustomer.outstanding || 0).toLocaleString('en-IN')}` : ''} 
-                      InputLabelProps={{ shrink: true }}
-                      InputProps={{ readOnly: true }} 
-                      sx={{ 
-                        bgcolor: '#f8fafc', 
-                        '& .MuiInputBase-input': { 
-                          color: outstandingColor, 
-                          fontWeight: selectedCustomer ? 850 : 400 
-                        } 
-                      }} 
-                    />
-                  </Grid>
-                  <Grid item xs={6} md={3}>
-                    <TextField 
-                      fullWidth 
-                      size="small" 
-                      label="Payment Terms" 
-                      placeholder="-" 
-                      value={selectedCustomer ? `${selectedCustomer.creditDays || 30} Days Credit` : ''} 
-                      InputLabelProps={{ shrink: true }}
-                      InputProps={{ readOnly: true }} 
-                      sx={{ bgcolor: '#f8fafc' }} 
-                    />
-                  </Grid>
-                  <Grid item xs={6} md={3}>
-                    <TextField 
-                      fullWidth 
-                      size="small" 
-                      label="Sales Executive" 
-                      placeholder="-" 
-                      value={selectedCustomer?.salesExec || ''} 
-                      InputLabelProps={{ shrink: true }}
-                      InputProps={{ readOnly: true }} 
-                      sx={{ bgcolor: '#f8fafc' }} 
-                    />
-                  </Grid>
-                </Grid>
+                </Box>
               )}
 
-              {/* CREDIT LIMIT EXCEEDED WARNING ALERT */}
               {isCreditExceeded && (
-                <Alert severity="error" icon={<WarningIcon />} sx={{ mt: 2, borderRadius: 3, fontWeight: 700 }}>
-                  Credit Limit Warning: Outstanding (₹{parseFloat(selectedCustomer.outstanding).toLocaleString('en-IN')}) + New Bill (₹{summary.grandTotal.toLocaleString('en-IN')}) exceeds Credit Limit of ₹{parseFloat(selectedCustomer.creditLimit).toLocaleString('en-IN')}!
+                <Alert severity="warning" icon={<WarningIcon />} sx={{ mt: 1.5, borderRadius: 2, fontWeight: 600, py: 0.25 }}>
+                  Outstanding (₹{parseFloat(selectedCustomer.outstanding).toLocaleString('en-IN')}) + this bill exceeds the credit limit of ₹{parseFloat(selectedCustomer.creditLimit).toLocaleString('en-IN')}.
                 </Alert>
               )}
             </Card>
 
-            {/* SECTION 2 — PRODUCT SELECTION & POS CART */}
-            <Card variant="outlined" sx={{ borderRadius: 4, bgcolor: '#ffffff', borderColor: '#e2e8f0', overflow: 'hidden' }}>
-              <Box sx={{ p: 2.5, borderBottom: '1px solid #e2e8f0', bgcolor: '#f8fafc' }}>
-                {(() => {
-                  const catalogCount = products.length;
-                  const inStock = products.filter((p) => parseFloat(p.availableStock ?? p.stock ?? 0) > 5).length;
-                  const lowStock = products.filter((p) => {
-                    const s = parseFloat(p.availableStock ?? p.stock ?? 0);
-                    return s > 0 && s <= 5;
-                  }).length;
-                  const outStock = products.filter((p) => parseFloat(p.availableStock ?? p.stock ?? 0) <= 0).length;
-                  return (
-                    <Stack
-                      direction={{ xs: 'column', md: 'row' }}
-                      spacing={1.5}
-                      alignItems={{ xs: 'flex-start', md: 'center' }}
-                      justifyContent="space-between"
-                      sx={{ mb: 2, width: '100%' }}
-                    >
-                      <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap" useFlexGap>
-                        <Typography variant="subtitle1" fontWeight={850} color="#0f172a">
-                          Section 2: Live Inventory Product Selection
-                        </Typography>
-                        <Chip label="F3" size="small" sx={{ height: 20, fontSize: '0.68rem', fontWeight: 800, bgcolor: '#e2e8f0', color: '#475569' }} />
-                      </Stack>
-
-                      {/* LIVE INVENTORY STATS — ALIGNED TO END OF ROW */}
-                      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap sx={{ ml: 'auto' }}>
-                        <Chip
-                          icon={<InventoryIcon sx={{ fontSize: 15 }} />}
-                          label={`${catalogCount} SKUs`}
-                          size="small"
-                          variant="outlined"
-                          sx={{ fontWeight: 800, height: 24, borderColor: '#cbd5e1', color: '#475569', '& .MuiChip-icon': { color: '#64748b' } }}
-                        />
-                        <Chip label={`${inStock} In stock`} size="small" color="success" variant="outlined" sx={{ fontWeight: 800, height: 24 }} />
-                        <Chip label={`${lowStock} Low`} size="small" color="warning" variant="outlined" sx={{ fontWeight: 800, height: 24 }} />
-                        <Chip label={`${outStock} Out`} size="small" color="error" variant="outlined" sx={{ fontWeight: 800, height: 24 }} />
-                      </Stack>
-                    </Stack>
-                  );
-                })()}
-
-                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5, fontWeight: 600 }}>
-                  Scan a barcode gun into the F3 field for instant add, or search by product name, code, brand or category. Stock, rate and GST are pulled live from inventory.
-                </Typography>
-
-                <Grid container spacing={2}>
-                  {/* BARCODE SCANNER INPUT */}
-                  <Grid item xs={12} md={4}>
-                    <TextField
-                      fullWidth
-                      size="small"
-                      inputRef={barcodeSearchInputRef}
-                      placeholder="Scan Barcode + Enter (F3)"
-                      value={barcodeInput}
-                      onChange={(e) => setBarcodeInput(e.target.value)}
-                      onKeyDown={handleBarcodeScan}
-                      InputProps={{
-                        startAdornment: <QrCodeScannerIcon color="primary" sx={{ mr: 1, fontSize: 20 }} />
-                      }}
-                    />
-                  </Grid>
-
-                  {/* AUTOCOMPLETE PRODUCT SEARCH */}
-                  <Grid item xs={12} md={8}>
-                    <Autocomplete
-                      options={products}
-                      getOptionLabel={(p) => `${p.name} (${p.code || p.barcode}) • Stock: ${p.availableStock ?? p.stock ?? 0} ${p.unit || 'Pcs'} • ₹${p.wholesalePrice || p.price}`}
-                      onChange={(e, selectedProd) => {
-                        if (selectedProd) handleAddProductToCart(selectedProd);
-                      }}
-                      renderInput={(params) => (
-                        <TextField
-                          {...params}
-                          size="small"
-                          label="Search Live Inventory (Barcode, Name, Code, Brand)..."
-                          InputLabelProps={{ shrink: true }}
-                          InputProps={{
-                            ...params.InputProps,
-                            startAdornment: (
-                              <>
-                                <SearchIcon color="action" sx={{ mr: 1, fontSize: 20 }} />
-                                {params.InputProps.startAdornment}
-                              </>
-                            )
-                          }}
-                        />
-                      )}
-                      renderOption={(props, p) => {
-                        const stock = parseFloat(p.availableStock ?? p.stock ?? 0);
-                        return (
-                          <li {...props} key={p.id || p.code}>
-                            <Box sx={{ width: '100%' }}>
-                              <Stack direction="row" justifyContent="space-between" alignItems="center">
-                                <Typography variant="body2" fontWeight={700}>{p.name}</Typography>
-                                <Chip
-                                  label={stock > 5 ? `Stock: ${stock} ${p.unit || 'Pcs'}` : stock > 0 ? `Low: ${stock}` : `Out of Stock`}
-                                  color={stock > 5 ? 'success' : stock > 0 ? 'warning' : 'error'}
-                                  size="small"
-                                  sx={{ fontWeight: 700, height: 20, fontSize: '0.7rem' }}
-                                />
-                              </Stack>
-                              <Typography variant="caption" color="text.secondary">
-                                Code: {p.code} • Brand: {p.brand} • Category: {p.category} • ₹{(p.wholesalePrice || p.price || 0).toFixed(2)}
-                              </Typography>
-                            </Box>
-                          </li>
-                        );
-                      }}
-                    />
-                  </Grid>
-                </Grid>
-
-                {/* RUNNING CART SNAPSHOT — ALIGNED TO END OF PAGE */}
-                <Stack
-                  direction="row"
-                  spacing={2}
-                  alignItems="center"
-                  justifyContent="flex-end"
-                  flexWrap="wrap"
-                  useFlexGap
-                  sx={{ mt: 2, pt: 1.5, borderTop: '1px dashed #cbd5e1' }}
-                >
-                  <Stack direction="row" spacing={0.75} alignItems="center">
-                    <CartIcon sx={{ fontSize: 17, color: '#64748b' }} />
-                    <Typography variant="caption" fontWeight={800} color="#475569">
-                      {summary.totalItems} line{summary.totalItems === 1 ? '' : 's'}
-                    </Typography>
-                  </Stack>
-                  <Divider orientation="vertical" flexItem sx={{ my: 0.5 }} />
-                  <Typography variant="caption" fontWeight={800} color="#475569">
-                    {summary.totalQty} unit{summary.totalQty === 1 ? '' : 's'}
-                  </Typography>
-                  <Divider orientation="vertical" flexItem sx={{ my: 0.5 }} />
-                  <Typography variant="caption" fontWeight={800} color="#475569">
-                    Disc −₹{summary.totalDiscount.toFixed(2)}
-                  </Typography>
-                  <Divider orientation="vertical" flexItem sx={{ my: 0.5 }} />
-                  <Typography variant="caption" fontWeight={800} color="#475569">
-                    GST ₹{summary.totalGst.toFixed(2)}
-                  </Typography>
-                  <Divider orientation="vertical" flexItem sx={{ my: 0.5 }} />
-                  <Stack direction="row" spacing={0.75} alignItems="center">
-                    <TrendingUpIcon sx={{ fontSize: 17, color: 'primary.main' }} />
-                    <Typography variant="subtitle2" fontWeight={900} color="primary.main">
-                      ₹{summary.grandTotal.toLocaleString('en-IN')}
-                    </Typography>
-                  </Stack>
+            {/* PRODUCTS */}
+            <Card variant="outlined" sx={{ borderRadius: 3, bgcolor: '#ffffff', borderColor: '#e2e8f0', overflow: 'hidden' }}>
+              <Box sx={{ p: 2 }}>
+                <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}>
+                  <Typography variant="subtitle2" fontWeight={800} color="#0f172a">Products</Typography>
+                  <Chip label="F3" size="small" sx={{ height: 18, fontSize: '0.65rem', fontWeight: 700, bgcolor: '#f1f5f9', color: '#64748b' }} />
                 </Stack>
+
+                <Autocomplete
+                  freeSolo
+                  fullWidth
+                  options={products}
+                  value={null}
+                  inputValue={barcodeInput}
+                  onInputChange={(e, v, reason) => { if (reason === 'input' || reason === 'clear') setBarcodeInput(v); }}
+                  getOptionLabel={(p) => (typeof p === 'string' ? p : p.name || '')}
+                  filterOptions={(opts, state) => {
+                    const q = state.inputValue.trim().toLowerCase();
+                    if (!q) return opts.slice(0, 50);
+                    return opts
+                      .filter((p) =>
+                        (p.name || '').toLowerCase().includes(q) ||
+                        (p.code || '').toLowerCase().includes(q) ||
+                        (p.barcode || '').toLowerCase().includes(q) ||
+                        (p.brand || '').toLowerCase().includes(q) ||
+                        (p.modelNo || '').toLowerCase().includes(q)
+                      )
+                      .slice(0, 50);
+                  }}
+                  onChange={(e, val) => {
+                    if (val && typeof val !== 'string') {
+                      handleAddProductToCart(val);
+                      setBarcodeInput('');
+                      showToast(`Added: ${val.name}`, 'success');
+                      setTimeout(() => barcodeSearchInputRef.current?.focus(), 0);
+                    }
+                  }}
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      inputRef={barcodeSearchInputRef}
+                      size="small"
+                      placeholder="Scan barcode or search product name / model..."
+                      /* capture phase so an exact barcode hit is handled before the
+                         Autocomplete's own Enter handler can also select an option */
+                      onKeyDownCapture={handleBarcodeScan}
+                      InputProps={{
+                        ...params.InputProps,
+                        startAdornment: (
+                          <>
+                            <QrCodeScannerIcon sx={{ color: '#4f46e5', mr: 0.5, fontSize: 20 }} />
+                            {params.InputProps.startAdornment}
+                          </>
+                        ),
+                        endAdornment: (
+                          <>
+                            <Chip label="F3" size="small" sx={{ height: 18, fontSize: '0.62rem', fontWeight: 700, bgcolor: '#f1f5f9', color: '#64748b', mr: 0.5 }} />
+                            {params.InputProps.endAdornment}
+                          </>
+                        )
+                      }}
+                    />
+                  )}
+                  renderOption={(props, p) => {
+                    const stock = parseFloat(p.availableStock ?? p.stock ?? 0);
+                    return (
+                      <li {...props} key={p.id || p.code}>
+                        <Box sx={{ width: '100%' }}>
+                          <Stack direction="row" justifyContent="space-between" alignItems="center">
+                            <Typography variant="body2" fontWeight={700}>{p.name}</Typography>
+                            <Typography variant="caption" sx={{ fontWeight: 700, color: stock > 5 ? '#059669' : stock > 0 ? '#d97706' : '#dc2626' }}>
+                              {stock > 0 ? `Stock: ${stock}` : 'Out of stock'}
+                            </Typography>
+                          </Stack>
+                          <Typography variant="caption" color="text.secondary">
+                            {[cellText(p.code), cellText(p.brand), `₹${(p.wholesalePrice || p.price || 0).toFixed(2)}`].filter(Boolean).join('  •  ')}
+                          </Typography>
+                        </Box>
+                      </li>
+                    );
+                  }}
+                />
               </Box>
 
-              {/* POS CART PRODUCTS DATA TABLE WITH STOCK OVER-LIMIT RED HIGHLIGHT */}
-              <TableContainer component={Paper} elevation={0} sx={{ overflowX: 'auto', maxHeight: 420 }}>
-                <Table stickyHeader sx={{ minWidth: 1180 }}>
-                  <TableHead sx={{ '& th': { bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 1, fontSize: '0.75rem', whiteSpace: 'nowrap' } }}>
-                    <TableRow>
-                      <TableCell sx={{ minWidth: 120 }}>Barcode</TableCell>
-                      <TableCell sx={{ minWidth: 230 }}>Item Description</TableCell>
-                      <TableCell sx={{ minWidth: 110 }}>Model No</TableCell>
-                      <TableCell sx={{ minWidth: 100 }}>Color</TableCell>
-                      <TableCell sx={{ minWidth: 90 }}>Size</TableCell>
-                      <TableCell sx={{ minWidth: 110 }}>Brand</TableCell>
-                      <TableCell sx={{ minWidth: 110 }}>Category</TableCell>
-                      <TableCell sx={{ minWidth: 90 }}>Power</TableCell>
-                      <TableCell align="center" sx={{ minWidth: 135 }}>Qty</TableCell>
-                      <TableCell align="right" sx={{ minWidth: 100 }}>Price</TableCell>
-                      <TableCell align="right" sx={{ minWidth: 80 }}>Disc.</TableCell>
-                      <TableCell align="right" sx={{ minWidth: 100 }}>Gross</TableCell>
-                      <TableCell align="right" sx={{ minWidth: 90 }}>Tax</TableCell>
-                      <TableCell align="right" sx={{ minWidth: 110 }}>Total</TableCell>
-                      <TableCell align="center" sx={{ minWidth: 60 }}>Action</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {cartItems.length === 0 ? (
+              {cartItems.length === 0 ? (
+                <Box sx={{ py: 6, px: 2, textAlign: 'center', borderTop: '1px solid #e2e8f0' }}>
+                  <InventoryIcon sx={{ fontSize: 30, color: '#cbd5e1', mb: 0.5 }} />
+                  <Typography variant="body2" fontWeight={700} color="#475569">Start adding products</Typography>
+                  <Typography variant="caption" color="text.secondary">Scan a barcode or search for a product</Typography>
+                </Box>
+              ) : (
+                <TableContainer sx={{ overflowX: 'auto', borderTop: '1px solid #e2e8f0' }}>
+                  <Table size="small" sx={{ minWidth: 760 }}>
+                    <TableHead sx={{ '& th': { bgcolor: '#f8fafc', color: '#475569', fontWeight: 700, fontSize: '0.72rem', borderBottom: '1px solid #e2e8f0', whiteSpace: 'nowrap', py: 1 } }}>
                       <TableRow>
-                        <TableCell colSpan={15} align="center" sx={{ py: 6 }}>
-                          <Typography variant="body2" color="text.secondary" fontWeight={600}>
-                            No products added to POS cart yet. Scan a barcode (F3) or search live inventory above.
-                          </Typography>
-                        </TableCell>
+                        <TableCell>Barcode</TableCell>
+                        <TableCell>Product</TableCell>
+                        <TableCell>Model</TableCell>
+                        <TableCell>Color</TableCell>
+                        <TableCell>Size</TableCell>
+                        <TableCell align="center">Qty</TableCell>
+                        <TableCell align="right">Rate</TableCell>
+                        <TableCell align="right">Disc %</TableCell>
+                        <TableCell align="right">GST</TableCell>
+                        <TableCell align="right">Total</TableCell>
+                        <TableCell align="center" padding="checkbox" />
                       </TableRow>
-                    ) : (
-                      cartItems.map((item, idx) => {
+                    </TableHead>
+                    <TableBody>
+                      {cartItems.map((item, idx) => {
                         const isStockExceeded = item.qty > item.availableStock;
                         const lineBase = (parseFloat(item.rate) || 0) * (parseFloat(item.qty) || 0);
                         const lineDisc = lineBase * ((parseFloat(item.discount) || 0) / 100);
@@ -1072,55 +924,38 @@ export default function WholesaleSales() {
                         const lineTotal = lineGross + lineGst;
 
                         return (
-                          <TableRow key={item.id || idx} hover sx={{ bgcolor: isStockExceeded ? '#fef2f2' : 'inherit', '& td': { py: 1.2, verticalAlign: 'middle', whiteSpace: 'nowrap' } }}>
-                            <TableCell sx={{ fontFamily: 'monospace', fontWeight: 700, color: 'primary.main' }}>{item.barcode || item.code}</TableCell>
-                            <TableCell sx={{ whiteSpace: 'normal' }}>
-                              <Typography variant="body2" fontWeight={700}>{item.name}</Typography>
-                              <Typography
-                                variant="caption"
-                                fontWeight={800}
-                                sx={{ display: 'block', color: isStockExceeded ? 'error.main' : 'success.main' }}
-                              >
-                                🟢 Live Stock: {item.availableStock} Free
+                          <TableRow
+                            key={item.id || idx}
+                            hover
+                            sx={{ bgcolor: isStockExceeded ? '#fef2f2' : 'inherit', '& td': { py: 0.75, fontSize: '0.8rem', whiteSpace: 'nowrap', borderBottom: '1px solid #f1f5f9' } }}
+                          >
+                            <TableCell sx={{ fontFamily: 'monospace', color: '#64748b' }}>{cellText(item.barcode) || cellText(item.code)}</TableCell>
+                            <TableCell sx={{ whiteSpace: 'normal', minWidth: 160 }}>
+                              <Typography variant="body2" fontWeight={700} sx={{ fontSize: '0.82rem' }}>{item.name}</Typography>
+                              <Typography variant="caption" sx={{ color: isStockExceeded ? '#dc2626' : '#94a3b8' }}>
+                                Stock: {item.availableStock}{isStockExceeded ? ' — over limit' : ''}
                               </Typography>
                             </TableCell>
-                            <TableCell sx={{ fontWeight: 600 }}>{item.modelNo || '—'}</TableCell>
-                            <TableCell sx={{ fontWeight: 600 }}>{item.color || '—'}</TableCell>
-                            <TableCell sx={{ fontWeight: 600 }}>{item.size || '—'}</TableCell>
-                            <TableCell sx={{ fontWeight: 600 }}>{item.brand || '—'}</TableCell>
-                            <TableCell sx={{ fontWeight: 600 }}>{item.category || '—'}</TableCell>
-                            <TableCell sx={{ fontWeight: 600 }}>{item.power || '—'}</TableCell>
+                            <TableCell sx={{ color: '#475569' }}>{cellText(item.modelNo)}</TableCell>
+                            <TableCell sx={{ color: '#475569' }}>{cellText(item.color)}</TableCell>
+                            <TableCell sx={{ color: '#475569' }}>{cellText(item.size)}</TableCell>
                             <TableCell align="center">
-                              <Box>
-                                <Stack direction="row" alignItems="center" justifyContent="center" spacing={0.5}>
-                                  <IconButton size="small" onClick={() => handleUpdateItemQty(idx, -1)}>
-                                    <RemoveIcon fontSize="small" />
-                                  </IconButton>
-                                  <TextField
-                                    size="small"
-                                    type="number"
-                                    error={isStockExceeded}
-                                    value={item.qty}
-                                    onChange={(e) => handleUpdateItemQty(idx, e.target.value, true)}
-                                    sx={{ 
-                                      width: 60, 
-                                      '& .MuiInputBase-input': { 
-                                        py: 0.5, px: 0.5, textAlign: 'center', fontWeight: 800,
-                                        color: isStockExceeded ? '#dc2626' : 'inherit'
-                                      } 
-                                    }}
-                                  />
-                                  <IconButton size="small" onClick={() => handleUpdateItemQty(idx, 1)}>
-                                    <AddIcon fontSize="small" />
-                                  </IconButton>
-                                </Stack>
-                                {/* INLINE STOCK WARNING BELOW FIELD */}
-                                {isStockExceeded && (
-                                  <Typography variant="caption" color="error" fontWeight={700} sx={{ display: 'block', fontSize: '0.65rem', mt: 0.3 }}>
-                                    Only {item.availableStock} in stock
-                                  </Typography>
-                                )}
-                              </Box>
+                              <Stack direction="row" alignItems="center" justifyContent="center" spacing={0.25}>
+                                <IconButton size="small" sx={{ p: 0.25 }} onClick={() => handleUpdateItemQty(idx, -1)}>
+                                  <RemoveIcon sx={{ fontSize: 15 }} />
+                                </IconButton>
+                                <TextField
+                                  size="small"
+                                  type="number"
+                                  error={isStockExceeded}
+                                  value={item.qty}
+                                  onChange={(e) => handleUpdateItemQty(idx, e.target.value, true)}
+                                  sx={{ width: 46, '& .MuiInputBase-input': { py: 0.25, px: 0.25, textAlign: 'center', fontWeight: 700, fontSize: '0.8rem' } }}
+                                />
+                                <IconButton size="small" sx={{ p: 0.25 }} onClick={() => handleUpdateItemQty(idx, 1)}>
+                                  <AddIcon sx={{ fontSize: 15 }} />
+                                </IconButton>
+                              </Stack>
                             </TableCell>
                             <TableCell align="right">
                               <TextField
@@ -1128,7 +963,7 @@ export default function WholesaleSales() {
                                 type="number"
                                 value={item.rate}
                                 onChange={(e) => handleUpdateItemField(idx, 'rate', parseFloat(e.target.value) || 0)}
-                                sx={{ width: 85, '& .MuiInputBase-input': { py: 0.5, px: 0.5, textAlign: 'right', fontWeight: 600 } }}
+                                sx={{ width: 74, '& .MuiInputBase-input': { py: 0.25, px: 0.5, textAlign: 'right', fontSize: '0.8rem' } }}
                               />
                             </TableCell>
                             <TableCell align="right">
@@ -1137,336 +972,219 @@ export default function WholesaleSales() {
                                 type="number"
                                 value={item.discount}
                                 onChange={(e) => handleUpdateItemField(idx, 'discount', parseFloat(e.target.value) || 0)}
-                                sx={{ width: 60, '& .MuiInputBase-input': { py: 0.5, px: 0.5, textAlign: 'right' } }}
+                                sx={{ width: 52, '& .MuiInputBase-input': { py: 0.25, px: 0.5, textAlign: 'right', fontSize: '0.8rem' } }}
                               />
                             </TableCell>
-                            <TableCell align="right" sx={{ fontWeight: 600 }}>
-                              ₹{lineGross.toFixed(2)}
-                            </TableCell>
-                            <TableCell align="right" sx={{ fontWeight: 600, color: '#b45309' }}>
-                              ₹{lineGst.toFixed(2)}
-                              <Box component="span" sx={{ display: 'block', fontSize: '0.6rem', fontWeight: 700, color: 'text.secondary' }}>
-                                {item.gst || 0}% GST
-                              </Box>
-                            </TableCell>
-                            <TableCell align="right" sx={{ fontWeight: 850, color: 'primary.main' }}>
-                              ₹{lineTotal.toFixed(2)}
-                            </TableCell>
-                            <TableCell align="center">
-                              <IconButton size="small" color="error" onClick={() => handleRemoveItem(idx)}>
-                                <DeleteIcon fontSize="small" />
+                            <TableCell align="right" sx={{ color: '#64748b' }}>{(parseFloat(item.gst) || 0)}%</TableCell>
+                            <TableCell align="right" sx={{ fontWeight: 800, color: '#0f172a' }}>₹{lineTotal.toFixed(2)}</TableCell>
+                            <TableCell align="center" padding="checkbox">
+                              <IconButton size="small" sx={{ p: 0.25 }} onClick={() => handleRemoveItem(idx)}>
+                                <DeleteIcon sx={{ fontSize: 16, color: '#94a3b8' }} />
                               </IconButton>
                             </TableCell>
                           </TableRow>
                         );
-                      })
-                    )}
-                  </TableBody>
-                  {cartItems.length > 0 && (
-                    <TableFooter sx={{ position: 'sticky', bottom: 0, bgcolor: '#f8fafc', '& td': { borderTop: '2px solid #e2e8f0' } }}>
-                      <TableRow>
-                        <TableCell colSpan={8} sx={{ fontWeight: 800, color: '#475569' }}>
-                          {summary.totalItems} item{summary.totalItems === 1 ? '' : 's'} in cart
-                        </TableCell>
-                        <TableCell align="center" sx={{ fontWeight: 800, color: '#475569' }}>
-                          {summary.totalQty} units
-                        </TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 700, color: '#475569' }}>
-                          ₹{summary.subtotal.toFixed(2)}
-                        </TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 700, color: '#dc2626' }}>
-                          −₹{summary.totalDiscount.toFixed(2)}
-                        </TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 700, color: '#475569' }}>
-                          ₹{(summary.subtotal - summary.totalDiscount).toFixed(2)}
-                        </TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 700, color: '#b45309' }}>
-                          ₹{summary.totalGst.toFixed(2)}
-                        </TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 900, fontSize: '0.95rem', color: 'primary.main' }}>
-                          ₹{summary.grandTotal.toLocaleString('en-IN')}
-                        </TableCell>
-                        <TableCell />
-                      </TableRow>
-                    </TableFooter>
-                  )}
-                </Table>
-              </TableContainer>
-            </Card>
+                      })}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+              )}
 
-            {/* SECTION 3 — LIVE INVOICE SUMMARY PANEL (FULL WIDTH, UNDER SECTION 2) */}
-            <Card variant="outlined" sx={{ p: 2.5, borderRadius: 4, bgcolor: '#ffffff', borderColor: '#e2e8f0' }}>
-              <Typography variant="subtitle1" fontWeight={850} color="#0f172a" sx={{ mb: 2 }}>
-                Section 3: Live Invoice Summary
-              </Typography>
-
-              <Grid container spacing={2} alignItems="stretch">
-                <Grid item xs={12} md={7}>
-                  <Stack spacing={1.4} sx={{ p: 2, height: '100%', bgcolor: '#f8fafc', borderRadius: 3, border: '1px solid #e2e8f0' }}>
-                    <Stack direction="row" justifyContent="space-between" alignItems="center">
-                      <Typography variant="body2" color="text.secondary">Total Line Items</Typography>
-                      <Typography variant="body2" fontWeight={700}>{summary.totalItems}</Typography>
-                    </Stack>
-                    <Stack direction="row" justifyContent="space-between" alignItems="center">
-                      <Typography variant="body2" color="text.secondary">Total Quantity Units</Typography>
-                      <Typography variant="body2" fontWeight={700}>{summary.totalQty} Units</Typography>
-                    </Stack>
-                    <Divider />
-                    <Stack direction="row" justifyContent="space-between" alignItems="center">
-                      <Typography variant="body2" color="text.secondary">Subtotal (Base Price)</Typography>
-                      <Typography variant="body2" fontWeight={700}>₹ {summary.subtotal.toFixed(2)}</Typography>
-                    </Stack>
-                    <Stack direction="row" justifyContent="space-between" alignItems="center">
-                      <Typography variant="body2" color="text.secondary">Total Discount</Typography>
-                      <Typography variant="body2" fontWeight={700} color="success.main">- ₹ {summary.totalDiscount.toFixed(2)}</Typography>
-                    </Stack>
-                    <Stack direction="row" justifyContent="space-between" alignItems="center">
-                      <Typography variant="body2" color="text.secondary">GST Tax (18%)</Typography>
-                      <Typography variant="body2" fontWeight={700}>+ ₹ {summary.totalGst.toFixed(2)}</Typography>
-                    </Stack>
-                    <Stack direction="row" justifyContent="space-between" alignItems="center">
-                      <Typography variant="body2" color="text.secondary">Freight / Additional Charges</Typography>
-                      <TextField
-                        size="small"
-                        type="number"
-                        placeholder="0"
-                        value={additionalCharges}
-                        onChange={(e) => setAdditionalCharges(e.target.value)}
-                        sx={{ width: 110, '& .MuiInputBase-input': { py: 0.4, px: 0.8, textAlign: 'right', fontWeight: 700 } }}
-                      />
-                    </Stack>
-                    <Stack direction="row" justifyContent="space-between" alignItems="center">
-                      <Typography variant="body2" color="text.secondary">Round Off</Typography>
-                      <Typography variant="body2" fontWeight={600}>{summary.roundOff >= 0 ? `+ ₹${summary.roundOff.toFixed(2)}` : `- ₹${Math.abs(summary.roundOff).toFixed(2)}`}</Typography>
-                    </Stack>
-                  </Stack>
-                </Grid>
-
-                <Grid item xs={12} md={5}>
-                  <Stack justifyContent="center" spacing={1} sx={{ p: 2.5, height: '100%', borderRadius: 3, bgcolor: '#eef2ff', border: '1px solid #c7d2fe' }}>
-                    <Typography variant="subtitle2" fontWeight={800} color="#4f46e5">
-                      Grand Total Payable
-                    </Typography>
-                    <Typography variant="h3" fontWeight={900} color="primary.main" sx={{ lineHeight: 1.1 }}>
-                      ₹ {summary.grandTotal.toLocaleString('en-IN')}
-                    </Typography>
-                    <Typography variant="caption" color="text.secondary" fontWeight={600}>
-                      Inclusive of 18% GST • {summary.totalItems} items • {summary.totalQty} units
-                    </Typography>
-                  </Stack>
-                </Grid>
-              </Grid>
-            </Card>
-
-            {/* SECTION 4 — DYNAMIC PAYMENT & COMPLETION PANEL */}
-            <Card variant="outlined" sx={{ p: 2.5, borderRadius: 4, bgcolor: '#ffffff', borderColor: '#e2e8f0' }}>
-              <Typography variant="subtitle1" fontWeight={850} color="#0f172a" sx={{ mb: 2 }}>
-                Section 4: Payment & Completion Panel
-              </Typography>
-
-              {/* PAYMENT MODE HORIZONTAL SELECTOR ROW */}
-              <Box sx={{ mb: 2.5 }}>
-                <Typography variant="caption" fontWeight={700} color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-                  Select Payment Method *
-                </Typography>
-                <Grid container spacing={1.5}>
-                  {['Cash', 'UPI', 'Card', 'Bank Transfer', 'Credit Sale'].map((mode) => (
-                    <Grid item xs={6} sm={2.4} key={mode}>
-                      <Button
-                        fullWidth
-                        size="medium"
-                        variant={payMode === mode ? 'contained' : 'outlined'}
-                        onClick={() => setPayMode(mode)}
-                        sx={{
-                          py: 1,
-                          fontWeight: 800,
-                          fontSize: '0.825rem',
-                          borderRadius: 3,
-                          backgroundColor: payMode === mode ? '#4f46e5' : 'transparent'
-                        }}
-                      >
-                        {mode}
-                      </Button>
-                    </Grid>
-                  ))}
-                </Grid>
-              </Box>
-
-              {/* DYNAMIC PAYMENT METHOD FIELDS */}
-              <Grid container spacing={2.5} sx={{ mb: 2.5 }}>
-                {/* 1. CASH MODE */}
-                {payMode === 'Cash' && (
-                  <>
-                    <Grid item xs={12} md={6}>
-                      <TextField
-                        fullWidth
-                        size="small"
-                        type="number"
-                        label="Amount Received (₹)"
-                        placeholder={`Total: ₹${summary.grandTotal}`}
-                        value={amountReceived}
-                        onChange={(e) => setAmountReceived(e.target.value)}
-                      />
-                    </Grid>
-                    <Grid item xs={12} md={6}>
-                      <Box sx={{ p: 1.5, px: 2, bgcolor: '#f8fafc', borderRadius: 3, border: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <Box>
-                          <Typography variant="caption" color="text.secondary" fontWeight={600} display="block">Due Amount</Typography>
-                          <Typography variant="subtitle1" fontWeight={850} color={paymentCalc.dueAmount > 0 ? 'error.main' : 'success.main'}>
-                            ₹ {paymentCalc.dueAmount.toLocaleString('en-IN')}
-                          </Typography>
-                        </Box>
-                        <Box textAlign="right">
-                          <Typography variant="caption" color="text.secondary" fontWeight={600} display="block">Change Return</Typography>
-                          <Typography variant="subtitle1" fontWeight={850} color="primary.main">
-                            ₹ {paymentCalc.balanceAmount.toLocaleString('en-IN')}
-                          </Typography>
-                        </Box>
-                      </Box>
-                    </Grid>
-                  </>
-                )}
-
-                {/* 2. UPI / CARD MODE */}
-                {(payMode === 'UPI' || payMode === 'Card') && (
-                  <>
-                    <Grid item xs={12} md={6}>
-                      <TextField
-                        fullWidth
-                        size="small"
-                        label="Amount Received (Auto-Filled ₹)"
-                        value={summary.grandTotal}
-                        InputProps={{ readOnly: true }}
-                        sx={{ bgcolor: '#f8fafc' }}
-                      />
-                    </Grid>
-                    <Grid item xs={12} md={6}>
-                      <TextField
-                        fullWidth
-                        size="small"
-                        label="Reference / Transaction ID"
-                        placeholder="e.g. UPI Ref / Approval Code"
-                        value={refNo}
-                        onChange={(e) => setRefNo(e.target.value)}
-                      />
-                    </Grid>
-                  </>
-                )}
-
-                {/* 3. BANK TRANSFER MODE */}
-                {payMode === 'Bank Transfer' && (
-                  <>
-                    <Grid item xs={12} md={6}>
-                      <TextField
-                        fullWidth
-                        size="small"
-                        label="Reference No / Cheque No"
-                        placeholder="e.g. NEFT/RTGS Ref No"
-                        value={refNo}
-                        onChange={(e) => setRefNo(e.target.value)}
-                      />
-                    </Grid>
-                    <Grid item xs={12} md={6}>
-                      <TextField
-                        fullWidth
-                        size="small"
-                        label="Bank Name / Account"
-                        placeholder="e.g. HDFC Bank Main Account"
-                        value={bankName}
-                        onChange={(e) => setBankName(e.target.value)}
-                      />
-                    </Grid>
-                  </>
-                )}
-
-                {/* 4. CREDIT SALE MODE */}
-                {payMode === 'Credit Sale' && (
-                  <>
-                    <Grid item xs={12} md={6}>
-                      <TextField
-                        select
-                        fullWidth
-                        size="small"
-                        label="Credit Duration Days"
-                        value={creditDays}
-                        onChange={(e) => setCreditDays(e.target.value)}
-                      >
-                        <MenuItem value={15}>15 Days Credit</MenuItem>
-                        <MenuItem value={30}>30 Days Credit (Standard)</MenuItem>
-                        <MenuItem value={45}>45 Days Credit</MenuItem>
-                        <MenuItem value={60}>60 Days Credit</MenuItem>
-                      </TextField>
-                    </Grid>
-
-                    <Grid item xs={12} md={6}>
-                      <Box sx={{ p: 1.5, px: 2, bgcolor: '#eff6ff', borderRadius: 3, border: '1px solid #bfdbfe' }}>
-                        <Typography variant="caption" color="primary.main" fontWeight={700} display="block">
-                          Credit Sale Due Amount: ₹ {summary.grandTotal.toLocaleString('en-IN')}
-                        </Typography>
-                        {selectedCustomer && (
-                          <Typography variant="caption" color="text.secondary" fontWeight={600} display="block" sx={{ mt: 0.5 }}>
-                            Updated Outstanding: ₹ {(parseFloat(selectedCustomer.outstanding || 0) + summary.grandTotal).toLocaleString('en-IN')}
-                          </Typography>
-                        )}
-                      </Box>
-                    </Grid>
-                  </>
-                )}
-              </Grid>
-
-              {/* ACTION BUTTONS ROW WITH SHORTCUT HINTS */}
-              <Grid container spacing={2}>
-                <Grid item xs={12} sm={6}>
-                  <Button
-                    variant="contained"
-                    size="large"
-                    fullWidth
-                    disabled={Boolean(!selectedCustomer || cartItems.length === 0)}
-                    onClick={handleAttemptCompleteSale}
-                    startIcon={<CheckedIcon />}
-                    endIcon={<Chip label="F9" size="small" sx={{ height: 18, fontSize: '0.65rem', fontWeight: 800, bgcolor: 'rgba(255,255,255,0.25)', color: '#ffffff' }} />}
-                    sx={{ backgroundColor: '#10b981', fontWeight: 850, py: 1.4, fontSize: '0.925rem', borderRadius: 3 }}
-                  >
-                    Complete Sale & Print Invoice
-                  </Button>
-                </Grid>
-                <Grid item xs={6} sm={3}>
-                  <Button
-                    fullWidth
-                    size="large"
-                    variant="outlined"
-                    color="warning"
-                    disabled={cartItems.length === 0}
-                    onClick={handleHoldInvoice}
-                    startIcon={<HoldIcon />}
-                    sx={{ fontWeight: 700, py: 1.4, borderRadius: 3 }}
-                  >
-                    Hold Invoice
-                  </Button>
-                </Grid>
-                <Grid item xs={6} sm={3}>
-                  <Button
-                    fullWidth
-                    size="large"
-                    variant="outlined"
-                    disabled={cartItems.length === 0}
-                    onClick={() => showToast("Draft saved.", "info")}
-                    startIcon={<SaveIcon />}
-                    sx={{ fontWeight: 700, py: 1.4, borderRadius: 3 }}
-                  >
-                    Save Draft
-                  </Button>
-                </Grid>
-              </Grid>
-
-              {/* INLINE CREDIT LIMIT WARNING MESSAGE */}
-              {isCreditExceeded && (
-                <Alert severity="warning" variant="outlined" sx={{ mt: 2, borderRadius: 3, fontWeight: 700, py: 0.5, fontSize: '0.825rem' }}>
-                  ⚠️ Warning: Completing this Credit Sale will push customer's total outstanding above Credit Limit (₹{selectedCustomer.creditLimit}). Confirmation required on submit.
-                </Alert>
+              {cartItems.length > 0 && (
+                <Box sx={{ px: 2, py: 1, borderTop: '1px solid #e2e8f0', bgcolor: '#f8fafc' }}>
+                  <Typography variant="caption" fontWeight={700} color="#475569">
+                    Total Items: {summary.totalItems} product{summary.totalItems === 1 ? '' : 's'} ({summary.totalQty} unit{summary.totalQty === 1 ? '' : 's'})
+                  </Typography>
+                </Box>
               )}
             </Card>
-      </Stack>
+          </Stack>
+        </Grid>
+
+        {/* ================= RIGHT: SUMMARY + PAYMENT + ACTIONS ================= */}
+        <Grid item xs={12} lg={4}>
+          <Stack spacing={2.5} sx={{ position: { lg: 'sticky' }, top: 16 }}>
+            {/* INVOICE SUMMARY */}
+            <Card variant="outlined" sx={{ p: 2, borderRadius: 3, bgcolor: '#ffffff', borderColor: '#e2e8f0' }}>
+              <Typography variant="subtitle2" fontWeight={800} color="#0f172a" sx={{ mb: 1.5 }}>Invoice Summary</Typography>
+              <Stack spacing={0.85}>
+                <SummaryLine label="Subtotal" value={`₹${summary.subtotal.toFixed(2)}`} />
+                <SummaryLine label="Discount" value={`-₹${summary.totalDiscount.toFixed(2)}`} valueColor="#059669" />
+                <SummaryLine label="GST" value={`₹${summary.totalGst.toFixed(2)}`} />
+                <Stack direction="row" justifyContent="space-between" alignItems="center">
+                  <Typography variant="body2" color="text.secondary">Additional Charges</Typography>
+                  <TextField
+                    size="small"
+                    type="number"
+                    placeholder="0"
+                    value={additionalCharges}
+                    onChange={(e) => setAdditionalCharges(e.target.value)}
+                    sx={{ width: 96, '& .MuiInputBase-input': { py: 0.3, px: 0.6, textAlign: 'right', fontSize: '0.82rem' } }}
+                  />
+                </Stack>
+                <SummaryLine
+                  label="Round Off"
+                  value={`${summary.roundOff >= 0 ? '+' : '-'}₹${Math.abs(summary.roundOff).toFixed(2)}`}
+                />
+              </Stack>
+              <Divider sx={{ my: 1.25 }} />
+              <Stack direction="row" justifyContent="space-between" alignItems="baseline">
+                <Typography variant="subtitle2" fontWeight={800} color="#0f172a">Grand Total</Typography>
+                <Typography variant="h6" fontWeight={900} color="#4f46e5">₹{summary.grandTotal.toLocaleString('en-IN')}</Typography>
+              </Stack>
+            </Card>
+
+            {/* PAYMENT */}
+            <Card variant="outlined" sx={{ p: 2, borderRadius: 3, bgcolor: '#ffffff', borderColor: '#e2e8f0' }}>
+              <Typography variant="subtitle2" fontWeight={800} color="#0f172a" sx={{ mb: 1.5 }}>Payment Method</Typography>
+
+              <ToggleButtonGroup
+                value={payMode}
+                exclusive
+                onChange={(e, v) => { if (v) setPayMode(v); }}
+                fullWidth
+                size="small"
+                sx={{
+                  mb: 1.5,
+                  flexWrap: 'wrap',
+                  gap: 0.5,
+                  '& .MuiToggleButton-root': {
+                    flex: '1 0 auto',
+                    textTransform: 'none',
+                    fontWeight: 700,
+                    fontSize: '0.75rem',
+                    py: 0.5,
+                    border: '1px solid #e2e8f0 !important',
+                    borderRadius: '8px !important',
+                    '&.Mui-selected': { bgcolor: '#4f46e5', color: '#fff', '&:hover': { bgcolor: '#4338ca' } }
+                  }
+                }}
+              >
+                {[['Cash', 'Cash'], ['UPI', 'UPI'], ['Card', 'Card'], ['Bank Transfer', 'Bank'], ['Credit Sale', 'Credit']].map(([val, label]) => (
+                  <ToggleButton key={val} value={val}>{label}</ToggleButton>
+                ))}
+              </ToggleButtonGroup>
+
+              {payMode === 'Cash' && (
+                <Stack spacing={1}>
+                  <TextField
+                    fullWidth
+                    size="small"
+                    type="number"
+                    label="Amount Received (₹)"
+                    InputLabelProps={{ shrink: true }}
+                    placeholder={String(summary.grandTotal)}
+                    value={amountReceived}
+                    onChange={(e) => setAmountReceived(e.target.value)}
+                  />
+                  <Stack direction="row" spacing={1}>
+                    <MiniStat label="Due Amount" value={`₹${paymentCalc.dueAmount.toLocaleString('en-IN')}`} color={paymentCalc.dueAmount > 0 ? '#dc2626' : '#059669'} />
+                    <MiniStat label="Change" value={`₹${paymentCalc.balanceAmount.toLocaleString('en-IN')}`} color="#4f46e5" />
+                  </Stack>
+                </Stack>
+              )}
+
+              {(payMode === 'UPI' || payMode === 'Card') && (
+                <Stack spacing={1}>
+                  <TextField fullWidth size="small" label="Amount Received (₹)" InputLabelProps={{ shrink: true }} value={summary.grandTotal} InputProps={{ readOnly: true }} sx={{ bgcolor: '#f8fafc' }} />
+                  <TextField fullWidth size="small" label="Reference / Txn ID" InputLabelProps={{ shrink: true }} placeholder="UPI Ref / Approval Code" value={refNo} onChange={(e) => setRefNo(e.target.value)} />
+                </Stack>
+              )}
+
+              {payMode === 'Bank Transfer' && (
+                <Stack spacing={1}>
+                  <TextField fullWidth size="small" label="Reference / Cheque No" InputLabelProps={{ shrink: true }} placeholder="NEFT / RTGS Ref" value={refNo} onChange={(e) => setRefNo(e.target.value)} />
+                  <TextField fullWidth size="small" label="Bank Name / Account" InputLabelProps={{ shrink: true }} placeholder="e.g. HDFC Bank" value={bankName} onChange={(e) => setBankName(e.target.value)} />
+                </Stack>
+              )}
+
+              {payMode === 'Credit Sale' && (
+                <Stack spacing={1}>
+                  <TextField
+                    select
+                    fullWidth
+                    size="small"
+                    label="Credit Duration"
+                    InputLabelProps={{ shrink: true }}
+                    value={creditDays}
+                    onChange={(e) => setCreditDays(e.target.value)}
+                  >
+                    <MenuItem value={15}>15 Days</MenuItem>
+                    <MenuItem value={30}>30 Days</MenuItem>
+                    <MenuItem value={45}>45 Days</MenuItem>
+                    <MenuItem value={60}>60 Days</MenuItem>
+                  </TextField>
+
+                  {selectedCustomer ? (
+                    <Box sx={{ p: 1.25, borderRadius: 2, bgcolor: '#f8fafc', border: '1px solid #e2e8f0' }}>
+                      <SummaryLine label="Outstanding" value={`₹${(parseFloat(selectedCustomer.outstanding) || 0).toLocaleString('en-IN')}`} dense />
+                      <SummaryLine label="Credit Limit" value={`₹${(parseFloat(selectedCustomer.creditLimit) || 0).toLocaleString('en-IN')}`} dense />
+                      <SummaryLine
+                        label="Available Credit"
+                        value={`₹${Math.max(0, (parseFloat(selectedCustomer.creditLimit) || 0) - (parseFloat(selectedCustomer.outstanding) || 0)).toLocaleString('en-IN')}`}
+                        valueColor="#059669"
+                        dense
+                      />
+                    </Box>
+                  ) : (
+                    <Typography variant="caption" color="text.secondary">Select a customer to see available credit.</Typography>
+                  )}
+
+                  {selectedCustomer && summary.grandTotal > Math.max(0, (parseFloat(selectedCustomer.creditLimit) || 0) - (parseFloat(selectedCustomer.outstanding) || 0)) && (
+                    <Alert severity="warning" sx={{ borderRadius: 2, py: 0.25, fontSize: '0.75rem', fontWeight: 600 }}>
+                      This invoice exceeds available credit by ₹{(summary.grandTotal - Math.max(0, (parseFloat(selectedCustomer.creditLimit) || 0) - (parseFloat(selectedCustomer.outstanding) || 0))).toLocaleString('en-IN')}.
+                    </Alert>
+                  )}
+                </Stack>
+              )}
+            </Card>
+
+            {/* ACTIONS */}
+            <Stack spacing={1}>
+              <Button
+                variant="contained"
+                fullWidth
+                size="large"
+                disabled={Boolean(!selectedCustomer || cartItems.length === 0)}
+                onClick={handleAttemptCompleteSale}
+                startIcon={<CheckedIcon />}
+                endIcon={<Chip label="F9" size="small" sx={{ height: 18, fontSize: '0.62rem', fontWeight: 700, bgcolor: 'rgba(255,255,255,0.25)', color: '#fff' }} />}
+                sx={{ bgcolor: '#4f46e5', fontWeight: 800, py: 1.1, textTransform: 'none', '&:hover': { bgcolor: '#4338ca' } }}
+              >
+                Complete Sale
+              </Button>
+              <Stack direction="row" spacing={1}>
+                <Button
+                  fullWidth
+                  size="small"
+                  variant="outlined"
+                  disabled={cartItems.length === 0}
+                  onClick={() => showToast('Draft saved.', 'info')}
+                  startIcon={<SaveIcon />}
+                  sx={{ fontWeight: 700, textTransform: 'none' }}
+                >
+                  Save Draft
+                </Button>
+                <Button
+                  fullWidth
+                  size="small"
+                  variant="outlined"
+                  color="warning"
+                  disabled={cartItems.length === 0}
+                  onClick={handleHoldInvoice}
+                  startIcon={<HoldIcon />}
+                  sx={{ fontWeight: 700, textTransform: 'none' }}
+                >
+                  Hold Invoice
+                </Button>
+              </Stack>
+              <Typography variant="caption" color="text.secondary" sx={{ textAlign: 'center', mt: 0.25 }}>
+                F2 Customer &nbsp;&middot;&nbsp; F3 Product &nbsp;&middot;&nbsp; F9 Complete &nbsp;&middot;&nbsp; Esc Clear
+              </Typography>
+            </Stack>
+          </Stack>
+        </Grid>
+      </Grid>
 
       {/* DIALOG: + ADD WHOLESALE CUSTOMER */}
       <Dialog open={addCustomerOpen} onClose={() => setAddCustomerOpen(false)} maxWidth="sm" fullWidth>
@@ -1559,99 +1277,23 @@ export default function WholesaleSales() {
         onConfirm={executeCompleteSale}
       />
 
-      {/* DIALOG: PRINT GST TAX INVOICE */}
+      {/* DIALOG: PRINT GST TAX INVOICE — rendered by the shared Bill Rendering Engine
+          (template assigned to WHOLESALE_BILL in Settings → Bill & Invoice Designer). */}
       <Dialog open={printModalOpen} onClose={() => setPrintModalOpen(false)} maxWidth="md" fullWidth>
         <DialogTitle sx={{ fontWeight: 850, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span>Wholesale Tax Invoice #{printableInvoice?.invoiceNo}</span>
           <Stack direction="row" spacing={1}>
             <Button size="small" variant="outlined" startIcon={<WhatsAppIcon />} onClick={() => alert("Shared via WhatsApp")}>WhatsApp</Button>
             <Button size="small" variant="outlined" startIcon={<EmailIcon />} onClick={() => alert("Sent via Email")}>Email</Button>
-            <Button size="small" variant="contained" startIcon={<PrintIcon />} onClick={() => window.print()}>Print</Button>
+            <Button size="small" variant="contained" startIcon={<PrintIcon />}
+              onClick={() => printBill({ doc: printableInvoice, documentType: 'WHOLESALE_BILL' })}>
+              Print
+            </Button>
           </Stack>
         </DialogTitle>
-        <DialogContent dividers>
+        <DialogContent dividers sx={{ bgcolor: '#eef2f7', py: 3 }}>
           {printableInvoice && (
-            <Box id="printable-invoice-area" sx={{ p: 2 }}>
-              {/* INVOICE SHOP HEADER */}
-              <Stack direction="row" justifyContent="space-between" sx={{ borderBottom: '2px solid #0f172a', pb: 2, mb: 2 }}>
-                <Box>
-                  <Typography variant="h5" fontWeight={900} color="primary.main">G OPTICALS WHOLESALE</Typography>
-                  <Typography variant="caption" display="block">123 Vision Hub, Commercial Street, Bengaluru - 560001</Typography>
-                  <Typography variant="caption" display="block">GSTIN: 29AAAAA0000A1Z5 • Contact: +91 80 2233 4455</Typography>
-                </Box>
-                <Box textAlign="right">
-                  <Typography variant="h6" fontWeight={850}>TAX INVOICE</Typography>
-                  <Typography variant="caption" display="block">Invoice No: {printableInvoice.invoiceNo}</Typography>
-                  <Typography variant="caption" display="block">Date: {printableInvoice.date}</Typography>
-                </Box>
-              </Stack>
-
-              {/* CUSTOMER DETAILS */}
-              <Paper variant="outlined" sx={{ p: 2, mb: 2, bgcolor: '#f8fafc' }}>
-                <Typography variant="caption" fontWeight={700} color="text.secondary" display="block">Billed To (Wholesale Buyer):</Typography>
-                <Typography variant="subtitle1" fontWeight={850}>{printableInvoice.customer?.name}</Typography>
-                <Typography variant="caption" display="block">Contact: {printableInvoice.customer?.contactPerson} ({printableInvoice.customer?.phone})</Typography>
-                <Typography variant="caption" display="block">GSTIN: {printableInvoice.customer?.gstin || 'N/A'}</Typography>
-                <Typography variant="caption" display="block">Payment Mode: {printableInvoice.payMode} {printableInvoice.refNo ? `(Ref: ${printableInvoice.refNo})` : ''}</Typography>
-              </Paper>
-
-              {/* ITEMS TABLE */}
-              <TableContainer component={Paper} variant="outlined" sx={{ mb: 2 }}>
-                <Table size="small">
-                  <TableHead sx={{ bgcolor: '#f1f5f9' }}>
-                    <TableRow>
-                      <TableCell sx={{ fontWeight: 800 }}>#</TableCell>
-                      <TableCell sx={{ fontWeight: 800 }}>Item & Brand</TableCell>
-                      <TableCell sx={{ fontWeight: 800 }} align="center">Qty</TableCell>
-                      <TableCell sx={{ fontWeight: 800 }} align="right">Rate (₹)</TableCell>
-                      <TableCell sx={{ fontWeight: 800 }} align="center">Disc %</TableCell>
-                      <TableCell sx={{ fontWeight: 800 }} align="right">Total (₹)</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {printableInvoice.items.map((item, i) => {
-                      const lineBase = (parseFloat(item.rate) || 0) * (parseFloat(item.qty) || 0);
-                      const lineDisc = lineBase * ((parseFloat(item.discount) || 0) / 100);
-                      const lineTotal = (lineBase - lineDisc) * 1.18;
-                      return (
-                        <TableRow key={i}>
-                          <TableCell>{i + 1}</TableCell>
-                          <TableCell>
-                            <Typography variant="body2" fontWeight={700}>{item.name}</Typography>
-                            <Typography variant="caption" color="text.secondary">{item.code} • {item.brand}</Typography>
-                          </TableCell>
-                          <TableCell align="center">{item.qty}</TableCell>
-                          <TableCell align="right">₹{item.rate.toFixed(2)}</TableCell>
-                          <TableCell align="center">{item.discount}%</TableCell>
-                          <TableCell align="right" sx={{ fontWeight: 700 }}>₹{lineTotal.toFixed(2)}</TableCell>
-                        </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
-              </TableContainer>
-
-              {/* TOTALS SUMMARY */}
-              <Grid container spacing={2}>
-                <Grid item xs={6}>
-                  <Typography variant="caption" fontWeight={700} display="block">Terms & Conditions:</Typography>
-                  <Typography variant="caption" color="text.secondary" display="block">
-                    1. Goods once sold will not be taken back.<br />
-                    2. Payment due within {printableInvoice.creditDays} days.<br />
-                    3. Subject to Bengaluru Jurisdiction.
-                  </Typography>
-                </Grid>
-                <Grid item xs={6}>
-                  <Stack spacing={0.8} align="right">
-                    <Typography variant="caption">Subtotal: ₹{printableInvoice.summary.subtotal.toFixed(2)}</Typography>
-                    <Typography variant="caption">Discount: -₹{printableInvoice.summary.totalDiscount.toFixed(2)}</Typography>
-                    <Typography variant="caption">GST (18%): +₹{printableInvoice.summary.totalGst.toFixed(2)}</Typography>
-                    <Divider />
-                    <Typography variant="subtitle1" fontWeight={900} color="primary.main">Grand Total: ₹{printableInvoice.summary.grandTotal.toLocaleString('en-IN')}</Typography>
-                  </Stack>
-                </Grid>
-              </Grid>
-            </Box>
+            <BillPreview doc={printableInvoice} documentType="WHOLESALE_BILL" maxWidth={720} />
           )}
         </DialogContent>
         <DialogActions>

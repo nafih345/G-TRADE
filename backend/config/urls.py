@@ -66,6 +66,7 @@ urlpatterns = [
     path('api/health/', health_check_view),
     path('api/auth/', include('apps.authentication.urls')),
     path('api/company/', include('apps.company.urls')),
+    path('api/billing/', include('apps.billing.urls')),
     path('api/masters/', include('apps.masters.urls')),
     path('api/products/', include('apps.products.urls')),
     path('api/import/', include('apps.products.import_urls')),

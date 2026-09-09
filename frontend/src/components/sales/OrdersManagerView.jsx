@@ -139,6 +139,9 @@ export default function OrdersManagerView({
   };
 
   const cfg = DOC_VIEWS[docView];
+  // Map the active document view to a Bill Designer document type so each prints with
+  // its own assigned template.
+  const billDocType = { ORDER: 'ORDER_BILL', QUOTATION: 'QUOTATION', INVOICE: 'SALES_INVOICE' }[docView] || 'SALES_INVOICE';
 
   // Counts across ALL rows, for the top document-type switcher badges
   const totalByType = {
@@ -657,14 +660,14 @@ export default function OrdersManagerView({
                           <Tooltip title={docView === 'QUOTATION' ? 'Print Quotation' : docView === 'ORDER' ? 'Print Lab Job Work Slip' : 'Print Invoice'}>
                             <IconButton size="small" color="inherit" onClick={() => {
                               if (onPrintInvoice) onPrintInvoice(ord);
-                              printSalesInvoiceReceipt(ord);
+                              printSalesInvoiceReceipt(ord, 'A4', billDocType);
                             }}>
                               <PrintIcon fontSize="small" />
                             </IconButton>
                           </Tooltip>
 
                           <Tooltip title="Download PDF">
-                            <IconButton size="small" color="error" onClick={() => downloadPdfInvoice(ord)}>
+                            <IconButton size="small" color="error" onClick={() => downloadPdfInvoice(ord, billDocType)}>
                               <PdfIcon fontSize="small" />
                             </IconButton>
                           </Tooltip>
@@ -813,7 +816,7 @@ export default function OrdersManagerView({
           </DialogContent>
 
           <DialogActions sx={{ p: 2.5 }}>
-            <Button variant="outlined" onClick={() => printSalesInvoiceReceipt(selectedOrder)} startIcon={<PrintIcon />}>
+            <Button variant="outlined" onClick={() => printSalesInvoiceReceipt(selectedOrder, 'A4', billDocType)} startIcon={<PrintIcon />}>
               Print {docView === 'QUOTATION' ? 'Quotation' : docView === 'ORDER' ? 'Job Slip' : 'Invoice'}
             </Button>
             <Button variant="contained" onClick={() => setDetailModalOpen(false)}>
