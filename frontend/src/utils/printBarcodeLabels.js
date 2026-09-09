@@ -112,13 +112,72 @@ export function buildCustomLayout(printerType, dims = {}) {
 }
 
 // Single entry point the dialog and the print job both use to get the active
-// layout: a preset from the lists, or a synthesised custom one.
+// layout: a preset from the lists, a saved template ('tpl:<id>'), or a
+// synthesised custom one. Templates and 'custom' both resolve from the typed
+// dimensions in settings.customA4 / settings.customThermal — picking a template
+// in the dialog just loads its saved dimensions into that bucket.
 export function resolveLayout(settings) {
-  if (settings && settings.sizeId === 'custom') {
+  const sizeId = String(settings?.sizeId || '');
+  if (sizeId === 'custom' || sizeId.startsWith('tpl:')) {
     const dims = settings.printerType === 'a4' ? settings.customA4 : settings.customThermal;
     return buildCustomLayout(settings.printerType, dims);
   }
   return getLayout(settings?.printerType, settings?.sizeId);
+}
+
+// ---------------------------------------------------------------------------
+// Saved custom sheet templates
+// ---------------------------------------------------------------------------
+// Reusable named snapshots of the "Custom" dimensions, kept in localStorage so
+// they persist across sessions and every product's print dialog. Each entry:
+//   { id, name, printerType: 'a4' | 'thermal', dims: { ...same keys as
+//     CUSTOM_A4_DEFAULTS / CUSTOM_THERMAL_DEFAULTS } }
+export const CUSTOM_LAYOUTS_STORAGE_KEY = 'optical_barcode_custom_layouts';
+
+export function loadCustomLayouts() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(CUSTOM_LAYOUTS_STORAGE_KEY) || '[]');
+    return Array.isArray(arr)
+      ? arr.filter((t) => t && t.id && t.name && t.dims)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveCustomLayout(template) {
+  const list = loadCustomLayouts();
+  const idx = list.findIndex((t) => t.id === template.id);
+  if (idx >= 0) list[idx] = template;
+  else list.push(template);
+  try {
+    localStorage.setItem(CUSTOM_LAYOUTS_STORAGE_KEY, JSON.stringify(list));
+  } catch {}
+  return list;
+}
+
+export function deleteCustomLayout(id) {
+  const list = loadCustomLayouts().filter((t) => t.id !== id);
+  try {
+    localStorage.setItem(CUSTOM_LAYOUTS_STORAGE_KEY, JSON.stringify(list));
+  } catch {}
+  return list;
+}
+
+// How many label slots to leave blank before the first real barcode, so a
+// print run can resume on a partially-used sheet. Off unless the user turns on
+// `startPositionEnabled`. For A4 the user picks a start row + column; for a
+// thermal roll they give a flat count.
+export function getStartSkip(layout, settings, printerType) {
+  if (!settings?.startPositionEnabled) return 0;
+  if (printerType === 'a4') {
+    const cols = Math.max(1, layout?.cols || 1);
+    const rows = Math.max(1, layout?.rows || 1);
+    const r = Math.min(Math.max(1, parseInt(settings?.startRow, 10) || 1), rows);
+    const c = Math.min(Math.max(1, parseInt(settings?.startCol, 10) || 1), cols);
+    return (r - 1) * cols + (c - 1);
+  }
+  return Math.max(0, parseInt(settings?.skipLabels, 10) || 0);
 }
 
 export const BARCODE_TYPES = [
@@ -556,6 +615,9 @@ const LABEL_BASE_CSS = `
   .lbl-attr b { font-weight: 800; }
   .lbl-expiry { font-size: 2mm; color: #475569; }
   .lbl-error { font-size: 2.1mm; color: #b91c1c; padding: 1mm; }
+  /* Spacer cells that hold the grid/row position on a partially-used sheet —
+     take up a label slot but print nothing. */
+  .label.label--blank { border-color: transparent !important; }
 `;
 
 // Sectioned jewellery price-tag card. Pure black-on-white, no fills, tight
@@ -797,8 +859,15 @@ export async function printBarcodeLabels(products, settings, businessName) {
     return buildLabelInnerHtml(p, settings, businessName, markup, error, layout);
   });
 
+  // Leave the already-used slots on a partial sheet blank so the first real
+  // label lands on the chosen row/column (A4) or after N positions (thermal).
+  const startSkip = getStartSkip(layout, settings, settings.printerType);
+  const paddedHtmlList = startSkip > 0
+    ? [...Array(startSkip).fill('<div class="label label--blank"></div>'), ...labelHtmlList]
+    : labelHtmlList;
+
   const perPage = settings.printerType === 'a4' ? layout.cols * layout.rows : layout.cols;
-  const sheetsHtml = chunk(labelHtmlList, perPage)
+  const sheetsHtml = chunk(paddedHtmlList, perPage)
     .map((pageLabels) => `<div class="sheet">${pageLabels.join('')}</div>`)
     .join('');
 

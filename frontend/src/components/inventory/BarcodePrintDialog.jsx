@@ -3,14 +3,15 @@ import {
   Dialog, DialogTitle, DialogContent, DialogActions, Button, Box, Grid,
   ToggleButton, ToggleButtonGroup, FormControl, InputLabel, Select, MenuItem,
   RadioGroup, FormControlLabel, Radio, TextField, Checkbox, FormGroup, Typography,
-  Alert, Divider, Stack, FormHelperText
+  Alert, Divider, Stack, FormHelperText, ListSubheader
 } from '@mui/material';
 import {
   THERMAL_SIZES, A4_SHEET_LAYOUTS, BARCODE_TYPES, LABEL_STYLES, BARCODE_SIZES,
   BARCODE_CUSTOM_MIN, BARCODE_CUSTOM_MAX, clampBarcodeCustomPercent,
   CUSTOM_THERMAL_DEFAULTS, CUSTOM_A4_DEFAULTS, resolveLayout, getBarcodeTypeHint,
   getTotalLabelCount, getBarcodeScale, renderBarcodeMarkup, buildLabelInnerHtml,
-  buildStyleBlock, printBarcodeLabels
+  buildStyleBlock, printBarcodeLabels,
+  loadCustomLayouts, saveCustomLayout, deleteCustomLayout, getStartSkip
 } from '../../utils/printBarcodeLabels';
 
 const SETTINGS_STORAGE_KEY = 'optical_barcode_print_settings';
@@ -23,6 +24,10 @@ const DEFAULT_SETTINGS = {
   barcodeCustomScale: 100,
   customThermal: { ...CUSTOM_THERMAL_DEFAULTS },
   customA4: { ...CUSTOM_A4_DEFAULTS },
+  startPositionEnabled: false,
+  startRow: 1,
+  startCol: 1,
+  skipLabels: 0,
   labelStyle: 'jewel',
   quantityMode: 'custom',
   customQuantity: 1,
@@ -99,6 +104,40 @@ function getInitialPersistedSettings() {
   }
 }
 
+// Tiny map of the sheet showing which slots are skipped (grey), where printing
+// resumes (filled) and the still-free slots (outlined). Hidden for very dense
+// sheets where the cells would be unreadably small.
+function StartPositionGrid({ rows, cols, skip }) {
+  if (!rows || !cols || rows * cols > 260) return null;
+  const cells = [];
+  for (let i = 0; i < rows * cols; i += 1) {
+    const isFirst = i === skip;
+    const isUsed = i < skip;
+    cells.push(
+      <Box
+        key={i}
+        sx={{
+          width: 15, height: 11, borderRadius: '2px',
+          border: '1px solid',
+          borderColor: isFirst ? 'primary.main' : isUsed ? 'transparent' : 'divider',
+          bgcolor: isFirst ? 'primary.main' : isUsed ? 'action.disabledBackground' : 'transparent',
+        }}
+      />
+    );
+  }
+  return (
+    <Box
+      sx={{
+        display: 'grid', gap: '3px', my: 1,
+        gridTemplateColumns: `repeat(${cols}, 15px)`,
+        justifyContent: 'start',
+      }}
+    >
+      {cells}
+    </Box>
+  );
+}
+
 // products is always an array — [product] for a single row's print action,
 // or the selected rows for bulk print. The dialog doesn't need to know which.
 export default function BarcodePrintDialog({ open, onClose, products }) {
@@ -106,6 +145,8 @@ export default function BarcodePrintDialog({ open, onClose, products }) {
   const [ephemeral, setEphemeral] = useState(EMPTY_EPHEMERAL);
   const [previewSymbol, setPreviewSymbol] = useState({ markup: '', error: null });
   const [printing, setPrinting] = useState(false);
+  const [customLayouts, setCustomLayouts] = useState(loadCustomLayouts);
+  const [templateName, setTemplateName] = useState('');
 
   const businessName = useMemo(() => getBusinessName(), [open]);
   const validProducts = useMemo(() => (products || []).filter((p) => p && p.barcode), [products]);
@@ -115,13 +156,32 @@ export default function BarcodePrintDialog({ open, onClose, products }) {
     if (open) {
       setSettings(getInitialPersistedSettings());
       setEphemeral(EMPTY_EPHEMERAL);
+      setCustomLayouts(loadCustomLayouts());
+      setTemplateName('');
     }
   }, [open]);
 
   const fullSettings = { ...settings, ...ephemeral };
   const layout = resolveLayout(fullSettings);
-  const sizeOptions = fullSettings.printerType === 'a4' ? A4_SHEET_LAYOUTS : THERMAL_SIZES;
   const totalCount = getTotalLabelCount(validProducts, fullSettings);
+
+  const isCustomLike =
+    fullSettings.sizeId === 'custom' || String(fullSettings.sizeId).startsWith('tpl:');
+  const printerTemplates = customLayouts.filter(
+    (t) => (t.printerType || 'thermal') === fullSettings.printerType
+  );
+  const activeTemplate = printerTemplates.find((t) => `tpl:${t.id}` === fullSettings.sizeId) || null;
+  const presetOptions = fullSettings.printerType === 'a4' ? A4_SHEET_LAYOUTS : THERMAL_SIZES;
+  // A 'tpl:' id whose template was deleted (or belongs to the other printer)
+  // falls back to the plain custom editor so the Select never shows a blank.
+  const sizeValue =
+    presetOptions.some((o) => o.id === fullSettings.sizeId) || activeTemplate
+      ? fullSettings.sizeId
+      : 'custom';
+
+  const startSkip = getStartSkip(layout, fullSettings, fullSettings.printerType);
+  const resumeRow = layout.cols ? Math.floor(startSkip / layout.cols) + 1 : 1;
+  const resumeCol = layout.cols ? (startSkip % layout.cols) + 1 : 1;
   const previewCss = useMemo(
     () => buildStyleBlock(
       layout, fullSettings.printerType,
@@ -159,6 +219,21 @@ export default function BarcodePrintDialog({ open, onClose, products }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, validProducts, fullSettings.barcodeType, previewBarcodeValue]);
 
+  // Keep the A4 start row/column inside the current layout's grid when the
+  // sheet size (and therefore its row/column count) changes.
+  useEffect(() => {
+    if (fullSettings.printerType !== 'a4') return;
+    setSettings((prev) => {
+      const rows = Math.max(1, layout.rows || 1);
+      const cols = Math.max(1, layout.cols || 1);
+      const r = Math.min(Math.max(1, parseInt(prev.startRow, 10) || 1), rows);
+      const c = Math.min(Math.max(1, parseInt(prev.startCol, 10) || 1), cols);
+      if (r === prev.startRow && c === prev.startCol) return prev;
+      return { ...prev, startRow: r, startCol: c };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layout.rows, layout.cols, fullSettings.printerType]);
+
   const updateSetting = (key, value) => {
     if (key in EMPTY_EPHEMERAL) {
       setEphemeral((prev) => ({ ...prev, [key]: value }));
@@ -174,12 +249,67 @@ export default function BarcodePrintDialog({ open, onClose, products }) {
   };
 
   // Updates one dimension inside the custom-size bucket for the active printer type.
+  // Editing while a saved template is selected detaches to a plain "Custom" edit
+  // until the user explicitly saves it back via "Update".
   const updateCustomDim = (field, value) => {
     const bucket = settings.printerType === 'a4' ? 'customA4' : 'customThermal';
     setSettings((prev) => ({
       ...prev,
+      sizeId: String(prev.sizeId).startsWith('tpl:') ? 'custom' : prev.sizeId,
       [bucket]: { ...prev[bucket], [field]: value },
     }));
+  };
+
+  // Picking an entry from the Sheet Layout / Roll Size dropdown. Saved templates
+  // ('tpl:<id>') load their stored dimensions into the custom bucket.
+  const handleSizeChange = (val) => {
+    if (String(val).startsWith('tpl:')) {
+      const tpl = customLayouts.find((t) => `tpl:${t.id}` === val);
+      if (tpl) {
+        const bucket = (tpl.printerType || 'thermal') === 'a4' ? 'customA4' : 'customThermal';
+        setSettings((prev) => ({
+          ...prev,
+          printerType: tpl.printerType || prev.printerType,
+          sizeId: val,
+          [bucket]: { ...prev[bucket], ...tpl.dims },
+        }));
+      }
+      return;
+    }
+    updateSetting('sizeId', val);
+  };
+
+  const handleSaveTemplate = () => {
+    const name = templateName.trim();
+    if (!name) return;
+    const id =
+      (typeof crypto !== 'undefined' && crypto.randomUUID && crypto.randomUUID()) ||
+      `tpl_${Date.now()}`;
+    const dims = settings.printerType === 'a4' ? settings.customA4 : settings.customThermal;
+    setCustomLayouts(
+      saveCustomLayout({ id, name, printerType: settings.printerType, dims: { ...dims } })
+    );
+    setSettings((prev) => ({ ...prev, sizeId: `tpl:${id}` }));
+    setTemplateName('');
+  };
+
+  const handleUpdateTemplate = () => {
+    if (!activeTemplate) return;
+    const dims = settings.printerType === 'a4' ? settings.customA4 : settings.customThermal;
+    setCustomLayouts(
+      saveCustomLayout({
+        ...activeTemplate,
+        printerType: settings.printerType,
+        dims: { ...dims },
+      })
+    );
+    setSettings((prev) => ({ ...prev, sizeId: `tpl:${activeTemplate.id}` }));
+  };
+
+  const handleDeleteTemplate = () => {
+    if (!activeTemplate) return;
+    setCustomLayouts(deleteCustomLayout(activeTemplate.id));
+    setSettings((prev) => ({ ...prev, sizeId: 'custom' }));
   };
 
   const handlePrint = async () => {
@@ -187,7 +317,14 @@ export default function BarcodePrintDialog({ open, onClose, products }) {
     try {
       const { printed } = await printBarcodeLabels(validProducts, fullSettings, businessName);
       if (printed > 0) {
-        localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+        // Reset the "resume on a partial sheet" offset — that sheet has now been
+        // consumed, so the next job should assume a fresh one unless told otherwise.
+        const persisted = {
+          ...settings,
+          startPositionEnabled: false, startRow: 1, startCol: 1, skipLabels: 0,
+        };
+        setSettings(persisted);
+        localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(persisted));
         onClose();
       }
     } finally {
@@ -228,16 +365,25 @@ export default function BarcodePrintDialog({ open, onClose, products }) {
                   <InputLabel>{fullSettings.printerType === 'a4' ? 'Sheet Layout' : 'Roll Size'}</InputLabel>
                   <Select
                     label={fullSettings.printerType === 'a4' ? 'Sheet Layout' : 'Roll Size'}
-                    value={fullSettings.sizeId}
-                    onChange={(e) => updateSetting('sizeId', e.target.value)}
+                    value={sizeValue}
+                    onChange={(e) => handleSizeChange(e.target.value)}
                   >
-                    {sizeOptions.map((opt) => (
+                    {presetOptions.filter((o) => o.id !== 'custom').map((opt) => (
                       <MenuItem key={opt.id} value={opt.id}>{opt.label}</MenuItem>
                     ))}
+                    {printerTemplates.length > 0 && (
+                      <ListSubheader>Saved templates</ListSubheader>
+                    )}
+                    {printerTemplates.map((t) => (
+                      <MenuItem key={t.id} value={`tpl:${t.id}`}>&#9733; {t.name}</MenuItem>
+                    ))}
+                    <MenuItem value="custom">
+                      {fullSettings.printerType === 'a4' ? 'Custom sheet layout…' : 'Custom roll size…'}
+                    </MenuItem>
                   </Select>
                 </FormControl>
 
-                {fullSettings.sizeId === 'custom' && (
+                {isCustomLike && (
                   <Box sx={{ p: 1.5, border: '1px dashed', borderColor: 'divider', borderRadius: 1 }}>
                     <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
                       Enter the exact dimensions from your label sheet / roll (in millimetres).
@@ -264,8 +410,117 @@ export default function BarcodePrintDialog({ open, onClose, products }) {
                     <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
                       {layout.label}
                     </Typography>
+
+                    <Divider sx={{ my: 1.5 }} />
+                    <Typography variant="caption" fontWeight={700} color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+                      {activeTemplate
+                        ? `Editing saved template “${activeTemplate.name}”`
+                        : 'Save this layout to reuse it later'}
+                    </Typography>
+                    <Stack direction="row" spacing={1} alignItems="flex-start" flexWrap="wrap" useFlexGap>
+                      <TextField
+                        size="small"
+                        label="Template name"
+                        value={templateName}
+                        onChange={(e) => setTemplateName(e.target.value)}
+                        sx={{ flex: '1 1 160px' }}
+                      />
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        onClick={handleSaveTemplate}
+                        disabled={!templateName.trim()}
+                        sx={{ mt: 0.25 }}
+                      >
+                        {activeTemplate ? 'Save as new' : 'Save template'}
+                      </Button>
+                      {activeTemplate && (
+                        <Button size="small" variant="outlined" onClick={handleUpdateTemplate} sx={{ mt: 0.25 }}>
+                          Update
+                        </Button>
+                      )}
+                      {activeTemplate && (
+                        <Button size="small" color="error" onClick={handleDeleteTemplate} sx={{ mt: 0.25 }}>
+                          Delete
+                        </Button>
+                      )}
+                    </Stack>
                   </Box>
                 )}
+
+                <Box>
+                  <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mb: 1 }}>
+                    <Typography variant="subtitle2" fontWeight={700}>
+                      Start Position
+                    </Typography>
+                    <ToggleButtonGroup
+                      exclusive
+                      size="small"
+                      value={fullSettings.startPositionEnabled ? 'on' : 'off'}
+                      onChange={(e, val) => val && updateSetting('startPositionEnabled', val === 'on')}
+                    >
+                      <ToggleButton value="off">Off</ToggleButton>
+                      <ToggleButton value="on">On</ToggleButton>
+                    </ToggleButtonGroup>
+                  </Stack>
+
+                  {!fullSettings.startPositionEnabled ? (
+                    <Typography variant="caption" color="text.secondary">
+                      Off — every job starts on a fresh sheet. Turn on to resume printing on a
+                      partly-used label sheet.
+                    </Typography>
+                  ) : fullSettings.printerType === 'a4' ? (
+                    <>
+                      <Stack direction="row" spacing={1.5}>
+                        <TextField
+                          select
+                          size="small"
+                          label="Start row"
+                          value={Math.min(fullSettings.startRow || 1, layout.rows || 1)}
+                          onChange={(e) => updateSetting('startRow', Number(e.target.value))}
+                          sx={{ width: 120 }}
+                        >
+                          {Array.from({ length: layout.rows || 1 }, (_, i) => (
+                            <MenuItem key={i} value={i + 1}>{i + 1}</MenuItem>
+                          ))}
+                        </TextField>
+                        <TextField
+                          select
+                          size="small"
+                          label="Start column"
+                          value={Math.min(fullSettings.startCol || 1, layout.cols || 1)}
+                          onChange={(e) => updateSetting('startCol', Number(e.target.value))}
+                          sx={{ width: 120 }}
+                        >
+                          {Array.from({ length: layout.cols || 1 }, (_, i) => (
+                            <MenuItem key={i} value={i + 1}>{i + 1}</MenuItem>
+                          ))}
+                        </TextField>
+                      </Stack>
+                      <StartPositionGrid rows={layout.rows} cols={layout.cols} skip={startSkip} />
+                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                        {startSkip === 0
+                          ? 'First label prints in the top-left cell.'
+                          : `${startSkip} used label slot${startSkip === 1 ? '' : 's'} left blank; printing resumes at row ${resumeRow}, column ${resumeCol}.`}
+                      </Typography>
+                    </>
+                  ) : (
+                    <Stack direction="row" spacing={1.5} alignItems="center">
+                      <TextField
+                        type="number"
+                        size="small"
+                        label="Skip first labels"
+                        value={fullSettings.skipLabels ?? 0}
+                        onChange={(e) => updateSetting('skipLabels', Math.max(0, parseInt(e.target.value, 10) || 0))}
+                        inputProps={{ min: 0, step: 1 }}
+                        sx={{ width: 150 }}
+                      />
+                      <Typography variant="caption" color="text.secondary">
+                        Leaves this many label positions blank before the first barcode.
+                      </Typography>
+                    </Stack>
+                  )}
+                </Box>
 
                 <FormControl size="small" fullWidth error={!!previewSymbol.error}>
                   <InputLabel>Barcode Type</InputLabel>
