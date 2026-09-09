@@ -45,7 +45,7 @@ const gstinStateCode = (gstin) => {
   return clean.length >= 2 ? clean.slice(0, 2) : null;
 };
 
-const blankRow = (product, overrides = {}, defaultGstPercent = 18, defaultCessPercent = 0, defaultVatPercent = 0) => {
+const blankRow = (product, overrides = {}, defaultGstPercent = 0, defaultCessPercent = 0, defaultVatPercent = 0) => {
   const rate = parseFloat(overrides.purchaseRate ?? product.costPrice ?? product.price ?? 0) || 0;
   const gstPercent = parseFloat(overrides.gstPercent ?? product.taxRate) || defaultGstPercent;
   const mrp = +(rate * 1.4).toFixed(2);
@@ -205,7 +205,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
   const [warehouseId, setWarehouseId] = useState('');
   const [branchId, setBranchId] = useState('');
   const [gstType, setGstType] = useState('EXCLUSIVE');
-  const [defaultGstPercent, setDefaultGstPercent] = useState(18);
+  const [defaultGstPercent, setDefaultGstPercent] = useState(0);
   const [defaultCessPercent, setDefaultCessPercent] = useState(0);
   const [defaultVatPercent, setDefaultVatPercent] = useState(0);
   const [supplierVatNumber, setSupplierVatNumber] = useState('');
@@ -390,7 +390,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
       setPaymentMethod(inv.payment_method || 'CASH');
       setPaidAmount(parseFloat(inv.paid_amount) || 0);
       const items = Array.isArray(inv.items) ? inv.items : [];
-      if (items.length) setDefaultGstPercent(parseFloat(items[0].gst_percent) || 18);
+      if (items.length) setDefaultGstPercent(parseFloat(items[0].gst_percent) || 0);
       setRows(items.map(rowFromInvoiceItem));
       cellRefs.current = {};
     }).catch(() => {
@@ -578,7 +578,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
     setWarehouseId('');
     setBranchId('');
     setGstType('EXCLUSIVE');
-    setDefaultGstPercent(18);
+    setDefaultGstPercent(0);
     setDefaultCessPercent(0);
     setDefaultVatPercent(0);
     setSupplierVatNumber('');

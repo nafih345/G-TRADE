@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { 
   Box, Card, CardContent, Typography, Grid, TextField, 
   MenuItem, Button, Checkbox, FormControlLabel, Paper, 
@@ -173,6 +173,44 @@ export default function SingleScreenEyeTestForm({
   // blocks interaction (pointerEvents) without having to thread a `disabled` prop through every
   // TextField in these sections individually.
   const lockSx = isLocked ? { pointerEvents: 'none', opacity: 0.55, filter: 'grayscale(15%)' } : {};
+
+  // Customer Paid Amount defaults to the balance the patient owes after the
+  // medical aid deduction: Procedure Charge − Medical Aid Charge (e.g. 250 − 100
+  // = 150). It stays in sync as those two charges change until the user types
+  // their own value in the field, which sets customerPaidTouched and stops the
+  // auto-fill. A cleared form (all charge fields blank) drops the override again
+  // so the next visit auto-calculates from scratch.
+  const [customerPaidTouched, setCustomerPaidTouched] = useState(false);
+  const lastAutoPaidRef = useRef(null);
+
+  const autoCustomerBalance = useMemo(() => {
+    const proc = parseFloat(diagnosis?.procedureCharge || 0) || 0;
+    const aid = parseFloat(diagnosis?.medicalAidCharge || 0) || 0;
+    return Math.max(0, proc - aid);
+  }, [diagnosis?.procedureCharge, diagnosis?.medicalAidCharge]);
+
+  useEffect(() => {
+    if (isLocked || customerPaidTouched) return;
+    const current = String(diagnosis?.customerPaidAmount ?? '');
+    // Leave an existing value alone unless it's blank, "0", or a figure this
+    // effect itself last wrote — so a saved partial payment loaded via Edit
+    // isn't clobbered by the auto-calc.
+    const autoOwned = current === '' || current === '0' || current === lastAutoPaidRef.current;
+    if (!autoOwned) return;
+    const next = String(autoCustomerBalance);
+    lastAutoPaidRef.current = next;
+    if (current !== next) setDiagnosis(prev => ({ ...prev, customerPaidAmount: next }));
+  }, [autoCustomerBalance, isLocked, customerPaidTouched, diagnosis?.customerPaidAmount, setDiagnosis]);
+
+  useEffect(() => {
+    const empty = !diagnosis?.procedureCharge && !diagnosis?.medicineCharge &&
+      !diagnosis?.medicalAidCharge && !diagnosis?.customerPaidAmount;
+    if (empty) {
+      lastAutoPaidRef.current = null;
+      if (customerPaidTouched) setCustomerPaidTouched(false);
+    }
+  }, [diagnosis?.procedureCharge, diagnosis?.medicineCharge, diagnosis?.medicalAidCharge,
+      diagnosis?.customerPaidAmount, customerPaidTouched]);
 
   const filteredHistory = safeExams.filter(e => {
     if (!e || e.name === 'Mohammed' || e.patientId === 'P-7375') return false;
@@ -966,20 +1004,12 @@ export default function SingleScreenEyeTestForm({
           (nothing new to save), Rx Print/Clear Form/New Patient must keep working regardless. */}
       <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, bgcolor: '#ffffff', borderColor: '#cbd5e1' }}>
         {/* Row 1: the four charge / medical-aid fields, evenly spaced across the full width. */}
-        <Grid container spacing={2} alignItems="center">
+        <Grid container spacing={2} alignItems="flex-start">
           <Grid item xs={6} sm={3} sx={lockSx}>
             <TextField
               fullWidth size="small" label="Procedure Charge"
               value={diagnosis?.procedureCharge || '0'}
               onChange={(e) => setDiagnosis(prev => ({ ...prev, procedureCharge: e.target.value }))}
-              InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
-            />
-          </Grid>
-          <Grid item xs={6} sm={3} sx={lockSx}>
-            <TextField
-              fullWidth size="small" label="Medicine Charge"
-              value={diagnosis?.medicineCharge || '0'}
-              onChange={(e) => setDiagnosis(prev => ({ ...prev, medicineCharge: e.target.value }))}
               InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
             />
           </Grid>
@@ -1000,8 +1030,27 @@ export default function SingleScreenEyeTestForm({
           <Grid item xs={6} sm={3} sx={lockSx}>
             <TextField
               fullWidth size="small" label="Customer Paid Amount"
-              value={diagnosis?.customerPaidAmount || '0'}
-              onChange={(e) => setDiagnosis(prev => ({ ...prev, customerPaidAmount: e.target.value }))}
+              value={diagnosis?.customerPaidAmount ?? '0'}
+              onChange={(e) => {
+                setCustomerPaidTouched(true);
+                setDiagnosis(prev => ({ ...prev, customerPaidAmount: e.target.value }));
+              }}
+              InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
+              helperText={customerPaidTouched
+                ? 'Manual override — clear the form to resume auto-calc'
+                : `Auto: Procedure − Medical Aid = ₹${autoCustomerBalance}`}
+              FormHelperTextProps={{ sx: { position: 'absolute', top: '100%', mt: 0.25, mx: 0, whiteSpace: 'nowrap' } }}
+              sx={{ position: 'relative' }}
+            />
+          </Grid>
+
+          {/* Medicine / pharmacy charge — kept last, and intentionally left off the on-save
+              confirmation. Still flows onto the printed invoice via handlePrintInvoice. */}
+          <Grid item xs={6} sm={3} sx={lockSx}>
+            <TextField
+              fullWidth size="small" label="Medicine Charge"
+              value={diagnosis?.medicineCharge || '0'}
+              onChange={(e) => setDiagnosis(prev => ({ ...prev, medicineCharge: e.target.value }))}
               InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
             />
           </Grid>
