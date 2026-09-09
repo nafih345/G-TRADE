@@ -73,184 +73,182 @@ export default function AccountsCOA() {
 
   // Backend Sync & Automatic Cross-Module Sync
   useEffect(() => {
-    const fetchAccountsData = async () => {
-      // 1. AUTOMATIC PATIENT RECEIPTS (from POS Sales, Billing Invoices & Payments)
-      let autoReceipts = [];
-      try {
-        const savedInvoices = JSON.parse(localStorage.getItem('optical_sales_invoices') || '[]');
-        const savedPayments = JSON.parse(localStorage.getItem('optical_payments') || '[]');
+    const dedupeBy = (items, key) => {
+      const uniqueMap = new Map();
+      items.forEach(i => uniqueMap.set(i[key], i));
+      return Array.from(uniqueMap.values());
+    };
 
-        savedInvoices.forEach(inv => {
-          if (parseFloat(inv.paidAmount || inv.total || 0) > 0) {
-            autoReceipts.push({
-              id: `REC-${inv.invoiceNumber || inv.id}`,
-              patient: inv.customerName || inv.patientName || 'Walk-in Patient',
-              date: inv.date || new Date().toISOString().split('T')[0],
-              method: inv.paymentMethod || 'UPI/Cash',
-              amount: parseFloat(inv.paidAmount || inv.total || 0),
-              status: 'Completed'
-            });
-          }
-        });
+    // Build every locally-cached pool synchronously first (no network wait) so the ledger can
+    // paint immediately, then fold in the backend's copy once it responds instead of leaving
+    // the page blank for the full round-trip.
+    let localReceipts = [];
+    try {
+      const savedInvoices = JSON.parse(localStorage.getItem('optical_sales_invoices') || '[]');
+      const savedPayments = JSON.parse(localStorage.getItem('optical_payments') || '[]');
 
-        savedPayments.forEach(p => {
-          autoReceipts.push({
-            id: `REC-${p.id || p.receiptId}`,
-            patient: p.customerName || p.patientName || 'Patient',
-            date: p.date || new Date().toISOString().split('T')[0],
-            method: p.method || 'Cash',
-            amount: parseFloat(p.amount || 0),
+      savedInvoices.forEach(inv => {
+        if (parseFloat(inv.paidAmount || inv.total || 0) > 0) {
+          localReceipts.push({
+            id: `REC-${inv.invoiceNumber || inv.id}`,
+            patient: inv.customerName || inv.patientName || 'Walk-in Patient',
+            date: inv.date || new Date().toISOString().split('T')[0],
+            method: inv.paymentMethod || 'UPI/Cash',
+            amount: parseFloat(inv.paidAmount || inv.total || 0),
             status: 'Completed'
           });
-        });
-      } catch (e) {}
-
-      try {
-        const invRes = await axios.get('/api/sales/invoices/?document_type=INVOICE');
-        if (invRes.data && Array.isArray(invRes.data)) {
-          invRes.data.forEach(inv => {
-            const paid = parseFloat(inv.paid_amount || inv.total || 0);
-            if (paid > 0) {
-              autoReceipts.push({
-                id: `REC-${inv.invoice_number || inv.id}`,
-                patient: inv.customer_name || 'Patient',
-                date: inv.created_at ? inv.created_at.split('T')[0] : new Date().toISOString().split('T')[0],
-                method: inv.payment_method || 'Cash',
-                amount: paid,
-                status: 'Completed'
-              });
-            }
-          });
         }
-      } catch (e) {}
+      });
 
-      if (autoReceipts.length > 0) {
-        setReceipts(prev => {
-          const combined = [...prev, ...autoReceipts];
-          const uniqueMap = new Map();
-          combined.forEach(r => uniqueMap.set(r.id, r));
-          return Array.from(uniqueMap.values());
+      savedPayments.forEach(p => {
+        localReceipts.push({
+          id: `REC-${p.id || p.receiptId}`,
+          patient: p.customerName || p.patientName || 'Patient',
+          date: p.date || new Date().toISOString().split('T')[0],
+          method: p.method || 'Cash',
+          amount: parseFloat(p.amount || 0),
+          status: 'Completed'
         });
+      });
+    } catch (e) {}
+
+    // AUTOMATIC SUPPLIER PAYMENTS — local-only, no backend counterpart fetched below.
+    let localSupplierPayments = [];
+    try {
+      const savedDB = JSON.parse(localStorage.getItem('optical_supplier_payments_db') || '[]');
+      if (Array.isArray(savedDB) && savedDB.length > 0) {
+        localSupplierPayments.push(...savedDB);
       }
 
-      // 2. AUTOMATIC SUPPLIER PAYMENTS (from Purchase Orders, LocalStorage DB & Vendor Payments)
-      let autoSupplierPayments = [];
-      try {
-        const savedDB = JSON.parse(localStorage.getItem('optical_supplier_payments_db') || '[]');
-        if (Array.isArray(savedDB) && savedDB.length > 0) {
-          autoSupplierPayments.push(...savedDB);
+      const savedPos = JSON.parse(localStorage.getItem('optical_purchase_orders') || '[]');
+      savedPos.forEach(po => {
+        if (po.status === 'Completed' || po.paid) {
+          localSupplierPayments.push({
+            id: `PAY-${po.id}`,
+            supplier: po.supplier || 'Vendor',
+            date: po.date || new Date().toISOString().split('T')[0],
+            method: 'Bank Transfer',
+            amount: parseFloat(po.total || 0),
+            status: 'Completed'
+          });
         }
+      });
+    } catch (e) {}
 
-        const savedPos = JSON.parse(localStorage.getItem('optical_purchase_orders') || '[]');
-        savedPos.forEach(po => {
-          if (po.status === 'Completed' || po.paid) {
-            autoSupplierPayments.push({
-              id: `PAY-${po.id}`,
-              supplier: po.supplier || 'Vendor',
-              date: po.date || new Date().toISOString().split('T')[0],
-              method: 'Bank Transfer',
-              amount: parseFloat(po.total || 0),
+    let localCustomerDues = [];
+    try {
+      const savedCustomers = JSON.parse(localStorage.getItem('optical_customers') || '[]');
+      savedCustomers.forEach((c, i) => {
+        const bal = parseFloat(c.dueAmount || c.balance || 0);
+        if (bal > 0) {
+          localCustomerDues.push({
+            id: `DUE-${100 + i}`,
+            patient: c.name,
+            phone: c.phone || 'N/A',
+            lastExam: c.lastVisit || new Date().toISOString().split('T')[0],
+            outstanding: bal
+          });
+        }
+      });
+    } catch (e) {}
+
+    let localSupplierDues = [];
+    try {
+      const savedSuppliers = JSON.parse(localStorage.getItem('optical_suppliers') || '[]');
+      savedSuppliers.forEach((sName, i) => {
+        localSupplierDues.push({
+          id: `SDUE-${300 + i}`,
+          supplier: typeof sName === 'string' ? sName : sName.name,
+          phone: typeof sName === 'object' ? sName.phone || 'N/A' : 'N/A',
+          email: typeof sName === 'object' ? sName.email || 'N/A' : 'N/A',
+          balance: typeof sName === 'object' ? parseFloat(sName.balance || 0) : 0
+        });
+      });
+    } catch (e) {}
+
+    if (localReceipts.length > 0) {
+      setReceipts(prev => dedupeBy([...prev, ...localReceipts], 'id'));
+    }
+    if (localSupplierPayments.length > 0) {
+      setPayments(prev => dedupeBy([...prev, ...localSupplierPayments], 'id'));
+    }
+    if (localCustomerDues.length > 0) {
+      setCustomerDue(dedupeBy(localCustomerDues, 'patient'));
+    }
+    if (localSupplierDues.filter(s => s.balance > 0).length > 0) {
+      setSupplierDue(dedupeBy(localSupplierDues.filter(s => s.balance > 0), 'supplier'));
+    }
+
+    const fetchAccountsData = async () => {
+      let autoReceipts = [...localReceipts];
+      let autoCustomerDues = [...localCustomerDues];
+      let autoSupplierDues = [...localSupplierDues];
+
+      const [invRes, custRes, suppRes] = await Promise.all([
+        axios.get('/api/sales/invoices/?document_type=INVOICE').catch(() => null),
+        axios.get('/api/sales/customers/').catch(() => null),
+        axios.get('/api/purchase/suppliers/').catch(() => axios.get('/api/purchasing/suppliers/').catch(() => null))
+      ]);
+
+      if (invRes?.data && Array.isArray(invRes.data)) {
+        invRes.data.forEach(inv => {
+          const paid = parseFloat(inv.paid_amount || inv.total || 0);
+          if (paid > 0) {
+            autoReceipts.push({
+              id: `REC-${inv.invoice_number || inv.id}`,
+              patient: inv.customer_name || 'Patient',
+              date: inv.created_at ? inv.created_at.split('T')[0] : new Date().toISOString().split('T')[0],
+              method: inv.payment_method || 'Cash',
+              amount: paid,
               status: 'Completed'
             });
           }
         });
-      } catch (e) {}
-
-      if (autoSupplierPayments.length > 0) {
-        setPayments(prev => {
-          const combined = [...prev, ...autoSupplierPayments];
-          const uniqueMap = new Map();
-          combined.forEach(p => uniqueMap.set(p.id, p));
-          return Array.from(uniqueMap.values());
-        });
       }
 
-      // 3. AUTOMATIC CUSTOMER DUES
-      let autoCustomerDues = [];
-      try {
-        const savedCustomers = JSON.parse(localStorage.getItem('optical_customers') || '[]');
-        savedCustomers.forEach((c, i) => {
-          const bal = parseFloat(c.dueAmount || c.balance || 0);
+      if (autoReceipts.length > 0) {
+        setReceipts(prev => dedupeBy([...prev, ...autoReceipts], 'id'));
+      }
+
+      // AUTOMATIC CUSTOMER DUES
+      if (custRes?.data && Array.isArray(custRes.data)) {
+        custRes.data.forEach((c, i) => {
+          const bal = parseFloat(c.balance || 0);
           if (bal > 0) {
             autoCustomerDues.push({
-              id: `DUE-${100 + i}`,
+              id: `DUE-API-${100 + i}`,
               patient: c.name,
               phone: c.phone || 'N/A',
-              lastExam: c.lastVisit || new Date().toISOString().split('T')[0],
+              lastExam: c.date || new Date().toISOString().split('T')[0],
               outstanding: bal
             });
           }
         });
-      } catch (e) {}
-
-      try {
-        const custRes = await axios.get('/api/sales/customers/');
-        if (custRes.data && Array.isArray(custRes.data)) {
-          custRes.data.forEach((c, i) => {
-            const bal = parseFloat(c.balance || 0);
-            if (bal > 0) {
-              autoCustomerDues.push({
-                id: `DUE-API-${100 + i}`,
-                patient: c.name,
-                phone: c.phone || 'N/A',
-                lastExam: c.date || new Date().toISOString().split('T')[0],
-                outstanding: bal
-              });
-            }
-          });
-        }
-      } catch (e) {}
-
-      if (autoCustomerDues.length > 0) {
-        const uniqueMap = new Map();
-        autoCustomerDues.forEach(d => uniqueMap.set(d.patient, d));
-        setCustomerDue(Array.from(uniqueMap.values()));
       }
 
-      // 4. AUTOMATIC SUPPLIER DUES
-      let autoSupplierDues = [];
-      try {
-        const savedSuppliers = JSON.parse(localStorage.getItem('optical_suppliers') || '[]');
-        savedSuppliers.forEach((sName, i) => {
-          // Check if supplier has pending POs
-          autoSupplierDues.push({
-            id: `SDUE-${300 + i}`,
-            supplier: typeof sName === 'string' ? sName : sName.name,
-            phone: typeof sName === 'object' ? sName.phone || 'N/A' : 'N/A',
-            email: typeof sName === 'object' ? sName.email || 'N/A' : 'N/A',
-            balance: typeof sName === 'object' ? parseFloat(sName.balance || 0) : 0
-          });
-        });
-      } catch (e) {}
+      if (autoCustomerDues.length > 0) {
+        setCustomerDue(dedupeBy(autoCustomerDues, 'patient'));
+      }
 
-      try {
-        let suppRes;
-        try {
-          suppRes = await axios.get('/api/purchase/suppliers/');
-        } catch (e1) {
-          suppRes = await axios.get('/api/purchasing/suppliers/');
-        }
-        const suppData = suppRes.data?.results || suppRes.data || [];
-        if (Array.isArray(suppData)) {
-          suppData.forEach((s, i) => {
-            const bal = parseFloat(s.balance || 0);
-            if (bal > 0) {
-              autoSupplierDues.push({
-                id: `SDUE-API-${300 + i}`,
-                supplier: s.name,
-                phone: s.phone || 'N/A',
-                email: s.email || 'N/A',
-                balance: bal
-              });
-            }
-          });
-        }
-      } catch (e) {}
+      // AUTOMATIC SUPPLIER DUES
+      const suppData = suppRes?.data?.results || suppRes?.data || [];
+      if (Array.isArray(suppData)) {
+        suppData.forEach((s, i) => {
+          const bal = parseFloat(s.balance || 0);
+          if (bal > 0) {
+            autoSupplierDues.push({
+              id: `SDUE-API-${300 + i}`,
+              supplier: s.name,
+              phone: s.phone || 'N/A',
+              email: s.email || 'N/A',
+              balance: bal
+            });
+          }
+        });
+      }
 
       if (autoSupplierDues.filter(s => s.balance > 0).length > 0) {
-        const uniqueMap = new Map();
-        autoSupplierDues.filter(s => s.balance > 0).forEach(s => uniqueMap.set(s.supplier, s));
-        setSupplierDue(Array.from(uniqueMap.values()));
+        setSupplierDue(dedupeBy(autoSupplierDues.filter(s => s.balance > 0), 'supplier'));
       }
     };
 

@@ -184,7 +184,7 @@ export default function Purchases() {
       }
     } catch(e) {}
 
-    const fetchPurchaseData = async () => {
+    const readLocalSuppliers = () => {
       let localSupps = [];
       try {
         const savedDB = JSON.parse(localStorage.getItem('optical_suppliers_db') || '[]');
@@ -204,7 +204,15 @@ export default function Purchases() {
         localSupps = [];
       }
 
-      localSupps = localSupps.filter(s => !isSampleOrCorrupt(s));
+      return localSupps.filter(s => !isSampleOrCorrupt(s));
+    };
+
+    // Paint instantly from whatever suppliers are already cached locally.
+    const seedSupps = readLocalSuppliers();
+    if (seedSupps.length) setSuppliers(seedSupps);
+
+    const fetchPurchaseData = async () => {
+      const localSupps = readLocalSuppliers();
 
       // Force clean localStorage from any sample or corrupt data
       try {

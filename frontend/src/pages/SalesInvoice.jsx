@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, lazy, Suspense } from 'react';
 import axios from 'axios';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { 
@@ -38,12 +38,20 @@ import {
   BookOnline as AppointmentIcon
 } from '@mui/icons-material';
 
-import SalesDashboardView from '../components/sales/SalesDashboardView';
-import NewSaleWizard from '../components/sales/NewSaleWizard';
-import PosBillingView from '../components/sales/PosBillingView';
-import OrdersManagerView from '../components/sales/OrdersManagerView';
-import PaymentsManagerView from '../components/sales/PaymentsManagerView';
-import PrintInvoiceModal from '../components/sales/PrintInvoiceModal';
+// Each tab view is a large, self-contained sub-app (NewSaleWizard alone is ~2600 lines) that used
+// to be bundled eagerly into this page's chunk regardless of which tab the user actually opened —
+// landing on any one route paid the download/parse cost of every tab. Lazy-loading them means
+// opening e.g. "New Sale" only fetches NewSaleWizard's own chunk.
+const SalesDashboardView = lazy(() => import('../components/sales/SalesDashboardView'));
+const NewSaleWizard = lazy(() => import('../components/sales/NewSaleWizard'));
+const PosBillingView = lazy(() => import('../components/sales/PosBillingView'));
+const OrdersManagerView = lazy(() => import('../components/sales/OrdersManagerView'));
+const PaymentsManagerView = lazy(() => import('../components/sales/PaymentsManagerView'));
+const PrintInvoiceModal = lazy(() => import('../components/sales/PrintInvoiceModal'));
+
+const TabViewFallback = () => (
+  <Box sx={{ pt: 2 }}><LinearProgress /></Box>
+);
 
 // A product's tax can arrive as a numeric %, a "18%" string, null, or (for the raw
 // Product.tax field) a Tax-master UUID. Coerce to a usable GST % and fall back to 18
@@ -137,6 +145,22 @@ export default function SalesInvoice() {
           extra_data: p.extra_data || {},
           image: (p.category || '').toLowerCase().includes('lens') ? '🔍' : '👓'
         })));
+      }
+
+      // Instant first paint: render orders/payments from the local-only pools before the
+      // network round-trip resolves; the merged/authoritative setOrders/setPayments calls
+      // below (after the await) overwrite this once the backend data lands.
+      if (localOrders.length > 0 || localQuotes.length > 0 || localInvoices.length > 0) {
+        const localAllOrders = [...localOrders, ...localQuotes, ...localInvoices];
+        const localUniqueOrders = Array.from(new Map(localAllOrders.map(o => [o.id, o])).values())
+          .map(o => ({
+            ...o,
+            documentType: (o.documentType || o.docType || 'INVOICE').toUpperCase(),
+          }));
+        setOrders(localUniqueOrders);
+      }
+      if (localPayments.length > 0) {
+        setPayments(Array.from(new Map(localPayments.map(p => [p.id, p])).values()));
       }
 
       // DRF pagination wraps list responses as {count, next, previous, results: [...]} rather
@@ -778,20 +802,23 @@ export default function SalesInvoice() {
     <Box sx={{ p: 4, pb: 8 }}>
       {/* 1. SALES DASHBOARD */}
       {activeTab === 'dashboard' && (
-        <SalesDashboardView
-          orders={orders}
-          payments={payments}
-          customers={customersWithLoyalty}
-          onNavigateToNewSale={() => { setActiveTab('new-sale'); navigate('/sales/new'); }}
-          onNavigateToPos={() => { setActiveTab('pos-billing'); navigate('/sales/pos'); }}
-          onOpenRecordPayment={() => setRecordPaymentDialogOpen(true)}
-          onViewOrderDetails={(ord) => { setSelectedOrder(ord); setOrderDetailTab(0); }}
-          onPrintInvoice={(inv) => { setPrintableInvoice(inv); setPrintModalOpen(true); }}
-        />
+        <Suspense fallback={<TabViewFallback />}>
+          <SalesDashboardView
+            orders={orders}
+            payments={payments}
+            customers={customersWithLoyalty}
+            onNavigateToNewSale={() => { setActiveTab('new-sale'); navigate('/sales/new'); }}
+            onNavigateToPos={() => { setActiveTab('pos-billing'); navigate('/sales/pos'); }}
+            onOpenRecordPayment={() => setRecordPaymentDialogOpen(true)}
+            onViewOrderDetails={(ord) => { setSelectedOrder(ord); setOrderDetailTab(0); }}
+            onPrintInvoice={(inv) => { setPrintableInvoice(inv); setPrintModalOpen(true); }}
+          />
+        </Suspense>
       )}
 
       {/* 2. NEW SALE WIZARD */}
       {activeTab === 'new-sale' && (
+        <Suspense fallback={<TabViewFallback />}>
         <NewSaleWizard
           customers={customersWithLoyalty}
           products={products}
@@ -825,11 +852,13 @@ export default function SalesInvoice() {
             setPrintModalOpen(true);
           }}
         />
+        </Suspense>
       )}
 
 
       {/* 3. POS BILLING */}
       {activeTab === 'pos-billing' && (
+        <Suspense fallback={<TabViewFallback />}>
         <PosBillingView
           products={products}
           customers={customersWithLoyalty}
@@ -863,10 +892,12 @@ export default function SalesInvoice() {
             setPrintModalOpen(true);
           }}
         />
+        </Suspense>
       )}
 
       {/* 4. ORDERS */}
       {activeTab === 'orders' && (
+        <Suspense fallback={<TabViewFallback />}>
         <OrdersManagerView
           orders={orders}
           onNavigateToNewSale={() => { setActiveTab('new-sale'); navigate('/sales/new'); }}
@@ -918,6 +949,7 @@ export default function SalesInvoice() {
             }
           }}
         />
+        </Suspense>
       )}
 
       {/* 5. CUSTOMERS */}
@@ -1148,6 +1180,7 @@ export default function SalesInvoice() {
 
       {/* 6. PAYMENTS */}
       {activeTab === 'payments' && (
+        <Suspense fallback={<TabViewFallback />}>
         <PaymentsManagerView
           payments={payments}
           customers={customersWithLoyalty}
@@ -1176,6 +1209,7 @@ export default function SalesInvoice() {
             }
           }}
         />
+        </Suspense>
       )}
 
       {/* 7. REPORTS */}
@@ -2273,11 +2307,13 @@ export default function SalesInvoice() {
       </Dialog>
 
       {/* 🖨️ PRINT INVOICE MODAL */}
-      <PrintInvoiceModal 
-        open={printModalOpen} 
-        onClose={() => setPrintModalOpen(false)} 
-        invoice={printableInvoice} 
-      />
+      <Suspense fallback={null}>
+        <PrintInvoiceModal
+          open={printModalOpen}
+          onClose={() => setPrintModalOpen(false)}
+          invoice={printableInvoice}
+        />
+      </Suspense>
     </Box>
   );
 }

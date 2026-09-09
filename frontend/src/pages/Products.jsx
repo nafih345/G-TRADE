@@ -87,7 +87,7 @@ export default function Products() {
 
   // Sync Registered Suppliers from Purchases Module / API
   useEffect(() => {
-    const fetchRegisteredSuppliers = async () => {
+    const readLocalSuppliers = () => {
       let suppList = [];
       try {
         const local = JSON.parse(localStorage.getItem('optical_suppliers') || '[]');
@@ -95,6 +95,15 @@ export default function Products() {
         const localNames = localDB.map(s => s.name || s.company_name || s.company).filter(Boolean);
         suppList = [...local, ...localNames];
       } catch (e) {}
+      return suppList;
+    };
+
+    // Paint instantly from whatever supplier names are already cached locally.
+    const localSuppList = readLocalSuppliers();
+    if (localSuppList.length) setDbSuppliers(Array.from(new Set(localSuppList)).filter(Boolean));
+
+    const fetchRegisteredSuppliers = async () => {
+      let suppList = readLocalSuppliers();
 
       try {
         let res;
@@ -119,6 +128,14 @@ export default function Products() {
 
   // Fetch Inventory Products from Sales/Products Database & Local Storage
   useEffect(() => {
+    const dedupeProducts = (list) => Array.from(new Map(list.map(item => [item.code || item.barcode || item.name, item])).values());
+
+    // Paint instantly from whatever is already cached locally before waiting on the backend.
+    try {
+      const localSeed = JSON.parse(localStorage.getItem('optical_inventory_items') || '[]');
+      if (localSeed.length) setProducts(dedupeProducts(localSeed));
+    } catch (e) {}
+
     const fetchInventoryProducts = async () => {
       let itemsList = [];
       try {
@@ -159,8 +176,7 @@ export default function Products() {
       } catch (err) {}
 
       // Deduplicate by SKU or Name
-      const unique = Array.from(new Map(itemsList.map(item => [item.code || item.barcode || item.name, item])).values());
-      setProducts(unique);
+      setProducts(dedupeProducts(itemsList));
     };
 
     fetchInventoryProducts();

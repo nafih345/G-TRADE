@@ -126,32 +126,13 @@ export default function PatientHistory() {
 
   // Fetch Database Records (Patients & Past Eye Exams)
   useEffect(() => {
-    const fetchDatabaseRecords = async () => {
-      let custPool = [];
-      let examPool = [];
-
-      try {
-        const localCust = JSON.parse(localStorage.getItem('optical_sales_customers') || '[]');
-        const localExams = JSON.parse(localStorage.getItem('optical_eye_tests') || '[]');
-        custPool = [...localCust];
-        examPool = [...localExams];
-      } catch (e) {}
-
-      try {
-        const resCust = await axios.get('/api/sales/customers/');
-        const custData = resCust.data?.results || resCust.data || [];
-        if (Array.isArray(custData)) {
-          custPool = [...custPool, ...custData];
-        }
-      } catch (e) {}
-
-      try {
-        const resExams = await axios.get('/api/sales/eye-examinations/');
-        const examData = resExams.data?.results || resExams.data || [];
-        if (Array.isArray(examData)) {
-          examPool = [...examPool, ...examData];
-        }
-      } catch (e) {}
+    // Pure transform: raw customer/exam pools (from localStorage and/or the backend) in,
+    // deduped {patients, exams} out. Kept separate from the fetching below so the very fast
+    // local-only pass and the slower backend-merged pass can both render through the same logic
+    // instead of the page sitting blank until the network round-trip finishes.
+    const buildPatientsAndExams = (custPoolIn, examPoolIn) => {
+      let custPool = [...custPoolIn];
+      const examPool = [...examPoolIn];
 
       // Normalize every examination object to unify flat and nested field access
       const normalizedExams = examPool.map(item => {
@@ -249,11 +230,6 @@ export default function PatientHistory() {
         }
       });
 
-      try {
-        const localPatients = JSON.parse(localStorage.getItem('optical_patients') || '[]');
-        custPool = [...custPool, ...localPatients];
-      } catch (e) {}
-
       // Deduplicate and aggregate patient records. A real phone number is a far more reliable
       // "same person" signal than id — id can be missing/malformed on older records (see note
       // above) — so group by phone first when one is present. Without a phone, id alone isn't
@@ -315,6 +291,11 @@ export default function PatientHistory() {
         return (phone && phone !== 'no mobile' && examPhones.has(phone)) || (id && examPatientIds.has(id));
       });
 
+      return { uniqueCust, uniqueExams };
+    };
+
+    const applyPatientsAndExams = (custPool, examPool) => {
+      const { uniqueCust, uniqueExams } = buildPatientsAndExams(custPool, examPool);
       setPatients(uniqueCust);
       setExaminations(uniqueExams);
 
@@ -322,10 +303,49 @@ export default function PatientHistory() {
       if (location.state?.patientId) {
         const match = uniqueCust.find(p => String(p.id).toLowerCase() === String(location.state.patientId).toLowerCase());
         if (match) setSelectedPatientId(getPatientKey(match));
-        else if (uniqueCust.length > 0) setSelectedPatientId(getPatientKey(uniqueCust[0]));
+        else if (uniqueCust.length > 0) setSelectedPatientId(prev => prev || getPatientKey(uniqueCust[0]));
       } else if (uniqueCust.length > 0) {
-        setSelectedPatientId(getPatientKey(uniqueCust[0]));
+        setSelectedPatientId(prev => prev || getPatientKey(uniqueCust[0]));
       }
+    };
+
+    let localCust = [];
+    let localExams = [];
+    try {
+      localCust = JSON.parse(localStorage.getItem('optical_sales_customers') || '[]');
+      localExams = JSON.parse(localStorage.getItem('optical_eye_tests') || '[]');
+    } catch (e) {}
+    try {
+      localCust = [...localCust, ...JSON.parse(localStorage.getItem('optical_patients') || '[]')];
+    } catch (e) {}
+
+    // Paint instantly from whatever is already on this device — no need to wait on the network
+    // for data the browser already has.
+    if (localCust.length || localExams.length) {
+      applyPatientsAndExams(localCust, localExams);
+    }
+
+    const fetchDatabaseRecords = async () => {
+      let custPool = [...localCust];
+      let examPool = [...localExams];
+
+      try {
+        const resCust = await axios.get('/api/sales/customers/');
+        const custData = resCust.data?.results || resCust.data || [];
+        if (Array.isArray(custData)) {
+          custPool = [...custPool, ...custData];
+        }
+      } catch (e) {}
+
+      try {
+        const resExams = await axios.get('/api/sales/eye-examinations/');
+        const examData = resExams.data?.results || resExams.data || [];
+        if (Array.isArray(examData)) {
+          examPool = [...examPool, ...examData];
+        }
+      } catch (e) {}
+
+      applyPatientsAndExams(custPool, examPool);
     };
 
     fetchDatabaseRecords();
@@ -334,20 +354,33 @@ export default function PatientHistory() {
   // Fetch billing / lab / appointment records so the selected patient's 360° history can also
   // show their previous invoices, payments, lab job status, and visit notes — not just eye exams.
   useEffect(() => {
+    // Dedup by id (backend rows and their localStorage mirror share the same id where saved)
+    const dedup = (arr) => Array.from(
+      new Map(arr.filter(Boolean).map(r => [String(r.id || r.receipt_no || r.invoice_number || Math.random()), r])).values()
+    );
+
+    let invPool = [];
+    let payPool = [];
+    let apptPool = [];
+    try {
+      invPool = JSON.parse(localStorage.getItem('optical_sales_invoices') || '[]');
+      payPool = [
+        ...JSON.parse(localStorage.getItem('optical_payments') || '[]'),
+        ...JSON.parse(localStorage.getItem('optical_sales_payments') || '[]')
+      ];
+      apptPool = JSON.parse(localStorage.getItem('optical_appointments') || '[]');
+    } catch (e) {}
+
+    // Show whatever billing history is already cached on this device immediately, then merge
+    // in the backend's copy once it arrives instead of leaving these tabs blank meanwhile.
+    if (invPool.length || payPool.length || apptPool.length) {
+      setInvoices(dedup(invPool));
+      setPayments(dedup(payPool));
+      setAppointments(dedup(apptPool));
+    }
+
     const fetchBillingRecords = async () => {
       const unwrap = (res) => (res && res.data && res.data.results) || (res && res.data) || [];
-      let invPool = [];
-      let payPool = [];
-      let apptPool = [];
-
-      try {
-        invPool = JSON.parse(localStorage.getItem('optical_sales_invoices') || '[]');
-        payPool = [
-          ...JSON.parse(localStorage.getItem('optical_payments') || '[]'),
-          ...JSON.parse(localStorage.getItem('optical_sales_payments') || '[]')
-        ];
-        apptPool = JSON.parse(localStorage.getItem('optical_appointments') || '[]');
-      } catch (e) {}
 
       try {
         const [invRes, payRes, apptRes] = await Promise.all([
@@ -359,11 +392,6 @@ export default function PatientHistory() {
         payPool = [...payPool, ...unwrap(payRes)];
         apptPool = [...apptPool, ...unwrap(apptRes)];
       } catch (e) {}
-
-      // Dedup by id (backend rows and their localStorage mirror share the same id where saved)
-      const dedup = (arr) => Array.from(
-        new Map(arr.filter(Boolean).map(r => [String(r.id || r.receipt_no || r.invoice_number || Math.random()), r])).values()
-      );
 
       setInvoices(dedup(invPool));
       setPayments(dedup(payPool));

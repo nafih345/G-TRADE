@@ -1265,6 +1265,9 @@ function FinancialManagementView() {
       }
     } catch(e) {}
 
+    // Paint immediately from the cached local list before waiting on the network round-trip.
+    if (accList.length > 0) setAccounts(accList);
+
     try {
       const res = await axios.get('/api/financial/accounts/').catch(() => axios.get('/api/accounts/accounts/')).catch(() => null);
       if (res && res.data && Array.isArray(res.data) && res.data.length > 0) {

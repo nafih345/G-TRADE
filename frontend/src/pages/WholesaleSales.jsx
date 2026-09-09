@@ -158,9 +158,12 @@ export default function WholesaleSales() {
 
     const keyOf = (p) => String(p.barcode || p.code || p.sku || p.id || p.name || '').toLowerCase();
 
+    const readLocalProducts = () => {
+      try { return JSON.parse(localStorage.getItem('optical_inventory_items') || '[]'); } catch (e) { return []; }
+    };
+
     const syncInventory = async () => {
-      let local = [];
-      try { local = JSON.parse(localStorage.getItem('optical_inventory_items') || '[]'); } catch (e) {}
+      let local = readLocalProducts();
 
       let backend = [];
       try {
@@ -199,6 +202,11 @@ export default function WholesaleSales() {
         if (!cancelled && Array.isArray(list) && list.length) setInvWarehouseId(String(list[0].id));
       } catch (e) {}
     };
+
+    // Paint instantly from cached inventory — no need to wait on the network round-trip
+    // for data the browser already has.
+    const initialLocal = readLocalProducts();
+    if (initialLocal.length) setProducts(initialLocal);
 
     syncInventory();
     loadWarehouse();

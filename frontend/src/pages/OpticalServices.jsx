@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import axios from 'axios';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { 
@@ -6,7 +6,7 @@ import {
   MenuItem, Table, TableBody, TableCell, TableContainer, 
   TableHead, TableRow, Paper, Divider, Stack, Chip, 
   IconButton, Tooltip, Alert, Dialog, DialogTitle, 
-  DialogContent, DialogActions 
+  DialogContent, DialogActions, LinearProgress
 } from '@mui/material';
 import { 
   Visibility as EyeIcon, 
@@ -23,22 +23,30 @@ import {
   MedicalServices as MedicalIcon
 } from '@mui/icons-material';
 
-// Import Optical Sub-components
-import ExaminationStepper, { stepsList } from '../components/optical/ExaminationStepper';
-import ExaminationSummarySidebar from '../components/optical/ExaminationSummarySidebar';
-import PatientSearchModal from '../components/optical/PatientSearchModal';
-import RxCompareModal from '../components/optical/RxCompareModal';
-import PrintPrescriptionCard from '../components/optical/PrintPrescriptionCard';
-import Step1PatientInfo from '../components/optical/Step1PatientInfo';
-import Step2MedicalHistory from '../components/optical/Step2MedicalHistory';
-import Step3VisualAcuity from '../components/optical/Step3VisualAcuity';
-import Step4ObjectiveRefraction from '../components/optical/Step4ObjectiveRefraction';
-import Step5SubjectiveRefraction from '../components/optical/Step5SubjectiveRefraction';
-import Step6BinocularVision from '../components/optical/Step6BinocularVision';
-import Step7EyeHealth from '../components/optical/Step7EyeHealth';
-import Step8Diagnosis from '../components/optical/Step8Diagnosis';
-import Step9Prescription from '../components/optical/Step9Prescription';
+// Import Optical Sub-components. `layoutMode` defaults to 'single', which only ever needs
+// SingleScreenEyeTestForm — but the 10-step wizard layout (ExaminationStepper + all 9 Step*
+// components) and the two on-demand modals below used to be bundled eagerly too, so every visit
+// to Eye Test paid for code nobody was using yet. Lazy-load everything but the default form.
+import { stepsList } from '../components/optical/ExaminationStepper';
 import SingleScreenEyeTestForm from '../components/optical/SingleScreenEyeTestForm';
+const ExaminationStepper = lazy(() => import('../components/optical/ExaminationStepper'));
+const ExaminationSummarySidebar = lazy(() => import('../components/optical/ExaminationSummarySidebar'));
+const PatientSearchModal = lazy(() => import('../components/optical/PatientSearchModal'));
+const RxCompareModal = lazy(() => import('../components/optical/RxCompareModal'));
+const PrintPrescriptionCard = lazy(() => import('../components/optical/PrintPrescriptionCard'));
+const Step1PatientInfo = lazy(() => import('../components/optical/Step1PatientInfo'));
+const Step2MedicalHistory = lazy(() => import('../components/optical/Step2MedicalHistory'));
+const Step3VisualAcuity = lazy(() => import('../components/optical/Step3VisualAcuity'));
+const Step4ObjectiveRefraction = lazy(() => import('../components/optical/Step4ObjectiveRefraction'));
+const Step5SubjectiveRefraction = lazy(() => import('../components/optical/Step5SubjectiveRefraction'));
+const Step6BinocularVision = lazy(() => import('../components/optical/Step6BinocularVision'));
+const Step7EyeHealth = lazy(() => import('../components/optical/Step7EyeHealth'));
+const Step8Diagnosis = lazy(() => import('../components/optical/Step8Diagnosis'));
+const Step9Prescription = lazy(() => import('../components/optical/Step9Prescription'));
+
+const StepViewFallback = () => (
+  <Box sx={{ pt: 2 }}><LinearProgress /></Box>
+);
 
 // A real backend Customer id is a UUID; local/legacy records use human-readable
 // "P-1001"-style codes as their id, which never match this shape.
@@ -191,20 +199,22 @@ export default function OpticalServices() {
 
   // Sync Patients, Examinations, and Registered Doctors from Database / LocalStorage / API
   useEffect(() => {
-    const fetchDatabaseRecords = async () => {
+    // Pure local-only read (no network) — used both for the instant first paint below and,
+    // re-read fresh, inside fetchDatabaseRecords every time it runs (including the
+    // 'optical_doctors_updated' refresh) so a just-purged/edited local record stays current.
+    const readLocalPools = () => {
       let patientsList = [];
       let testsList = [];
       let docsList = [];
-
       try {
         const localCust = JSON.parse(localStorage.getItem('optical_sales_customers') || '[]');
         const localTests = JSON.parse(localStorage.getItem('optical_eye_tests') || '[]');
         const localDocs = JSON.parse(localStorage.getItem('optical_doctors') || '[]');
-        
+
         // Purge legacy demo records (e.g. Mohammed, P-7375) from localStorage
         const cleanCust = localCust.filter(c => c.name && c.name !== 'Mohammed' && c.id !== 'P-7375');
         const cleanTests = localTests.filter(t => t.name && t.name !== 'Mohammed' && t.patientId !== 'P-7375' && t.id !== 'P-7375');
-        
+
         localStorage.setItem('optical_sales_customers', JSON.stringify(cleanCust));
         localStorage.setItem('optical_eye_tests', JSON.stringify(cleanTests));
 
@@ -212,6 +222,64 @@ export default function OpticalServices() {
         testsList = cleanTests;
         docsList = [...localDocs];
       } catch (e) {}
+      return { patientsList, testsList, docsList };
+    };
+
+    // Sync registered doctors from Doctor Master (optical_doctors_db)
+    const readAdminDocNames = () => {
+      try {
+        const adminDocs = JSON.parse(localStorage.getItem('optical_doctors_db') || '[]');
+        return adminDocs.filter(d => d.status === 'Active').map(d => d.name);
+      } catch (e) { return []; }
+    };
+
+    // Deduplicate patients: prefer patient_code as the identity key so a locally-cached
+    // record (id = "P-1001") and its backend counterpart (id = real UUID, patient_code =
+    // "P-1001") collapse into one entry instead of showing the same patient twice.
+    const buildLists = (patientsList, docsList) => {
+      const uniquePatients = Array.from(
+        new Map(patientsList.map(item => [item.patient_code || item.id || item.phone, item])).values()
+      ).map(p => {
+        // patientData.id is always displayed/typed as the human-readable code; the real
+        // backend link (used to PATCH the same Customer row instead of creating a duplicate)
+        // is tracked separately in customerId.
+        const backendId = isBackendId(p.id) ? p.id : (p.customerId || null);
+        const humanId = p.patient_code || (isBackendId(p.id) ? null : p.id) || p.id;
+        return {
+          ...p,
+          id: humanId,
+          customerId: backendId,
+          // Records fetched straight from the backend carry these as snake_case
+          // (id_type, medical_aid_name, ...); the UI/local cache always reads the
+          // camelCase form, so alias them here rather than at every call site.
+          idType: p.idType || p.id_type || '',
+          idNumber: p.idNumber || p.id_number || '',
+          medicalAidName: p.medicalAidName || p.medical_aid_name || '',
+          medicalAidScheme: p.medicalAidScheme || p.medical_aid_scheme || '',
+          medicalAidMemberNumber: p.medicalAidMemberNumber || p.medical_aid_member_number || ''
+        };
+      });
+      return { uniquePatients, uniqueDocs: Array.from(new Set(docsList.filter(Boolean))) };
+    };
+
+    // Paint instantly from whatever is already on this device — no need to make the whole form
+    // wait on the network for data the browser already has. recordsLoaded stays false until the
+    // backend merge below finishes, so the appointment/edit-exam handoff effect still waits for
+    // the authoritative pool before matching a patient.
+    const localPools = readLocalPools();
+    const localDocsList = [...localPools.docsList, ...readAdminDocNames()];
+    if (localPools.patientsList.length || localPools.testsList.length || localDocsList.length) {
+      const { uniquePatients, uniqueDocs } = buildLists(localPools.patientsList, localDocsList);
+      setDbPatients(uniquePatients);
+      setDoctorsList(uniqueDocs);
+      setPastExaminations(localPools.testsList);
+    }
+
+    const fetchDatabaseRecords = async () => {
+      const local = readLocalPools();
+      let patientsList = local.patientsList;
+      let testsList = local.testsList;
+      let docsList = local.docsList;
 
       try {
         // /api/sales/* endpoints are paginated (DRF PageNumberPagination) — a successful
@@ -284,41 +352,11 @@ export default function OpticalServices() {
         }
       } catch (e) {}
 
-      // Sync registered doctors from Doctor Master (optical_doctors_db)
-      try {
-        const adminDocs = JSON.parse(localStorage.getItem('optical_doctors_db') || '[]');
-        const adminDocNames = adminDocs.filter(d => d.status === 'Active').map(d => d.name);
-        docsList = [...docsList, ...adminDocNames];
-      } catch (e) {}
+      docsList = [...docsList, ...readAdminDocNames()];
 
-      // Deduplicate patients: prefer patient_code as the identity key so a locally-cached
-      // record (id = "P-1001") and its backend counterpart (id = real UUID, patient_code =
-      // "P-1001") collapse into one entry instead of showing the same patient twice.
-      const uniquePatients = Array.from(
-        new Map(patientsList.map(item => [item.patient_code || item.id || item.phone, item])).values()
-      ).map(p => {
-        // patientData.id is always displayed/typed as the human-readable code; the real
-        // backend link (used to PATCH the same Customer row instead of creating a duplicate)
-        // is tracked separately in customerId.
-        const backendId = isBackendId(p.id) ? p.id : (p.customerId || null);
-        const humanId = p.patient_code || (isBackendId(p.id) ? null : p.id) || p.id;
-        return {
-          ...p,
-          id: humanId,
-          customerId: backendId,
-          // Records fetched straight from the backend carry these as snake_case
-          // (id_type, medical_aid_name, ...); the UI/local cache always reads the
-          // camelCase form, so alias them here rather than at every call site.
-          idType: p.idType || p.id_type || '',
-          idNumber: p.idNumber || p.id_number || '',
-          medicalAidName: p.medicalAidName || p.medical_aid_name || '',
-          medicalAidScheme: p.medicalAidScheme || p.medical_aid_scheme || '',
-          medicalAidMemberNumber: p.medicalAidMemberNumber || p.medical_aid_member_number || ''
-        };
-      });
-
+      const { uniquePatients, uniqueDocs } = buildLists(patientsList, docsList);
       setDbPatients(uniquePatients);
-      setDoctorsList(Array.from(new Set(docsList.filter(Boolean))));
+      setDoctorsList(uniqueDocs);
       setPastExaminations(testsList);
       setRecordsLoaded(true);
     };
@@ -643,15 +681,26 @@ export default function OpticalServices() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [activeStep]);
 
-  // Selecting an existing patient restores their own Patient ID and Test No (assigned when
-  // they were first registered) along with their contact/demographic details — Patient ID and
-  // Test No are that patient's permanent identifiers, not freshly generated each visit. A
-  // brand-new patient (typed in directly, never selected) still gets a fresh auto-generated
-  // Patient ID / Test No, since they have no prior record to restore.
-  const handleSelectPatient = (selected) => {
+  // Selecting an existing patient restores their permanent Patient ID (+ the real backend
+  // customerId link) and contact/demographic details, but always starts a NEW visit: a fresh
+  // Test No and a clean clinical form. Patient ID ties every visit back to the one patient;
+  // the Test No identifies this single visit. A returning patient's follow-up must never
+  // silently overwrite an earlier exam — see the editingExamId reset below.
+  // A brand-new patient (typed in directly, never selected) likewise gets a fresh Patient ID
+  // and Test No.
+  const handleSelectPatient = (selected, visitTestNo = '') => {
+    // A returning patient's visit is a brand-new examination record, not an edit of their last
+    // one. Drop any record link / edit-lock left over from a previously saved exam so Save
+    // POSTs a fresh row (new UUID + new Test No) against this same patient and every prior
+    // visit stays untouched in history.
+    setEditingExamId(null);
+    setIsRecordLocked(false);
+    fetchNextTestNo();
+
     setPatientData(prev => ({
       ...prev,
       ...selected,
+      testNo: undefined,
       visitNum: `VIS-${Math.floor(100 + Math.random() * 900)}`,
       appointmentNum: `APT-${Math.floor(1000 + Math.random() * 9000)}`
     }));
@@ -714,7 +763,7 @@ export default function OpticalServices() {
     setPrescription({ selectedLenses: [], frameRecommendation: '', lensRecommendation: '' });
     setDiagnosis(prev => ({
       ...prev,
-      testNo: selected?.testNo || '',
+      testNo: visitTestNo || nextTestNoPreview || '',
       primary: '', icdCode: '', remarks: '', procedure: '', medicine: '', advice: '', nextReview: '', nextReviewDate: '',
       procedureCharge: '0', medicineCharge: '0', medicalAidCharge: '0'
     }));
@@ -770,7 +819,9 @@ export default function OpticalServices() {
       : null;
 
     if (matched) {
-      handleSelectPatient(matched);
+      // This appointment already reserved its own Test No at booking time (a distinct visit) —
+      // carry it into the exam rather than letting handleSelectPatient mint another.
+      handleSelectPatient(matched, apt.testNo);
     } else {
       // The Patient ID/Test No were already assigned (and possibly quoted to the patient) at
       // booking time in Appointments.jsx — use those rather than re-guessing fresh ones here,
@@ -1402,9 +1453,10 @@ export default function OpticalServices() {
         </Box>
       ) : (
         /* Stepper & Live Clinical Workspace Layout */
+        <Suspense fallback={<StepViewFallback />}>
         <Box>
           {/* Horizontal 10-Step Bar */}
-          <ExaminationStepper 
+          <ExaminationStepper
             activeStep={activeStep} 
             setActiveStep={setActiveStep} 
             completedSteps={[]} 
@@ -1555,10 +1607,12 @@ export default function OpticalServices() {
             </Grid>
           </Grid>
         </Box>
+        </Suspense>
       )}
 
       {/* Smart Patient Search & Registration Modal */}
-      <PatientSearchModal 
+      <Suspense fallback={null}>
+      <PatientSearchModal
         open={searchModalOpen}
         onClose={() => setSearchModalOpen(false)}
         onSelectPatient={handleSelectPatient}
@@ -1567,13 +1621,14 @@ export default function OpticalServices() {
       />
 
       {/* Prescription Delta Comparison Modal */}
-      <RxCompareModal 
+      <RxCompareModal
         open={compareModalOpen}
         onClose={() => setCompareModalOpen(false)}
         previousRx={{ od: { sph: '-1.00', cyl: '-0.50' }, os: { sph: '-1.25', cyl: '-0.50' }, nearAdd: '+1.00' }}
         currentRx={subjectiveRefraction}
         patientName={patientData.name}
       />
+      </Suspense>
 
       {/* Keyboard Shortcuts Dialog */}
       <Dialog open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} PaperProps={{ sx: { borderRadius: 3 } }}>

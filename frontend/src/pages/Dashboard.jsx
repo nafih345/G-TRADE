@@ -37,12 +37,18 @@ export default function Dashboard() {
   // Fetch Live Database Data
   useEffect(() => {
     const fetchDashboardData = async () => {
-      // 1. Sales Invoices
+      // Local-storage pools first (both, before any await) so the page paints instantly
+      // instead of purchaseOrders sitting blank behind the Eye Tests/Products network calls.
       try {
         const savedSales = JSON.parse(localStorage.getItem('optical_sales_invoices') || '[]');
         setSalesInvoices(savedSales);
       } catch (e) {}
+      try {
+        const savedPos = JSON.parse(localStorage.getItem('optical_purchase_orders') || '[]');
+        setPurchaseOrders(savedPos);
+      } catch (e) {}
 
+      // 1. Sales Invoices
       try {
         const invRes = await axios.get('/api/sales/invoices/?document_type=INVOICE');
         if (invRes.data && Array.isArray(invRes.data) && invRes.data.length > 0) {
@@ -67,11 +73,6 @@ export default function Dashboard() {
       } catch (e) {}
 
       // 4. Purchase Orders
-      try {
-        const savedPos = JSON.parse(localStorage.getItem('optical_purchase_orders') || '[]');
-        setPurchaseOrders(savedPos);
-      } catch (e) {}
-
       try {
         let poRes;
         try {

@@ -131,6 +131,7 @@ export default function SingleScreenEyeTestForm({
     const procCharge = parseFloat(row.procedureCharge || 0) || 0;
     const medCharge = parseFloat(row.medicineCharge || 0) || 0;
     const aidCharge = parseFloat(row.medicalAidCharge || 0) || 0;
+    const paidAmount = parseFloat(row.customerPaidAmount || 0) || 0;
     const items = [
       { name: 'Eye Examination / Consultation Fee', qty: 1, price: procCharge },
       { name: 'Medicine / Pharmacy Charge', qty: 1, price: medCharge }
@@ -138,6 +139,7 @@ export default function SingleScreenEyeTestForm({
     if (aidCharge) {
       items.push({ name: `Medical Aid Cover${row.medicalAidName ? ` (${row.medicalAidName})` : ''}`, qty: 1, price: -aidCharge });
     }
+    const total = Math.max(0, procCharge + medCharge - aidCharge);
     printSalesInvoiceReceipt({
       invoiceNumber: `EYE-${row.testNo || row.id || ''}`,
       date: row.date,
@@ -145,7 +147,9 @@ export default function SingleScreenEyeTestForm({
       phone: row.phone,
       doctor: row.assignedOptometrist || row.optometrist || row.doctor,
       items,
-      total: Math.max(0, procCharge + medCharge - aidCharge)
+      total,
+      paidAmount,
+      balanceDue: Math.max(0, total - paidAmount)
     }, paperSize);
   };
 
@@ -408,12 +412,24 @@ export default function SingleScreenEyeTestForm({
                   />
                 </Box>
                 <Box sx={{ gridColumn: { md: '5 / 6' } }}>
-                  <TextField
-                    fullWidth
+                  {/* Medical Aid — pick a common scheme or type a custom one. Moved up from the
+                      diagnosis section so the scheme is captured alongside the other patient
+                      details; still bound to patientData.medicalAidName. */}
+                  <Autocomplete
+                    freeSolo
                     size="small"
-                    label="Medical Aid Name"
+                    options={MEDICAL_AID_OPTIONS}
                     value={patientData.medicalAidName || ''}
-                    onChange={(e) => setPatientData(prev => ({ ...prev, medicalAidName: e.target.value }))}
+                    onChange={(e, val) => setPatientData(prev => ({ ...prev, medicalAidName: val || '' }))}
+                    onInputChange={(e, val) => setPatientData(prev => ({ ...prev, medicalAidName: val || '' }))}
+                    renderInput={(params) => (
+                      <TextField
+                        {...params}
+                        fullWidth
+                        label="Medical Aid Name"
+                        placeholder="Scheme / insurer"
+                      />
+                    )}
                   />
                 </Box>
                 <Box sx={{ gridColumn: { md: '6 / 7' } }}>
@@ -968,32 +984,6 @@ export default function SingleScreenEyeTestForm({
             />
           </Grid>
 
-          {/* Medical Aid — pick a common scheme or type a custom one. Bound to the same
-              patientData.medicalAidName captured in the patient-registration section, so setting
-              it here fills that field (and vice-versa) and it flows into the saved visit /
-              customer record on Save Clinical Record. */}
-          <Grid item xs={6} sm={3}>
-            <Autocomplete
-              freeSolo
-              size="small"
-              options={MEDICAL_AID_OPTIONS}
-              value={patientData.medicalAidName || ''}
-              onChange={(e, val) => setPatientData(prev => ({ ...prev, medicalAidName: val || '' }))}
-              onInputChange={(e, val) => setPatientData(prev => ({ ...prev, medicalAidName: val || '' }))}
-              renderInput={(params) => (
-                <TextField
-                  {...params}
-                  label="Medical Aid"
-                  placeholder="Scheme / insurer"
-                  InputProps={{
-                    ...params.InputProps,
-                    startAdornment: <InputAdornment position="start"><MedicalIcon fontSize="small" color="action" /></InputAdornment>
-                  }}
-                />
-              )}
-            />
-          </Grid>
-
           {/* Amount claimed from / covered by the medical aid — deducted from the patient's
               payable on the printed invoice (see handlePrintInvoice). */}
           <Grid item xs={6} sm={3} sx={lockSx}>
@@ -1001,6 +991,17 @@ export default function SingleScreenEyeTestForm({
               fullWidth size="small" label="Medical Aid Charge"
               value={diagnosis?.medicalAidCharge || '0'}
               onChange={(e) => setDiagnosis(prev => ({ ...prev, medicalAidCharge: e.target.value }))}
+              InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
+            />
+          </Grid>
+
+          {/* Amount the customer actually paid — shown as a Paid line on the printed invoice
+              with any remainder as Balance Due (see handlePrintInvoice). */}
+          <Grid item xs={6} sm={3} sx={lockSx}>
+            <TextField
+              fullWidth size="small" label="Customer Paid Amount"
+              value={diagnosis?.customerPaidAmount || '0'}
+              onChange={(e) => setDiagnosis(prev => ({ ...prev, customerPaidAmount: e.target.value }))}
               InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
             />
           </Grid>

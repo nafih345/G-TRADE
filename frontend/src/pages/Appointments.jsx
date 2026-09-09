@@ -200,6 +200,18 @@ export default function Appointments() {
 
   // Fetch Database Records (Appointments, Patients, Doctors)
   useEffect(() => {
+    // Dedup + set state from whatever pools are passed in — called once with the local-only
+    // pools for an instant first paint, then again once the backend data has merged in.
+    const applyPools = (aptList, custPool, docPool) => {
+      const uniqueApts = Array.from(new Map(aptList.map(a => [a.id, a])).values());
+      const uniqueCust = Array.from(new Map(custPool.map(c => [c.name || c.phone, c])).values());
+      const uniqueDocs = Array.from(new Set(docPool.filter(Boolean)));
+
+      setAppointments(uniqueApts);
+      setDbPatients(uniqueCust);
+      setRegisteredDoctors(uniqueDocs);
+    };
+
     const fetchDatabaseRecords = async () => {
       let aptList = [];
       let custPool = [];
@@ -216,6 +228,12 @@ export default function Appointments() {
         custPool = [...localCust];
         docPool = [...localDocs, ...adminDocNames];
       } catch (e) {}
+
+      // Paint instantly from whatever is already cached on this device — no need to wait on
+      // the network round-trip for data the browser already has.
+      if (aptList.length || custPool.length || docPool.length) {
+        applyPools(aptList, custPool, docPool);
+      }
 
       // API fetches — /api/sales/* endpoints are paginated (DRF PageNumberPagination), so a
       // successful response is {count, next, previous, results}, not a bare array.
@@ -246,14 +264,7 @@ export default function Appointments() {
         }
       } catch (e) {}
 
-      // Deduplicate
-      const uniqueApts = Array.from(new Map(aptList.map(a => [a.id, a])).values());
-      const uniqueCust = Array.from(new Map(custPool.map(c => [c.name || c.phone, c])).values());
-      const uniqueDocs = Array.from(new Set(docPool.filter(Boolean)));
-
-      setAppointments(uniqueApts);
-      setDbPatients(uniqueCust);
-      setRegisteredDoctors(uniqueDocs);
+      applyPools(aptList, custPool, docPool);
     };
 
     fetchDatabaseRecords();
