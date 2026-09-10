@@ -73,8 +73,14 @@ function adaptSalesLike(doc, documentType) {
       qty,
       unit: first(it.unit, it.uom) || '',
       rate,
-      discount: num(first(it.discount, it.discount_amount, it.discountAmount, 0)),
-      discountPercent: it.discount_percent !== undefined ? num(it.discount_percent) : null,
+      // `disc` / `discPercent` are what the sales billing grid stores per line (a line's
+      // discount can be entered as a % or as a flat ₹ amount — both are always derived).
+      discount: num(first(it.discount, it.discount_amount, it.discountAmount, it.disc, 0)),
+      // Percent is only printed when the line was actually discounted BY a percent — a flat
+      // ₹ discount prints as money, so the bill shows the figure that was entered.
+      discountPercent: it.discount_percent !== undefined
+        ? num(it.discount_percent)
+        : ((it.discMode !== 'AMT' && num(it.discPercent) > 0) ? num(it.discPercent) : null),
       taxPercent: it.taxPercent !== undefined ? num(it.taxPercent)
         : (it.tax_rate !== undefined ? num(it.tax_rate) : null),
       taxAmount: num(first(it.taxAmount, it.tax_amount, it.tax, 0)),
@@ -110,7 +116,7 @@ function adaptSalesLike(doc, documentType) {
       number: first(doc.invoiceNumber, doc.invoice_number, doc.id, doc.number) || '',
       orderNumber: first(doc.orderNumber, doc.order_number, doc.order_ref) || '',
       date: first(doc.date, doc.invoice_date, new Date().toISOString().split('T')[0]),
-      dueDate: first(doc.dueDate, doc.due_date) || '',
+      dueDate: first(doc.dueDate, doc.due_date, doc.deliveryDate, doc.delivery_date) || '',
       paymentStatus: status,
       salesperson: first(doc.salesman, doc.salesperson, doc.doctor, doc.optometrist) || '',
       branch: first(doc.branch, doc.branch_name) || '',

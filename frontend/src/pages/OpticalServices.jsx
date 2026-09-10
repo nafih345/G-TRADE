@@ -52,6 +52,109 @@ const StepViewFallback = () => (
 // "P-1001"-style codes as their id, which never match this shape.
 const isBackendId = (id) => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
 
+// One visit's identity, for collapsing duplicates. An exam that reached the backend carries
+// a real row UUID (backendId) — that's the strongest key. Otherwise fall back to Patient ID +
+// Test No, which is fixed for the life of a visit. Blank on both -> no usable key.
+const examTestNoOf = (t) => (t?.testNo ?? t?.test_no ?? t?.diagnosisData?.testNo ?? t?.raw_data?.testNo ?? '').toString().trim();
+const examPatientIdOf = (t) => (t?.patientId ?? t?.patient_id ?? t?.patientData?.id ?? '').toString().trim();
+const examVisitKey = (t) => {
+  const pid = examPatientIdOf(t);
+  const tno = examTestNoOf(t);
+  return (pid || tno) ? `${pid}|${tno}` : '';
+};
+
+// The merged Recent Examination Directory is (local cache) ++ (backend rows) with no natural
+// join key, so the same visit can land in it two or three times: a locally-cached copy saved
+// before it synced, plus the authoritative backend row, plus an older cache entry keyed by a
+// stale preview number. Collapse them — backend row wins, local-only visits are kept once.
+const dedupeExams = (list) => {
+  const backendById = new Map();
+  const backendVisitKeys = new Set();
+  for (const t of list) {
+    if (!t?.backendId) continue;
+    if (!backendById.has(t.backendId)) backendById.set(t.backendId, t);
+    const vk = examVisitKey(t);
+    if (vk) backendVisitKeys.add(vk);
+  }
+  const out = [...backendById.values()];
+  const localKeys = new Set();
+  for (const t of list) {
+    if (t?.backendId) continue; // already represented by the backend copy above
+    const vk = examVisitKey(t);
+    if (vk && backendVisitKeys.has(vk)) continue; // same visit as a synced backend row
+    const key = vk || t?.id || null;
+    if (key) {
+      if (localKeys.has(key)) continue;
+      localKeys.add(key);
+    }
+    out.push(t);
+  }
+  return out;
+};
+
+// Rebuilds the Clinical Refraction & Measurement Grid state (UCVA/PHVA, AR, Streak retinoscopy,
+// IOP, lens options, orthoptics) for an exam being opened in Edit mode. Prefers the complete
+// raw_data snapshot; falls back to the flat backend columns (`flat`) for records saved before
+// those objects were snapshotted, so nothing in the grid comes back blank.
+const buildClinicalGridState = (raw = {}, flat = {}) => {
+  const pick = (...vals) => vals.find(v => v !== undefined && v !== null && v !== '') ?? '';
+  const rawVa = raw.visualAcuity || {};
+  const rawObj = raw.objectiveRefraction || {};
+  const rawEye = raw.eyeHealth || {};
+  return {
+    visualAcuity: {
+      distance: {
+        odWo: pick(rawVa.distance?.odWo, flat.va_od_distance_unaided),
+        osWo: pick(rawVa.distance?.osWo, flat.va_os_distance_unaided),
+        odWith: pick(rawVa.distance?.odWith, flat.va_od_distance_corrected),
+        osWith: pick(rawVa.distance?.osWith, flat.va_os_distance_corrected),
+        odPinhole: pick(rawVa.distance?.odPinhole, flat.va_od_pinhole),
+        osPinhole: pick(rawVa.distance?.osPinhole, flat.va_os_pinhole),
+      },
+      near: {
+        odWo: pick(rawVa.near?.odWo, flat.va_od_near), osWo: pick(rawVa.near?.osWo, flat.va_os_near),
+        odWith: rawVa.near?.odWith || '', osWith: rawVa.near?.osWith || '',
+      },
+      colorVision: rawVa.colorVision || 'Normal',
+      contrastSensitivity: rawVa.contrastSensitivity || 'Normal',
+      dominantEye: rawVa.dominantEye || 'Right (OD)',
+    },
+    objectiveRefraction: {
+      autoRefraction: {
+        od: {
+          sph: pick(rawObj.autoRefraction?.od?.sph, flat.ar_sph_od),
+          cyl: pick(rawObj.autoRefraction?.od?.cyl, flat.ar_cyl_od),
+          axis: pick(rawObj.autoRefraction?.od?.axis, flat.ar_axis_od),
+          va: rawObj.autoRefraction?.od?.va || '', pd: pick(rawObj.autoRefraction?.od?.pd, flat.distance_pd),
+        },
+        os: {
+          sph: pick(rawObj.autoRefraction?.os?.sph, flat.ar_sph_os),
+          cyl: pick(rawObj.autoRefraction?.os?.cyl, flat.ar_cyl_os),
+          axis: pick(rawObj.autoRefraction?.os?.axis, flat.ar_axis_os),
+          va: rawObj.autoRefraction?.os?.va || '', pd: rawObj.autoRefraction?.os?.pd || '',
+        },
+      },
+      retinoscopy: {
+        od: { sph: rawObj.retinoscopy?.od?.sph || '', cyl: rawObj.retinoscopy?.od?.cyl || '', axis: rawObj.retinoscopy?.od?.axis || '', va: rawObj.retinoscopy?.od?.va || '' },
+        os: { sph: rawObj.retinoscopy?.os?.sph || '', cyl: rawObj.retinoscopy?.os?.cyl || '', axis: rawObj.retinoscopy?.os?.axis || '', va: rawObj.retinoscopy?.os?.va || '' },
+      },
+      kReading: rawObj.kReading || { odK1: '', odK2: '', osK1: '', osK2: '', cornealRadius: '', streakNotes: '' },
+    },
+    eyeHealth: {
+      anterior: rawEye.anterior || { lids: '', lashes: '', conjunctiva: '', cornea: '', iris: '', lens: '', anteriorChamber: '' },
+      posterior: rawEye.posterior || { disc: '', macula: '', retina: '', vessels: '' },
+      iop: {
+        od: pick(rawEye.iop?.od, flat.iop_od), os: pick(rawEye.iop?.os, flat.iop_os),
+        method: rawEye.iop?.method || '',
+      },
+      cupDiscRatio: rawEye.cupDiscRatio || { od: '', os: '' },
+      dilatedExam: rawEye.dilatedExam || '',
+    },
+    binocularVision: raw.binocularVision || {},
+    prescription: raw.prescription || { selectedLenses: [], frameRecommendation: '', lensRecommendation: '' },
+  };
+};
+
 export default function OpticalServices() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -86,6 +189,11 @@ export default function OpticalServices() {
   // against genuinely sequential requests. The loser hits a raw IntegrityError instead of the
   // graceful re-roll perform_create otherwise guarantees.
   const savingPatientRef = useRef(false);
+  // Same idea for the "Save Clinical Record" button: a bounced Enter keypress or a stray
+  // double-click was firing handleSaveDraft twice before the first call's POST resolved. Both
+  // reads saw editingExamId still null, so both POSTed — producing two EyeExamination rows
+  // (each minting its own fresh test_no) for a single save.
+  const savingDraftRef = useRef(false);
 
   // Core Examination State
   const [patientData, setPatientData] = useState({
@@ -272,7 +380,7 @@ export default function OpticalServices() {
       const { uniquePatients, uniqueDocs } = buildLists(localPools.patientsList, localDocsList);
       setDbPatients(uniquePatients);
       setDoctorsList(uniqueDocs);
-      setPastExaminations(localPools.testsList);
+      setPastExaminations(dedupeExams(localPools.testsList));
     }
 
     const fetchDatabaseRecords = async () => {
@@ -280,6 +388,7 @@ export default function OpticalServices() {
       let patientsList = local.patientsList;
       let testsList = local.testsList;
       let docsList = local.docsList;
+      let testsFetchOk = false;
 
       try {
         // /api/sales/* endpoints are paginated (DRF PageNumberPagination) — a successful
@@ -335,9 +444,23 @@ export default function OpticalServices() {
             // UUID and the backend's authoritative test_no back on afterwards so "Load Exam"/
             // "Edit" can actually resume editing the same row instead of cloning it.
             backendId: item.id,
-            testNo: item.test_no || item.raw_data?.testNo
+            testNo: item.test_no || item.raw_data?.testNo,
+            // The backend columns are the authoritative identity of the visit — prefer them
+            // over a possibly-blank raw_data snapshot so "Edit" always resumes the right row
+            // and never regenerates the Patient ID / Test No on save.
+            patientId: item.patient_id || item.raw_data?.patientId || item.raw_data?.patientData?.id || '',
+            patientData: {
+              ...(item.raw_data?.patientData || {}),
+              id: item.patient_id || item.raw_data?.patientData?.id || item.raw_data?.patientId || ''
+            },
+            // Clinical Refraction & Measurement Grid, reconstructed from the raw_data snapshot
+            // merged with the flat DB columns — so opening this row in Edit prefills UCVA/PHVA,
+            // AR, Streak, IOP and lens options even for records saved before the snapshot
+            // carried those objects.
+            ...buildClinicalGridState(item.raw_data || {}, item)
           })).filter(t => t.name && t.name !== 'Mohammed' && t.patientId !== 'P-7375');
           testsList = [...testsList, ...apiTests];
+          testsFetchOk = true;
         }
       } catch (e) {}
 
@@ -357,7 +480,21 @@ export default function OpticalServices() {
       const { uniquePatients, uniqueDocs } = buildLists(patientsList, docsList);
       setDbPatients(uniquePatients);
       setDoctorsList(uniqueDocs);
-      setPastExaminations(testsList);
+      // Backend rows are appended last, so dedupeExams keeps them and drops the matching
+      // local-cache copies — the directory shows each visit exactly once.
+      const mergedTests = dedupeExams(testsList);
+      setPastExaminations(mergedTests);
+      // Converge the local cache onto what actually synced: keep only visits with no backend
+      // row yet, so next reload can't resurrect a stale duplicate. Backend-backed visits are
+      // re-fetched fresh every load anyway. Only do this when the exam fetch actually
+      // succeeded — otherwise an offline load would wipe records that are safe on the server
+      // but not reachable right now.
+      if (testsFetchOk) {
+        try {
+          const unsynced = mergedTests.filter(t => !t.backendId);
+          localStorage.setItem('optical_eye_tests', JSON.stringify(unsynced));
+        } catch (e) {}
+      }
       setRecordsLoaded(true);
     };
 
@@ -785,11 +922,17 @@ export default function OpticalServices() {
     // corrections save back over the same visit instead of starting a blank new one.
     if (editExam) {
       const raw = editExam.raw_data || {};
+      // The backend's authoritative values for this exact visit — an edit must reuse these,
+      // never regenerate them. editExam.test_no is the real persisted test_no; editExam.testNo
+      // is only the stale client-side snapshot (blank on records saved before this was fixed).
+      const lockedTestNo = editExam.test_no || editExam.testNo || raw.diagnosisData?.testNo || raw.diagnosis?.testNo || '';
+      const lockedPatientId = editExam.patient_id || editExam.patientId || raw.patientData?.id || '';
       setEditingExamId(editExam.backendId || null);
+      setIsRecordLocked(false);
       setPatientData(prev => ({
         ...prev,
         ...(raw.patientData || {}),
-        id: editExam.patientId || raw.patientData?.id || prev.id,
+        id: lockedPatientId || prev.id,
         customerId: editExam.customerId || raw.patientData?.customerId || prev.customerId,
         name: editExam.name || raw.patientData?.name || '',
         phone: editExam.phone || raw.patientData?.phone || '',
@@ -797,12 +940,26 @@ export default function OpticalServices() {
       }));
       if (editExam.subjectiveRefraction) setSubjectiveRefraction(editExam.subjectiveRefraction);
       if (editExam.medicalHistory) setMedicalHistory(prev => ({ ...prev, ...editExam.medicalHistory }));
-      if (raw.diagnosis) {
-        setDiagnosis(raw.diagnosis);
+      // raw.diagnosisData is the full diagnosis object (charges, testNo, primary, ...); older
+      // snapshots only stored raw.diagnosis as a plain string, so fall back to that.
+      if (raw.diagnosisData && typeof raw.diagnosisData === 'object') {
+        setDiagnosis({ ...raw.diagnosisData, testNo: lockedTestNo || raw.diagnosisData.testNo || '' });
+      } else if (raw.diagnosis && typeof raw.diagnosis === 'object') {
+        setDiagnosis({ ...raw.diagnosis, testNo: lockedTestNo || raw.diagnosis.testNo || '' });
       } else {
-        setDiagnosis(prev => ({ ...prev, primary: editExam.diagnosis || '', testNo: editExam.testNo || prev.testNo }));
+        setDiagnosis(prev => ({ ...prev, primary: (typeof raw.diagnosis === 'string' ? raw.diagnosis : '') || editExam.diagnosis || '', testNo: lockedTestNo || prev.testNo }));
       }
-      if (raw.prescription) setPrescription(raw.prescription);
+      // Clinical Refraction & Measurement Grid — UCVA/PHVA, AR, Streak, IOP, lens options,
+      // orthoptics. Rebuilt from the raw_data snapshot (falling back to the flat DB columns on
+      // editExam itself) so every grid field prefills instead of coming back blank.
+      const grid = buildClinicalGridState(raw, editExam);
+      setVisualAcuity(grid.visualAcuity);
+      setObjectiveRefraction(grid.objectiveRefraction);
+      setEyeHealth(grid.eyeHealth);
+      if (grid.binocularVision && Object.keys(grid.binocularVision).length) {
+        setBinocularVision(prev => ({ ...prev, ...grid.binocularVision }));
+      }
+      setPrescription(grid.prescription);
       return;
     }
 
@@ -1018,16 +1175,38 @@ export default function OpticalServices() {
       return;
     }
 
+    // See savingDraftRef's declaration — refuse a second overlapping call so a bounced
+    // Enter / double-click can't POST two duplicate exam rows.
+    if (savingDraftRef.current) return;
+    savingDraftRef.current = true;
+
+    // Are we editing an exam that's already on record? (Either arrived here via Patient
+    // History's "Edit", loaded from the directory table, or just saved this session.) If so,
+    // the visit's identity is fixed: reuse the existing Patient ID / Test No and PATCH — never
+    // regenerate them, never fall through to getNextPatientId()/nextTestNoPreview, which is
+    // what produced a brand-new patient code + test number on every edit.
+    const isEditingExisting = Boolean(editingExamId);
+    // The record being edited, as last loaded from the backend/directory — its patientId /
+    // testNo are the authoritative identity of this visit and must survive the edit even if
+    // the on-screen fields were blanked while loading an older snapshot.
+    const editingSource = isEditingExisting
+      ? (pastExaminations || []).find(t => t.backendId && t.backendId === editingExamId)
+      : null;
+
     // The Patient ID / Test No fields show auto-generated placeholders (P-1001, "1", ...) until
     // the user types over them, but those display values were never written back into state —
     // so saved records ended up with a blank patient ID / test no. Persist the same auto values
     // now (matching the exact formula SingleScreenEyeTestForm uses to display them).
-    const effectivePatientId = patientData?.id || getNextPatientId();
-    const effectiveTestNo = diagnosis?.testNo || nextTestNoPreview || (pastExaminations?.length + 1).toString();
-    if (!patientData?.id) {
+    const effectivePatientId = patientData?.id
+      || editingSource?.patientId
+      || (isEditingExisting ? '' : getNextPatientId());
+    const effectiveTestNo = diagnosis?.testNo
+      || editingSource?.testNo
+      || (isEditingExisting ? '' : (nextTestNoPreview || (pastExaminations?.length + 1).toString()));
+    if (!patientData?.id && effectivePatientId) {
       setPatientData(prev => ({ ...prev, id: effectivePatientId }));
     }
-    if (!diagnosis?.testNo) {
+    if (!diagnosis?.testNo && effectiveTestNo) {
       setDiagnosis(prev => ({ ...prev, testNo: effectiveTestNo }));
     }
 
@@ -1037,6 +1216,9 @@ export default function OpticalServices() {
       // (e.g. clicking Save again after filling in more sections) replaces this exact local
       // entry instead of appending a lookalike duplicate row to the Recent Examination Directory.
       id: `${effectivePatientId}_${effectiveTestNo}`,
+      // The real EyeExamination row this local entry mirrors (set once known). Loading it from
+      // the directory reads this to PATCH the same row instead of POSTing a duplicate.
+      backendId: editingExamId || editingSource?.backendId || null,
       date: new Date().toISOString().split('T')[0],
       testNo: effectiveTestNo,
       patientId: effectivePatientId,
@@ -1054,10 +1236,24 @@ export default function OpticalServices() {
       medicalAidCharge: diagnosis?.medicalAidCharge || '0',
       medicalAidName: patientData?.medicalAidName || '',
       rx: `OD: ${subjectiveRefraction?.od?.sph || ''} SPH / ${subjectiveRefraction?.od?.cyl || ''} CYL @ ${subjectiveRefraction?.od?.axis || ''}° | OS: ${subjectiveRefraction?.os?.sph || ''} SPH / ${subjectiveRefraction?.os?.cyl || ''} CYL @ ${subjectiveRefraction?.os?.axis || ''}°`,
-      patientData,
+      // Snapshot patientData with the resolved identity baked in — the raw patientData in state
+      // can still carry a blank id (the setPatientData above is async), and loading that blank
+      // snapshot back via Edit is exactly what made the next save mint a fresh Patient ID.
+      patientData: { ...patientData, id: effectivePatientId, testNo: effectiveTestNo },
       subjectiveRefraction,
       medicalHistory,
-      prescription
+      prescription,
+      // Full diagnosis object (charges, testNo, primary, advice, ...) so an edit restores every
+      // field, not just the primary-diagnosis string kept in `diagnosis` above for the table.
+      diagnosisData: diagnosis,
+      // The Clinical Refraction & Measurement Grid state — UCVA/PHVA (visualAcuity), AR + Streak
+      // retinoscopy (objectiveRefraction), IOP + slit-lamp (eyeHealth), orthoptics
+      // (binocularVision). Only a subset of these has dedicated DB columns; snapshotting the
+      // whole objects here is what lets Edit prefill every grid field on reload.
+      visualAcuity,
+      objectiveRefraction,
+      eyeHealth,
+      binocularVision
     };
 
     const customerRecord = {
@@ -1110,7 +1306,12 @@ export default function OpticalServices() {
     // Save locally
     try {
       const existingTests = JSON.parse(localStorage.getItem('optical_eye_tests') || '[]');
-      const updatedTests = [examRecord, ...existingTests.filter(t => t.id !== examRecord.id)];
+      // Drop any prior copy of this visit — match on the stable id AND on the backend row id,
+      // so editing an exam replaces its directory entry instead of leaving the old one behind
+      // next to the freshly-saved one.
+      const sameVisit = (t) => t.id === examRecord.id
+        || (examRecord.backendId && t.backendId === examRecord.backendId);
+      const updatedTests = [examRecord, ...existingTests.filter(t => !sameVisit(t))];
       localStorage.setItem('optical_eye_tests', JSON.stringify(updatedTests));
 
       const existingCust = JSON.parse(localStorage.getItem('optical_sales_customers') || '[]');
@@ -1162,7 +1363,13 @@ export default function OpticalServices() {
       const dbPayload = {
         customer: customerId || null,
         patient_id: effectivePatientId,
-        test_no: effectiveTestNo,
+        // Test No is assigned by the server from the shared atomic sequence at submit time
+        // (EyeExaminationViewSet.perform_create) — never predicted here. We only pass a value
+        // through when it was already minted by the backend for the appointment this exam was
+        // started from, so that number carries into one continuous series instead of being
+        // burned. For every other (walk-in / standalone) exam the field is omitted and the
+        // real number comes back on savedExam.test_no, which the reconcile step below applies.
+        test_no: (!editingExamId && patientData?.appointmentNum) ? effectiveTestNo : undefined,
         patient_name: patientData?.name || '',
         age: String(patientData?.age || ''),
         gender: patientData?.gender || '',
@@ -1209,12 +1416,25 @@ export default function OpticalServices() {
         sub_add_os: subjectiveRefraction?.nearAdd || subjectiveRefraction?.osNv?.sph || '',
         sub_add_va_os: subjectiveRefraction?.osNv?.va || '',
 
-        ar_sph_od: objectiveRefraction?.odAr?.sph || '',
-        ar_cyl_od: objectiveRefraction?.odAr?.cyl || '',
-        ar_axis_od: objectiveRefraction?.odAr?.axis || '',
-        ar_sph_os: objectiveRefraction?.osAr?.sph || '',
-        ar_cyl_os: objectiveRefraction?.osAr?.cyl || '',
-        ar_axis_os: objectiveRefraction?.osAr?.axis || '',
+        // AR (Auto-Refractor) — the grid writes to objectiveRefraction.autoRefraction.od/os;
+        // the payload previously read a non-existent `odAr`/`osAr` path, so AR never persisted.
+        ar_sph_od: objectiveRefraction?.autoRefraction?.od?.sph || '',
+        ar_cyl_od: objectiveRefraction?.autoRefraction?.od?.cyl || '',
+        ar_axis_od: objectiveRefraction?.autoRefraction?.od?.axis || '',
+        ar_sph_os: objectiveRefraction?.autoRefraction?.os?.sph || '',
+        ar_cyl_os: objectiveRefraction?.autoRefraction?.os?.cyl || '',
+        ar_axis_os: objectiveRefraction?.autoRefraction?.os?.axis || '',
+
+        // UCVA (uncorrected distance VA) and PHVA (pinhole VA) from the grid's first two columns.
+        va_od_distance_unaided: visualAcuity?.distance?.odWo || '',
+        va_os_distance_unaided: visualAcuity?.distance?.osWo || '',
+        va_od_pinhole: visualAcuity?.distance?.odPinhole || '',
+        va_os_pinhole: visualAcuity?.distance?.osPinhole || '',
+
+        // IOP (tonometry) from the grid's IOP & Lens Options card.
+        iop_od: eyeHealth?.iop?.od || '',
+        iop_os: eyeHealth?.iop?.os || '',
+        distance_pd: subjectiveRefraction?.pd || objectiveRefraction?.autoRefraction?.od?.pd || '',
 
         primary_diagnosis: diagnosis?.primary || 'Routine Refraction',
         rx_summary: `OD: ${subjectiveRefraction?.od?.sph || ''} SPH / ${subjectiveRefraction?.od?.cyl || ''} CYL @ ${subjectiveRefraction?.od?.axis || ''}° | OS: ${subjectiveRefraction?.os?.sph || ''} SPH / ${subjectiveRefraction?.os?.cyl || ''} CYL @ ${subjectiveRefraction?.os?.axis || ''}°`,
@@ -1222,11 +1442,19 @@ export default function OpticalServices() {
         raw_data: examRecord
       };
 
+      // On an edit, never send a blank identity field — that would wipe the visit's Patient ID
+      // / Test No on the server. Drop the key so the existing value is preserved (the backend
+      // also guards this in perform_update).
+      if (editingExamId) {
+        if (!dbPayload.patient_id) delete dbPayload.patient_id;
+        if (!dbPayload.test_no) delete dbPayload.test_no;
+      }
+
       let savedExam = null;
       if (editingExamId) {
         const res = await axios.patch(`/api/sales/eye-examinations/${editingExamId}/`, dbPayload);
         savedExam = res.data;
-        alert(`Clinical Examination & Prescription for ${patientData.name} (${effectivePatientId}) updated!`);
+        alert(`Clinical Examination & Prescription for ${patientData.name} (${savedExam?.patient_id || effectivePatientId}) updated!`);
       } else {
         const res = await axios.post('/api/sales/eye-examinations/', dbPayload);
         savedExam = res.data;
@@ -1237,34 +1465,53 @@ export default function OpticalServices() {
         alert(`Clinical Examination & Prescription for ${patientData.name} (${effectivePatientId}) saved to database!`);
         fetchNextTestNo();
       }
+
+      // The server owns Test No / Patient ID (perform_create assigns Test No from the shared
+      // atomic sequence; the client value is only a preview). Reconcile every local copy of
+      // this visit — on-screen fields, the Recent Examination Directory, and the localStorage
+      // cache — onto what actually persisted, and stamp the real backend row UUID on so a
+      // later "Edit" PATCHes this row instead of POSTing a duplicate. Doing all three together
+      // is what stops a reload from showing the visit twice (stale cache copy + backend row).
+      const realBackendId = savedExam?.id || editingExamId || null;
+      const savedTestNo = savedExam?.test_no || effectiveTestNo;
+      const savedPatientId = savedExam?.patient_id || effectivePatientId;
+      const reconciledId = `${savedPatientId}_${savedTestNo}`;
+
+      if (savedTestNo && savedTestNo !== effectiveTestNo) setDiagnosis(prev => ({ ...prev, testNo: savedTestNo }));
+      if (savedPatientId && savedPatientId !== effectivePatientId) setPatientData(prev => ({ ...prev, id: savedPatientId }));
+
+      const isThisVisit = (t) => t.id === examRecord.id
+        || t.id === reconciledId
+        || (realBackendId && t.backendId === realBackendId)
+        || (examRecord.backendId && t.backendId === examRecord.backendId);
+      const reconcileRow = (t) => ({
+        ...t, id: reconciledId, backendId: realBackendId || t.backendId || null,
+        testNo: savedTestNo, patientId: savedPatientId,
+      });
+      setPastExaminations(prev => {
+        const hit = prev.some(isThisVisit);
+        const next = prev.map(t => isThisVisit(t) ? reconcileRow(t) : t);
+        return hit ? next : [reconcileRow(examRecord), ...next];
+      });
+      setDbPatients(prev => prev.map(c => c.id === customerRecord.id
+        ? { ...c, id: savedPatientId || c.id, testNo: savedTestNo || c.testNo }
+        : c));
+
+      // Cache write-back: drop every stale copy of this visit, keep one reconciled entry.
+      try {
+        const cached = JSON.parse(localStorage.getItem('optical_eye_tests') || '[]');
+        const cleaned = cached.filter(t => !isThisVisit(t) && examVisitKey(t) !== `${savedPatientId}|${savedTestNo}`);
+        localStorage.setItem('optical_eye_tests', JSON.stringify([reconcileRow(examRecord), ...cleaned]));
+      } catch (e) {}
+
       // Lock the form now that this visit is on record — re-enabled by "New Patient" or by
       // reopening this exact record via the history table's Edit icon.
       setIsRecordLocked(true);
-
-      // Test No / Patient ID sent above are just client-side previews — the backend silently
-      // swaps in a fresh one if it collides with a record saved elsewhere in the meantime (see
-      // perform_create in views.py). Reconcile local state with whatever actually got persisted
-      // so the on-screen fields and the Recent Examination Directory reflect the real saved
-      // record instead of a stale/duplicate guess.
-      const savedTestNo = savedExam?.test_no;
-      const savedPatientId = savedExam?.patient_id;
-      if ((savedTestNo && savedTestNo !== effectiveTestNo) || (savedPatientId && savedPatientId !== effectivePatientId)) {
-        if (savedTestNo && savedTestNo !== effectiveTestNo) setDiagnosis(prev => ({ ...prev, testNo: savedTestNo }));
-        if (savedPatientId && savedPatientId !== effectivePatientId) setPatientData(prev => ({ ...prev, id: savedPatientId }));
-        // Also re-key this entry to match the id a repeat save will compute next (it's built
-        // from patient id + test no), so a follow-up save still finds and replaces this same
-        // row instead of appending another duplicate.
-        const reconciledId = `${savedPatientId || effectivePatientId}_${savedTestNo || effectiveTestNo}`;
-        setPastExaminations(prev => prev.map(t => t.id === examRecord.id
-          ? { ...t, id: reconciledId, testNo: savedTestNo || t.testNo, patientId: savedPatientId || t.patientId }
-          : t));
-        setDbPatients(prev => prev.map(c => c.id === customerRecord.id
-          ? { ...c, id: savedPatientId || c.id, testNo: savedTestNo || c.testNo }
-          : c));
-      }
     } catch (e) {
       console.warn("API database save notice:", e);
       alert(`Saved locally, but syncing "${patientData.name}"'s record to the database failed. Please check your connection and try Save again.`);
+    } finally {
+      savingDraftRef.current = false;
     }
 
     // Keep the screen on the same Patient ID / Test No after saving — the patient just saved
@@ -1438,15 +1685,37 @@ export default function OpticalServices() {
               // become editable again (see isRecordLocked).
               setEditingExamId(exam.backendId || null);
               setIsRecordLocked(false);
-              if (exam.patientData) setPatientData(exam.patientData);
+              // This visit's identity — take it from whichever field carries it, never leave it
+              // blank, or the next Save would mint a brand-new Patient ID / Test No.
+              const lockedPatientId = exam.patientId || exam.patientData?.id || exam.patient_id || '';
+              const lockedTestNo = exam.testNo || exam.test_no || exam.diagnosisData?.testNo || '';
+              if (exam.patientData) {
+                setPatientData({ ...exam.patientData, id: lockedPatientId || exam.patientData.id || '' });
+              } else if (lockedPatientId) {
+                setPatientData(prev => ({ ...prev, id: lockedPatientId }));
+              }
               if (exam.subjectiveRefraction) setSubjectiveRefraction(exam.subjectiveRefraction);
               if (exam.medicalHistory) setMedicalHistory(exam.medicalHistory);
+              // Clinical Refraction & Measurement Grid (UCVA/PHVA, AR, Streak, IOP, lens
+              // options, orthoptics) — `exam` here already carries the raw_data snapshot
+              // (spread by the directory mapping) plus the flat backend columns.
+              const grid = buildClinicalGridState(exam, exam);
+              setVisualAcuity(grid.visualAcuity);
+              setObjectiveRefraction(grid.objectiveRefraction);
+              setEyeHealth(grid.eyeHealth);
+              if (grid.binocularVision && Object.keys(grid.binocularVision).length) {
+                setBinocularVision(prev => ({ ...prev, ...grid.binocularVision }));
+              }
+              setPrescription(grid.prescription);
               setDiagnosis(prev => ({
                 ...prev,
-                testNo: exam.testNo || '',
-                procedureCharge: exam.procedureCharge ?? prev.procedureCharge ?? '0',
-                medicineCharge: exam.medicineCharge ?? prev.medicineCharge ?? '0',
-                medicalAidCharge: exam.medicalAidCharge ?? prev.medicalAidCharge ?? '0'
+                // Full diagnosis snapshot if this record carries one (newer saves), else keep
+                // the fields already on screen.
+                ...(exam.diagnosisData && typeof exam.diagnosisData === 'object' ? exam.diagnosisData : {}),
+                testNo: lockedTestNo || prev.testNo || '',
+                procedureCharge: exam.procedureCharge ?? exam.diagnosisData?.procedureCharge ?? prev.procedureCharge ?? '0',
+                medicineCharge: exam.medicineCharge ?? exam.diagnosisData?.medicineCharge ?? prev.medicineCharge ?? '0',
+                medicalAidCharge: exam.medicalAidCharge ?? exam.diagnosisData?.medicalAidCharge ?? prev.medicalAidCharge ?? '0'
               }));
             }}
           />

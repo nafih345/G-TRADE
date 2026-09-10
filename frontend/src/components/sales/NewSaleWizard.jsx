@@ -110,9 +110,81 @@ const GridCellInput = ({ value, onChange, onBlur, type = 'text', width = 88, ali
     onBlur={onBlur}
     onFocus={(e) => e.target.select()}
     inputProps={type === 'number' ? { min: 0 } : undefined}
-    sx={{ width, '& input': { fontSize: '0.75rem', py: 0.3, textAlign: align, fontWeight: 700 } }}
+    sx={{
+      width,
+      '& input': { fontSize: '0.75rem', py: 0.3, textAlign: align, fontWeight: 700 },
+      '& input[type=number]': { MozAppearance: 'textfield' },
+      '& input::-webkit-outer-spin-button, & input::-webkit-inner-spin-button': { WebkitAppearance: 'none', margin: 0 },
+    }}
   />
 );
+
+// A line's discount can be entered two ways: as a % of the line's gross, or as a flat rupee
+// amount off. `discMode` picks which, `discValue` holds whatever the user typed in that mode —
+// and BOTH `disc` (₹) and `discPercent` are always derived from it, so every downstream reader
+// (totals, bill preview, print, save payload) keeps working off the same two fields as before.
+const resolveDiscount = (src, gross) => {
+  const mode = src.discMode === 'AMT' ? 'AMT' : 'PCT';
+  // Rows created before this field existed carry only discPercent — fall back to it.
+  const rawValue = src.discValue ?? (mode === 'AMT' ? src.disc : src.discPercent);
+  const value = Math.max(0, parseFloat(rawValue) || 0);
+  if (mode === 'AMT') {
+    const disc = Math.min(value, gross);
+    return { discMode: mode, discValue: value, disc, discPercent: gross > 0 ? (disc / gross) * 100 : 0 };
+  }
+  // A % over 100 is capped (a flat ₹ over gross is NOT — it stays as typed so the line stays
+  // right if the qty is raised later; only the applied discount is capped at the gross).
+  const pct = Math.min(value, 100);
+  return { discMode: mode, discValue: pct, disc: (gross * pct) / 100, discPercent: pct };
+};
+
+// The switch that flips a discount field between % and ₹. Sized so it never makes the
+// field it sits in taller than its neighbours — a fixed-height inline square.
+const DiscModeToggle = ({ mode, onChange, size = 'sm' }) => {
+  const isAmt = mode === 'AMT';
+  const small = size === 'sm';
+  return (
+    <Tooltip title={isAmt ? 'Discount is a flat ₹ amount — click to switch to %' : 'Discount is a % of gross — click to switch to ₹'}>
+      <Box
+        component="button"
+        type="button"
+        tabIndex={-1}
+        onClick={() => onChange(isAmt ? 'PCT' : 'AMT')}
+        sx={{
+          flex: '0 0 auto',
+          cursor: 'pointer',
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          p: 0,
+          height: small ? 18 : 22,
+          width: small ? 18 : 22,
+          border: '1px solid',
+          borderColor: isAmt ? '#0f766e' : '#dc2626',
+          color: isAmt ? '#0f766e' : '#dc2626',
+          bgcolor: isAmt ? '#ecfdf5' : '#fef2f2',
+          borderRadius: 1,
+          fontWeight: 900,
+          lineHeight: 1,
+          fontSize: small ? '0.72rem' : '0.82rem',
+          '&:hover': { bgcolor: isAmt ? '#d1fae5' : '#fee2e2' },
+        }}
+      >
+        {isAmt ? '₹' : '%'}
+      </Box>
+    </Tooltip>
+  );
+};
+
+// Shared sx for the two toolbar discount inputs: kill the native number spinners (they
+// steal width and shove the value off-centre) and keep the toggle snug to the edge.
+const DISC_FIELD_SX = {
+  '& input[type=number]': { MozAppearance: 'textfield' },
+  '& input::-webkit-outer-spin-button, & input::-webkit-inner-spin-button': {
+    WebkitAppearance: 'none', margin: 0,
+  },
+  '& .MuiInputBase-root': { pr: 0.5 },
+};
 
 export default function NewSaleWizard({
   customers = [],
@@ -201,7 +273,11 @@ export default function NewSaleWizard({
   });
   
   const [paymentMode, setPaymentMode] = useState('Cash');
-  const [deliveryDate, setDeliveryDate] = useState(new Date().toISOString().split('T')[0]);
+  const todayISO = () => new Date().toISOString().split('T')[0];
+  // Document date (invoice / order / quotation) — editable, defaults to today. Shown above the
+  // Order/Invoice/Quotation pills and is what gets persisted as the invoice_date.
+  const [invoiceDate, setInvoiceDate] = useState(todayISO());
+  const [deliveryDate, setDeliveryDate] = useState(todayISO());
   const [salesman, setSalesman] = useState('ADMIN');
   const [remark, setRemark] = useState('');
   // Diagnosis text lives in rxData.notes (auto-filled from the patient's last eye exam when one
@@ -240,6 +316,8 @@ export default function NewSaleWizard({
     power: '',
     qty: 1,
     price: '',
+    discMode: 'PCT',
+    discValue: 0,
     discPercent: 0,
     incTax: 0,
     taxPercent: 0
@@ -264,7 +342,7 @@ export default function NewSaleWizard({
   useEffect(() => { setServiceCatalog(services); }, [services]);
   const [serviceInput, setServiceInput] = useState({
     serviceId: '', code: '', name: '', description: '',
-    qty: 1, price: '', discPercent: 0, taxPercent: 0
+    qty: 1, price: '', discMode: 'PCT', discValue: 0, discPercent: 0, taxPercent: 0
   });
   // Optional repair job-card fields — only shown when the Repair card (or the toggle) is on, so
   // Fitting / Adjustment stay one-click.
@@ -320,7 +398,8 @@ export default function NewSaleWizard({
       power: '',
       qty: 1,
       price: record.salePrice || record.sellingPrice || record.mrp || 0,
-      discPercent: 0,
+      discMode: 'PCT',
+      discValue: 0,
       taxPercent,
     });
     setLensDialogOpen(false);
@@ -559,6 +638,8 @@ export default function NewSaleWizard({
       stock: selectedProd.stock ?? selectedProd.qty ?? null,
       category: (selectedProd.type || selectedProd.category || 'FRAME').toUpperCase(),
       price: selectedProd.price || selectedProd.sellingPrice || 0,
+      discMode: entryInput.discMode || 'PCT',
+      discValue: 0,
       discPercent: 0,
       // Tax % is fixed at 0 for this entry row regardless of the product's tax master.
       taxPercent: 0
@@ -575,7 +656,7 @@ export default function NewSaleWizard({
       ...prev,
       productId: '', barcode: '', item: '', modelNo: '', color: '', size: '',
       supplier: '', rack: '', stock: null,
-      power: '', price: '', qty: 1, discPercent: 0, taxPercent: 0
+      power: '', price: '', qty: 1, discValue: 0, discPercent: 0, taxPercent: 0
     }));
     setSelectedProductDetail(null);
     setProductSearchText('');
@@ -601,6 +682,8 @@ export default function NewSaleWizard({
       power: '',
       qty: 1,
       price: p.price || p.sellingPrice || 0,
+      discMode: 'PCT',
+      discValue: 0,
       discPercent: 0,
       taxPercent: 0
     };
@@ -622,6 +705,8 @@ export default function NewSaleWizard({
     power: '',
     qty: 1,
     price: s.price || 0,
+    discMode: 'PCT',
+    discValue: 0,
     discPercent: 0,
     taxPercent: s.taxRate || 0,
   });
@@ -649,13 +734,15 @@ export default function NewSaleWizard({
         description: master.description || '',
         qty: 1,
         price: master.price ?? '',
+        discMode: serviceInput.discMode || 'PCT',
+        discValue: 0,
         discPercent: 0,
         taxPercent: master.taxRate || 0,
       });
     } else {
       setServiceInput({
         serviceId: '', code: '', name: card.match || '', description: '',
-        qty: 1, price: '', discPercent: 0, taxPercent: 0,
+        qty: 1, price: '', discMode: serviceInput.discMode || 'PCT', discValue: 0, discPercent: 0, taxPercent: 0,
       });
     }
     setShowServiceRepair(!!card.repair);
@@ -681,13 +768,14 @@ export default function NewSaleWizard({
       power: '',
       qty: serviceInput.qty,
       price: serviceInput.price,
-      discPercent: serviceInput.discPercent,
+      discMode: serviceInput.discMode || 'PCT',
+      discValue: serviceInput.discValue,
       taxPercent: serviceInput.taxPercent,
       serviceDescription: serviceInput.description || '',
       serviceDetails: repairFilled ? { ...serviceRepair } : null,
     };
     handleAddItem(src);
-    setServiceInput({ serviceId: '', code: '', name: '', description: '', qty: 1, price: '', discPercent: 0, taxPercent: 0 });
+    setServiceInput({ serviceId: '', code: '', name: '', description: '', qty: 1, price: '', discMode: serviceInput.discMode || 'PCT', discValue: 0, discPercent: 0, taxPercent: 0 });
     setServiceRepair({ customerItem: '', problemDescription: '', estimatedDelivery: '', technician: '', serviceStatus: 'RECEIVED' });
     setShowServiceRepair(false);
   };
@@ -707,6 +795,8 @@ export default function NewSaleWizard({
       description: record.description || '',
       qty: 1,
       price: record.price ?? '',
+      discMode: 'PCT',
+      discValue: 0,
       discPercent: 0,
       taxPercent: record.taxRate || 0,
     });
@@ -718,10 +808,9 @@ export default function NewSaleWizard({
   const computeEntryLine = (src) => {
     const qty = parseInt(src.qty) || 1;
     const price = parseFloat(src.price) || 0;
-    const discPercent = parseFloat(src.discPercent) || 0;
     const taxPercent = parseFloat(src.taxPercent) || 0;
     const gross = qty * price;
-    const disc = (gross * discPercent) / 100;
+    const { discMode, discValue, disc, discPercent } = resolveDiscount(src, gross);
     const taxable = gross - disc;
     const tax = (taxable * taxPercent) / 100;
     const total = taxable + tax;
@@ -737,7 +826,7 @@ export default function NewSaleWizard({
       }
     }
 
-    return { qty, price, discPercent, taxPercent, gross, disc, tax, total, power };
+    return { qty, price, discMode, discValue, discPercent, taxPercent, gross, disc, tax, total, power };
   };
 
   // 2️⃣ PART 2 HANDLER: Add Item to Billing Grid
@@ -751,7 +840,7 @@ export default function NewSaleWizard({
       return;
     }
 
-    const { qty, price, discPercent, taxPercent, gross, disc, tax, total, power } = computeEntryLine(src);
+    const { qty, price, discMode, discValue, discPercent, taxPercent, gross, disc, tax, total, power } = computeEntryLine(src);
 
     const isService = (src.itemType === 'SERVICE') || src.category === 'SERVICE';
     const newItem = {
@@ -780,6 +869,8 @@ export default function NewSaleWizard({
       price,
       disc,
       gross,
+      discMode,
+      discValue,
       discPercent,
       tax,
       taxPercent,
@@ -791,7 +882,7 @@ export default function NewSaleWizard({
       ...entryInput,
       productId: '', barcode: '', item: '', modelNo: '', color: '', size: '',
       supplier: '', rack: '', stock: null, qty: 1, price: '', power: '',
-      discPercent: 0, taxPercent: 0
+      discValue: 0, discPercent: 0, taxPercent: 0
     });
     setSelectedProductDetail(null);
     setProductSearchText('');
@@ -834,6 +925,8 @@ export default function NewSaleWizard({
       qty: 1,
       price,
       disc: 0,
+      discMode: 'PCT',
+      discValue: 0,
       discPercent: 0,
       gross: price,
       tax: scanTaxVal,
@@ -861,17 +954,17 @@ export default function NewSaleWizard({
     setItemsList(prev => prev.map(item => {
       if (item.id !== id) return item;
       const next = { ...item, [field]: value };
-      if (['qty', 'price', 'discPercent', 'taxPercent'].includes(field)) {
+      if (['qty', 'price', 'discMode', 'discValue', 'taxPercent'].includes(field)) {
         const qty = parseInt(next.qty) || 0;
         const price = parseFloat(next.price) || 0;
-        const discPercent = parseFloat(next.discPercent) || 0;
         const taxPercent = parseFloat(next.taxPercent) || 0;
         const gross = qty * price;
-        const disc = (gross * discPercent) / 100;
+        const { disc, discPercent } = resolveDiscount(next, gross);
         const taxable = gross - disc;
         const tax = (taxable * taxPercent) / 100;
         next.gross = gross;
         next.disc = disc;
+        next.discPercent = discPercent;
         next.tax = tax;
         next.total = taxable + tax;
       }
@@ -891,15 +984,14 @@ export default function NewSaleWizard({
       const clean = (v, fallback) => (v ?? '').toString().trim() || fallback;
       const qty = parseInt(item.qty) || 0;
       const price = parseFloat(item.price) || 0;
-      const discPercent = parseFloat(item.discPercent) || 0;
       const taxPercent = parseFloat(item.taxPercent) || 0;
       const gross = qty * price;
-      const disc = (gross * discPercent) / 100;
+      const { discMode, discValue, disc, discPercent } = resolveDiscount(item, gross);
       const taxable = gross - disc;
       const tax = (taxable * taxPercent) / 100;
       return {
         ...item,
-        qty, price, discPercent, taxPercent,
+        qty, price, discMode, discValue, discPercent, taxPercent,
         gross, disc, tax, total: taxable + tax,
         modelNo: clean(item.modelNo, '—'),
         color: clean(item.color, '—'),
@@ -925,7 +1017,8 @@ export default function NewSaleWizard({
   const buildInvoiceSnapshot = () => ({
     id: billNo,
     invoiceNumber: billNo,
-    date: new Date().toISOString().split('T')[0],
+    date: invoiceDate || todayISO(),
+    deliveryDate,
     customerName: customerInput.name || 'Walk-in Customer',
     phone: customerInput.phone || '',
     customerPhone: customerInput.phone || '',
@@ -1084,7 +1177,7 @@ export default function NewSaleWizard({
           document_type: docType.toUpperCase(),
           fulfillment_status: docType === 'Order' ? 'Order Received' : undefined,
           customer: customerId,
-          invoice_date: new Date().toISOString().split('T')[0],
+          invoice_date: invoiceDate || todayISO(),
           status,
           total_amount: grossTotal,
           tax_amount: totalTax,
@@ -1118,7 +1211,8 @@ export default function NewSaleWizard({
       id: backendInvoiceId || billNo,
       invoiceNumber: backendInvoiceNumber,
       customerId,
-      date: new Date().toISOString().split('T')[0],
+      date: invoiceDate || todayISO(),
+      deliveryDate,
       customerName: customerInput.name || 'Walk-in Customer',
       customerPhone: customerInput.phone || '',
       customerAge: customerInput.age,
@@ -1304,24 +1398,33 @@ export default function NewSaleWizard({
                 </Stack>
               </Grid>
 
-              {/* Document Type Pills */}
-              <Grid item xs={12} md={3}>
-                <Paper variant="outlined" sx={{ p: 0.4, display: 'flex', gap: 0.5, bgcolor: '#f8fafc', borderRadius: 2 }}>
-                  {['Order', 'Invoice', 'Quotation'].map(type => (
-                    <Button 
-                      key={type} size="small"
-                      variant={docType === type ? 'contained' : 'text'}
-                      onClick={() => handleDocTypeChange(type)}
-                      sx={{ 
-                        flexGrow: 1, py: 0.4, fontSize: '0.78rem', fontWeight: 900, borderRadius: 1.5,
-                        bgcolor: docType === type ? '#0f172a' : 'transparent',
-                        color: docType === type ? '#facc15' : 'text.primary'
-                      }}
-                    >
-                      {type}
-                    </Button>
-                  ))}
-                </Paper>
+              {/* Document Date + Document Type Pills */}
+              <Grid item xs={12} md={3} sx={{ alignSelf: 'flex-start' }}>
+                <Stack spacing={0.75}>
+                  <TextField
+                    type="date" fullWidth size="small"
+                    label={docType === 'Order' ? 'Order Date' : docType === 'Quotation' ? 'Quotation Date' : 'Invoice Date'}
+                    value={invoiceDate} onChange={(e) => setInvoiceDate(e.target.value || todayISO())}
+                    InputLabelProps={{ shrink: true }}
+                    inputProps={{ style: { fontWeight: 700, fontSize: '0.82rem' } }}
+                  />
+                  <Paper variant="outlined" sx={{ p: 0.4, display: 'flex', gap: 0.5, bgcolor: '#f8fafc', borderRadius: 2 }}>
+                    {['Order', 'Invoice', 'Quotation'].map(type => (
+                      <Button
+                        key={type} size="small"
+                        variant={docType === type ? 'contained' : 'text'}
+                        onClick={() => handleDocTypeChange(type)}
+                        sx={{
+                          flexGrow: 1, py: 0.4, fontSize: '0.78rem', fontWeight: 900, borderRadius: 1.5,
+                          bgcolor: docType === type ? '#0f172a' : 'transparent',
+                          color: docType === type ? '#facc15' : 'text.primary'
+                        }}
+                      >
+                        {type}
+                      </Button>
+                    ))}
+                  </Paper>
+                </Stack>
               </Grid>
 
               {/* Row 2: Customer Name, Phone, Age, Gender, Payment Mode */}
@@ -1382,7 +1485,7 @@ export default function NewSaleWizard({
               </Grid>
 
               <Grid item xs={12} sm={4} md={2}>
-                <TextField 
+                <TextField
                   type="date" fullWidth size="small" label="Delivery Date"
                   value={deliveryDate} onChange={(e) => setDeliveryDate(e.target.value)}
                   InputLabelProps={{ shrink: true }}
@@ -1478,7 +1581,7 @@ export default function NewSaleWizard({
                 </Button>
               </Stack>
               <Typography variant="subtitle2" fontWeight={900} color="#facc15">
-                📅 Date: {new Date().toLocaleDateString('en-GB')}
+                📅 Date: {invoiceDate ? new Date(invoiceDate).toLocaleDateString('en-GB') : new Date().toLocaleDateString('en-GB')}
               </Typography>
             </Box>
 
@@ -1644,7 +1747,7 @@ export default function NewSaleWizard({
                 />
               </Grid>
 
-              <Grid item xs={12} sm={1.1} md={1.1}>
+              <Grid item xs={12} sm={1.1} md={1.0}>
                 <TextField 
                   select fullWidth size="small" label="Index" disabled={!powerChecked}
                   value={lensIndex} onChange={(e) => setLensIndex(e.target.value)}
@@ -1660,7 +1763,7 @@ export default function NewSaleWizard({
               {/* Select Item from Optical Database — search matches name, barcode, SKU, brand,
                   category, and (for imported products) model no / color / size, so staff can
                   find an item by typing whichever detail they actually have on hand. */}
-              <Grid item xs={12} sm={3.0} md={3.0}>
+              <Grid item xs={12} sm={2.8} md={2.7}>
                 {/* Plain search box — no results popup. Typing here filters the product
                     matches shown as rows in the billing grid below; click a row's + to add. */}
                 <TextField
@@ -1674,7 +1777,7 @@ export default function NewSaleWizard({
                 />
               </Grid>
 
-              <Grid item xs={12} sm={1.0} md={1.0}>
+              <Grid item xs={12} sm={1.0} md={1.1}>
                 <TextField
                   select fullWidth size="small" label="Category"
                   value={entryInput.category} onChange={(e) => setEntryInput({ ...entryInput, category: e.target.value })}
@@ -1691,11 +1794,12 @@ export default function NewSaleWizard({
                 <TextField 
                   fullWidth size="small" label="Qty" type="number"
                   value={entryInput.qty} onChange={(e) => setEntryInput({ ...entryInput, qty: e.target.value })}
+                  sx={{ '& input[type=number]': { MozAppearance: 'textfield' }, '& input::-webkit-outer-spin-button, & input::-webkit-inner-spin-button': { WebkitAppearance: 'none', margin: 0 } }}
                   inputProps={{ style: { fontWeight: 900, textAlign: 'center', fontSize: '0.8rem' } }}
                 />
               </Grid>
 
-              <Grid item xs={6} sm={1.1} md={1.1}>
+              <Grid item xs={6} sm={1.1} md={1.0}>
                 <TextField
                   fullWidth size="small" label="Price (₹)" placeholder="0.00"
                   value={entryInput.price} onChange={(e) => setEntryInput({ ...entryInput, price: e.target.value })}
@@ -1703,16 +1807,29 @@ export default function NewSaleWizard({
                 />
               </Grid>
 
-              <Grid item xs={6} sm={0.9} md={0.9}>
+              <Grid item xs={6} sm={1.1} md={1.4}>
+                {/* Discount takes either a % of gross or a flat ₹ amount — the chip picks which. */}
                 <TextField
-                  fullWidth size="small" label="Disc %" type="number" placeholder="0"
-                  value={entryInput.discPercent}
-                  onChange={(e) => setEntryInput({ ...entryInput, discPercent: e.target.value })}
-                  inputProps={{ min: 0, max: 100, style: { fontWeight: 800, textAlign: 'center', fontSize: '0.8rem', color: '#dc2626' } }}
+                  fullWidth size="small" type="number" placeholder="0"
+                  label={entryInput.discMode === 'AMT' ? 'Disc ₹' : 'Disc %'}
+                  value={entryInput.discValue}
+                  onChange={(e) => setEntryInput({ ...entryInput, discValue: e.target.value })}
+                  sx={DISC_FIELD_SX}
+                  inputProps={{ min: 0, max: entryInput.discMode === 'AMT' ? undefined : 100, style: { fontWeight: 800, textAlign: 'center', fontSize: '0.8rem', color: '#dc2626' } }}
+                  InputProps={{
+                    endAdornment: (
+                      <InputAdornment position="end" sx={{ ml: 0.25 }}>
+                        <DiscModeToggle
+                          mode={entryInput.discMode}
+                          onChange={(mode) => setEntryInput({ ...entryInput, discMode: mode })}
+                        />
+                      </InputAdornment>
+                    ),
+                  }}
                 />
               </Grid>
 
-              <Grid item xs={6} sm={1.0} md={1.0}>
+              <Grid item xs={6} sm={1.0} md={0.9}>
                 <Autocomplete
                   freeSolo
                   options={['0', '5', '12', '18', '21']}
@@ -1807,7 +1924,7 @@ export default function NewSaleWizard({
                 </Box>
 
                 <Grid container spacing={1} alignItems="center">
-                  <Grid item xs={12} sm={6} md={3}>
+                  <Grid item xs={12} sm={6} md={2.9}>
                     <Autocomplete
                       freeSolo
                       options={(serviceCatalog || []).filter(s => s.isActive !== false).map(s => s.name)}
@@ -1818,7 +1935,8 @@ export default function NewSaleWizard({
                           setServiceInput({
                             serviceId: master.id || '', code: master.code || '', name: master.name || '',
                             description: master.description || '', qty: 1, price: master.price ?? '',
-                            discPercent: 0, taxPercent: master.taxRate || 0,
+                            discMode: serviceInput.discMode || 'PCT', discValue: 0, discPercent: 0,
+                            taxPercent: master.taxRate || 0,
                           });
                         } else {
                           setServiceInput({ ...serviceInput, serviceId: '', code: '', name: val || '' });
@@ -1833,7 +1951,7 @@ export default function NewSaleWizard({
                     />
                   </Grid>
 
-                  <Grid item xs={12} sm={6} md={3.5}>
+                  <Grid item xs={12} sm={6} md={3.3}>
                     <TextField
                       fullWidth size="small" label="Service Description"
                       placeholder="e.g. Repair broken hinge"
@@ -1843,16 +1961,17 @@ export default function NewSaleWizard({
                     />
                   </Grid>
 
-                  <Grid item xs={4} sm={2} md={0.9}>
+                  <Grid item xs={4} sm={2} md={0.8}>
                     <TextField
                       fullWidth size="small" label="Qty" type="number"
                       value={serviceInput.qty}
                       onChange={(e) => setServiceInput({ ...serviceInput, qty: e.target.value })}
+                      sx={{ '& input[type=number]': { MozAppearance: 'textfield' }, '& input::-webkit-outer-spin-button, & input::-webkit-inner-spin-button': { WebkitAppearance: 'none', margin: 0 } }}
                       inputProps={{ style: { fontWeight: 800, textAlign: 'center', fontSize: '0.8rem' } }}
                     />
                   </Grid>
 
-                  <Grid item xs={4} sm={3} md={1.3}>
+                  <Grid item xs={4} sm={3} md={1.2}>
                     <TextField
                       fullWidth size="small" label="Price (₹)" placeholder="0.00"
                       value={serviceInput.price}
@@ -1861,16 +1980,28 @@ export default function NewSaleWizard({
                     />
                   </Grid>
 
-                  <Grid item xs={4} sm={3} md={1}>
+                  <Grid item xs={4} sm={3} md={1.4}>
                     <TextField
-                      fullWidth size="small" label="Disc %" type="number" placeholder="0"
-                      value={serviceInput.discPercent}
-                      onChange={(e) => setServiceInput({ ...serviceInput, discPercent: e.target.value })}
-                      inputProps={{ min: 0, max: 100, style: { fontWeight: 800, textAlign: 'center', fontSize: '0.8rem', color: '#dc2626' } }}
+                      fullWidth size="small" type="number" placeholder="0"
+                      label={serviceInput.discMode === 'AMT' ? 'Disc ₹' : 'Disc %'}
+                      value={serviceInput.discValue}
+                      onChange={(e) => setServiceInput({ ...serviceInput, discValue: e.target.value })}
+                      sx={DISC_FIELD_SX}
+                      inputProps={{ min: 0, max: serviceInput.discMode === 'AMT' ? undefined : 100, style: { fontWeight: 800, textAlign: 'center', fontSize: '0.8rem', color: '#dc2626' } }}
+                      InputProps={{
+                        endAdornment: (
+                          <InputAdornment position="end" sx={{ ml: 0.25 }}>
+                            <DiscModeToggle
+                              mode={serviceInput.discMode}
+                              onChange={(mode) => setServiceInput({ ...serviceInput, discMode: mode })}
+                            />
+                          </InputAdornment>
+                        ),
+                      }}
                     />
                   </Grid>
 
-                  <Grid item xs={6} sm={3} md={1}>
+                  <Grid item xs={6} sm={3} md={0.9}>
                     <Autocomplete
                       freeSolo
                       options={['0', '5', '12', '18', '28']}
@@ -2166,7 +2297,7 @@ export default function NewSaleWizard({
                       <TableCell align="center" sx={{ fontWeight: 900, fontSize: '0.85rem' }}>{previewLine.qty}</TableCell>
                       <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>₹{previewLine.price.toFixed(2)}</TableCell>
                       <TableCell align="right" sx={{ color: 'error.main', fontSize: '0.8rem' }}>
-                        ₹{previewLine.disc.toFixed(2)}{previewLine.discPercent ? ` (${previewLine.discPercent}%)` : ''}
+                        ₹{previewLine.disc.toFixed(2)}{previewLine.disc ? ` (${previewLine.discPercent.toFixed(2)}%)` : ''}
                       </TableCell>
                       <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>₹{previewLine.gross.toFixed(2)}</TableCell>
                       <TableCell align="right" sx={{ fontSize: '0.8rem', color: '#0f766e' }}>
@@ -2227,8 +2358,17 @@ export default function NewSaleWizard({
                           {cellInput('price', { type: 'number', width: 64, align: 'right' })}
                         </TableCell>
                         <TableCell align="right" sx={{ color: 'error.main', fontSize: '0.8rem' }}>
-                          {cellInput('discPercent', { type: 'number', width: 48, align: 'right' })}
-                          <Box component="span" sx={{ fontSize: '0.62rem', color: 'text.secondary', display: 'block' }}>₹{(row.disc || 0).toFixed(2)}</Box>
+                          {/* % of gross or a flat ₹ off — the chip switches the mode, the caption
+                              always shows the discount in the OTHER unit so both are visible. */}
+                          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 0.4 }}>
+                            <DiscModeToggle mode={row.discMode} onChange={set('discMode')} />
+                            {cellInput('discValue', { type: 'number', width: 46, align: 'right' })}
+                          </Box>
+                          <Box component="span" sx={{ fontSize: '0.62rem', color: 'text.secondary', display: 'block' }}>
+                            {row.discMode === 'AMT'
+                              ? `${(row.discPercent || 0).toFixed(2)}%`
+                              : `₹${(row.disc || 0).toFixed(2)}`}
+                          </Box>
                         </TableCell>
                         <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>₹{(row.gross || 0).toFixed(2)}</TableCell>
                         <TableCell align="right" sx={{ fontSize: '0.8rem', color: '#0f766e' }}>
@@ -2311,8 +2451,24 @@ export default function NewSaleWizard({
                         <TextField fullWidth size="small" label="Price (₹)" type="number" value={editDialogRow.price} onChange={fld('price')} />
                       </Grid>
                       <Grid item xs={6}>
-                        <TextField fullWidth size="small" label="Discount %" type="number" value={editDialogRow.discPercent}
-                          onChange={fld('discPercent')} inputProps={{ min: 0, max: 100 }} />
+                        <TextField
+                          fullWidth size="small" type="number"
+                          label={editDialogRow.discMode === 'AMT' ? 'Discount ₹ (flat)' : 'Discount % (of gross)'}
+                          value={editDialogRow.discValue ?? editDialogRow.discPercent ?? 0}
+                          onChange={fld('discValue')}
+                          inputProps={{ min: 0, max: editDialogRow.discMode === 'AMT' ? undefined : 100 }}
+                          InputProps={{
+                            endAdornment: (
+                              <InputAdornment position="end">
+                                <DiscModeToggle
+                                  mode={editDialogRow.discMode}
+                                  size="md"
+                                  onChange={(mode) => updateItemField(editDialogRow.id, 'discMode', mode)}
+                                />
+                              </InputAdornment>
+                            ),
+                          }}
+                        />
                       </Grid>
                       <Grid item xs={6}>
                         <TextField select fullWidth size="small" label="Tax %" value={editDialogRow.taxPercent} onChange={fld('taxPercent')}>
@@ -2323,7 +2479,7 @@ export default function NewSaleWizard({
 
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', bgcolor: '#f8fafc', borderRadius: 2, p: 1.2 }}>
                       <Typography variant="body2" fontWeight={700} color="text.secondary">
-                        Gross ₹{(editDialogRow.gross || 0).toFixed(2)} · Disc ₹{(editDialogRow.disc || 0).toFixed(2)} · Tax ₹{(editDialogRow.tax || 0).toFixed(2)}
+                        Gross ₹{(editDialogRow.gross || 0).toFixed(2)} · Disc ₹{(editDialogRow.disc || 0).toFixed(2)} ({(editDialogRow.discPercent || 0).toFixed(2)}%) · Tax ₹{(editDialogRow.tax || 0).toFixed(2)}
                       </Typography>
                       <Typography variant="body2" fontWeight={900} color="primary.main">
                         Total ₹{(editDialogRow.total || 0).toFixed(2)}

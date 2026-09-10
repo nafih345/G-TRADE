@@ -341,6 +341,19 @@ class EyeExamination(BaseUUIDModel):
     follow_up_date = models.CharField(max_length=50, blank=True, null=True)
     follow_up_interval = models.CharField(max_length=50, blank=True, null=True)
 
+    class Meta:
+        constraints = [
+            # Test No is a single continuous series across every device (see
+            # patient_utils.reserve_test_numbers). This is the DB-level guarantee that no
+            # two exams share a number even under a race; blank/NULL rows (legacy or
+            # not-yet-assigned) are excluded. See migration 0016.
+            models.UniqueConstraint(
+                fields=['test_no'],
+                condition=models.Q(test_no__isnull=False) & ~models.Q(test_no=''),
+                name='uniq_eyeexamination_test_no',
+            ),
+        ]
+
     def __str__(self):
         return f"Exam for {self.patient_name} on {self.examination_date.date() if self.examination_date else 'N/A'}"
 

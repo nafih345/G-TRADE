@@ -1437,7 +1437,9 @@ export default function PatientHistory() {
             <PrintPrescriptionCard
               patientData={printingExam.raw_data?.patientData || printingExam.patientData || selectedPatient}
               subjectiveRefraction={printingExam.subjectiveRefraction}
-              diagnosis={printingExam.raw_data?.diagnosis || { primary: printingExam.diagnosis }}
+              diagnosis={printingExam.raw_data?.diagnosisData
+                || (printingExam.raw_data?.diagnosis && typeof printingExam.raw_data.diagnosis === 'object' ? printingExam.raw_data.diagnosis : null)
+                || { primary: printingExam.diagnosis }}
               prescription={printingExam.raw_data?.prescription || printingExam.prescription || {}}
               medicalHistory={printingExam.medicalHistory}
               onNavigateToSales={() => navigate('/sales/new', { state: { patient: selectedPatient } })}

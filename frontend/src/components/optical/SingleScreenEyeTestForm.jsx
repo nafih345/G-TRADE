@@ -212,7 +212,27 @@ export default function SingleScreenEyeTestForm({
   }, [diagnosis?.procedureCharge, diagnosis?.medicineCharge, diagnosis?.medicalAidCharge,
       diagnosis?.customerPaidAmount, customerPaidTouched]);
 
-  const filteredHistory = safeExams.filter(e => {
+  // Collapse repeats of the same visit before rendering. The directory is fed a merge of the
+  // localStorage cache and the backend rows, so one exam can arrive two or three times (a
+  // cached copy saved before it synced + the authoritative backend row). Identity: the backend
+  // row UUID if present, else Patient ID + Test No (fixed for the life of a visit).
+  const dedupeVisits = (rows) => {
+    const seen = new Map();
+    for (const r of rows) {
+      const key = r.backendId
+        ? `b:${r.backendId}`
+        : `v:${(r.patientId || r.patientData?.id || '').toString().trim()}|${(r.testNo || r.test_no || r.diagnosisData?.testNo || '').toString().trim()}`;
+      const dupKeyable = key !== 'v:|';
+      const prev = seen.get(key);
+      // Keep the richer copy: a backend-backed row over a local-only one, otherwise the first seen.
+      if (!dupKeyable) { seen.set(`${key}:${seen.size}`, r); continue; }
+      if (!prev) seen.set(key, r);
+      else if (!prev.backendId && r.backendId) seen.set(key, r);
+    }
+    return Array.from(seen.values());
+  };
+
+  const filteredHistory = dedupeVisits(safeExams.filter(e => {
     if (!e || e.name === 'Mohammed' || e.patientId === 'P-7375') return false;
     const q = (historySearch || '').toLowerCase();
     if (!q) return true;
@@ -222,7 +242,7 @@ export default function SingleScreenEyeTestForm({
       String(e.testNo || '').toLowerCase().includes(q) ||
       (e.gender || '').toLowerCase().includes(q) ||
       (e.assignedOptometrist || e.optometrist || e.doctor || '').toLowerCase().includes(q);
-  });
+  }));
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2.5 }}>
@@ -1137,7 +1157,7 @@ export default function SingleScreenEyeTestForm({
                 </TableRow>
               ) : (
                 filteredHistory.map((row, idx) => (
-                  <TableRow key={idx} hover sx={{ cursor: 'pointer' }} onClick={() => onSelectExamFromHistory && onSelectExamFromHistory(row)}>
+                  <TableRow key={row.backendId || row.id || `${row.patientId || ''}_${row.testNo || ''}_${idx}`} hover sx={{ cursor: 'pointer' }} onClick={() => onSelectExamFromHistory && onSelectExamFromHistory(row)}>
                     <TableCell sx={{ fontWeight: 800 }}>#{row.testNo || idx + 1}</TableCell>
                     <TableCell>{row.date || '—'}</TableCell>
                     <TableCell sx={{ fontWeight: 700 }}>{row.patientId || '—'}</TableCell>

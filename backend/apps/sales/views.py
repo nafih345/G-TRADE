@@ -2,7 +2,7 @@ import time
 import uuid
 
 from django.db import IntegrityError, transaction
-from rest_framework import viewsets, permissions
+from rest_framework import viewsets, permissions, serializers
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.serializers import ModelSerializer, SerializerMethodField
@@ -11,7 +11,10 @@ from .models import (
     Dealer, WholesalePriceList, WholesaleQuotation, WholesaleOrder,
     WholesaleDeliveryChallan, WholesaleInvoice, WholesalePaymentCollection, WholesaleReturn
 )
-from .patient_utils import reserve_patient_codes, peek_next_patient_code, reserve_test_numbers, peek_next_test_no
+from .patient_utils import (
+    reserve_patient_codes, peek_next_patient_code, peek_next_test_no,
+    reserve_unused_test_numbers, sync_test_no_sequence,
+)
 from apps.inventory.models import StockLedger
 from apps.inventory.stock_utils import adjust_branch_stock
 from apps.common.branch_mixins import BranchScopedViewSetMixin
@@ -22,6 +25,14 @@ class CustomerSerializer(ModelSerializer):
         fields = '__all__'
 
 class EyeExaminationSerializer(ModelSerializer):
+    # The partial UNIQUE constraint on test_no makes DRF auto-attach a UniqueValidator, but
+    # that validator isn't condition-aware (it would reject a blank '' against legacy blank
+    # rows) and, more to the point, uniqueness here is enforced server-side by
+    # EyeExaminationViewSet.perform_create, which assigns the number itself and re-rolls on
+    # the DB IntegrityError. A 400 from the serializer would just turn that graceful re-roll
+    # into a failed save. Drop the auto validator.
+    test_no = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=20, validators=[])
+
     class Meta:
         model = EyeExamination
         fields = '__all__'
@@ -158,29 +169,62 @@ class EyeExaminationViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.AllowAny]
 
     def perform_create(self, serializer):
-        # Preserve a real test_no carried over from the Appointment this exam started from
-        # (see Appointments.jsx's "Start Eye Test" flow); only mint a fresh one for a
-        # standalone/walk-in exam that never had an appointment.
+        # Test No is assigned HERE, on the server, at submit time — never taken from the
+        # client's on-screen value. That field is only a preview (peek_next_test_no, which
+        # doesn't consume the sequence), so every device that has the Eye Test page open
+        # is showing the *same* "next" number; if we saved whatever the client sent, two
+        # of them submitting before either commits would both write that number. Assigning
+        # from the shared atomic counter (reserve_unused_test_numbers -> TestNoSequence via
+        # a single UPDATE ... RETURNING) gives every save its own number regardless of how
+        # many sessions are connected to the shared database:
+        #     Device A saves -> 1001    Device B saves -> 1002    Device A saves -> 1003
         #
-        # The frontend's Test No field is just a preview fetched once when the page loads
-        # (peek_next_test_no doesn't consume the sequence), so it goes stale the moment a
-        # second exam is saved anywhere else before this one is submitted — two Eye Test
-        # tabs open at once, or one left open overnight, would otherwise both submit the
-        # same number and silently save a duplicate (test_no has no DB unique constraint).
-        # Re-check for a collision at the moment of save, exactly like CustomerViewSet does
-        # for patient_code above, and only then fall back to reserving a fresh one.
-        #
-        # Must check all_objects, not the default soft-delete-filtered manager: a soft-deleted
-        # exam/appointment's test_no is still "used" as far as this collision check should
-        # care, even though Customer.objects/EyeExamination.objects no longer lists it.
-        test_no = serializer.validated_data.get('test_no')
-        if (
-            not test_no
-            or EyeExamination.all_objects.filter(test_no=test_no).exists()
-            or Appointment.all_objects.filter(test_no=test_no).exists()
-        ):
-            test_no = reserve_test_numbers()[0]
-        serializer.save(test_no=test_no)
+        # The one value we honour from the request is a Test No that already belongs to the
+        # Appointment this exam was started from (Appointments.jsx "Start Eye Test") and is
+        # not yet used by any exam — that number was itself minted by the backend for the
+        # appointment, so keeping it preserves one continuous series rather than burning a
+        # number. all_objects (not the soft-delete-filtered manager) so a soft-deleted
+        # exam/appointment still counts as "using" its number.
+        requested = (serializer.validated_data.get('test_no') or '').strip()
+        carried_over = (
+            bool(requested)
+            and Appointment.all_objects.filter(test_no=requested).exists()
+            and not EyeExamination.all_objects.filter(test_no=requested).exists()
+        )
+        if carried_over:
+            test_no = requested
+            # Keep the shared counter ahead of this directly-accepted number so the next
+            # reservation can't hand out the same one.
+            sync_test_no_sequence(test_no)
+        else:
+            test_no = reserve_unused_test_numbers()[0]
+
+        # DB-level backstop: EyeExamination.test_no carries a partial UNIQUE constraint
+        # (migration 0016). If two requests race past the checks above onto the same number
+        # the loser lands here instead of persisting a duplicate — re-roll and retry, the
+        # same recovery CustomerViewSet.perform_create uses for patient_code.
+        for attempts_left in (2, 1, 0):
+            try:
+                with transaction.atomic():
+                    serializer.save(test_no=test_no)
+                return
+            except IntegrityError:
+                if attempts_left <= 0:
+                    raise
+                test_no = reserve_unused_test_numbers()[0]
+
+    def perform_update(self, serializer):
+        # An edit must never change the visit's identity. If the client omits or blanks
+        # test_no / patient_id (e.g. it loaded an older snapshot that never stored them),
+        # keep whatever is already on the row instead of wiping it or minting a new number.
+        instance = serializer.instance
+        data = serializer.validated_data
+        preserved = {}
+        if not data.get('test_no'):
+            preserved['test_no'] = instance.test_no
+        if 'patient_id' in data and not data.get('patient_id'):
+            preserved['patient_id'] = instance.patient_id
+        serializer.save(**preserved)
 
     @action(detail=False, methods=['get'], url_path='next-test-no')
     def next_test_no(self, request):
@@ -198,7 +242,9 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             appointment_code = f"APT-{int(time.time()) % 1000000}"
         # Every new appointment is a distinct visit, so it always gets a fresh Test No —
         # even when booked for a returning patient, rather than reusing their last visit's.
-        test_no = reserve_test_numbers()[0]
+        # reserve_unused_test_numbers so a sequence lagging behind directly-assigned numbers
+        # can't collide with an existing exam/appointment.
+        test_no = reserve_unused_test_numbers()[0]
         serializer.save(appointment_code=appointment_code, test_no=test_no)
 
 class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
