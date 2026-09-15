@@ -673,28 +673,52 @@ export default function OpticalServices() {
     // Do not override if user is inside a multiline textarea
     if (activeEl && activeEl.tagName === 'TEXTAREA') return;
 
-    // Medical Aid Member Number is the LAST field of the patient registration rows (Mobile No
-    // now flows on into Email, ID Type, ID Number, Medical Aid Name/Scheme like every other
-    // field below) — pressing Enter there saves just the patient details to the database
-    // instead of just moving focus on into the next section, so no separate "register patient"
-    // step is needed. This must NOT create/update an eye-examinations record — that only
-    // happens via "Save Clinical Record" once test details have actually been entered.
-    if (e.key === 'Enter' && activeEl?.id === 'eyetest-medicalaid-membernumber-input') {
-      e.preventDefault();
-      handleSavePatient();
-      return;
-    }
+    // Patient Details (single-screen form) flows in this exact order:
+    //   Test No → Patient ID → Patient Name → Address → Place → Gender → Age → Mobile No →
+    //   Email → ID Type → ID Number → Medical Aid Name → Scheme → Member No → Date →
+    //   Test Type → Optometrist → Save
+    // Enter on Save lets the button's own click run: it saves just the patient details, so no
+    // separate "register patient" step is needed. This must NOT create/update an
+    // eye-examinations record — that only happens via "Save Clinical Record".
+    if (e.key === 'Enter' && activeEl?.id === 'eyetest-save-patient-btn') return;
+
+    // MUI selects are focusable <div>s, not inputs. A closed one opens its own menu on
+    // Enter/ArrowUp/ArrowDown (MUI has already handled the key) — leave focus on it.
+    const isSelectDisplay = (el) => !!el?.classList?.contains('MuiSelect-select');
+    if (isSelectDisplay(activeEl) && e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
 
     const container = document.getElementById('optical-single-form-container') || document.getElementById('optical-step-container');
     if (!container) return;
 
-    // Filter STRICTLY to interactive inputs (exclude wrapper divs, hidden inputs, disabled inputs)
-    const rawFocusables = Array.from(container.querySelectorAll('input:not([type="hidden"]):not([disabled]), select:not([disabled])'));
-    const focusables = rawFocusables.filter(el => {
+    // Filter STRICTLY to interactive inputs (exclude wrapper divs, hidden inputs, disabled inputs).
+    // The Patient Details section's selects and its Save button are pulled in explicitly so Enter
+    // stops on them too — scoped to that section so the clinical sections keep their existing flow.
+    const getFocusables = () => Array.from(container.querySelectorAll(
+      'input:not([type="hidden"]):not([disabled]), select:not([disabled]), #eyetest-patient-details .MuiSelect-select, #eyetest-save-patient-btn'
+    )).filter(el => {
       if (el.tabIndex === -1 || el.offsetParent === null) return false;
       if (el.type === 'hidden' || el.getAttribute('aria-hidden') === 'true') return false;
       return true;
     });
+
+    // Enter on an option in one of those selects' menus picks it (MUI's own handler); once the
+    // menu has closed and handed focus back to the select, carry on to the next field.
+    if (e.key === 'Enter' && activeEl?.getAttribute?.('role') === 'option') {
+      setTimeout(() => {
+        const sel = document.activeElement;
+        if (!isSelectDisplay(sel) || !sel.closest('#eyetest-patient-details')) return;
+        const list = getFocusables();
+        const idx = list.indexOf(sel);
+        const nextEl = idx >= 0 ? list[idx + 1] : null;
+        if (nextEl) {
+          nextEl.focus();
+          if (nextEl.select) nextEl.select();
+        }
+      }, 0);
+      return;
+    }
+
+    const focusables = getFocusables();
 
     if (focusables.length === 0) return;
 

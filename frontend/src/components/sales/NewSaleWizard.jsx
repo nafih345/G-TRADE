@@ -1,8 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import useBarcodeScanner from '../../hooks/useBarcodeScanner';
 import { sendInvoiceWhatsApp } from '../../utils/whatsappInvoice';
 import { barcodeMatchesProduct } from '../../utils/barcodeMatch';
+import { notify } from '../../utils/notify';
+import { isRealCustomerName } from '../../utils/salesDocStatus';
+import { apiErrorMessage } from '../../utils/apiError';
 import { 
   Box, Card, Typography, Grid, TextField, 
   Button, MenuItem, Table, TableBody, TableCell, 
@@ -32,7 +35,10 @@ import {
   Speed as SpeedIcon,
   CloudDone as CloudIcon,
   Visibility as EyeIcon,
-  ReceiptLong as BillIcon
+  ReceiptLong as BillIcon,
+  CheckCircle as DoneIcon,
+  AddCircleOutline as NewSaleIcon,
+  Edit as EditIcon
 } from '@mui/icons-material';
 import PrintInvoiceModal from './PrintInvoiceModal';
 import ServiceMasterDialog from './ServiceMasterDialog';
@@ -186,12 +192,137 @@ const DISC_FIELD_SX = {
   '& .MuiInputBase-root': { pr: 0.5 },
 };
 
+// Blank values for one sale's worth of form state. Used both as the initial useState() values and
+// by "Add New Details", so the reset always lands on exactly what a freshly opened New Sale shows.
+// (Always spread a copy into state — never hand these shared objects to a setter directly.)
+const EMPTY_CUSTOMER = { id: '', name: '', phone: '', age: '', gender: 'MALE', address: '', gstin: '' };
+const EMPTY_RX = {
+  sphOD: '', cylOD: '', axisOD: '', vaOD: '',
+  sphOD_NV: '', cylOD_NV: '', axisOD_NV: '', vaOD_NV: '',
+  ipdOD: '', addOD: '',
+  sphOS: '', cylOS: '', axisOS: '', vaOS: '',
+  sphOS_NV: '', cylOS_NV: '', axisOS_NV: '', vaOS_NV: '',
+  ipdOS: '', addOS: '',
+  notes: ''
+};
+const EMPTY_ENTRY = {
+  productId: '', barcode: '', item: '', modelNo: '', color: '', size: '',
+  brand: '', supplier: '', rack: '', stock: null,
+  category: 'FRAME', group: 'GENERIC', power: '',
+  qty: 1, price: '', discMode: 'PCT', discValue: 0, discPercent: 0, incTax: 0, taxPercent: 0
+};
+const EMPTY_SERVICE_INPUT = {
+  serviceId: '', code: '', name: '', description: '',
+  qty: 1, price: '', discMode: 'PCT', discValue: 0, discPercent: 0, taxPercent: 0
+};
+const EMPTY_SERVICE_REPAIR = {
+  customerItem: '', problemDescription: '', estimatedDelivery: '', technician: '', serviceStatus: 'RECEIVED'
+};
+const EMPTY_MULTI_PAY = { cash: '', cards: '', gpay: '', bank: '' };
+
+// Document number for a new bill, e.g. INV-2026-4821 / ORD-… / QTN-….
+const DOC_NUMBER_PREFIX = { Order: 'ORD', Quotation: 'QTN', Invoice: 'INV' };
+const generateDocNumber = (type) =>
+  `${DOC_NUMBER_PREFIX[type] || 'INV'}-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
+
+const docTypeLabel = (type) =>
+  type === 'Order' ? 'Spectacle Sales Order' : type === 'Quotation' ? 'Price Quotation / Estimate' : 'Tax Invoice';
+
+// --- Editing a saved document (Sales > Orders → ✏️ Edit) ---
+const isBackendUuid = (id) =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id || ''));
+
+// Every localStorage bucket a completed sale is mirrored into (see saveCompletedSale).
+const SALES_STORAGE_KEYS = ['optical_sales_invoices', 'optical_sales_orders', 'optical_sales_quotations'];
+
+// 'ORDER' / 'Order' / … → the wizard's docType value.
+const toWizardDocType = (t) => {
+  const u = String(t || 'INVOICE').toUpperCase();
+  return u === 'ORDER' ? 'Order' : u === 'QUOTATION' ? 'Quotation' : 'Invoice';
+};
+
+// saveCompletedSale records a bill with no patient as "Walk-in Customer". Never load that back
+// into the name field — saving the edit would then register a patient literally called that.
+// Also what a bill needs before it can be saved (see handleCompleteBilling).
+const realCustomerName = (n) => (isRealCustomerName(n) ? String(n).trim().replace(/\s+/g, ' ') : '');
+
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+// --- Split advance (footer pay-mode boxes) ---
+// Wizard state key, `payment_splits` key sent to the backend (one receipt per mode), the label
+// saved as the payment method, and the row caption.
+const PAY_MODES = [
+  { key: 'cash', apiKey: 'cash', label: 'Cash', caption: 'Cash' },
+  { key: 'cards', apiKey: 'card', label: 'Card', caption: 'Cards' },
+  { key: 'gpay', apiKey: 'upi', label: 'UPI', caption: 'GPAY / UPI' },
+  { key: 'bank', apiKey: 'bank', label: 'Bank Transfer', caption: 'Bank Transfer' },
+];
+// Change is handed back out of cash first, then refunded from Bank / UPI / Card.
+const CHANGE_ORDER = ['cash', 'bank', 'gpay', 'cards'];
+
+const payAmount = (v) => Math.max(0, round2(parseFloat(v) || 0));
+
+// Keep a pay-mode box to a plain positive amount with at most two decimals — no minus sign, so a
+// typo can never subtract from what has been paid.
+const cleanAmountInput = (raw) => {
+  const s = String(raw ?? '').replace(/[^\d.]/g, '');
+  const dot = s.indexOf('.');
+  return dot < 0 ? s : `${s.slice(0, dot + 1)}${s.slice(dot + 1).replace(/\./g, '').slice(0, 2)}`;
+};
+
+// Tendered = the sum of the pay-mode boxes. Anything over the net payable is change / refund
+// handed back, so `recorded` (what's saved against the bill) is the split less that excess.
+const settlePaySplit = (multiPay, net) => {
+  const recorded = {};
+  PAY_MODES.forEach(m => { recorded[m.key] = payAmount(multiPay[m.key]); });
+  const tendered = round2(PAY_MODES.reduce((s, m) => s + recorded[m.key], 0));
+  const change = round2(Math.max(0, tendered - round2(net)));
+  let left = change;
+  CHANGE_ORDER.forEach(k => {
+    const back = Math.min(left, recorded[k]);
+    recorded[k] = round2(recorded[k] - back);
+    left = round2(left - back);
+  });
+  return { recorded, tendered, change, paid: round2(tendered - change) };
+};
+
+// "Cash + UPI" — the bill's payment method, from the modes actually used.
+const paySplitLabel = (recorded) =>
+  PAY_MODES.filter(m => recorded[m.key] > 0).map(m => m.label).join(' + ');
+
+// Typing a total into the Advance Paid box: Card / UPI / Bank keep what they hold and the rest
+// goes under Cash; a total below those trims Bank, then UPI, then Card. So Advance Paid always
+// stays the sum of the pay-mode boxes — never a second figure added on top of them.
+const applyAdvanceTotal = (multiPay, rawTotal) => {
+  const target = payAmount(rawTotal);
+  const { recorded, tendered } = settlePaySplit({ ...multiPay, cash: 0 }, target);
+  recorded.cash = round2(Math.max(0, target - tendered));
+  return Object.fromEntries(PAY_MODES.map(m => [m.key,
+    recorded[m.key] === payAmount(multiPay[m.key]) ? multiPay[m.key]
+      : (recorded[m.key] > 0 ? recorded[m.key].toFixed(2) : '')]));
+};
+
+// The pay-mode box a saved payment-method label belongs to (blank / unknown counts as cash).
+const payModeKeyFor = (method) => {
+  const m = String(method || '').toLowerCase();
+  if (!m || m.includes('cash')) return 'cash';
+  if (/upi|gpay/.test(m)) return 'gpay';
+  if (/bank|transfer/.test(m)) return 'bank';
+  if (m.includes('card')) return 'cards';
+  return 'cash';
+};
+
 export default function NewSaleWizard({
   customers = [],
   products = [],
   services = [],
   onCheckoutComplete,
-  onNavigateToEyeTest
+  onNavigateToEyeTest,
+  // Set when Sales > Orders sends a saved Order / Invoice / Quotation here to be edited: the form
+  // loads it, and "Complete" then updates that same record instead of creating a new bill.
+  editDocumentId = null,
+  onExitEdit,
+  onCancelEdit
 }) {
   // View Mode Selection: 'single-page' (Easy All-in-One Method) vs 'wizard' (5-Step Guided Wizard)
   const [viewMode, setViewMode] = useState('single-page');
@@ -226,7 +357,7 @@ export default function NewSaleWizard({
             id: id,
             name: name,
             phone: phone,
-            age: c.age || '22',
+            age: c.age || '',
             gender: c.gender || 'MALE',
             address: c.address || ''
           });
@@ -254,23 +385,25 @@ export default function NewSaleWizard({
     }
   }, [customers]);
 
-  const customerOptions = dbCustomers.length > 0 ? dbCustomers : (Array.isArray(customers) && customers.length > 0 ? customers : [{ id: 'P-1002', name: 'Mohammed', phone: '9961876122' }]);
+  // Real patients only — no demo patient when the database has none.
+  const baseCustomerOptions = dbCustomers.length > 0 ? dbCustomers : (Array.isArray(customers) ? customers : []);
+  // The patient on a document being edited isn't always in the lists above (e.g. a soft-deleted
+  // or not-yet-loaded customer). Keep it selectable so the patient select shows who the bill is for.
+  const [editCustomerOption, setEditCustomerOption] = useState(null);
+  const customerOptions = editCustomerOption && !baseCustomerOptions.some(c => String(c.id) === String(editCustomerOption.id))
+    ? [editCustomerOption, ...baseCustomerOptions]
+    : baseCustomerOptions;
 
   // --- PART 1: MASTER SALES HEADER & CUSTOMER DETAILS STATE ---
   const [docType, setDocType] = useState('Invoice');
-  const [billNo, setBillNo] = useState(`INV-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`);
+  const [billNo, setBillNo] = useState(() => generateDocNumber('Invoice'));
   const [testNo, setTestNo] = useState('');
   
   const [selectedCustomerId, setSelectedCustomerId] = useState('');
-  const [customerInput, setCustomerInput] = useState({
-    id: '',
-    name: '',
-    phone: '',
-    age: '',
-    gender: 'MALE',
-    address: '',
-    gstin: ''
-  });
+  const [customerInput, setCustomerInput] = useState({ ...EMPTY_CUSTOMER });
+  // Set when Complete is pressed without a customer name — flags the field until it's filled.
+  const [customerNameError, setCustomerNameError] = useState(false);
+  const customerNameRef = useRef(null);
   
   const [paymentMode, setPaymentMode] = useState('Cash');
   const todayISO = () => new Date().toISOString().split('T')[0];
@@ -288,40 +421,11 @@ export default function NewSaleWizard({
   // --- PART 2: REFRACTION PRESCRIPTION GRID & PRODUCT ENTRY TOOLBAR ---
   const [showRx, setShowRx] = useState(true);
   const [activeRxTab, setActiveRxTab] = useState('prescription');
-  const [rxData, setRxData] = useState({
-    sphOD: '', cylOD: '', axisOD: '', vaOD: '',
-    sphOD_NV: '', cylOD_NV: '', axisOD_NV: '', vaOD_NV: '',
-    ipdOD: '', addOD: '',
-    sphOS: '', cylOS: '', axisOS: '', vaOS: '',
-    sphOS_NV: '', cylOS_NV: '', axisOS_NV: '', vaOS_NV: '',
-    ipdOS: '', addOS: '',
-    notes: ''
-  });
+  const [rxData, setRxData] = useState({ ...EMPTY_RX });
 
   const [powerChecked, setPowerChecked] = useState(false);
   const [lensIndex, setLensIndex] = useState('1.56');
-  const [entryInput, setEntryInput] = useState({
-    productId: '',
-    barcode: '',
-    item: '',
-    modelNo: '',
-    color: '',
-    size: '',
-    brand: '',
-    supplier: '',
-    rack: '',
-    stock: null,
-    category: 'FRAME',
-    group: 'GENERIC',
-    power: '',
-    qty: 1,
-    price: '',
-    discMode: 'PCT',
-    discValue: 0,
-    discPercent: 0,
-    incTax: 0,
-    taxPercent: 0
-  });
+  const [entryInput, setEntryInput] = useState({ ...EMPTY_ENTRY });
   // Full product record for the currently-selected Optical DB item, shown as a detail strip
   // (barcode/brand/category/stock/price) under the selector so staff can confirm they picked
   // the right one before it goes into the billing grid.
@@ -340,34 +444,43 @@ export default function NewSaleWizard({
   const [serviceCatalog, setServiceCatalog] = useState(services);
   const [serviceMasterOpen, setServiceMasterOpen] = useState(false);
   useEffect(() => { setServiceCatalog(services); }, [services]);
-  const [serviceInput, setServiceInput] = useState({
-    serviceId: '', code: '', name: '', description: '',
-    qty: 1, price: '', discMode: 'PCT', discValue: 0, discPercent: 0, taxPercent: 0
-  });
+  const [serviceInput, setServiceInput] = useState({ ...EMPTY_SERVICE_INPUT });
   // Optional repair job-card fields — only shown when the Repair card (or the toggle) is on, so
   // Fitting / Adjustment stay one-click.
   const [showServiceRepair, setShowServiceRepair] = useState(false);
-  const [serviceRepair, setServiceRepair] = useState({
-    customerItem: '', problemDescription: '', estimatedDelivery: '', technician: '', serviceStatus: 'RECEIVED'
-  });
+  const [serviceRepair, setServiceRepair] = useState({ ...EMPTY_SERVICE_REPAIR });
 
   // --- PART 3: BILLING ITEMS TABLE & FINANCIAL FOOTER ---
   const [itemsList, setItemsList] = useState([]);
   const [sendWhatsapp, setSendWhatsapp] = useState(true);
   const [sendSms, setSendSms] = useState(true);
+  // The most recently saved sale. Set only after "Complete Tax Invoice" has persisted the
+  // invoice — this is the "data" the Alt+W WhatsApp shortcut shares. Nothing is shared until
+  // this exists, so the sale is always in the database before any message goes out.
+  const [lastCompletedOrder, setLastCompletedOrder] = useState(null);
+  // Post-completion lockout: the form is frozen while the sale is being saved and stays frozen
+  // once it's saved, until the front-desk explicitly starts the next one via "Add New Details"
+  // (click, F2 or Alt+N). The ref guards against a double-click firing two saves before React
+  // re-renders the disabled button.
+  const [isSaving, setIsSaving] = useState(false);
+  const savingRef = useRef(false);
+  // The saved document being edited, or null for a new sale: { id, invoiceNumber, docType,
+  // isBackend }. Cleared only by resetSaleForm (i.e. "Add New Details" / leaving edit mode).
+  const [editingDoc, setEditingDoc] = useState(null);
+  const [loadingEdit, setLoadingEdit] = useState(false);
+  const formLocked = isSaving || loadingEdit || Boolean(lastCompletedOrder);
+  // First field of the form — "Add New Details" focuses it so the next sale can be typed at once.
+  const firstFieldRef = useRef(null);
+  const [focusRequest, setFocusRequest] = useState(0);
 
   const [couponCode, setCouponCode] = useState('');
   const [couponDisc, setCouponDisc] = useState(0);
   const [overallDisc, setOverallDisc] = useState(0);
-  const [advancePaid, setAdvancePaid] = useState('');
   const [outRx, setOutRx] = useState('');
   
-  const [multiPay, setMultiPay] = useState({
-    cash: '',
-    cards: '',
-    gpay: '',
-    bank: ''
-  });
+  const [multiPay, setMultiPay] = useState({ ...EMPTY_MULTI_PAY });
+  // Advance Paid box text while it's being typed in (null otherwise) — see applyAdvanceTotal.
+  const [advanceDraft, setAdvanceDraft] = useState(null);
 
   // --- NEW LENS CREATOR ---
   // "+ NEW Lens" opens the full Product Master dialog (the same "Add Optical Stock / Product"
@@ -462,12 +575,14 @@ export default function NewSaleWizard({
       const subOd = subRef.od || matched.od || {};
       const subOs = subRef.os || matched.os || {};
 
-      const custName = matched.patient_name || matched.name || raw.name || customerInput.name || 'Mohammed';
-      const custPhone = matched.phone || raw.phone || customerInput.phone || '9961876122';
-      const custAge = matched.age || raw.age || customerInput.age || '22';
+      // Only what the exam / patient record actually holds — no demo patient or made-up Rx
+      // standing in for missing values (those printed on real bills).
+      const custName = matched.patient_name || matched.name || raw.name || customerInput.name || '';
+      const custPhone = matched.phone || raw.phone || customerInput.phone || '';
+      const custAge = matched.age || raw.age || customerInput.age || '';
       const custGender = matched.gender || raw.gender || customerInput.gender || 'MALE';
       const custAddr = matched.address || raw.address || customerInput.address || '';
-      const custId = matched.patient_id || matched.patientId || matched.id || 'P-1002';
+      const custId = matched.patient_id || matched.patientId || matched.id || '';
 
       setCustomerInput({
         id: custId,
@@ -481,18 +596,18 @@ export default function NewSaleWizard({
 
       setSelectedCustomerId(custId);
 
-      const sphOD = matched.sub_sph_od || subOd.sph || matched.sphRight || raw.sphRight || '-1.25';
-      const cylOD = matched.sub_cyl_od || subOd.cyl || matched.cylRight || raw.cylRight || '-0.50';
-      const axisOD = matched.sub_axis_od || subOd.axis || matched.axisRight || raw.axisRight || '90';
-      const vaOD = matched.sub_va_od || subOd.va || matched.vaOD || raw.vaOD || '6/6';
+      const sphOD = matched.sub_sph_od || subOd.sph || matched.sphRight || raw.sphRight || '';
+      const cylOD = matched.sub_cyl_od || subOd.cyl || matched.cylRight || raw.cylRight || '';
+      const axisOD = matched.sub_axis_od || subOd.axis || matched.axisRight || raw.axisRight || '';
+      const vaOD = matched.sub_va_od || subOd.va || matched.vaOD || raw.vaOD || '';
 
-      const sphOS = matched.sub_sph_os || subOs.sph || matched.sphLeft || raw.sphLeft || '-1.50';
-      const cylOS = matched.sub_cyl_os || subOs.cyl || matched.cylLeft || raw.cylLeft || '-0.75';
-      const axisOS = matched.sub_axis_os || subOs.axis || matched.axisLeft || raw.axisLeft || '85';
-      const vaOS = matched.sub_va_os || subOs.va || matched.vaOS || raw.vaOS || '6/6';
+      const sphOS = matched.sub_sph_os || subOs.sph || matched.sphLeft || raw.sphLeft || '';
+      const cylOS = matched.sub_cyl_os || subOs.cyl || matched.cylLeft || raw.cylLeft || '';
+      const axisOS = matched.sub_axis_os || subOs.axis || matched.axisLeft || raw.axisLeft || '';
+      const vaOS = matched.sub_va_os || subOs.va || matched.vaOS || raw.vaOS || '';
 
-      const nearAdd = matched.sub_add_od || matched.sub_add_os || subRef.nearAdd || subRef.add || matched.nearAdd || raw.nearAdd || '+1.50';
-      const ipd = matched.distance_pd || subRef.pd || matched.distancePD || matched.pd || raw.distancePD || '64';
+      const nearAdd = matched.sub_add_od || matched.sub_add_os || subRef.nearAdd || subRef.add || matched.nearAdd || raw.nearAdd || '';
+      const ipd = matched.distance_pd || subRef.pd || matched.distancePD || matched.pd || raw.distancePD || '';
 
       setRxData({
         sphOD: sphOD,
@@ -502,7 +617,7 @@ export default function NewSaleWizard({
         sphOD_NV: matched.sub_nv_sph_od || rxData.sphOD_NV || '',
         cylOD_NV: matched.sub_nv_cyl_od || rxData.cylOD_NV || '',
         axisOD_NV: matched.sub_nv_axis_od || rxData.axisOD_NV || '',
-        vaOD_NV: matched.sub_nv_va_od || 'N6',
+        vaOD_NV: matched.sub_nv_va_od || '',
         ipdOD: ipd,
         addOD: nearAdd,
         sphOS: sphOS,
@@ -512,10 +627,10 @@ export default function NewSaleWizard({
         sphOS_NV: matched.sub_nv_sph_os || rxData.sphOS_NV || '',
         cylOS_NV: matched.sub_nv_cyl_os || rxData.cylOS_NV || '',
         axisOS_NV: matched.sub_nv_axis_os || rxData.axisOS_NV || '',
-        vaOS_NV: matched.sub_nv_va_os || 'N6',
+        vaOS_NV: matched.sub_nv_va_os || '',
         ipdOS: ipd,
         addOS: nearAdd,
-        notes: matched.primary_diagnosis || matched.diagnosis || raw.diagnosis || 'Routine Refraction'
+        notes: matched.primary_diagnosis || matched.diagnosis || raw.diagnosis || ''
       });
     }
   };
@@ -524,6 +639,7 @@ export default function NewSaleWizard({
   const handleSelectCustomer = (cust) => {
     if (!cust) return;
     setSelectedCustomerId(cust.id);
+    setCustomerNameError(false);
     setCustomerInput({
       id: cust.id || '',
       name: cust.name || '',
@@ -537,18 +653,19 @@ export default function NewSaleWizard({
     const subOd = cust.subjectiveRefraction?.od || cust.od || {};
     const subOs = cust.subjectiveRefraction?.os || cust.os || {};
 
-    const sphOD = cust.sphRight || cust.sub_sph_od || subOd.sph || '-1.25';
-    const cylOD = cust.cylRight || cust.sub_cyl_od || subOd.cyl || '-0.50';
-    const axisOD = cust.axisRight || cust.sub_axis_od || subOd.axis || '90';
-    const vaOD = cust.vaOD || subOd.va || '6/6';
+    // The patient's own Rx only — never made-up values for a patient with no exam on file.
+    const sphOD = cust.sphRight || cust.sub_sph_od || subOd.sph || '';
+    const cylOD = cust.cylRight || cust.sub_cyl_od || subOd.cyl || '';
+    const axisOD = cust.axisRight || cust.sub_axis_od || subOd.axis || '';
+    const vaOD = cust.vaOD || subOd.va || '';
 
-    const sphOS = cust.sphLeft || cust.sub_sph_os || subOs.sph || '-1.50';
-    const cylOS = cust.cylLeft || cust.sub_cyl_os || subOs.cyl || '-0.75';
-    const axisOS = cust.axisLeft || cust.sub_axis_os || subOs.axis || '85';
-    const vaOS = cust.vaOS || subOs.va || '6/6';
+    const sphOS = cust.sphLeft || cust.sub_sph_os || subOs.sph || '';
+    const cylOS = cust.cylLeft || cust.sub_cyl_os || subOs.cyl || '';
+    const axisOS = cust.axisLeft || cust.sub_axis_os || subOs.axis || '';
+    const vaOS = cust.vaOS || subOs.va || '';
 
-    const nearAdd = cust.nearAdd || cust.sub_add_od || cust.subjectiveRefraction?.nearAdd || '+1.50';
-    const ipd = cust.distancePD || cust.pd || cust.distance_pd || '64';
+    const nearAdd = cust.nearAdd || cust.sub_add_od || cust.subjectiveRefraction?.nearAdd || '';
+    const ipd = cust.distancePD || cust.pd || cust.distance_pd || '';
 
     setRxData({
       sphOD: sphOD,
@@ -558,7 +675,7 @@ export default function NewSaleWizard({
       sphOD_NV: cust.sphRight_NV || '',
       cylOD_NV: cust.cylRight_NV || '',
       axisOD_NV: cust.axisRight_NV || '',
-      vaOD_NV: cust.vaOD_NV || 'N6',
+      vaOD_NV: cust.vaOD_NV || '',
       ipdOD: ipd,
       addOD: nearAdd,
       sphOS: sphOS,
@@ -568,10 +685,10 @@ export default function NewSaleWizard({
       sphOS_NV: cust.sphLeft_NV || '',
       cylOS_NV: cust.cylLeft_NV || '',
       axisOS_NV: cust.axisLeft_NV || '',
-      vaOS_NV: cust.vaOS_NV || 'N6',
+      vaOS_NV: cust.vaOS_NV || '',
       ipdOS: ipd,
       addOS: nearAdd,
-      notes: cust.primary_diagnosis || cust.diagnosis || cust.notes || 'Routine Refraction'
+      notes: cust.primary_diagnosis || cust.diagnosis || cust.notes || ''
     });
   };
 
@@ -894,6 +1011,11 @@ export default function NewSaleWizard({
   // entryInput state, and calling both back-to-back in the same handler would
   // read a stale (pre-update) entryInput due to React's async state batching.
   const handleBarcodeScan = (code) => {
+    // The scanner listens on the whole window, so the `inert` form lock doesn't stop it.
+    if (formLocked) {
+      notify('This bill is locked after completion — press F2 (Add New Details) to start a new sale, then scan again.');
+      return;
+    }
     const normalized = code.trim().toLowerCase();
     const found = products.find(p =>
       barcodeMatchesProduct(p, normalized) ||
@@ -1034,25 +1156,317 @@ export default function NewSaleWizard({
     itemDiscounts,
     totalTax,
     netTotal,
-    advancePaid: parseFloat(advancePaid) || 0,
+    advancePaid: recordedPaidAmount,
     balanceDue,
-    paidAmount: totalPaidAmount,
-    totalPaidAmount,
+    paidAmount: recordedPaidAmount,
+    totalPaidAmount: recordedPaidAmount,
+    amountTendered: totalPaidAmount,
+    changeReturned: changeDue,
     paymentStatusLabel,
-    paymentMode,
-    paymentMethod: paymentMode,
-    multiPay,
+    paymentMode: paymentMethodLabel,
+    paymentMethod: paymentMethodLabel,
+    multiPay: paySettlement.recorded,
     salesman,
     rxData
   });
 
   const handleShowBill = () => {
-    if (itemsList.length === 0) {
-      alert('Please add at least one item to the billing grid before showing the bill.');
+    if (itemsList.length === 0 && !lastCompletedOrder) {
+      notify('Please add at least one item to the billing grid before showing the bill.');
       return;
     }
     setShowBillOpen(true);
   };
+
+  // Alt + W → share the receipt on WhatsApp. Only fires once real invoice data exists: a
+  // just-completed sale (lastCompletedOrder), otherwise the live billing grid so the shortcut
+  // still works from the "Show Bill" preview. Nothing to share = a gentle nudge, not a no-op.
+  useEffect(() => {
+    const handleKey = (e) => {
+      if (!e.altKey || e.ctrlKey || e.metaKey) return;
+      if ((e.key || '').toLowerCase() !== 'w') return;
+      e.preventDefault();
+      const order = lastCompletedOrder || (itemsList.length > 0 ? buildInvoiceSnapshot() : null);
+      if (!order) {
+        alert('Nothing to share yet — complete a sale (or add items to the bill) first, then press Alt + W.');
+        return;
+      }
+      sendInvoiceWhatsApp(order);
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [lastCompletedOrder, itemsList]);
+
+  // "Add New Details" — unlock the form and reset it for the next customer. Everything that
+  // belongs to the sale just saved goes back to the fresh-screen defaults (including document type
+  // and date, so a Quotation or back-dated entry never silently carries over to the next bill);
+  // workstation preferences (view mode, salesman, WhatsApp/SMS ticks, Rx panel) are kept.
+  // This is also the only thing that clears lastCompletedOrder, so Alt+W / "Show Bill" keep
+  // pointing at the saved sale for as long as the lock screen is up.
+  const resetSaleForm = () => {
+    setDocType('Invoice');
+    setBillNo(generateDocNumber('Invoice'));
+    setTestNo('');
+    setSelectedCustomerId('');
+    setCustomerInput({ ...EMPTY_CUSTOMER });
+    setCustomerNameError(false);
+    setPaymentMode('Cash');
+    setInvoiceDate(todayISO());
+    setDeliveryDate(todayISO());
+    setRemark('');
+    setIcdCode('');
+    setActiveRxTab('prescription');
+    setRxData({ ...EMPTY_RX });
+    setPowerChecked(false);
+    setLensIndex('1.56');
+    setEntryInput({ ...EMPTY_ENTRY });
+    setSelectedProductDetail(null);
+    setProductSearchText('');
+    setItemMode('product');
+    setServiceInput({ ...EMPTY_SERVICE_INPUT });
+    setShowServiceRepair(false);
+    setServiceRepair({ ...EMPTY_SERVICE_REPAIR });
+    setItemsList([]);
+    setCouponCode('');
+    setCouponDisc(0);
+    setOverallDisc(0);
+    setOutRx('');
+    setMultiPay({ ...EMPTY_MULTI_PAY });
+    setAdvanceDraft(null);
+    setEditDialogId(null);
+    setShowBillOpen(false);
+    setLensDialogOpen(false);
+    setServiceMasterOpen(false);
+    setActiveStep(0);
+    setLastCompletedOrder(null);
+    setEditingDoc(null);
+    setEditCustomerOption(null);
+  };
+
+  const handleStartNewSale = () => {
+    resetSaleForm();
+    // Finishing (or abandoning) an edit also drops the edit request from the route, so the next
+    // bill is a genuinely new one.
+    if (editingDoc) onExitEdit?.();
+    setFocusRequest(n => n + 1);
+  };
+
+  // "Cancel Edit" — back to the Orders list without saving (or, standalone, a blank new sale).
+  const handleCancelEdit = () => {
+    if (onCancelEdit) onCancelEdit();
+    else handleStartNewSale();
+  };
+
+  // F2 / Alt+N = "Add New Details". Only listens while a completed sale is locking the form, so
+  // it can never wipe a bill that's still being built.
+  useEffect(() => {
+    if (!lastCompletedOrder) return;
+    const handleKey = (e) => {
+      const isF2 = e.key === 'F2' && !e.altKey && !e.ctrlKey && !e.metaKey;
+      const isAltN = e.altKey && !e.ctrlKey && !e.metaKey && (e.key || '').toLowerCase() === 'n';
+      if (!isF2 && !isAltN) return;
+      e.preventDefault();
+      if (e.repeat) return;
+      handleStartNewSale();
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [lastCompletedOrder]);
+
+  // Runs after the reset has committed (so the `inert` lock is already off) and puts the cursor
+  // in the first field of the fresh form.
+  useEffect(() => {
+    if (focusRequest) firstFieldRef.current?.focus();
+  }, [focusRequest]);
+
+  // ---- EDIT A SAVED DOCUMENT (Sales > Orders → ✏️ Edit) ------------------------------------
+  // The bill is rebuilt from the backend record. InvoiceItem has no per-line discount / brand /
+  // colour columns and the Invoice stores no Rx, so this device's localStorage copy of the sale
+  // (written by saveCompletedSale) fills those in when there is one.
+  const findLocalCopy = (id, invoiceNumber) => {
+    const matches = (r) => r && ((id && r.id === id) ||
+      (invoiceNumber && (r.invoiceNumber === invoiceNumber || r.id === invoiceNumber)));
+    let best = null;
+    for (const key of SALES_STORAGE_KEYS) {
+      try {
+        const list = JSON.parse(localStorage.getItem(key) || '[]');
+        const hit = Array.isArray(list) ? list.find(matches) : null;
+        // Prefer a full wizard snapshot (it has items) over a trimmed Orders-table row.
+        if (hit && (!best || (Array.isArray(hit.items) && !Array.isArray(best.items)))) best = hit;
+      } catch (e) { /* ignore malformed bucket */ }
+    }
+    return best;
+  };
+
+  const loadDocumentForEdit = async (docId) => {
+    let backend = null;
+    if (isBackendUuid(docId)) {
+      try {
+        backend = (await axios.get(`/api/sales/invoices/${docId}/`)).data;
+      } catch (e) {
+        console.warn('Could not load the document to edit:', e);
+        // A database record that failed to load must not quietly turn into a local-only edit —
+        // the save would never reach the database.
+        return null;
+      }
+    }
+    const local = findLocalCopy(backend?.id || docId, backend?.invoice_number);
+    if (!backend && !local) return null;
+    return { backend, local };
+  };
+
+  // One saved InvoiceItem → a billing-grid row. `li` is the matching line from the local copy.
+  const buildEditLine = (it, li, idx) => {
+    const qty = parseInt(it.quantity) || 1;
+    const price = parseFloat(it.unit_price) || 0;
+    const taxPercent = parseFloat(it.tax_rate) || 0;
+    const gross = qty * price;
+    const storedTax = parseFloat(it.tax_amount) || 0;
+    const storedTotal = parseFloat(it.subtotal) || 0;
+    // No discount column: this wizard saves subtotal = gross − disc + tax, POS Billing saves the
+    // pre-tax gross (its discount is bill-level) — so "subtotal == gross" means no line discount.
+    let discSrc = {
+      discMode: 'AMT',
+      discValue: Math.abs(storedTotal - gross) < 0.01 ? 0 : Math.max(0, round2(gross + storedTax - storedTotal)),
+    };
+    // The local copy knows the exact % / ₹ the user typed — use it while the line is unchanged.
+    if (li && li.discMode && (parseInt(li.qty) || 0) === qty && (parseFloat(li.price) || 0) === price) {
+      discSrc = { discMode: li.discMode, discValue: li.discValue, disc: li.disc, discPercent: li.discPercent };
+    }
+    const { discMode, discValue, disc, discPercent } = resolveDiscount(discSrc, gross);
+    const tax = ((gross - disc) * taxPercent) / 100;
+
+    const product = it.product ? products.find(p => String(p.id) === String(it.product)) : null;
+    const isService = String(it.item_type || '').toUpperCase() === 'SERVICE';
+    const description = it.description || product?.name || li?.item || 'Item';
+    return {
+      id: `ITEM-${Date.now()}-${idx}`,
+      productId: it.product || null,
+      serviceId: it.service || null,
+      itemType: isService ? 'SERVICE' : (it.item_type || 'PRODUCT'),
+      serviceDetails: it.service_details || null,
+      barcode: li?.barcode || product?.barcode || '',
+      item: description,
+      modelNo: li?.modelNo || product?.sku || '—',
+      color: li?.color || product?.colour || '—',
+      size: li?.size || product?.size || '—',
+      brand: li?.brand || product?.brand || (isService ? 'SERVICE' : '—'),
+      supplier: li?.supplier || product?.supplier || '',
+      rack: li?.rack || product?.rack || '',
+      stock: product?.stock ?? li?.stock ?? null,
+      category: li?.category || (isService
+        ? 'SERVICE'
+        : product ? String(product.type || product.category || 'FRAME').toUpperCase()
+          : (/lens/i.test(description) ? 'LENS' : 'FRAME')),
+      group: li?.group || (isService ? 'SERVICE' : 'GENERIC'),
+      power: li?.power || (isService ? (it.service_details?.problem_description || '—') : '—'),
+      serviceDescription: isService ? (li?.serviceDescription || '') : undefined,
+      qty, price, disc, gross, discMode, discValue, discPercent, tax, taxPercent,
+      total: gross - disc + tax,
+    };
+  };
+
+  const applyDocumentToForm = ({ backend, local }) => {
+    const dt = toWizardDocType(backend?.document_type || local?.documentType || local?.docType);
+    const number = backend?.invoice_number || local?.invoiceNumber || local?.id || '';
+    const docDate = backend?.invoice_date || local?.date || todayISO();
+
+    resetSaleForm();
+    setEditingDoc({ id: backend?.id || local.id, invoiceNumber: number, docType: dt, isBackend: Boolean(backend) });
+    setDocType(dt);
+    setBillNo(number);
+    setInvoiceDate(docDate);
+    setDeliveryDate(local?.deliveryDate || docDate);
+    // The header select is only Cash / Credit; the bill's real method ("Cash + UPI") comes back
+    // through the pay-mode boxes below.
+    const savedMethod = backend?.payment_method || local?.paymentMode || local?.paymentMethod || '';
+    setPaymentMode(/credit/i.test(savedMethod) ? 'Credit' : 'Cash');
+    if (local?.salesman) setSalesman(local.salesman);
+    setIcdCode(local?.icdCode || '');
+    setRxData({ ...EMPTY_RX, ...(local?.rxData || {}), notes: local?.rxData?.notes || local?.diagnosis || '' });
+
+    // Keep the document's own patient link, so saving never re-resolves or creates a customer.
+    const custId = backend ? (backend.customer || '') : (local?.customerId || '');
+    const opt = custId ? customerOptions.find(c => String(c.id) === String(custId)) : null;
+    const custName = realCustomerName(backend?.customer_name || local?.customerName || local?.customer || opt?.name);
+    const custPhone = backend?.customer_phone || local?.customerPhone || opt?.phone || '';
+    setEditCustomerOption(custId && !opt ? { id: custId, name: custName || 'Patient', phone: custPhone } : null);
+    setSelectedCustomerId(custId);
+    setCustomerInput({
+      id: custId,
+      name: custName,
+      phone: custPhone,
+      age: local?.customerAge || opt?.age || '',
+      gender: String(local?.customerGender || opt?.gender || 'MALE').toUpperCase(),
+      address: local?.customerAddress || opt?.address || '',
+      gstin: opt?.gstin || '',
+    });
+
+    // Items — from the database when it has them; a local-only document uses its own snapshot.
+    const localItems = Array.isArray(local?.items) ? [...local.items] : [];
+    const takeLocalLine = (description) => {
+      const i = localItems.findIndex(li => String(li.item || li.name || '') === String(description || ''));
+      return i >= 0 ? localItems.splice(i, 1)[0] : null;
+    };
+    const lines = backend
+      ? (backend.items || []).map((it, idx) => buildEditLine(it, takeLocalLine(it.description), idx))
+      : localItems.map((li, idx) => ({ ...li, id: `ITEM-${Date.now()}-${idx}` }));
+    setItemsList(lines);
+
+    // Coupon / overall bill discount isn't stored on its own — it's whatever separates the
+    // lines' total from the saved net amount.
+    const net = backend ? (parseFloat(backend.net_amount) || 0) : (parseFloat(local?.netTotal ?? local?.total) || 0);
+    const linesNet = lines.reduce((s, l) => s + (parseFloat(l.gross) || 0) - (parseFloat(l.disc) || 0) + (parseFloat(l.tax) || 0), 0);
+    setOverallDisc(Math.max(0, round2(linesNet - net)));
+
+    // Payment — the per-mode split saved against the bill (its billing receipts) when the
+    // database has one, else this device's copy. Whatever was paid beyond that split (an old bill's
+    // separately typed "Advance", or a payment recorded since from the Orders tab) goes under the
+    // bill's own payment method, so the boxes always add up to what the bill says was paid.
+    const paid = round2(backend
+      ? (parseFloat(backend.paid_amount) || 0)
+      : (parseFloat(local?.totalPaidAmount ?? local?.paidAmount) || 0));
+    const dbSplit = backend?.payment_splits;
+    const dbSplitTotal = dbSplit ? PAY_MODES.reduce((s, m) => s + payAmount(dbSplit[m.apiKey]), 0) : 0;
+    const split = {};
+    PAY_MODES.forEach(m => {
+      split[m.key] = dbSplitTotal > 0 ? payAmount(dbSplit[m.apiKey]) : payAmount(local?.multiPay?.[m.key]);
+    });
+    let splitTotal = round2(PAY_MODES.reduce((s, m) => s + split[m.key], 0));
+    if (splitTotal > paid + 0.009) {
+      // The saved split no longer matches the bill — trust the bill's own paid figure.
+      PAY_MODES.forEach(m => { split[m.key] = 0; });
+      splitTotal = 0;
+    }
+    const unsplit = round2(paid - splitTotal);
+    if (unsplit > 0.009) {
+      const k = payModeKeyFor(savedMethod);
+      split[k] = round2(split[k] + unsplit);
+    }
+    setMultiPay(Object.fromEntries(PAY_MODES.map(m => [m.key, split[m.key] > 0 ? split[m.key].toFixed(2) : ''])));
+  };
+
+  useEffect(() => {
+    if (!editDocumentId) {
+      // Edit request dropped from outside (e.g. the sidebar's New Sale link while editing) —
+      // don't leave the old document's bill on screen as if it were a new sale.
+      if (editingDoc) resetSaleForm();
+      return;
+    }
+    let cancelled = false;
+    setLoadingEdit(true);
+    loadDocumentForEdit(editDocumentId).then((doc) => {
+      if (cancelled) return;
+      setLoadingEdit(false);
+      if (!doc) {
+        notify('Could not load that document for editing — it may have been deleted, or the server is unreachable.');
+        onExitEdit?.();
+        return;
+      }
+      applyDocumentToForm(doc);
+    });
+    return () => { cancelled = true; setLoadingEdit(false); };
+  }, [editDocumentId]);
 
 
   // 3️⃣ PART 3 HANDLER: Coupon Code Auto-Calculation
@@ -1095,65 +1509,112 @@ export default function NewSaleWizard({
   const totalTax = itemsList.reduce((sum, item) => sum + (parseFloat(item.tax) || 0), 0);
   const netTotal = Math.max(0, grossTotal - itemDiscounts - couponDisc - overallDisc + totalTax);
   
-  // Money taken across the individual pay modes (Cash / Cards / GPay / Bank).
-  const modePaidAmount = (parseFloat(multiPay.cash) || 0) +
-                          (parseFloat(multiPay.cards) || 0) +
-                          (parseFloat(multiPay.gpay) || 0) +
-                          (parseFloat(multiPay.bank) || 0);
+  const totalDiscount = round2(itemDiscounts + couponDisc + overallDisc);
 
-  // "Total Paid" = whatever the customer has actually handed over = any advance already
-  // collected + everything entered in the pay-mode split. The footer, the bill preview and the
-  // printed receipt all read this one figure so they can never disagree.
-  const advanceAmount = parseFloat(advancePaid) || 0;
-  const totalPaidAmount = advanceAmount + modePaidAmount;
-
-  const balanceDue = Math.max(0, netTotal - totalPaidAmount);
+  // Split advance: Advance Paid (= Total Paid) is always Cash + Card + UPI + Bank. It can be typed
+  // as a total (applyAdvanceTotal spreads it over the boxes) or built up in the pay-mode table,
+  // but it is never a second figure added on top of them. Balance Due = Net Payable − Advance
+  // Paid. The footer, the bill preview and the saved bill all read these same figures.
+  // While the Advance Paid box is being typed in, everything previews the split it will produce.
+  const effectivePay = advanceDraft === null ? multiPay : applyAdvanceTotal(multiPay, advanceDraft);
+  const paySettlement = settlePaySplit(effectivePay, netTotal);
+  const commitAdvanceDraft = () => {
+    if (advanceDraft === null) return;
+    const draft = advanceDraft;
+    setMultiPay(prev => applyAdvanceTotal(prev, draft));
+    setAdvanceDraft(null);
+  };
+  const totalPaidAmount = paySettlement.tendered;
+  const changeDue = paySettlement.change;
+  // Paid as recorded against the bill: the tendered sum less any change handed back.
+  const recordedPaidAmount = paySettlement.paid;
+  const balanceDue = round2(Math.max(0, netTotal - totalPaidAmount));
+  const paymentMethodLabel = paySplitLabel(paySettlement.recorded) || paymentMode;
   // PAID once nothing is owed, PARTIAL while some money is in, UNPAID when nothing is.
   const paymentStatusLabel = balanceDue <= 0.009
     ? 'PAID'
     : (totalPaidAmount > 0 ? 'PARTIALLY PAID' : 'UNPAID');
 
+  const completeLabel = editingDoc
+    ? (docType === 'Order' ? 'Update Spectacle Order' : docType === 'Quotation' ? 'Update Quotation' : 'Update Tax Invoice')
+    : (docType === 'Order' ? 'Complete Spectacle Order' : docType === 'Quotation' ? 'Generate Quotation' : 'Complete Tax Invoice');
+
   // 3️⃣ PART 3 HANDLER: Complete & Print Invoice (F10)
   // Handle Document Type Switch (Order vs Invoice vs Quotation)
   const handleDocTypeChange = (type) => {
     setDocType(type);
-    const year = new Date().getFullYear();
-    const rand = Math.floor(1000 + Math.random() * 9000);
+    // While editing, switching back to the document's own type restores its original number; a
+    // different type gets a fresh number with the matching prefix (ORD- / INV- / QTN-).
+    setBillNo(editingDoc && type === editingDoc.docType ? editingDoc.invoiceNumber : generateDocNumber(type));
+  };
 
-    if (type === 'Order') {
-      setBillNo(`ORD-${year}-${rand}`);
-    } else if (type === 'Quotation') {
-      setBillNo(`QTN-${year}-${rand}`);
-    } else {
-      setBillNo(`INV-${year}-${rand}`);
+  // Entry point for every "Complete …" button. Refuses to run twice for one bill (a double-click,
+  // or a click while the saved sale is locked) and keeps the form frozen while the save runs.
+  const handleCompleteBilling = async () => {
+    if (savingRef.current || lastCompletedOrder) return;
+    if (itemsList.length === 0) {
+      notify('Please add at least one item to the billing grid before completing.');
+      return;
+    }
+    // Every Order / Invoice / Quotation must say who it's for (the backend refuses it otherwise).
+    if (!realCustomerName(customerInput.name)) {
+      setCustomerNameError(true);
+      notify("Customer name is required — select the patient or type the customer's name before saving.");
+      customerNameRef.current?.focus();
+      return;
+    }
+    // More tendered than the bill: go ahead only once the cashier confirms the excess is being
+    // handed back as change / refund. The bill then records just what the shop keeps.
+    if (changeDue > 0.009) {
+      const kept = PAY_MODES
+        .filter(m => paySettlement.recorded[m.key] > 0)
+        .map(m => `${m.label} ₹${paySettlement.recorded[m.key].toFixed(2)}`)
+        .join(' + ') || 'no payment';
+      const ok = window.confirm(
+        `Total Paid ₹${totalPaidAmount.toFixed(2)} is more than the Net Payable ₹${round2(netTotal).toFixed(2)}.\n\n` +
+        `OK: return ₹${changeDue.toFixed(2)} to the customer as change / refund, and record ${kept} against this bill.\n` +
+        'Cancel: go back and correct the amounts.'
+      );
+      if (!ok) return;
+    }
+    savingRef.current = true;
+    setIsSaving(true);
+    try {
+      await saveCompletedSale();
+    } finally {
+      savingRef.current = false;
+      setIsSaving(false);
     }
   };
 
-  const handleCompleteBilling = async () => {
-    if (itemsList.length === 0) {
-      alert("Please add at least one item to the billing grid before completing.");
-      return;
-    }
+  const saveCompletedSale = async () => {
 
     // Resolve-or-create the real backend Customer this sale belongs to — same pattern as
     // handleSavePatient/Appointments.jsx, so a walk-in typed directly here still lands in the
     // shared Customer table instead of only existing as a name string on this one invoice.
-    let customerId = selectedCustomerId;
-    if (!customerId && customerInput.name) {
-      const existingMatch = customerInput.phone ? customers.find(c => c.phone && c.phone === customerInput.phone) : null;
+    const customerName = realCustomerName(customerInput.name);
+    // Only a real database id can be linked. A patient this browser only knows by a legacy local id
+    // (e.g. "P-1003") used to fail the whole save with "Invalid pk"; it's now looked up / registered
+    // by phone and name like a typed walk-in.
+    let customerId = isBackendUuid(selectedCustomerId) ? selectedCustomerId : '';
+    if (!customerId && customerName) {
+      const existingMatch = customerInput.phone
+        ? customers.find(c => isBackendUuid(c.id) && c.phone && c.phone === customerInput.phone)
+        : null;
       if (existingMatch) {
         customerId = existingMatch.id;
       } else {
         try {
           const res = await axios.post('/api/sales/customers/', {
-            name: customerInput.name,
+            name: customerName,
             phone: customerInput.phone || '',
             age: customerInput.age || '',
             gender: customerInput.gender || 'MALE'
           });
           customerId = res.data.id;
         } catch (e) {
-          // Continue without a linked customer rather than blocking the sale.
+          // Continue without a linked patient record rather than blocking the sale — the bill
+          // still carries the customer's name (customer_name).
         }
       }
     }
@@ -1171,20 +1632,28 @@ export default function NewSaleWizard({
       try {
         const status = docType === 'Quotation'
           ? 'DRAFT'
-          : (balanceDue > 0 ? (totalPaidAmount > 0 ? 'PARTIAL' : 'UNPAID') : 'PAID');
-        const res = await axios.post('/api/sales/invoices/', {
+          : (balanceDue > 0 ? (recordedPaidAmount > 0 ? 'PARTIAL' : 'UNPAID') : 'PAID');
+        const payload = {
           invoice_number: billNo,
           document_type: docType.toUpperCase(),
-          fulfillment_status: docType === 'Order' ? 'Order Received' : undefined,
-          customer: customerId,
+          // An edited Order keeps its lab-pipeline stage; only a new (or newly converted) Order
+          // starts at "Order Received".
+          fulfillment_status: docType === 'Order' && editingDoc?.docType !== 'Order' ? 'Order Received' : undefined,
+          customer: customerId || null,
+          // Who the bill is for — required by the backend, and kept on the bill even when no
+          // patient record could be linked.
+          customer_name: customerName,
           invoice_date: invoiceDate || todayISO(),
           status,
           total_amount: grossTotal,
           tax_amount: totalTax,
           discount_amount: itemDiscounts,
           net_amount: netTotal,
-          paid_amount: totalPaidAmount,
-          payment_method: paymentMode,
+          paid_amount: recordedPaidAmount,
+          payment_method: paymentMethodLabel,
+          // Each pay mode's amount — the backend records one receipt per mode against this bill
+          // (and sets paid_amount to their sum).
+          payment_splits: Object.fromEntries(PAY_MODES.map(m => [m.apiKey, paySettlement.recorded[m.key]])),
           items: itemsList.map(i => ({
             product: i.productId || null,
             service: i.serviceId || null,
@@ -1197,23 +1666,38 @@ export default function NewSaleWizard({
             tax_amount: i.tax,
             subtotal: i.total
           }))
-        });
-        backendInvoiceId = res.data.id;
-        backendInvoiceNumber = res.data.invoice_number || billNo;
+        };
+        // Editing updates the same record in place (the backend swaps its items and moves stock
+        // by the difference). A local-only document has no database row to update.
+        const res = editingDoc
+          ? (editingDoc.isBackend ? await axios.patch(`/api/sales/invoices/${editingDoc.id}/`, payload) : null)
+          : await axios.post('/api/sales/invoices/', payload);
+        if (res) {
+          backendInvoiceId = res.data.id;
+          backendInvoiceNumber = res.data.invoice_number || billNo;
+        }
       } catch (e) {
-        // Continue with the local-only record rather than blocking the sale — the receipt
-        // still prints and the record still saves to localStorage below.
+        // Never fall back to a browser-only "saved offline" copy: it never reached the database, so
+        // the bill was missing from every other screen and device while this one said it was saved
+        // (an edit would leave the old bill in the database). Say why, and leave the form open to
+        // fix / retry.
         console.warn('Invoice did not save to the database:', e);
+        notify(editingDoc
+          ? `Could not update ${editingDoc.invoiceNumber} — the changes were NOT saved. ${apiErrorMessage(e)}`
+          : `The ${docType.toLowerCase()} was NOT saved. ${apiErrorMessage(e)}`);
+        return;
       }
     }
 
     const completedOrder = {
-      id: backendInvoiceId || billNo,
+      id: backendInvoiceId || editingDoc?.id || billNo,
       invoiceNumber: backendInvoiceNumber,
+      isEdit: Boolean(editingDoc),
+      previousInvoiceNumber: editingDoc?.invoiceNumber,
       customerId,
       date: invoiceDate || todayISO(),
       deliveryDate,
-      customerName: customerInput.name || 'Walk-in Customer',
+      customerName,
       customerPhone: customerInput.phone || '',
       customerAge: customerInput.age,
       customerGender: customerInput.gender,
@@ -1227,13 +1711,16 @@ export default function NewSaleWizard({
       itemDiscounts,
       totalTax,
       netTotal,
-      advancePaid: parseFloat(advancePaid) || 0,
+      advancePaid: recordedPaidAmount,
       balanceDue,
-      paidAmount: totalPaidAmount,
-      totalPaidAmount,
+      paidAmount: recordedPaidAmount,
+      totalPaidAmount: recordedPaidAmount,
+      amountTendered: totalPaidAmount,
+      changeReturned: changeDue,
       paymentStatusLabel,
-      paymentMode,
-      multiPay,
+      paymentMode: paymentMethodLabel,
+      paymentMethod: paymentMethodLabel,
+      multiPay: paySettlement.recorded,
       salesman,
       rxData
     };
@@ -1245,6 +1732,19 @@ export default function NewSaleWizard({
           ? 'optical_sales_orders'
           : 'optical_sales_invoices';
 
+      // Editing: drop the document's old copies from every bucket first (a type change moves it
+      // to a different bucket), so it's replaced rather than listed twice.
+      if (editingDoc) {
+        const wasEdited = (r) => r && (r.id === editingDoc.id ||
+          r.invoiceNumber === editingDoc.invoiceNumber || r.id === editingDoc.invoiceNumber);
+        SALES_STORAGE_KEYS.forEach((key) => {
+          try {
+            const list = JSON.parse(localStorage.getItem(key) || '[]');
+            if (Array.isArray(list)) localStorage.setItem(key, JSON.stringify(list.filter(r => !wasEdited(r))));
+          } catch (e) { /* ignore malformed bucket */ }
+        });
+      }
+
       const stored = JSON.parse(localStorage.getItem(storedKey) || '[]');
       localStorage.setItem(storedKey, JSON.stringify([completedOrder, ...stored]));
 
@@ -1253,13 +1753,14 @@ export default function NewSaleWizard({
       localStorage.setItem('optical_sales_invoices', JSON.stringify([completedOrder, ...masterStored]));
     } catch (e) {}
 
-    // Dispatch WhatsApp/SMS receipt if the front-desk left those checked. WhatsApp opens a real
-    // pre-filled chat via the existing invoice-sharing utility; SMS has no gateway configured in
-    // this deployment yet, so it's logged as a queued send rather than faked as delivered.
-    if (sendWhatsapp) {
-      sendInvoiceWhatsApp(completedOrder);
-    }
-    if (sendSms) {
+    // WhatsApp is NO LONGER auto-opened here. The sale is saved first, the front-desk is told it
+    // saved, and only then can they share it — via the "Show Bill" dialog (which previews the
+    // exact message) or the Alt+W shortcut. This keeps a new browser tab from stealing focus the
+    // instant the invoice is completed.
+    setLastCompletedOrder(completedOrder);
+
+    // An edit is a correction, not a new sale — don't queue a second SMS for it.
+    if (sendSms && !editingDoc) {
       try {
         const logs = JSON.parse(localStorage.getItem('optical_sms_logs') || '[]');
         logs.unshift({
@@ -1274,11 +1775,18 @@ export default function NewSaleWizard({
       } catch (e) {}
     }
 
+    const docLabel = docTypeLabel(docType);
+    const savedMsg = editingDoc
+      ? `✔ ${docLabel} ${backendInvoiceNumber} updated${editingDoc.isBackend ? ' in the database' : ' (offline copy)'} — Net Total: ₹${netTotal.toFixed(2)}.`
+      : backendInvoiceId
+        ? `✔ ${docLabel} ${backendInvoiceNumber} saved to database successfully! Net Total: ₹${netTotal.toFixed(2)}.`
+        : `✔ ${docLabel} ${billNo} saved successfully (offline copy) — Net Total: ₹${netTotal.toFixed(2)}.`;
+    alert(sendWhatsapp
+      ? `${savedMsg}\n\nPress Alt + W (or use "Show Bill") to share the receipt on WhatsApp.`
+      : savedMsg);
+
     if (onCheckoutComplete) {
       onCheckoutComplete(completedOrder);
-    } else {
-      const docLabel = docType === 'Order' ? 'Spectacle Sales Order' : docType === 'Quotation' ? 'Price Quotation / Estimate' : 'Tax Invoice';
-      alert(`✔ ${docLabel} ${billNo} completed & saved to database successfully! Net Total: ₹${netTotal}.`);
     }
   };
 
@@ -1343,6 +1851,41 @@ export default function NewSaleWizard({
         </Box>
       </Card>
 
+      {/* Edit-mode banner — outside the lock container so "Cancel Edit" works while loading. */}
+      {(editingDoc || loadingEdit) && !lastCompletedOrder && (
+        <Alert
+          severity="warning"
+          icon={<EditIcon />}
+          sx={{ mb: 2, borderRadius: 2.5, alignItems: 'center', border: '1px solid', borderColor: 'warning.light' }}
+          action={
+            <Button
+              color="inherit" size="small" variant="outlined"
+              onClick={handleCancelEdit} disabled={isSaving}
+              sx={{ fontWeight: 800, textTransform: 'none' }}
+            >
+              Cancel Edit
+            </Button>
+          }
+        >
+          {loadingEdit || !editingDoc ? (
+            <Typography variant="body2" fontWeight={800}>Loading the saved document for editing…</Typography>
+          ) : (
+            <Typography variant="body2" fontWeight={700}>
+              Editing {docTypeLabel(editingDoc.docType)} <b>{editingDoc.invoiceNumber}</b> — change anything below
+              and press <b>{completeLabel}</b>. The existing record is updated; no new bill is created.
+            </Typography>
+          )}
+        </Alert>
+      )}
+
+      {/* Both entry modes sit inside one lock container: `inert` blocks every click, keystroke
+          and Tab stop inside it while a sale is saving or saved. The "Add New Details" card sits
+          outside the inert box (so it stays usable) and is the only way back into the form. */}
+      <Box
+        inert={formLocked}
+        sx={formLocked ? { opacity: 0.5, filter: 'grayscale(0.35)', userSelect: 'none', transition: 'opacity 0.2s' } : undefined}
+      >
+
       {/* ========================================================================= */}
       {/* MODE 1: ALL-IN-ONE SINGLE SCREEN POS TERMINAL (EASY METHOD) */}
       {/* ========================================================================= */}
@@ -1366,6 +1909,7 @@ export default function NewSaleWizard({
               <Grid item xs={12} sm={3} md={2}>
                 <TextField 
                   fullWidth size="small" label="Test No" placeholder="e.g. 1002"
+                  inputRef={firstFieldRef}
                   value={testNo} onChange={(e) => handleTestNoChange(e.target.value)}
                   inputProps={{ style: { fontWeight: 800, fontSize: '0.85rem' } }}
                 />
@@ -1429,9 +1973,16 @@ export default function NewSaleWizard({
 
               {/* Row 2: Customer Name, Phone, Age, Gender, Payment Mode */}
               <Grid item xs={12} sm={4} md={3}>
-                <TextField 
-                  fullWidth size="small" label="Customer Name" placeholder="Walk-in Patient Name"
-                  value={customerInput.name} onChange={(e) => setCustomerInput({ ...customerInput, name: e.target.value })}
+                <TextField
+                  fullWidth size="small" label="Customer Name" placeholder="Patient / customer name" required
+                  inputRef={customerNameRef}
+                  error={customerNameError}
+                  helperText={customerNameError ? 'Required — select a patient or type a name' : undefined}
+                  value={customerInput.name}
+                  onChange={(e) => {
+                    setCustomerInput({ ...customerInput, name: e.target.value });
+                    if (customerNameError) setCustomerNameError(false);
+                  }}
                   inputProps={{ style: { fontWeight: 700, fontSize: '0.85rem' } }}
                 />
               </Grid>
@@ -2517,25 +3068,37 @@ export default function NewSaleWizard({
                 </Paper>
               </Grid>
 
-              {/* Box 2: Net Totals, Advance & Balance */}
+              {/* Box 2: Net Payable, Advance Paid (sum of the pay modes) & Balance */}
               <Grid item xs={12} sm={6} md={2.4}>
                 <Paper variant="outlined" sx={{ p: 1.2, borderRadius: 2, bgcolor: '#ffffff', borderLeft: '4px solid #2563eb' }}>
                   <Grid container spacing={0.8}>
                     <Grid item xs={6}><Typography variant="caption" color="text.secondary" fontWeight={700}>Gross</Typography></Grid>
                     <Grid item xs={6}><Typography variant="body2" fontWeight={800} align="right">₹{grossTotal.toFixed(2)}</Typography></Grid>
 
-                    <Grid item xs={6}><Typography variant="caption" fontWeight={900} color="primary.main">Net (F3)</Typography></Grid>
+                    <Grid item xs={6}><Typography variant="caption" color="text.secondary" fontWeight={700}>Discount</Typography></Grid>
+                    <Grid item xs={6}><Typography variant="body2" fontWeight={800} color="error.main" align="right">−₹{totalDiscount.toFixed(2)}</Typography></Grid>
+
+                    <Grid item xs={6}><Typography variant="caption" fontWeight={900} color="primary.main">Net Payable</Typography></Grid>
                     <Grid item xs={6}><Typography variant="body2" fontWeight={900} color="primary.main" align="right">₹{netTotal.toFixed(2)}</Typography></Grid>
 
-                    <Grid item xs={6}><Typography variant="caption" color="text.secondary" fontWeight={700}>Advance</Typography></Grid>
+                    {/* Typed as a total; the pay-mode table shows how it splits (whatever Card / UPI /
+                        Bank don't hold goes under Cash). */}
+                    <Grid item xs={6}><Typography variant="caption" color="text.secondary" fontWeight={700}>Advance Paid</Typography></Grid>
                     <Grid item xs={6}>
-                      <TextField 
-                        size="small" placeholder="0.00" value={advancePaid} onChange={(e) => setAdvancePaid(e.target.value)}
-                        inputProps={{ style: { textAlign: 'right', fontWeight: 800, padding: '2px', fontSize: '0.8rem' } }}
-                      />
+                      <Tooltip title="Advance received. Card / UPI / Bank amounts in the pay-mode table are kept; the rest goes under Cash." placement="top">
+                        <TextField
+                          size="small" placeholder="0.00"
+                          value={advanceDraft ?? (totalPaidAmount > 0 ? totalPaidAmount.toFixed(2) : '')}
+                          onFocus={(e) => { setAdvanceDraft(totalPaidAmount > 0 ? totalPaidAmount.toFixed(2) : ''); e.target.select(); }}
+                          onChange={(e) => setAdvanceDraft(cleanAmountInput(e.target.value))}
+                          onBlur={commitAdvanceDraft}
+                          onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+                          inputProps={{ inputMode: 'decimal', 'aria-label': 'Advance Paid', style: { textAlign: 'right', fontWeight: 800, padding: '2px', fontSize: '0.8rem', color: '#15803d' } }}
+                        />
+                      </Tooltip>
                     </Grid>
 
-                    <Grid item xs={6}><Typography variant="caption" fontWeight={900} color="error.main">Balance</Typography></Grid>
+                    <Grid item xs={6}><Typography variant="caption" fontWeight={900} color="error.main">Balance Due</Typography></Grid>
                     <Grid item xs={6}><Typography variant="body2" fontWeight={900} color="error.main" align="right">₹{balanceDue.toFixed(2)}</Typography></Grid>
                   </Grid>
                 </Paper>
@@ -2553,12 +3116,15 @@ export default function NewSaleWizard({
                   <Button
                     fullWidth variant="contained" size="small"
                     onClick={() => {
-                      // Quick-fills whatever's still owed into Cash so staff don't have to do
-                      // the subtraction by hand when the customer is paying the remaining
-                      // balance in a single payment mode.
-                      const remaining = Math.max(0, netTotal - (parseFloat(advancePaid) || 0) -
-                        (parseFloat(multiPay.cards) || 0) - (parseFloat(multiPay.gpay) || 0) - (parseFloat(multiPay.bank) || 0));
-                      setMultiPay(prev => ({ ...prev, cash: remaining.toFixed(2) }));
+                      // Quick-fills whatever Card / UPI / Bank don't cover into Cash, so staff
+                      // don't have to do the subtraction by hand.
+                      // (prev, not the render's multiPay: an Advance Paid edit may commit on this
+                      // same click, as the box blurs.)
+                      setMultiPay(prev => {
+                        const remaining = round2(Math.max(0, netTotal -
+                          payAmount(prev.cards) - payAmount(prev.gpay) - payAmount(prev.bank)));
+                        return { ...prev, cash: remaining > 0 ? remaining.toFixed(2) : '' };
+                      });
                     }}
                     sx={{ bgcolor: '#0f172a', color: '#facc15', fontWeight: 900, textTransform: 'none', py: 0.6 }}
                   >
@@ -2578,30 +3144,21 @@ export default function NewSaleWizard({
                       </TableRow>
                     </TableHead>
                     <TableBody>
-                      <TableRow>
-                        <TableCell sx={{ py: 0.2, fontSize: '0.72rem', fontWeight: 700 }}>Cash</TableCell>
-                        <TableCell sx={{ p: 0.2 }}>
-                          <TextField size="small" value={multiPay.cash} onChange={(e) => setMultiPay({ ...multiPay, cash: e.target.value })} inputProps={{ style: { textAlign: 'center', fontWeight: 800, padding: '2px', fontSize: '0.72rem' } }} />
-                        </TableCell>
-                      </TableRow>
-                      <TableRow>
-                        <TableCell sx={{ py: 0.2, fontSize: '0.72rem', fontWeight: 700 }}>Cards</TableCell>
-                        <TableCell sx={{ p: 0.2 }}>
-                          <TextField size="small" value={multiPay.cards} onChange={(e) => setMultiPay({ ...multiPay, cards: e.target.value })} inputProps={{ style: { textAlign: 'center', fontWeight: 800, padding: '2px', fontSize: '0.72rem' } }} />
-                        </TableCell>
-                      </TableRow>
-                      <TableRow>
-                        <TableCell sx={{ py: 0.2, fontSize: '0.72rem', fontWeight: 700 }}>GPAY / UPI</TableCell>
-                        <TableCell sx={{ p: 0.2 }}>
-                          <TextField size="small" value={multiPay.gpay} onChange={(e) => setMultiPay({ ...multiPay, gpay: e.target.value })} inputProps={{ style: { textAlign: 'center', fontWeight: 800, padding: '2px', fontSize: '0.72rem' } }} />
-                        </TableCell>
-                      </TableRow>
-                      <TableRow>
-                        <TableCell sx={{ py: 0.2, fontSize: '0.72rem', fontWeight: 700 }}>Bank Transfer</TableCell>
-                        <TableCell sx={{ p: 0.2 }}>
-                          <TextField size="small" value={multiPay.bank} onChange={(e) => setMultiPay({ ...multiPay, bank: e.target.value })} inputProps={{ style: { textAlign: 'center', fontWeight: 800, padding: '2px', fontSize: '0.72rem' } }} />
-                        </TableCell>
-                      </TableRow>
+                      {PAY_MODES.map(m => (
+                        <TableRow key={m.key}>
+                          <TableCell sx={{ py: 0.2, fontSize: '0.72rem', fontWeight: 700 }}>{m.caption}</TableCell>
+                          <TableCell sx={{ p: 0.2 }}>
+                            <TextField
+                              size="small" placeholder="0.00" value={effectivePay[m.key]}
+                              onChange={(e) => {
+                                const value = cleanAmountInput(e.target.value);
+                                setMultiPay(prev => ({ ...prev, [m.key]: value }));
+                              }}
+                              inputProps={{ inputMode: 'decimal', 'aria-label': `${m.caption} amount`, style: { textAlign: 'center', fontWeight: 800, padding: '2px', fontSize: '0.72rem' } }}
+                            />
+                          </TableCell>
+                        </TableRow>
+                      ))}
                     </TableBody>
                   </Table>
                 </Paper>
@@ -2611,7 +3168,7 @@ export default function NewSaleWizard({
               <Grid item xs={12} sm={12} md={2.4}>
                 <Stack spacing={1}>
                   <Box sx={{ display: 'flex', gap: 1, justifyContent: 'space-between' }}>
-                    <FormControlLabel control={<Checkbox size="small" checked={sendWhatsapp} onChange={(e) => setSendWhatsapp(e.target.checked)} color="success" />} label={<Typography variant="caption" fontWeight={800} color="success.main">WhatsApp 🟢</Typography>} />
+                    <FormControlLabel control={<Checkbox size="small" checked={sendWhatsapp} onChange={(e) => setSendWhatsapp(e.target.checked)} color="success" />} label={<Typography variant="caption" fontWeight={800} color="success.main" title="Sharing is manual: after saving, press Alt + W or use Show Bill">WhatsApp 🟢</Typography>} />
                     <FormControlLabel control={<Checkbox size="small" checked={sendSms} onChange={(e) => setSendSms(e.target.checked)} color="primary" />} label={<Typography variant="caption" fontWeight={800}>SMS 🟢</Typography>} />
                   </Box>
 
@@ -2620,10 +3177,17 @@ export default function NewSaleWizard({
                       <Typography variant="caption" fontWeight={900}>Total Paid:</Typography>
                       <Typography variant="subtitle1" fontWeight={900} color="success.main">₹{totalPaidAmount.toFixed(2)}</Typography>
                     </Box>
-                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <Typography variant="caption" fontWeight={900} color="error.main">Balance Due:</Typography>
-                      <Typography variant="subtitle1" fontWeight={900} color="error.main">₹{balanceDue.toFixed(2)}</Typography>
-                    </Box>
+                    {changeDue > 0.009 ? (
+                      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <Typography variant="caption" fontWeight={900} color="warning.dark">Change to Return:</Typography>
+                        <Typography variant="subtitle1" fontWeight={900} color="warning.dark">₹{changeDue.toFixed(2)}</Typography>
+                      </Box>
+                    ) : (
+                      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <Typography variant="caption" fontWeight={900} color="error.main">Balance Due:</Typography>
+                        <Typography variant="subtitle1" fontWeight={900} color="error.main">₹{balanceDue.toFixed(2)}</Typography>
+                      </Box>
+                    )}
                     <Typography variant="caption" fontWeight={800} sx={{ display: 'block', textAlign: 'right', color: balanceDue <= 0.009 ? 'success.main' : 'warning.main' }}>
                       {paymentStatusLabel}
                     </Typography>
@@ -2642,14 +3206,10 @@ export default function NewSaleWizard({
                     fullWidth variant="contained"
                     color={docType === 'Quotation' ? 'warning' : docType === 'Order' ? 'primary' : 'success'}
                     size="medium"
-                    onClick={handleCompleteBilling} startIcon={<PrintIcon />}
+                    onClick={handleCompleteBilling} startIcon={<PrintIcon />} disabled={isSaving}
                     sx={{ fontWeight: 900, py: 1, borderRadius: 2.5, textTransform: 'none' }}
                   >
-                    {docType === 'Order'
-                      ? 'Complete Spectacle Order (F10)' 
-                      : docType === 'Quotation' 
-                        ? 'Generate Quotation (F10)' 
-                        : 'Complete Tax Invoice (F10)'}
+                    {isSaving ? 'Saving…' : `${completeLabel} (F10)`}
                   </Button>
                 </Stack>
               </Grid>
@@ -2683,6 +3243,7 @@ export default function NewSaleWizard({
                   <Typography variant="h6" fontWeight={800} color="primary.main" gutterBottom>Step 1: Select Patient from Database</Typography>
                   <TextField 
                     select fullWidth label="Select Registered Patient"
+                    inputRef={firstFieldRef}
                     value={selectedCustomerId} onChange={(e) => {
                       const cust = customers.find(c => c.id === e.target.value);
                       handleSelectCustomer(cust);
@@ -2724,7 +3285,7 @@ export default function NewSaleWizard({
                   <Typography variant="h6" fontWeight={800} color="primary.main" gutterBottom>Step 5: Review & Billing Checkout</Typography>
                   <Stack direction="row" spacing={1.5}>
                     <Button variant="outlined" color="primary" startIcon={<BillIcon />} onClick={handleShowBill}>Show Bill</Button>
-                    <Button variant="contained" color="success" onClick={handleCompleteBilling}>Complete Order & Print Invoice</Button>
+                    <Button variant="contained" color="success" onClick={handleCompleteBilling} disabled={isSaving}>{editingDoc ? `${completeLabel} & Print` : 'Complete Order & Print Invoice'}</Button>
                   </Stack>
                 </Card>
               )}
@@ -2743,7 +3304,7 @@ export default function NewSaleWizard({
                   {activeStep < stepsList.length - 1 ? (
                     <Button variant="contained" fullWidth onClick={() => setActiveStep(prev => prev + 1)}>Next Step ➔</Button>
                   ) : (
-                    <Button variant="contained" color="success" fullWidth onClick={handleCompleteBilling}>Complete Order</Button>
+                    <Button variant="contained" color="success" fullWidth onClick={handleCompleteBilling} disabled={isSaving}>{editingDoc ? completeLabel : 'Complete Order'}</Button>
                   )}
                   {activeStep > 0 && (
                     <Button variant="outlined" fullWidth onClick={() => setActiveStep(prev => prev - 1)}>⬅ Back</Button>
@@ -2755,11 +3316,92 @@ export default function NewSaleWizard({
         </Box>
       )}
 
+      </Box>
+
+      {/* Post-completion lock card. Fixed to the viewport (not placed inside the form) so it's on
+          screen wherever the page is scrolled — the Complete button that triggers it sits at the
+          bottom of a long form. z-index is above the app bar/sidebar but below MUI modals (1300),
+          so the print dialog that opens on completion still stacks on top of it. */}
+      {lastCompletedOrder && (
+          <Paper
+            elevation={8}
+            role="alertdialog"
+            aria-labelledby="new-sale-locked-title"
+            sx={{
+              position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', zIndex: 1250,
+              width: 'calc(100% - 32px)', maxWidth: 460, p: 3, borderRadius: 3,
+              textAlign: 'center', border: '2px solid', borderColor: 'success.main',
+            }}
+          >
+            <DoneIcon color="success" sx={{ fontSize: 48 }} />
+            <Typography id="new-sale-locked-title" variant="h6" fontWeight={900}>
+              {docTypeLabel(lastCompletedOrder.docType)} {lastCompletedOrder.isEdit ? 'updated' : 'saved'}
+            </Typography>
+            <Typography variant="body2" fontWeight={800} color="primary.main">
+              {lastCompletedOrder.invoiceNumber} · {lastCompletedOrder.customerName}
+            </Typography>
+            <Typography variant="h5" component="div" fontWeight={900} sx={{ my: 1 }}>
+              ₹{Number(lastCompletedOrder.netTotal || 0).toFixed(2)}
+              {lastCompletedOrder.docType !== 'Quotation' && (
+                <Chip
+                  size="small"
+                  label={lastCompletedOrder.paymentStatusLabel}
+                  color={lastCompletedOrder.paymentStatusLabel === 'PAID' ? 'success' : lastCompletedOrder.paymentStatusLabel === 'UNPAID' ? 'error' : 'warning'}
+                  sx={{ ml: 1, verticalAlign: 'middle', fontWeight: 800 }}
+                />
+              )}
+            </Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
+              This bill is locked so it can't be changed by accident. Start the next sale to unlock the form.
+            </Typography>
+
+            <Button
+              autoFocus fullWidth size="large" variant="contained" color="success"
+              startIcon={<NewSaleIcon />}
+              onClick={handleStartNewSale}
+              sx={{ fontWeight: 900, py: 1.2, borderRadius: 2.5, textTransform: 'none', fontSize: '1rem' }}
+            >
+              Add New Details
+              <Box
+                component="kbd"
+                sx={{
+                  ml: 1, px: 0.75, borderRadius: 1, fontFamily: 'monospace', fontSize: '0.75rem', fontWeight: 800,
+                  bgcolor: 'rgba(255,255,255,0.22)', border: '1px solid rgba(255,255,255,0.55)',
+                }}
+              >
+                F2
+              </Box>
+            </Button>
+
+            <Stack direction="row" spacing={1} sx={{ mt: 1.5 }}>
+              <Button
+                fullWidth size="small" variant="outlined" startIcon={<BillIcon />}
+                onClick={handleShowBill}
+                sx={{ fontWeight: 800, textTransform: 'none' }}
+              >
+                Show Bill
+              </Button>
+              <Button
+                fullWidth size="small" variant="outlined" color="success" startIcon={<WhatsAppIcon />}
+                onClick={() => sendInvoiceWhatsApp(lastCompletedOrder)}
+                sx={{ fontWeight: 800, textTransform: 'none' }}
+              >
+                WhatsApp (Alt+W)
+              </Button>
+            </Stack>
+
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1.5 }}>
+              Shortcut: <b>F2</b> or <b>Alt + N</b>
+            </Typography>
+          </Paper>
+      )}
+
       {/* Read-only invoice preview of the current billing grid (no save / no stock move) */}
       <PrintInvoiceModal
         open={showBillOpen}
         onClose={() => setShowBillOpen(false)}
-        invoice={showBillOpen ? buildInvoiceSnapshot() : null}
+        invoice={showBillOpen ? (lastCompletedOrder || buildInvoiceSnapshot()) : null}
+        showWhatsappPreview
       />
 
       {/* Inline Service Master — register a new service without leaving the bill */}

@@ -273,12 +273,12 @@ export default function SingleScreenEyeTestForm({
           </Box>
         </Box>
 
-        {/* Both rows share the exact same 7-column grid track definition, so items in Row 2
+        {/* All rows share the exact same 7-column grid track definition, so items in later rows
             that span multiple tracks line up pixel-perfectly under Row 1's columns — a plain
             MUI Grid can't guarantee this since flexbox gap distribution differs when the two
             rows have a different number of items. Locked once isLocked (see lockSx) — only the
             header above (New Patient) and the history table's Edit icon stay clickable. */}
-        <Box sx={lockSx}>
+        <Box id="eyetest-patient-details" sx={lockSx}>
         {(() => {
           const colTemplate = { xs: '1fr 1fr', sm: 'repeat(4, 1fr)', md: '1.5fr 1.3fr 2.5fr 2fr 1.8fr 1.2fr 1fr' };
           return (
@@ -316,8 +316,9 @@ export default function SingleScreenEyeTestForm({
                       placeholder="Enter Patient Name"
                       sx={{ '& input': { fontWeight: 800, color: '#1e3a8a' } }}
                     />
-                    <Tooltip title="Search Registered Patients">
-                      <Button variant="contained" color="primary" onClick={onOpenSearchModal} sx={{ minWidth: 40, px: 1 }}>
+                    {/* Out of the Tab order so Tab goes Patient Name → Address; Alt+F opens the same search. */}
+                    <Tooltip title="Search Registered Patients (Alt+F)">
+                      <Button variant="contained" color="primary" onClick={onOpenSearchModal} tabIndex={-1} sx={{ minWidth: 40, px: 1 }}>
                         <SearchIcon fontSize="small" />
                       </Button>
                     </Tooltip>
@@ -369,53 +370,11 @@ export default function SingleScreenEyeTestForm({
                 </Box>
               </Box>
 
-              {/* Row 2: Date, Test Type, Optometrist, Mobile No — each spans the same tracks
-                  as its Row 1 column group (Test No+Patient ID / Patient Name / Address+Place / Gender+Age) */}
+              {/* Row 2: Mobile No, Email, ID Type, ID Number, Medical Aid Name, Medical Aid Scheme,
+                  Medical Aid Member Number — one field per Row 1 track, continuing the sequence
+                  straight on from Age. */}
               <Box sx={{ display: 'grid', gridTemplateColumns: colTemplate, gap: 1.5, alignItems: 'center' }}>
-                <Box sx={{ gridColumn: { md: '1 / 3' } }}>
-                  <QuickDatePickerField
-                    label="Date"
-                    value={autoDate}
-                    onChange={(newDate) => setDiagnosis(prev => ({ ...prev, testDate: newDate }))}
-                    quickPresets={[
-                      { label: 'Today', type: 'today' },
-                      { label: 'Yesterday', type: 'yesterday' },
-                      { label: 'Tomorrow', type: 'tomorrow' }
-                    ]}
-                  />
-                </Box>
-                <Box sx={{ gridColumn: { md: '3 / 4' } }}>
-                  <TextField
-                    fullWidth
-                    select
-                    size="small"
-                    label="Test Type"
-                    value={diagnosis.testType || 'FREE EYE TEST'}
-                    onChange={(e) => setDiagnosis(prev => ({ ...prev, testType: e.target.value }))}
-                    sx={{ '& .MuiSelect-select': { fontWeight: 800 } }}
-                  >
-                    <MenuItem value="FREE EYE TEST">FREE EYE TEST</MenuItem>
-                    <MenuItem value="COMPREHENSIVE EYE TEST">COMPREHENSIVE EYE TEST</MenuItem>
-                    <MenuItem value="CONTACT LENS EVALUATION">CONTACT LENS EVALUATION</MenuItem>
-                    <MenuItem value="ROUTINE REFRACTION">ROUTINE REFRACTION</MenuItem>
-                  </TextField>
-                </Box>
-                <Box sx={{ gridColumn: { md: '4 / 6' } }}>
-                  <TextField
-                    fullWidth
-                    select
-                    size="small"
-                    label="Optometrist"
-                    value={patientData.assignedOptometrist || ''}
-                    onChange={(e) => setPatientData(prev => ({ ...prev, assignedOptometrist: e.target.value }))}
-                  >
-                    <MenuItem value="">-- Select Optometrist --</MenuItem>
-                    {doctorsList.map((doc, i) => (
-                      <MenuItem key={i} value={doc}>{doc}</MenuItem>
-                    ))}
-                  </TextField>
-                </Box>
-                <Box sx={{ gridColumn: { md: '6 / 8' } }}>
+                <Box sx={{ gridColumn: { md: '1 / 2' } }}>
                   <TextField
                     fullWidth
                     size="small"
@@ -426,13 +385,7 @@ export default function SingleScreenEyeTestForm({
                     sx={{ '& input': { fontWeight: 700 } }}
                   />
                 </Box>
-              </Box>
-
-              {/* Row 3: Email, ID Type, ID Number, Medical Aid Name, Medical Aid Scheme, Medical Aid Member
-                  Number — shares Row 1/2's colTemplate (not an independent equal-width grid) so every
-                  field lines up under the same tracks instead of drifting out of alignment. */}
-              <Box sx={{ display: 'grid', gridTemplateColumns: colTemplate, gap: 1.5, alignItems: 'center', mt: 1.5 }}>
-                <Box sx={{ gridColumn: { md: '1 / 3' } }}>
+                <Box sx={{ gridColumn: { md: '2 / 3' } }}>
                   <TextField
                     fullWidth
                     size="small"
@@ -511,11 +464,57 @@ export default function SingleScreenEyeTestForm({
                 </Box>
               </Box>
 
-              {/* Row 4: Save sits alone, directly under Medical Aid Member Number's column, so it
-                  no longer shares that field's track and squeeze its label into truncation. */}
-              <Box sx={{ display: 'grid', gridTemplateColumns: colTemplate, gap: 1.5, mt: 1.5 }}>
+              {/* Row 3: Date, Test Type, Optometrist — the examination details close the sequence —
+                  then Save, directly under Medical Aid Member Number's column. Save is the last
+                  Tab/Enter stop of this section (see handleKeyDownEnter in OpticalServices). */}
+              <Box sx={{ display: 'grid', gridTemplateColumns: colTemplate, gap: 1.5, alignItems: 'center', mt: 1.5 }}>
+                <Box sx={{ gridColumn: { md: '1 / 3' } }}>
+                  <QuickDatePickerField
+                    label="Date"
+                    value={autoDate}
+                    onChange={(newDate) => setDiagnosis(prev => ({ ...prev, testDate: newDate }))}
+                    quickPresets={[
+                      { label: 'Today', type: 'today' },
+                      { label: 'Yesterday', type: 'yesterday' },
+                      { label: 'Tomorrow', type: 'tomorrow' }
+                    ]}
+                    skipAdornmentsInTabOrder
+                  />
+                </Box>
+                <Box sx={{ gridColumn: { md: '3 / 4' } }}>
+                  <TextField
+                    fullWidth
+                    select
+                    size="small"
+                    label="Test Type"
+                    value={diagnosis.testType || 'FREE EYE TEST'}
+                    onChange={(e) => setDiagnosis(prev => ({ ...prev, testType: e.target.value }))}
+                    sx={{ '& .MuiSelect-select': { fontWeight: 800 } }}
+                  >
+                    <MenuItem value="FREE EYE TEST">FREE EYE TEST</MenuItem>
+                    <MenuItem value="COMPREHENSIVE EYE TEST">COMPREHENSIVE EYE TEST</MenuItem>
+                    <MenuItem value="CONTACT LENS EVALUATION">CONTACT LENS EVALUATION</MenuItem>
+                    <MenuItem value="ROUTINE REFRACTION">ROUTINE REFRACTION</MenuItem>
+                  </TextField>
+                </Box>
+                <Box sx={{ gridColumn: { md: '4 / 6' } }}>
+                  <TextField
+                    fullWidth
+                    select
+                    size="small"
+                    label="Optometrist"
+                    value={patientData.assignedOptometrist || ''}
+                    onChange={(e) => setPatientData(prev => ({ ...prev, assignedOptometrist: e.target.value }))}
+                  >
+                    <MenuItem value="">-- Select Optometrist --</MenuItem>
+                    {doctorsList.map((doc, i) => (
+                      <MenuItem key={i} value={doc}>{doc}</MenuItem>
+                    ))}
+                  </TextField>
+                </Box>
                 <Box sx={{ gridColumn: { md: '7 / 8' } }}>
                   <Button
+                    id="eyetest-save-patient-btn"
                     fullWidth
                     variant="contained" color="success" size="small" startIcon={<SaveIcon fontSize="small" />}
                     onClick={onSavePatient}

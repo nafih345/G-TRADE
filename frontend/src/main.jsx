@@ -4,7 +4,12 @@ import axios from 'axios'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import App from './App.jsx'
 import { installBranchInterceptor } from './utils/apiClient'
+import { installAlertOverride } from './utils/notify'
 import './index.css'
+
+// Every alert(...) in the app shows as an in-page notice at the bottom of the screen
+// (rendered by <NotificationHost /> in App.jsx) instead of a blocking browser popup.
+installAlertOverride()
 
 // All API calls in this app use relative paths (e.g. '/api/...'). In dev, Vite's
 // server.proxy forwards those to the backend. In a production build there is no

@@ -6,6 +6,7 @@ import {
 import {
   Save as SaveIcon, LocalShipping as DeliveryIcon
 } from '@mui/icons-material';
+import { paymentStatusOf, rowNetAmount } from '../../utils/salesDocStatus';
 
 // Lab / delivery workflow stages — kept in sync with OrdersManagerView.labStages.
 const PIPELINE_STAGES = [
@@ -17,7 +18,6 @@ const PIPELINE_STAGES = [
   'Delivered'
 ];
 
-const PAYMENT_STATES = ['Paid', 'Partial', 'Unpaid'];
 const PAYMENT_METHODS = ['Cash', 'Card', 'UPI', 'Bank', 'Credit'];
 
 const num = (v) => {
@@ -26,16 +26,6 @@ const num = (v) => {
 };
 
 const todayStr = () => new Date().toISOString().split('T')[0];
-
-// Normalise the many payment-status spellings the app uses (backend PAID/PARTIAL/UNPAID,
-// wizard 'PARTIALLY PAID', table 'Paid'/'Partial', …) down to the 3 the dialog shows.
-const normPay = (v) => {
-  const s = String(v || '').toUpperCase();
-  if (s.includes('PARTIAL')) return 'Partial';
-  if (s.includes('UNPAID') || s.includes('DUE') || s === 'DRAFT') return 'Unpaid';
-  if (s.includes('PAID')) return 'Paid';
-  return '';
-};
 
 /**
  * Quick "Update" dialog for a Sales > Orders row (Order / Invoice / Quotation) — payment
@@ -54,25 +44,19 @@ export default function UpdateDocumentDialog({ open, docView, doc, fullDoc, onCl
     initedFor.current = doc.id || doc.invoiceNumber;
 
     const src = fullDoc || {};
-    const total = num(
-      doc.total ?? doc.netTotal ?? doc.grossTotal ?? src.net_amount ?? src.total_amount ?? 0
-    );
+    // Net payable — what "Paid" is measured against.
+    const total = rowNetAmount(doc) || num(src.net_amount ?? src.total_amount ?? 0);
     const paidAmount = num(doc.paidAmount ?? doc.totalPaidAmount ?? src.paid_amount ?? 0);
-    const paymentStatus =
-      normPay(doc.payment) || normPay(doc.paymentStatusLabel) || normPay(src.status) ||
-      (total > 0 && paidAmount >= total ? 'Paid' : paidAmount > 0 ? 'Partial' : 'Unpaid');
 
     setForm({
       total,
-      paymentStatus,
       paidAmount,
       paymentMethod: doc.paymentMethod || doc.paymentMode || src.payment_method || 'Cash',
       pipelineStatus:
         doc.status || doc.fulfillmentStatus || src.fulfillment_status || 'Order Received',
       deliveredAt: doc.deliveredAt || src.delivered_at || '',
       fulfillmentNotes: doc.fulfillmentNotes || src.fulfillment_notes || '',
-      origPaid: paidAmount,
-      origStatus: paymentStatus
+      origPaid: paidAmount
     });
   }, [open, doc, fullDoc]);
 
@@ -83,21 +67,23 @@ export default function UpdateDocumentDialog({ open, docView, doc, fullDoc, onCl
 
   const balance = Math.max(0, num(form.total) - num(form.paidAmount));
   const balanceSettled = num(form.total) > 0 && balance <= 0;
+  // Always follows the amounts: Paid = Total Paid covers the net payable, Partially Paid = some of
+  // it, Unpaid = nothing. (It used to be a free choice, so a bill could say "Paid" with money due.)
+  const payStatus = paymentStatusOf(form.total, form.paidAmount);
 
-  // "Balance" toggle — Fully Paid sets paid = total + status Paid; Outstanding reverts to the
-  // amount/status the document was opened with.
+  // "Balance" toggle — Fully Paid sets paid = total; Outstanding reverts to the amount the
+  // document was opened with.
   const setBalanceSettled = (settled) => {
     if (settled) {
-      set({ paidAmount: num(form.total), paymentStatus: 'Paid' });
+      set({ paidAmount: num(form.total) });
     } else {
-      const reverted = form.origPaid >= num(form.total) && num(form.total) > 0 ? 0 : form.origPaid;
-      set({ paidAmount: reverted, paymentStatus: form.origStatus === 'Paid' ? 'Partial' : form.origStatus });
+      set({ paidAmount: form.origPaid >= num(form.total) && num(form.total) > 0 ? 0 : form.origPaid });
     }
   };
 
   const handleSave = () => {
     const patch = {
-      paymentStatus: form.paymentStatus,
+      paymentStatus: payStatus.short,
       paidAmount: num(form.paidAmount),
       paymentMethod: form.paymentMethod
     };
@@ -123,13 +109,11 @@ export default function UpdateDocumentDialog({ open, docView, doc, fullDoc, onCl
         <Typography variant="subtitle2" fontWeight={800} sx={{ mb: 1.5 }}>Payment</Typography>
         <Grid container spacing={2}>
           <Grid item xs={12} sm={4}>
-            <TextField fullWidth size="small" select label="Payment Status" value={form.paymentStatus}
-              onChange={(e) => set({ paymentStatus: e.target.value })}>
-              {PAYMENT_STATES.map((s) => <MenuItem key={s} value={s}>{s}</MenuItem>)}
-            </TextField>
+            <Typography variant="caption" color="text.secondary" display="block">Payment Status</Typography>
+            <Chip label={payStatus.label} color={payStatus.color} size="small" sx={{ fontWeight: 800, mt: 0.5 }} />
           </Grid>
           <Grid item xs={12} sm={4}>
-            <TextField fullWidth size="small" type="number" label="Paid Amount" value={form.paidAmount}
+            <TextField fullWidth size="small" type="number" label="Total Paid" value={form.paidAmount}
               onChange={(e) => set({ paidAmount: e.target.value })} />
           </Grid>
           <Grid item xs={12} sm={4}>

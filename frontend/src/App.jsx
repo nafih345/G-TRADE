@@ -6,6 +6,7 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import { BranchProvider } from './context/BranchContext';
 import Sidebar from './components/Sidebar';
 import Header from './components/Header';
+import NotificationHost from './components/NotificationHost';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 
@@ -144,6 +145,7 @@ function MainLayout() {
       <ThemeProvider theme={getTheme('light')}>
         <CssBaseline />
         <Login />
+        <NotificationHost />
       </ThemeProvider>
     );
   }
@@ -292,6 +294,7 @@ function MainLayout() {
           </Box>
         </Box>
       </Box>
+      <NotificationHost />
     </ThemeProvider>
   );
 }

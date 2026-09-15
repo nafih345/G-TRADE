@@ -25,6 +25,9 @@ export default function QuickDatePickerField({
   fullWidth = true,
   required = false,
   disabled = false,
+  // Keeps the preset/calendar icon buttons out of the Tab order, so Tab goes straight from the
+  // date to the next field (the date itself is typed; the icons stay clickable).
+  skipAdornmentsInTabOrder = false,
   sx = {}
 }) {
   const inputRef = useRef(null);
@@ -158,6 +161,7 @@ export default function QuickDatePickerField({
                     <IconButton
                       size="small"
                       disabled={disabled}
+                      tabIndex={skipAdornmentsInTabOrder ? -1 : undefined}
                       onClick={(e) => {
                         e.stopPropagation();
                         setAnchorEl(e.currentTarget);
@@ -172,6 +176,7 @@ export default function QuickDatePickerField({
                   <IconButton
                     size="small"
                     disabled={disabled}
+                    tabIndex={skipAdornmentsInTabOrder ? -1 : undefined}
                     onClick={handleOpenPicker}
                     sx={{ color: 'action.active', p: 0.2, '&:hover': { color: 'primary.main', bgcolor: 'action.hover' } }}
                   >

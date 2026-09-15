@@ -2,6 +2,9 @@ import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import useBarcodeScanner from '../../hooks/useBarcodeScanner';
 import { barcodeMatchesProduct } from '../../utils/barcodeMatch';
+import { notify } from '../../utils/notify';
+import { isRealCustomerName, summarizeLines } from '../../utils/salesDocStatus';
+import { apiErrorMessage } from '../../utils/apiError';
 import { 
   Box, Grid, Card, CardContent, Typography, TextField, InputBase,
   Button, MenuItem, Table, TableBody, TableCell, 
@@ -34,16 +37,6 @@ import {
   Inbox as EmptyIcon
 } from '@mui/icons-material';
 
-// Sample Catalog Items if DB is blank, with option to seed DB
-const defaultCatalogItems = [
-  { id: 'PRD-101', name: 'Ray-Ban Wayfarer Classic Black', brand: 'Ray-Ban', type: 'Frame', price: 4500, stock: 14, taxRate: 18, image: '👓' },
-  { id: 'PRD-102', name: 'Oakley Pitchman Titanium', brand: 'Oakley', type: 'Frame', price: 6200, stock: 8, taxRate: 18, image: '👓' },
-  { id: 'PRD-103', name: 'Essilor Crizal 1.56 Blue-Cut Lens', brand: 'Essilor', type: 'Lens', price: 2800, stock: 30, taxRate: 18, image: '🔍' },
-  { id: 'PRD-104', name: 'Zeiss Progressive SmartLife 1.61', brand: 'Zeiss', type: 'Lens', price: 8500, stock: 15, taxRate: 18, image: '🔍' },
-  { id: 'PRD-105', name: 'Acuvue Oasys 1-Day (30 Lenses)', brand: 'Acuvue', type: 'Contact Lens', price: 2200, stock: 25, taxRate: 12, image: '👁️' },
-  { id: 'PRD-106', name: 'Bausch & Lomb BioTrue Solution 300ml', brand: 'Bausch & Lomb', type: 'Accessory', price: 450, stock: 40, taxRate: 18, image: '🧪' }
-];
-
 export default function PosBillingView({
   products = [],
   customers = [],
@@ -65,6 +58,8 @@ export default function PosBillingView({
   const [selectedCustomerId, setSelectedCustomerId] = useState('');
   const [customerSearchQuery, setCustomerSearchQuery] = useState('');
   const [customerDialogOpen, setCustomerDialogOpen] = useState(false);
+  // Name of a walk-in billed without a patient record (used when no patient is selected).
+  const [walkInName, setWalkInName] = useState('');
   const [allCustomersList, setAllCustomersList] = useState([]);
 
   useEffect(() => {
@@ -147,7 +142,8 @@ export default function PosBillingView({
   // Camera QR Scanner Modal
   const [qrModalOpen, setQrModalOpen] = useState(false);
 
-  // Add Sample Items to Database handler if products empty
+  // The real inventory only (no sample catalogue: its made-up ids could never link a sold line
+  // to a product or move stock).
   const [catalogList, setCatalogList] = useState(products);
 
   useEffect(() => {
@@ -315,13 +311,15 @@ export default function PosBillingView({
 
         <Stack direction="row" spacing={1.5} flexWrap="wrap">
           <Button
-            variant={selectedCust ? "contained" : "outlined"}
-            color={selectedCust ? "success" : "primary"}
+            variant={selectedCust || walkInName.trim() ? "contained" : "outlined"}
+            color={selectedCust || walkInName.trim() ? "success" : "primary"}
             startIcon={<PersonIcon />}
             onClick={() => setCustomerDialogOpen(true)}
             sx={{ borderRadius: 2.5, textTransform: 'none', fontWeight: 700 }}
           >
-            {selectedCust ? `Patient: ${selectedCust.name}` : "+ Select / Register Patient"}
+            {selectedCust
+              ? `Patient: ${selectedCust.name}`
+              : walkInName.trim() ? `Customer: ${walkInName.trim()}` : "+ Select Patient / Enter Name"}
           </Button>
 
           <Button
@@ -469,18 +467,9 @@ export default function PosBillingView({
                 No Products Found in Inventory Database
               </Typography>
               <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 460, mx: 'auto', mb: 2.5 }}>
-                No products in inventory yet. Click below to load sample optical inventory or add custom charges.
+                No products in inventory yet. Add stock under Inventory → Products, or bill a custom charge.
               </Typography>
               <Stack direction="row" spacing={2} justifyContent="center">
-                <Button
-                  variant="contained"
-                  color="primary"
-                  startIcon={<AddIcon />}
-                  onClick={() => setCatalogList(defaultCatalogItems)}
-                  sx={{ borderRadius: 2.5, textTransform: 'none', fontWeight: 700 }}
-                >
-                  Seed Sample Optical Catalog
-                </Button>
                 <Button
                   variant="outlined"
                   color="secondary"
@@ -762,27 +751,38 @@ export default function PosBillingView({
               size="large"
               startIcon={<PrintIcon />}
               onClick={async () => {
+                // Every bill needs a customer name: the selected patient's, or a walk-in's typed in
+                // the patient dialog. (The backend refuses a bill without one.)
+                const billName = (selectedCust ? String(selectedCust.name || '') : walkInName).trim();
+                if (!isRealCustomerName(billName)) {
+                  notify("Customer name is required — select the patient or enter the walk-in customer's name before billing.");
+                  setCustomerDialogOpen(true);
+                  return;
+                }
+                // Nothing typed in the pay boxes = paid in full at the counter (Quick Pay). Change
+                // handed back isn't money the shop keeps, so Total Paid never exceeds the bill.
+                const paidNow = totalPaid > 0 ? Math.min(totalPaid, grandTotal) : grandTotal;
+
                 // A real UUID from /api/sales/customers/ can be used as the Invoice.customer FK
-                // directly; a legacy localStorage-only id (e.g. "P-1003") can't, so it's treated
-                // the same as "no customer selected" — the sale still goes through as anonymous
-                // walk-in rather than being blocked (Invoice.customer is nullable for exactly
-                // this reason).
+                // directly; a legacy localStorage-only id (e.g. "P-1003") can't, so such a sale is
+                // made out by name only (customer_name) — Invoice.customer is nullable for this.
                 const isBackendId = (id) => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
                 const customerId = selectedCust && isBackendId(selectedCust.id) ? selectedCust.id : null;
 
                 let backendInvoiceId = null;
                 let invNo = `INV-${Math.floor(100000 + Math.random() * 900000)}`;
                 try {
-                  const status = balanceDue > 0 ? (totalPaid > 0 ? 'PARTIAL' : 'UNPAID') : 'PAID';
                   const res = await axios.post('/api/sales/invoices/', {
                     customer: customerId,
+                    customer_name: billName,
                     invoice_date: new Date().toISOString().split('T')[0],
-                    status,
+                    // The backend re-derives this from paid_amount vs net_amount.
+                    status: paidNow >= grandTotal ? 'PAID' : 'PARTIAL',
                     total_amount: subtotal,
                     tax_amount: taxAmount,
                     discount_amount: totalDiscount,
                     net_amount: grandTotal,
-                    paid_amount: totalPaid || grandTotal,
+                    paid_amount: paidNow,
                     payment_method: paymentMethod,
                     items: cart.map(i => ({
                       product: i.product.id,
@@ -800,28 +800,34 @@ export default function PosBillingView({
                   await axios.post('/api/sales/payments/', {
                     invoice: backendInvoiceId,
                     customer: customerId,
-                    customer_name: selectedCust ? selectedCust.name : 'Walk-in Patient',
-                    amount: totalPaid || grandTotal,
+                    customer_name: billName,
+                    amount: paidNow,
                     method: paymentMethod,
                     payment_date: new Date().toISOString().split('T')[0],
-                    status: 'Completed'
+                    status: 'Completed',
+                    // Taken at the counter — lets a later New Sale edit of this bill update this
+                    // receipt instead of recording the same money again.
+                    source: 'BILLING'
                   }).catch(() => {});
                   // Stock deduction + the accounting journal entry both happen server-side
                   // (InvoiceViewSet.perform_create) — no separate calls needed here.
                   window.dispatchEvent(new Event('optical_stock_updated'));
                   window.dispatchEvent(new Event('optical_accounts_updated'));
                 } catch (e) {
+                  // Not saved — keep the cart so it can be retried, rather than printing a receipt
+                  // for a sale that would only exist in this browser.
                   console.warn('POS sale did not save to the database:', e);
+                  notify(`Sale NOT saved — ${apiErrorMessage(e)}`);
+                  return;
                 }
 
-                // Local cache mirror — kept so the receipt still prints and the Dashboard/Orders
-                // tabs still show the sale immediately even if the API call above failed.
+                // Local cache mirror — lets the Dashboard/Orders tabs show the sale immediately.
                 try {
                   const salesInvoices = JSON.parse(localStorage.getItem('optical_sales_invoices') || '[]');
                   const newInv = {
                     id: backendInvoiceId || invNo,
                     invoiceNumber: invNo,
-                    customerName: selectedCust ? selectedCust.name : 'Walk-in Patient',
+                    customerName: billName,
                     phone: selectedCust ? selectedCust.phone : '',
                     date: new Date().toISOString().split('T')[0],
                     subtotal,
@@ -829,12 +835,12 @@ export default function PosBillingView({
                     totalTax: taxAmount,
                     discount: totalDiscount,
                     total: grandTotal,
-                    paidAmount: totalPaid || grandTotal,
-                    balanceDue,
+                    paidAmount: paidNow,
+                    balanceDue: Math.max(0, grandTotal - paidNow),
                     changeDue,
                     paymentMethod: paymentMethod,
                     multiPay,
-                    status: balanceDue > 0 ? 'Partial' : 'Paid',
+                    status: paidNow >= grandTotal ? 'Paid' : 'Partial',
                     items: cart.map(i => ({ name: i.product.name, brand: i.product.brand, qty: i.qty, price: i.product.price, taxPercent: taxRatePercent }))
                   };
                   localStorage.setItem('optical_sales_invoices', JSON.stringify([newInv, ...salesInvoices]));
@@ -843,21 +849,22 @@ export default function PosBillingView({
                   const newPay = {
                     id: `PAY-${invNo}`,
                     receiptId: `REC-${invNo}`,
-                    customerName: selectedCust ? selectedCust.name : 'Walk-in Patient',
+                    customerName: billName,
                     date: new Date().toISOString().split('T')[0],
                     method: paymentMethod,
-                    amount: grandTotal,
+                    amount: paidNow,
                     status: 'Completed'
                   };
                   localStorage.setItem('optical_payments', JSON.stringify([newPay, ...payments]));
                 } catch (e) {}
 
+                const lines = summarizeLines(cart.map(i => ({ name: i.product.name, category: i.product.type || i.product.category })));
                 onCheckoutComplete?.({
                   id: backendInvoiceId || invNo,
                   invoiceNumber: invNo,
                   date: new Date().toISOString().split('T')[0],
-                  customer: selectedCust ? selectedCust.name : 'Walk-in Customer',
-                  customerName: selectedCust ? selectedCust.name : 'Walk-in Customer',
+                  customer: billName,
+                  customerName: billName,
                   phone: selectedCust ? selectedCust.phone : '',
                   customerAge: selectedCust?.age,
                   customerGender: selectedCust?.gender,
@@ -871,10 +878,12 @@ export default function PosBillingView({
                   netTotal: grandTotal,
                   multiPay,
                   paymentMode: paymentMethod,
-                  frame: cart[0]?.product.name || 'Frame',
-                  lens: cart[1]?.product.name || 'Lens'
+                  paidAmount: paidNow,
+                  frame: lines.frame,
+                  lens: lines.lens
                 });
                 setCart([]);
+                setWalkInName('');
                 setMultiPay({ cash: '', upi: '', card: '', credit: '' });
                 setDiscountAmount(0);
               }}
@@ -915,7 +924,7 @@ export default function PosBillingView({
               .map(cust => (
                 <Card 
                   key={cust.id || cust.phone}
-                  onClick={() => { setSelectedCustomerId(cust.id); setCustomerDialogOpen(false); }}
+                  onClick={() => { setSelectedCustomerId(cust.id); setWalkInName(''); setCustomerDialogOpen(false); }}
                   sx={{ 
                     p: 1.5, 
                     cursor: 'pointer', 
@@ -943,9 +952,20 @@ export default function PosBillingView({
               </Box>
             )}
           </Stack>
+          <Divider sx={{ my: 2 }}>or</Divider>
+          <TextField
+            fullWidth size="small" label="Walk-in customer name"
+            placeholder="Bill a customer without a patient record"
+            value={walkInName}
+            onChange={(e) => {
+              setWalkInName(e.target.value);
+              if (e.target.value.trim()) setSelectedCustomerId('');
+            }}
+            onKeyDown={(e) => { if (e.key === 'Enter' && walkInName.trim()) setCustomerDialogOpen(false); }}
+          />
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
-          <Button onClick={() => setCustomerDialogOpen(false)} variant="outlined">Close</Button>
+          <Button onClick={() => setCustomerDialogOpen(false)} variant="outlined">Done</Button>
         </DialogActions>
       </Dialog>
 

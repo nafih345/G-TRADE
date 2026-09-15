@@ -1,6 +1,10 @@
 import React, { useState, useEffect, useMemo, lazy, Suspense } from 'react';
 import axios from 'axios';
 import { useLocation, useNavigate } from 'react-router-dom';
+import { normalizeSalesRow, summarizeLines, rowCustomerName, rowPayment } from '../utils/salesDocStatus';
+import { apiErrorMessage } from '../utils/apiError';
+import { fetchAllPages } from '../utils/fetchAllPages';
+import { notify } from '../utils/notify';
 import { 
   Box, Grid, Card, CardContent, Typography, TextField, 
   Button, MenuItem, Table, TableBody, TableCell, 
@@ -52,6 +56,25 @@ const PrintInvoiceModal = lazy(() => import('../components/sales/PrintInvoiceMod
 const TabViewFallback = () => (
   <Box sx={{ pt: 2 }}><LinearProgress /></Box>
 );
+
+// Record Payment dialog. invoiceId / invoiceNumber: the Order / Invoice the money is collected
+// against when the dialog was opened from one of its rows.
+const EMPTY_PAY_RECORD = { customerId: '', amount: '', method: 'Cash', invoiceId: '', invoiceNumber: '' };
+
+// An Orders-list row for a document the database has AND this device keeps a local copy of. The
+// database wins for everything it stores (customer, amounts paid, statuses, frame/lens); the local
+// copy only fills in what it doesn't keep (Rx, per-line brand/discount for reprints). It used to be
+// the other way round, so a stale local copy hid payments collected later and the server's names.
+const mergeLocalIntoApiRow = (local, api) => {
+  const row = { ...local, ...api };
+  // Older bills reached the database without the customer's name — keep the one this device has.
+  const name = rowCustomerName(api) || rowCustomerName(local);
+  if (name) { row.customer = name; row.customerName = name; }
+  // This device's own lines also carry what the database doesn't (per-line discount, Rx power)
+  // for reprints; frame / lens names still come from the database row.
+  if (Array.isArray(local.items) && local.items.length) row.items = local.items;
+  return row;
+};
 
 // A product's tax can arrive as a numeric %, a "18%" string, null, or (for the raw
 // Product.tax field) a Tax-master UUID. Coerce to a usable GST % and fall back to 18
@@ -151,13 +174,8 @@ export default function SalesInvoice() {
       // network round-trip resolves; the merged/authoritative setOrders/setPayments calls
       // below (after the await) overwrite this once the backend data lands.
       if (localOrders.length > 0 || localQuotes.length > 0 || localInvoices.length > 0) {
-        const localAllOrders = [...localOrders, ...localQuotes, ...localInvoices];
-        const localUniqueOrders = Array.from(new Map(localAllOrders.map(o => [o.id, o])).values())
-          .map(o => ({
-            ...o,
-            documentType: (o.documentType || o.docType || 'INVOICE').toUpperCase(),
-          }));
-        setOrders(localUniqueOrders);
+        const localAllOrders = [...localOrders, ...localQuotes, ...localInvoices].filter(o => o && o.id != null);
+        setOrders(Array.from(new Map(localAllOrders.map(o => [o.id, o])).values()).map(normalizeSalesRow));
       }
       if (localPayments.length > 0) {
         setPayments(Array.from(new Map(localPayments.map(p => [p.id, p])).values()));
@@ -170,12 +188,15 @@ export default function SalesInvoice() {
       let apiInvoices = [];
       let apiPayments = [];
       try {
+        // Every page of the sales lists — the API pages them 20 at a time, and reading only the
+        // first response meant any bill / patient / receipt past the first 20 never showed here.
+        const allRows = (url) => fetchAllPages(url).then(rows => ({ data: rows })).catch(() => null);
         const [custRes, eyeExamRes, prodRes, invRes, payRes, svcRes] = await Promise.all([
-          axios.get('/api/sales/customers/').catch(() => null),
+          allRows('/api/sales/customers/'),
           axios.get('/api/sales/eye-examinations/').catch(() => null),
           axios.get('/api/products/products/').catch(() => null),
-          axios.get('/api/sales/invoices/').catch(() => null),
-          axios.get('/api/sales/payments/').catch(() => null),
+          allRows('/api/sales/invoices/'),
+          allRows('/api/sales/payments/'),
           axios.get('/api/sales/services/').catch(() => null)
         ]);
         const custList = unwrap(custRes);
@@ -229,28 +250,57 @@ export default function SalesInvoice() {
         }
 
         if (invList.length > 0) {
-          apiInvoices = invList.map(inv => ({
-            // `id` is the real backend UUID (the true identity, needed so status-update PATCHes
-            // and dedup-by-id against locally-created orders both work); invoiceNumber is what
-            // the Orders table actually displays.
-            id: inv.id,
-            invoiceNumber: inv.invoice_number || `INV-${inv.id}`,
-            documentType: (inv.document_type || 'INVOICE').toUpperCase(),
-            date: inv.invoice_date || (inv.created_at ? inv.created_at.split('T')[0] : new Date().toISOString().split('T')[0]),
-            customer: inv.customer_name || 'Walk-in Customer',
-            customerId: inv.customer || null,
-            phone: inv.customer_phone || '',
-            total: parseFloat(inv.total_amount || 0),
-            netTotal: parseFloat(inv.net_amount || inv.total_amount || 0),
-            paidAmount: parseFloat(inv.paid_amount || inv.total_amount || 0),
-            payment: parseFloat(inv.paid_amount || 0) >= parseFloat(inv.total_amount || 0) ? 'Paid' : 'Partial',
-            status: inv.fulfillment_status || 'Order Received',
-            deliveredAt: inv.delivered_at || null,
-            fulfillmentNotes: inv.fulfillment_notes || '',
-            paymentMethod: inv.payment_method || 'Cash',
-            frame: inv.frame_name || 'Prescribed Frame',
-            lens: inv.lens_name || 'Prescribed Lens'
-          }));
+          apiInvoices = invList.map(inv => {
+            const net = parseFloat(inv.net_amount ?? inv.total_amount) || 0;
+            return normalizeSalesRow({
+              // `id` is the real backend UUID (the true identity, needed so status-update PATCHes
+              // and dedup-by-id against locally-created orders both work); invoiceNumber is what
+              // the Orders table actually displays.
+              id: inv.id,
+              invoiceNumber: inv.invoice_number || `INV-${inv.id}`,
+              documentType: (inv.document_type || 'INVOICE').toUpperCase(),
+              date: inv.invoice_date || (inv.created_at ? inv.created_at.split('T')[0] : new Date().toISOString().split('T')[0]),
+              customer: inv.customer_name || '',
+              customerName: inv.customer_name || '',
+              customerId: inv.customer || null,
+              customerCode: inv.customer_code || '',
+              phone: inv.customer_phone || '',
+              // `total` is the NET payable (after discount, incl. tax) everywhere in the Orders
+              // list — total_amount is the pre-discount gross, which made a fully paid discounted
+              // bill look part-paid.
+              total: net,
+              netTotal: net,
+              grossTotal: parseFloat(inv.total_amount) || 0,
+              // Total Paid as recorded — never defaulted to the bill total, which showed unpaid
+              // bills as paid.
+              paidAmount: parseFloat(inv.paid_amount) || 0,
+              status: inv.fulfillment_status || 'Order Received',
+              deliveredAt: inv.delivered_at || null,
+              fulfillmentNotes: inv.fulfillment_notes || '',
+              paymentMethod: inv.payment_method || 'Cash',
+              frame: inv.frame_name || '',
+              lens: inv.lens_name || '',
+              // The bill's lines as stored, joined with their products — what the Sales
+              // dashboard, Orders list and reprints use when this device has no local copy.
+              items: (inv.items || []).map(it => ({
+                id: it.id,
+                productId: it.product || null,
+                item: it.display_name || it.description || it.product_name || '',
+                description: it.description || '',
+                itemType: it.item_type || 'PRODUCT',
+                category: it.category_name || it.item_type || '',
+                color: it.color || '',
+                brand: it.brand || '',
+                qty: parseFloat(it.quantity) || 0,
+                price: parseFloat(it.unit_price) || 0,
+                taxPercent: parseFloat(it.tax_rate) || 0,
+                tax: parseFloat(it.tax_amount) || 0,
+                total: parseFloat(it.subtotal) || 0
+              })),
+              itemsSummary: (inv.items || [])
+                .map(it => it.display_name || it.description || it.product_name).filter(Boolean).join(', ')
+            });
+          });
 
           // Pull every SERVICE line item out of the invoices for the Services report. Services
           // ride on the invoice as InvoiceItem rows with item_type === 'SERVICE' (see the
@@ -343,18 +393,18 @@ export default function SalesInvoice() {
       // Combine API & local storage orders/payments into database state. The app fragments
       // local records across three buckets by document type (Order / Quotation / Invoice),
       // all mirrored into `optical_sales_invoices`; list every bucket so a locally-created
-      // order or quotation still shows and survives a refetch. Invoices bucket is last so the
-      // most recently patched mirror row wins the de-dupe.
-      const allOrders = [...apiInvoices, ...localOrders, ...localQuotes, ...localInvoices];
-      const uniqueOrders = Array.from(new Map(allOrders.map(o => [o.id, o])).values())
-        // Normalise the document type onto every row so the Orders section can split its list
-        // into Orders / Invoices / Quotations. Local-only rows (backend write failed, or older
-        // records) carry it as `docType` ('Order'/'Invoice'/'Quotation'); default to INVOICE.
-        .map(o => ({
-          ...o,
-          documentType: (o.documentType || o.docType || 'INVOICE').toUpperCase(),
-        }));
-      setOrders(uniqueOrders);
+      // order or quotation still shows and survives a refetch. For a document the database also
+      // has, the database row wins (mergeLocalIntoApiRow); among local-only copies the invoices
+      // bucket is last so the most recently patched mirror row wins.
+      const apiIds = new Set(apiInvoices.map(o => o.id));
+      const merged = new Map(apiInvoices.map(o => [o.id, o]));
+      [...localOrders, ...localQuotes, ...localInvoices].forEach((o) => {
+        if (!o || o.id == null) return;
+        merged.set(o.id, apiIds.has(o.id) ? mergeLocalIntoApiRow(o, merged.get(o.id)) : o);
+      });
+      // One shape for every row (document type, customer, net total, Total Paid, payment status,
+      // frame / lens) whichever screen or device created it.
+      setOrders(Array.from(merged.values()).map(normalizeSalesRow));
 
       const allPayments = [...apiPayments, ...localPayments];
       const uniquePayments = Array.from(new Map(allPayments.map(p => [p.id, p])).values());
@@ -445,7 +495,7 @@ export default function SalesInvoice() {
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [customerDetailTab, setCustomerDetailTab] = useState(0);
   const [recordPaymentDialogOpen, setRecordPaymentDialogOpen] = useState(false);
-  const [payRecordInput, setPayRecordInput] = useState({ customerId: '', amount: '', method: 'Cash' });
+  const [payRecordInput, setPayRecordInput] = useState({ ...EMPTY_PAY_RECORD });
 
   // Calculation helpers
   const subtotal = cart.reduce((sum, item) => sum + (item.product.price * item.qty), 0);
@@ -670,14 +720,23 @@ export default function SalesInvoice() {
     alert('Invoice Receipt printed & Order registered successfully!');
   };
 
+  // Closing the dialog drops the link to the bill it was opened for, so a receipt taken later
+  // from elsewhere isn't recorded against that bill.
+  const closeRecordPayment = () => {
+    setRecordPaymentDialogOpen(false);
+    setPayRecordInput(p => ({ ...p, invoiceId: '', invoiceNumber: '' }));
+  };
+
   const handleRecordPaymentSubmit = async () => {
     if (!payRecordInput.amount || parseFloat(payRecordInput.amount) <= 0) {
       alert("Please enter a valid payment amount.");
       return;
     }
     const cust = customers.find(c => c.id === payRecordInput.customerId);
-    const custName = cust ? cust.name : 'Walk-in Patient';
-    const payAmt = parseFloat(payRecordInput.amount);
+    // The Order / Invoice this money is collected against (when opened from one of its rows).
+    const billRow = payRecordInput.invoiceId ? orders.find(o => o.id === payRecordInput.invoiceId) : null;
+    const custName = cust ? cust.name : (billRow && rowCustomerName(billRow)) || 'Walk-in Patient';
+    const payAmt = Math.round(parseFloat(payRecordInput.amount) * 100) / 100;
     const today = new Date().toISOString().split('T')[0];
 
     const newPay = {
@@ -694,13 +753,22 @@ export default function SalesInvoice() {
       setCustomers(customers.map(c => c.id === cust.id ? { ...c, balance: Math.max(0, (c.balance || 0) - payAmt) } : c));
     }
 
+    // Raise the bill's Total Paid (and its badge) on screen right away — the backend does the same
+    // when the receipt below lands, since it's linked to the bill.
+    if (billRow) {
+      const patch = { paidAmount: rowPayment(billRow).paid + payAmt };
+      setOrders(prev => prev.map(o => (rowMatches(o, billRow) ? normalizeSalesRow(mergePatchOntoRow(o, patch)) : o)));
+      patchLocalStorageRow(billRow, patch);
+    }
+
     setRecordPaymentDialogOpen(false);
-    setPayRecordInput({ customerId: '', amount: '', method: 'Cash' });
+    setPayRecordInput({ ...EMPTY_PAY_RECORD });
     alert(`Payment of ₹${payAmt} recorded successfully for ${custName}!`);
 
     try {
       const res = await axios.post('/api/sales/payments/', {
-        customer: cust ? cust.id : null,
+        invoice: billRow && isBackendUuid(billRow.id) ? billRow.id : null,
+        customer: cust && isBackendUuid(cust.id) ? cust.id : null,
         customer_name: custName,
         amount: payAmt,
         method: payRecordInput.method || 'Cash',
@@ -712,14 +780,13 @@ export default function SalesInvoice() {
       setPayments(prev => prev.map(p => p.id === newPay.id ? { ...p, id: res.data.id, receiptNo: res.data.receipt_no } : p));
     } catch (err) {
       console.warn('Failed to save payment to backend:', err);
+      notify(`The payment was NOT saved to the database — ${apiErrorMessage(err)}`);
     }
   };
 
   // ---- Sales > Orders: full "Update" of an Order / Invoice / Quotation ------------------
   const isBackendUuid = (id) =>
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id || ''));
-
-  const PAYMENT_STATUS_MAP = { Paid: 'PAID', Partial: 'PARTIAL', Unpaid: 'UNPAID' };
 
   // Fetch the full backend invoice so the Update dialog can prefill; falls back to the local
   // row for records that never reached the database.
@@ -773,13 +840,14 @@ export default function SalesInvoice() {
   // Apply a patch from UpdateDocumentDialog (or a bulk / Mark-Delivered action) to one row:
   // optimistic state + localStorage, then PATCH the backend invoice for real records.
   const applyDocumentUpdate = async (order, patch) => {
-    setOrders(prev => prev.map(o => (rowMatches(o, order) ? mergePatchOntoRow(o, patch) : o)));
+    setOrders(prev => prev.map(o => (rowMatches(o, order) ? normalizeSalesRow(mergePatchOntoRow(o, patch)) : o)));
     patchLocalStorageRow(order, patch);
 
     if (!isBackendUuid(order.id)) return;
 
+    // No `status`: the backend derives PAID / PARTIAL / UNPAID from paid_amount vs the net
+    // payable, so the badge can't contradict the amounts (and a quotation keeps its DRAFT).
     const body = {};
-    if (patch.paymentStatus) body.status = PAYMENT_STATUS_MAP[patch.paymentStatus] || 'UNPAID';
     if (patch.status !== undefined) body.fulfillment_status = patch.status;
     if (patch.deliveredAt !== undefined) body.delivered_at = patch.deliveredAt || null;
     if (patch.fulfillmentNotes !== undefined) body.fulfillment_notes = patch.fulfillmentNotes;
@@ -790,6 +858,7 @@ export default function SalesInvoice() {
       await axios.patch(`/api/sales/invoices/${order.id}/`, body);
     } catch (err) {
       console.warn('Failed to save document update to backend:', err);
+      notify(`The update to ${order.invoiceNumber || 'this document'} was NOT saved — ${apiErrorMessage(err)}`);
     }
   };
 
@@ -823,28 +892,48 @@ export default function SalesInvoice() {
           customers={customersWithLoyalty}
           products={products}
           services={services}
+          // Set by the ✏️ Edit action in Sales > Orders: the wizard loads that document and
+          // saves back onto it instead of creating a new bill.
+          editDocumentId={location.state?.editDocumentId || null}
+          onExitEdit={() => navigate('/sales/new', { replace: true })}
+          onCancelEdit={() => navigate('/sales/orders')}
           onNavigateToEyeTest={() => navigate('/optical/eyetest')}
           onCheckoutComplete={(completedOrder) => {
-            const newOrd = {
+            const lines = summarizeLines(completedOrder.items);
+            const newOrd = normalizeSalesRow({
               id: completedOrder.id || `INV-${Math.floor(1000 + Math.random() * 9000)}`,
               invoiceNumber: completedOrder.invoiceNumber || completedOrder.id,
               documentType: (completedOrder.docType || 'INVOICE').toUpperCase(),
-              customer: completedOrder.customerName || completedOrder.customer || 'CASH CUSTOMER',
-              phone: completedOrder.customerPhone || '+91 98470 12345',
+              customerId: completedOrder.customerId || null,
+              customer: completedOrder.customerName || completedOrder.customer || '',
+              phone: completedOrder.customerPhone || '',
               date: completedOrder.date || new Date().toISOString().split('T')[0],
               total: parseFloat(completedOrder.netTotal || completedOrder.total || 0),
-              paidAmount: parseFloat(completedOrder.netTotal || completedOrder.total || 0) - (parseFloat(completedOrder.balanceDue) || 0),
-              payment: (parseFloat(completedOrder.balanceDue) || 0) === 0 ? 'Paid' : 'Partial',
+              // What was recorded against the bill (the pay-mode split, less any change returned).
+              paidAmount: parseFloat(completedOrder.paidAmount) || 0,
               status: completedOrder.docType === 'Order'
                 ? 'Order Received'
                 : completedOrder.docType === 'Quotation'
                   ? 'Draft'
                   : 'Ready for Collection',
-              frame: completedOrder.items?.find(i => i.category === 'FRAME')?.item || 'Prescribed Frame',
-              lens: completedOrder.items?.find(i => i.category === 'LENS')?.item || 'Prescribed Lens',
+              frame: lines.frame,
+              lens: lines.lens,
+              itemsSummary: lines.summary,
               paymentMethod: completedOrder.paymentMode || 'Cash'
-            };
-            setOrders(prev => [newOrd, ...prev]);
+            });
+            if (completedOrder.isEdit) {
+              // Edited from Orders — replace that row in place (matched on the id / number it had
+              // before the edit) rather than listing the bill twice. The lab-pipeline stage isn't
+              // part of the New Sale form, so keep it unless the document type was changed.
+              const ref = { id: completedOrder.id, invoiceNumber: completedOrder.previousInvoiceNumber };
+              setOrders(prev => prev.map(o => {
+                if (!rowMatches(o, ref)) return o;
+                const sameType = (o.documentType || 'INVOICE') === newOrd.documentType;
+                return { ...o, ...newOrd, status: sameType && o.status ? o.status : newOrd.status };
+              }));
+            } else {
+              setOrders(prev => [newOrd, ...prev]);
+            }
             // The print modal needs the FULL order (real per-item brand/tax/disc, diagnosis,
             // patient age/gender/address, payment method breakdown, ...) — newOrd above is only
             // the trimmed summary the Orders table displays, so merge rather than replace.
@@ -864,21 +953,20 @@ export default function SalesInvoice() {
           customers={customersWithLoyalty}
           onOpenRecordPayment={() => setRecordPaymentDialogOpen(true)}
           onCheckoutComplete={(completedOrder) => {
-            const newOrd = {
+            const newOrd = normalizeSalesRow({
               id: completedOrder.id || `INV-${Math.floor(1000 + Math.random() * 9000)}`,
               invoiceNumber: completedOrder.invoiceNumber || completedOrder.id,
               documentType: 'INVOICE',
               customer: completedOrder.customer,
-              phone: completedOrder.phone || '+91 98470 12345',
+              phone: completedOrder.phone || '',
               date: completedOrder.date || new Date().toISOString().split('T')[0],
               total: completedOrder.total,
-              paidAmount: completedOrder.total,
-              payment: 'Paid',
+              paidAmount: completedOrder.paidAmount ?? completedOrder.total,
               status: 'Ready for Collection',
               frame: completedOrder.frame,
               lens: completedOrder.lens,
               paymentMethod: completedOrder.paymentMode || 'Cash'
-            };
+            });
             setOrders(prev => [newOrd, ...prev]);
             try {
               const existing = JSON.parse(localStorage.getItem('optical_sales_invoices') || '[]');
@@ -901,9 +989,21 @@ export default function SalesInvoice() {
         <OrdersManagerView
           orders={orders}
           onNavigateToNewSale={() => { setActiveTab('new-sale'); navigate('/sales/new'); }}
+          onEditInNewSale={(ord) => navigate('/sales/new', { state: { editDocumentId: ord.id } })}
           onNavigateToEyeTest={() => navigate('/optical/eyetest')}
           onOpenRecordPayment={(ord) => {
-            if (ord && ord.customerId) setPayRecordInput(p => ({ ...p, customerId: ord.customerId }));
+            // Opened from a row: the receipt is recorded against that bill (raising its Total
+            // Paid), pre-filled with what's still due.
+            if (ord) {
+              const { balance } = rowPayment(ord);
+              setPayRecordInput(p => ({
+                ...p,
+                customerId: ord.customerId || p.customerId,
+                invoiceId: ord.id,
+                invoiceNumber: ord.invoiceNumber || '',
+                amount: balance > 0 ? String(balance) : p.amount
+              }));
+            }
             setRecordPaymentDialogOpen(true);
           }}
           onPrintInvoice={(inv) => { setPrintableInvoice(inv); setPrintModalOpen(true); }}
@@ -2238,7 +2338,7 @@ export default function SalesInvoice() {
       {/* DIALOG FOR RECORD PAYMENT COLLECTION */}
       <Dialog 
         open={recordPaymentDialogOpen} 
-        onClose={() => setRecordPaymentDialogOpen(false)} 
+        onClose={closeRecordPayment} 
         maxWidth="xs" 
         fullWidth
         PaperProps={{ sx: { borderRadius: 4 } }}
@@ -2246,6 +2346,14 @@ export default function SalesInvoice() {
         <DialogTitle sx={{ fontWeight: 800 }}>Record Payment Collection</DialogTitle>
         <DialogContent dividers>
           <Stack spacing={2.5}>
+            {payRecordInput.invoiceNumber && (
+              <Chip
+                label={`Against ${payRecordInput.invoiceNumber}`}
+                color="primary" variant="outlined"
+                onDelete={() => setPayRecordInput(p => ({ ...p, invoiceId: '', invoiceNumber: '' }))}
+                sx={{ alignSelf: 'flex-start', fontWeight: 700 }}
+              />
+            )}
             <TextField 
               select 
               label="Select Patient Account" 
@@ -2295,7 +2403,7 @@ export default function SalesInvoice() {
           </Stack>
         </DialogContent>
         <DialogActions sx={{ p: 2, justifyContent: 'space-between' }}>
-          <Button onClick={() => setRecordPaymentDialogOpen(false)}>Cancel</Button>
+          <Button onClick={closeRecordPayment}>Cancel</Button>
           <Button 
             variant="contained" 
             onClick={handleRecordPaymentSubmit} 
@@ -2312,6 +2420,7 @@ export default function SalesInvoice() {
           open={printModalOpen}
           onClose={() => setPrintModalOpen(false)}
           invoice={printableInvoice}
+          showWhatsappPreview
         />
       </Suspense>
     </Box>

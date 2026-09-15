@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.db import models
 from apps.common.models import BaseUUIDModel
 
@@ -72,6 +74,37 @@ class Service(BaseUUIDModel):
         return f"{self.service_code} - {self.name}"
 
 
+# Names the billing screens write when no patient was picked — never a real customer, so they
+# don't satisfy the "customer name is required" rule on an Order / Invoice / Quotation.
+PLACEHOLDER_CUSTOMER_NAMES = {
+    'walk-in customer', 'walk-in patient', 'walk in customer', 'walk in patient', 'walk-in',
+    'walkin', 'cash customer', 'customer', 'patient', 'unknown', 'n/a', 'na', 'none', 'null',
+    'undefined', '-',
+}
+
+
+def is_real_customer_name(name):
+    text = ' '.join(str(name or '').split()).lower()
+    return bool(text) and text not in PLACEHOLDER_CUSTOMER_NAMES and any(ch.isalpha() for ch in text)
+
+
+def derive_payment_status(net_amount, paid_amount):
+    """PAID when Total Paid covers the net payable, PARTIAL while some of it is in, UNPAID when
+    nothing is."""
+    net = Decimal(str(net_amount or 0))
+    paid = Decimal(str(paid_amount or 0))
+    if paid <= 0 and net > 0:
+        return 'UNPAID'
+    return 'PAID' if paid >= net else 'PARTIAL'
+
+
+def settle_payment_status(status, net_amount, paid_amount):
+    # DRAFT (a quotation) and CANCELLED aren't payment states — they're kept as they are.
+    if (status or '').upper() in ('DRAFT', 'CANCELLED'):
+        return status
+    return derive_payment_status(net_amount, paid_amount)
+
+
 class Invoice(BaseUUIDModel):
     STATUS_CHOICES = [
         ('DRAFT', 'Draft'),
@@ -90,6 +123,11 @@ class Invoice(BaseUUIDModel):
     # for every such sale just to satisfy the constraint. SET_NULL (not CASCADE) so deleting a
     # Customer later doesn't wipe out their purchase history.
     customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name='invoices')
+    # Name the bill was made out to, snapshotted at save time (same idea as Payment.customer_name).
+    # A bill must carry a real name (InvoiceSerializer.validate) — either the linked patient's or
+    # one typed at the counter when no patient record could be linked — so the Orders list never
+    # has to fall back to "Walk-in Customer" for a sale that did have a customer.
+    customer_name = models.CharField(max_length=150, blank=True, default='')
     invoice_date = models.DateField()
     # Branch this sale belongs to. Nullable + SET_NULL for backward compatibility with rows
     # created before Multi-Branch existed (a data migration backfills them to the default
@@ -180,6 +218,10 @@ class Payment(BaseUUIDModel):
     payment_date = models.DateField()
     status = models.CharField(max_length=20, default='Completed')
     notes = models.TextField(blank=True, null=True)
+    # 'BILLING' = taken at the counter while billing (New Sale's Cash / Card / UPI / Bank split,
+    # POS Billing) — one receipt per pay mode, kept in step with the bill whenever it's edited.
+    # Blank = recorded separately afterwards (Payments tab), which a bill edit never touches.
+    source = models.CharField(max_length=20, blank=True, default='')
 
     class Meta:
         ordering = ['-payment_date', '-created_at']

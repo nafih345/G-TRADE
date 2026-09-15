@@ -31,13 +31,18 @@ import {
   RequestQuote as QuotationIcon,
   ArrowForward as ConvertIcon,
   Edit as EditIcon,
+  EditNote as UpdateStatusIcon,
   DoneAll as MarkDeliveredIcon
 } from '@mui/icons-material';
 import { printSalesInvoiceReceipt, downloadPdfInvoice } from '../../utils/printInvoice';
 import { sendInvoiceWhatsApp } from '../../utils/whatsappInvoice';
 import UpdateDocumentDialog from './UpdateDocumentDialog';
+import {
+  rowPayment, rowCustomerName, rowFrameLens, deliveryStatusOf, PAYMENT_STATUSES
+} from '../../utils/salesDocStatus';
 
 const todayStr = () => new Date().toISOString().split('T')[0];
+const inr = (n) => (Number(n) || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
 
 // Lab Workflow Pipeline Stages
 const labStages = [
@@ -88,11 +93,14 @@ export default function OrdersManagerView({
   onConvertDocument,
   onUpdateDocument,
   onBulkUpdate,
-  onFetchDocument
+  onFetchDocument,
+  // Opens the document in Sales > New Sale with every field (customer, items, payment) editable.
+  onEditInNewSale
 }) {
   const [docView, setDocView] = useState('ORDER'); // 'ORDER' | 'INVOICE' | 'QUOTATION'
   const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState('All');
+  const [statusFilter, setStatusFilter] = useState('All'); // lab pipeline stage (Orders)
+  const [paymentFilter, setPaymentFilter] = useState('All'); // PAID | PARTIAL | UNPAID
   const [activeTab, setActiveTab] = useState('all'); // 'all', 'lab', 'ready', 'delivered'
 
   // Selected Order Detail Modal State
@@ -126,8 +134,7 @@ export default function OrdersManagerView({
     if (selectedOrder && selectedOrder.id === ord.id) {
       setSelectedOrder({ ...selectedOrder, status: 'Delivered' });
     }
-    const balanceDue = (parseFloat(ord.total) || parseFloat(ord.amount) || 0) - (parseFloat(ord.paidAmount) || 0);
-    if (balanceDue > 0) onOpenRecordPayment?.(ord);
+    if (rowPayment(ord).balance > 0) onOpenRecordPayment?.(ord);
   };
 
   const toggleSelect = (id) => {
@@ -157,6 +164,7 @@ export default function OrdersManagerView({
     setDocView(next);
     setActiveTab('all');
     setStatusFilter('All');
+    setPaymentFilter('All');
     setSelectedIds(new Set());
   };
 
@@ -167,38 +175,47 @@ export default function OrdersManagerView({
     setSelectedIds(new Set());
   };
 
-  // Filter rows (search + sub-tab + status)
+  // Filter rows (search + sub-tab + pipeline stage + payment status). Payment and delivery status
+  // are computed from each row's figures / stage, never read from a stored label.
   const filteredOrders = scopedList.filter(o => {
-    const custName = o.customer || o.customerName || 'Walk-in Customer';
-    const matchesSearch = custName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                          (o.id && String(o.id).toLowerCase().includes(searchQuery.toLowerCase())) ||
-                          (o.invoiceNumber && o.invoiceNumber.toLowerCase().includes(searchQuery.toLowerCase())) ||
-                          (o.frame && o.frame.toLowerCase().includes(searchQuery.toLowerCase())) ||
-                          (o.lens && o.lens.toLowerCase().includes(searchQuery.toLowerCase()));
+    const q = searchQuery.trim().toLowerCase();
+    const { frame, lens, summary } = rowFrameLens(o);
+    const matchesSearch = !q || [rowCustomerName(o), o.phone, o.id, o.invoiceNumber, frame, lens, summary]
+      .some(v => v && String(v).toLowerCase().includes(q));
 
+    const payKey = rowPayment(o).key;
+    const deliveryKey = deliveryStatusOf(o.status).key;
     let matchesTab = true;
     if (docView === 'ORDER') {
-      if (activeTab === 'lab') matchesTab = o.status !== 'Delivered' && o.status !== 'Ready for Collection';
-      if (activeTab === 'ready') matchesTab = o.status === 'Ready for Collection' || o.status === 'Ready';
-      if (activeTab === 'delivered') matchesTab = o.status === 'Delivered';
+      if (activeTab === 'lab') matchesTab = deliveryKey === 'PENDING' || deliveryKey === 'PROCESSING';
+      if (activeTab === 'ready') matchesTab = deliveryKey === 'READY';
+      if (activeTab === 'delivered') matchesTab = deliveryKey === 'DELIVERED';
     } else if (docView === 'INVOICE') {
-      if (activeTab === 'paid') matchesTab = o.payment === 'Paid';
-      if (activeTab === 'outstanding') matchesTab = o.payment !== 'Paid';
+      if (activeTab === 'paid') matchesTab = payKey === 'PAID';
+      if (activeTab === 'outstanding') matchesTab = payKey !== 'PAID';
     }
 
-    const matchesStatus = statusFilter === 'All' || o.status === statusFilter || o.payment === statusFilter;
-    return matchesSearch && matchesTab && matchesStatus;
+    const matchesStatus = statusFilter === 'All' || o.status === statusFilter;
+    const matchesPayment = paymentFilter === 'All' || payKey === paymentFilter;
+    return matchesSearch && matchesTab && matchesStatus && matchesPayment;
   });
 
   // Metrics for the currently selected document type
   const scopedCount = scopedList.length;
-  const inLabCount = scopedList.filter(o => o.status !== 'Delivered' && o.status !== 'Ready for Collection').length;
-  const readyCount = scopedList.filter(o => o.status === 'Ready for Collection' || o.status === 'Ready').length;
-  const deliveredCount = scopedList.filter(o => o.status === 'Delivered').length;
-  const paidCount = scopedList.filter(o => o.payment === 'Paid').length;
+  const deliveryKeys = scopedList.map(o => deliveryStatusOf(o.status).key);
+  const inLabCount = deliveryKeys.filter(k => k === 'PENDING' || k === 'PROCESSING').length;
+  const readyCount = deliveryKeys.filter(k => k === 'READY').length;
+  const deliveredCount = deliveryKeys.filter(k => k === 'DELIVERED').length;
+  const scopedPayments = scopedList.map(rowPayment);
+  const paidCount = scopedPayments.filter(p => p.key === 'PAID').length;
   const outstandingCount = scopedCount - paidCount;
-  const scopedValue = scopedList.reduce((sum, o) => sum + (parseFloat(o.total) || parseFloat(o.amount) || 0), 0);
-  const collectedValue = scopedList.reduce((sum, o) => sum + (parseFloat(o.paidAmount) || 0), 0);
+  const scopedValue = scopedPayments.reduce((sum, p) => sum + p.net, 0);
+  const collectedValue = scopedPayments.reduce((sum, p) => sum + p.paid, 0);
+
+  // The row open in the detail modal
+  const selPay = selectedOrder ? rowPayment(selectedOrder) : null;
+  const selDelivery = selectedOrder ? deliveryStatusOf(selectedOrder.status) : null;
+  const selLines = selectedOrder ? rowFrameLens(selectedOrder) : null;
 
   const kpiCards = {
     ORDER: [
@@ -389,26 +406,25 @@ export default function OrdersManagerView({
                 <MenuItem value="All">All Pipeline Statuses</MenuItem>
                 <MenuItem value="Order Received">Order Received</MenuItem>
                 <MenuItem value="In Lab Processing">In Lab Processing</MenuItem>
+                <MenuItem value="Frame Mounting">Frame Mounting</MenuItem>
                 <MenuItem value="Quality Control">Quality Control (QC)</MenuItem>
                 <MenuItem value="Ready for Collection">Ready for Collection</MenuItem>
                 <MenuItem value="Delivered">Delivered</MenuItem>
               </TextField>
             )}
 
-            {docView === 'INVOICE' && (
-              <TextField
-                select
-                size="small"
-                value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value)}
-                sx={{ minWidth: 160, '& .MuiSelect-select': { borderRadius: 2 } }}
-              >
-                <MenuItem value="All">All Payment Statuses</MenuItem>
-                <MenuItem value="Paid">Paid</MenuItem>
-                <MenuItem value="Partial">Partially Paid</MenuItem>
-                <MenuItem value="Unpaid">Unpaid</MenuItem>
-              </TextField>
-            )}
+            <TextField
+              select
+              size="small"
+              value={paymentFilter}
+              onChange={(e) => setPaymentFilter(e.target.value)}
+              sx={{ minWidth: 170, '& .MuiSelect-select': { borderRadius: 2 } }}
+            >
+              <MenuItem value="All">All Payment Statuses</MenuItem>
+              {Object.values(PAYMENT_STATUSES).map(s => (
+                <MenuItem key={s.key} value={s.key}>{s.label}</MenuItem>
+              ))}
+            </TextField>
           </Stack>
         </Box>
       </Card>
@@ -500,21 +516,22 @@ export default function OrdersManagerView({
                   <TableCell sx={{ fontWeight: 800 }}>Prescribed Frame &amp; Lens</TableCell>
                   <TableCell sx={{ fontWeight: 800 }}>Total {docView === 'QUOTATION' ? 'Quoted' : 'Payable'}</TableCell>
                   <TableCell sx={{ fontWeight: 800 }}>Payment Status</TableCell>
-                  {docView === 'ORDER' && <TableCell sx={{ fontWeight: 800 }}>Lab Pipeline Status</TableCell>}
+                  {docView === 'ORDER' && <TableCell sx={{ fontWeight: 800 }}>Delivery Status</TableCell>}
                   <TableCell sx={{ fontWeight: 800, textAlign: 'right' }}>Actions</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
                 {filteredOrders.map((ord) => {
-                  const custName = ord.customer || ord.customerName || 'Walk-in Customer';
+                  const custName = rowCustomerName(ord);
                   const rawPhone = ord.phone || ord.customer_phone || '';
                   const displayPhone = (rawPhone && !rawPhone.includes('9847012345') && !rawPhone.includes('98470 12345')) ? rawPhone : '';
-                  const isPaid = ord.payment === 'Paid';
-                  const isDelivered = ord.status === 'Delivered';
-                  const isReady = ord.status === 'Ready for Collection' || ord.status === 'Ready';
+                  const pay = rowPayment(ord);
+                  const delivery = deliveryStatusOf(ord.status);
+                  const { frame, lens, summary } = rowFrameLens(ord);
+                  const isDelivered = delivery.key === 'DELIVERED';
 
                   const handleUpdatePhone = () => {
-                    const newPhone = prompt(`Enter Registered Phone Number for ${custName}:`, displayPhone);
+                    const newPhone = prompt(`Enter Registered Phone Number for ${custName || 'this customer'}:`, displayPhone);
                     if (newPhone !== null && newPhone.trim() !== '') {
                       try {
                         ord.phone = newPhone.trim();
@@ -523,7 +540,7 @@ export default function OrdersManagerView({
                         localStorage.setItem('optical_sales_invoices', JSON.stringify(updatedInvs));
 
                         const custs = JSON.parse(localStorage.getItem('optical_sales_customers') || '[]');
-                        const updatedCusts = custs.map(c => (c.name && c.name.toLowerCase() === custName.toLowerCase()) ? { ...c, phone: newPhone.trim() } : c);
+                        const updatedCusts = custs.map(c => (custName && c.name && c.name.toLowerCase() === custName.toLowerCase()) ? { ...c, phone: newPhone.trim() } : c);
                         localStorage.setItem('optical_sales_customers', JSON.stringify(updatedCusts));
 
                         window.dispatchEvent(new Event('optical_stock_updated'));
@@ -541,7 +558,15 @@ export default function OrdersManagerView({
                       </TableCell>
                       <TableCell sx={{ fontSize: '0.85rem' }}>{ord.date}</TableCell>
                       <TableCell>
-                        <Typography variant="subtitle2" fontWeight={800}>{custName}</Typography>
+                        {custName ? (
+                          <Typography variant="subtitle2" fontWeight={800}>{custName}</Typography>
+                        ) : (
+                          <Tooltip title="This older record was saved without a customer name — edit it to add one.">
+                            <Typography variant="subtitle2" fontWeight={700} color="text.secondary" sx={{ fontStyle: 'italic' }}>
+                              Walk-in (no name)
+                            </Typography>
+                          </Tooltip>
+                        )}
                         {displayPhone ? (
                           <Typography
                             variant="caption"
@@ -566,35 +591,55 @@ export default function OrdersManagerView({
                         )}
                       </TableCell>
                       <TableCell>
-                        <Typography variant="body2" fontWeight={700} noWrap sx={{ maxWidth: 220 }}>
-                          👓 {ord.frame || 'Prescribed Frame'}
-                        </Typography>
-                        <Typography variant="caption" color="text.secondary" display="block" noWrap sx={{ maxWidth: 220 }}>
-                          🔍 {ord.lens || 'Prescribed Lens'}
-                        </Typography>
+                        <Tooltip title={[frame && `Frame: ${frame}`, lens && `Lens: ${lens}`].filter(Boolean).join(' · ') || summary || ''}>
+                          <Box>
+                            {frame || lens ? (
+                              <>
+                                <Typography variant="body2" fontWeight={700} noWrap sx={{ maxWidth: 220 }}>
+                                  👓 {frame || '—'}
+                                </Typography>
+                                <Typography variant="caption" color="text.secondary" display="block" noWrap sx={{ maxWidth: 220 }}>
+                                  🔍 {lens || '—'}
+                                </Typography>
+                              </>
+                            ) : (
+                              <Typography variant="body2" color="text.secondary" noWrap sx={{ maxWidth: 220 }}>
+                                {summary || 'No frame / lens'}
+                              </Typography>
+                            )}
+                          </Box>
+                        </Tooltip>
                       </TableCell>
                       <TableCell sx={{ fontWeight: 900, fontSize: '1rem' }}>
-                        ₹{(parseFloat(ord.total) || parseFloat(ord.amount) || 0).toLocaleString()}
+                        ₹{inr(pay.net)}
                       </TableCell>
                       <TableCell>
                         <Chip
-                          label={docView === 'QUOTATION' ? (ord.status || 'Draft') : (ord.payment || 'Paid')}
+                          label={pay.label}
                           size="small"
-                          color={docView === 'QUOTATION' ? 'default' : (isPaid ? 'success' : 'warning')}
-                          variant={isPaid && docView !== 'QUOTATION' ? 'filled' : 'outlined'}
+                          color={pay.color}
+                          variant={pay.key === 'PAID' ? 'filled' : 'outlined'}
                           sx={{ fontWeight: 700, fontSize: '0.72rem' }}
                         />
+                        <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5, whiteSpace: 'nowrap' }}>
+                          Paid ₹{inr(pay.paid)}{pay.balance > 0 ? ` · Due ₹${inr(pay.balance)}` : ''}
+                        </Typography>
                       </TableCell>
                       {docView === 'ORDER' && (
                         <TableCell>
                           <Chip
-                            label={ord.status || 'In Lab Processing'}
+                            label={delivery.label}
                             size="small"
-                            color={isDelivered ? 'info' : isReady ? 'success' : 'warning'}
-                            variant="outlined"
-                            icon={isDelivered ? <SuccessIcon fontSize="small" /> : <LabIcon fontSize="small" />}
+                            color={delivery.color}
+                            variant={isDelivered ? 'filled' : 'outlined'}
+                            icon={isDelivered ? <SuccessIcon fontSize="small" /> : delivery.key === 'PENDING' ? <PendingIcon fontSize="small" /> : <LabIcon fontSize="small" />}
                             sx={{ fontWeight: 700, fontSize: '0.72rem' }}
                           />
+                          {(isDelivered ? ord.deliveredAt : ord.status && ord.status.toLowerCase() !== delivery.label.toLowerCase()) && (
+                            <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5, whiteSpace: 'nowrap' }}>
+                              {isDelivered ? `on ${ord.deliveredAt}` : ord.status}
+                            </Typography>
+                          )}
                         </TableCell>
                       )}
                       <TableCell align="right">
@@ -633,9 +678,17 @@ export default function OrdersManagerView({
                             </Tooltip>
                           )}
 
-                          <Tooltip title={`Update this ${cfg.label.replace(/s$/, '')}`}>
-                            <IconButton size="small" color="secondary" onClick={() => openEditDialog(ord)}>
-                              <EditIcon fontSize="small" />
+                          {onEditInNewSale && (
+                            <Tooltip title={`Edit this ${cfg.label.replace(/s$/, '')} in New Sale`}>
+                              <IconButton size="small" color="secondary" onClick={() => onEditInNewSale(ord)}>
+                                <EditIcon fontSize="small" />
+                              </IconButton>
+                            </Tooltip>
+                          )}
+
+                          <Tooltip title="Update payment / delivery status">
+                            <IconButton size="small" color="info" onClick={() => openEditDialog(ord)}>
+                              <UpdateStatusIcon fontSize="small" />
                             </IconButton>
                           </Tooltip>
 
@@ -695,7 +748,11 @@ export default function OrdersManagerView({
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
               <LabIcon color="primary" /> {docView === 'ORDER' ? 'Optical Order Job Slip & Tracking' : `${cfg.label.replace(/s$/, '')} Details`} — {selectedOrder.invoiceNumber || selectedOrder.id}
             </Box>
-            <Chip label={selectedOrder.status || (docView === 'QUOTATION' ? 'Draft' : selectedOrder.payment)} color="primary" sx={{ fontWeight: 700 }} />
+            <Chip
+              label={docView === 'ORDER' ? selDelivery.label : selPay.label}
+              color={docView === 'ORDER' ? selDelivery.color : selPay.color}
+              sx={{ fontWeight: 700 }}
+            />
           </DialogTitle>
 
           <Divider />
@@ -723,8 +780,8 @@ export default function OrdersManagerView({
               <Grid item xs={12} sm={6}>
                 <Card variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
                   <Typography variant="caption" color="text.secondary" fontWeight={700}>CUSTOMER DETAILS</Typography>
-                  <Typography variant="subtitle1" fontWeight={800}>{selectedOrder.customer}</Typography>
-                  <Typography variant="body2" color="text.secondary">Phone: {selectedOrder.phone || '+91 98765-43210'}</Typography>
+                  <Typography variant="subtitle1" fontWeight={800}>{rowCustomerName(selectedOrder) || 'Walk-in (no name)'}</Typography>
+                  <Typography variant="body2" color="text.secondary">Phone: {selectedOrder.phone || '—'}</Typography>
                   <Typography variant="body2" color="text.secondary">Date: {selectedOrder.date}</Typography>
                 </Card>
               </Grid>
@@ -732,11 +789,20 @@ export default function OrdersManagerView({
               <Grid item xs={12} sm={6}>
                 <Card variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
                   <Typography variant="caption" color="text.secondary" fontWeight={700}>PRESCRIBED SPECTACLE ITEMS</Typography>
-                  <Typography variant="body2" fontWeight={800} color="primary.main">👓 {selectedOrder.frame || 'Prescribed Frame'}</Typography>
-                  <Typography variant="body2" fontWeight={800} color="success.main">🔍 {selectedOrder.lens || 'Prescribed Lens'}</Typography>
+                  <Typography variant="body2" fontWeight={800} color="primary.main">👓 {selLines.frame || '—'}</Typography>
+                  <Typography variant="body2" fontWeight={800} color="success.main">🔍 {selLines.lens || '—'}</Typography>
+                  {!selLines.frame && !selLines.lens && selLines.summary && (
+                    <Typography variant="caption" color="text.secondary" display="block">{selLines.summary}</Typography>
+                  )}
                   <Typography variant="subtitle1" fontWeight={900} sx={{ mt: 0.5 }}>
-                    Total: ₹{(parseFloat(selectedOrder.total) || 0).toLocaleString()} ({selectedOrder.payment || (docView === 'QUOTATION' ? 'Estimate' : '')})
+                    Total: ₹{inr(selPay.net)}
                   </Typography>
+                  <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 0.5 }}>
+                    <Chip label={selPay.label} size="small" color={selPay.color} sx={{ fontWeight: 700 }} />
+                    <Typography variant="caption" color="text.secondary">
+                      Paid ₹{inr(selPay.paid)} · Balance ₹{inr(selPay.balance)}
+                    </Typography>
+                  </Stack>
                 </Card>
               </Grid>
             </Grid>
@@ -752,7 +818,7 @@ export default function OrdersManagerView({
                   <Button
                     variant="outlined"
                     color="secondary"
-                    startIcon={<EditIcon />}
+                    startIcon={<UpdateStatusIcon />}
                     onClick={() => { setDetailModalOpen(false); openEditDialog(selectedOrder); }}
                     sx={{ borderRadius: 2, textTransform: 'none', fontWeight: 700 }}
                   >
@@ -812,10 +878,18 @@ export default function OrdersManagerView({
               </Box>
             )}
 
-            {docView === 'INVOICE' && renderInvoicePaymentBlock(selectedOrder, onOpenRecordPayment)}
+            {docView !== 'QUOTATION' && renderPaymentBlock(selectedOrder, onOpenRecordPayment)}
           </DialogContent>
 
           <DialogActions sx={{ p: 2.5 }}>
+            {onEditInNewSale && (
+              <Button
+                variant="outlined" color="secondary" startIcon={<EditIcon />}
+                onClick={() => { setDetailModalOpen(false); onEditInNewSale(selectedOrder); }}
+              >
+                Edit in New Sale
+              </Button>
+            )}
             <Button variant="outlined" onClick={() => printSalesInvoiceReceipt(selectedOrder, 'A4', billDocType)} startIcon={<PrintIcon />}>
               Print {docView === 'QUOTATION' ? 'Quotation' : docView === 'ORDER' ? 'Job Slip' : 'Invoice'}
             </Button>
@@ -844,24 +918,28 @@ export default function OrdersManagerView({
   );
 }
 
-// Small "record payment" prompt shown inside the Invoice detail modal for unsettled invoices.
-function renderInvoicePaymentBlock(order, onOpenRecordPayment) {
-  if (order.payment === 'Paid') {
+// Small "record payment" prompt shown inside the Order / Invoice detail modal. The receipt is
+// recorded against this bill, so its Total Paid and badge move with it.
+function renderPaymentBlock(order, onOpenRecordPayment) {
+  const pay = rowPayment(order);
+  if (pay.key === 'PAID') {
     return (
-      <Box sx={{ p: 2.5, bgcolor: '#f0fdf4', borderRadius: 2.5, border: '1px solid', borderColor: 'success.light' }}>
-        <Typography variant="subtitle2" fontWeight={800} color="success.main">Invoice settled in full</Typography>
+      <Box sx={{ mt: 2, p: 2.5, bgcolor: '#f0fdf4', borderRadius: 2.5, border: '1px solid', borderColor: 'success.light' }}>
+        <Typography variant="subtitle2" fontWeight={800} color="success.main">
+          Settled in full — ₹{inr(pay.paid)} paid
+        </Typography>
       </Box>
     );
   }
   return (
-    <Box sx={{ p: 2.5, bgcolor: '#fffbeb', borderRadius: 2.5, border: '1px solid', borderColor: 'warning.light', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
+    <Box sx={{ mt: 2, p: 2.5, bgcolor: '#fffbeb', borderRadius: 2.5, border: '1px solid', borderColor: 'warning.light', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
       <Box>
-        <Typography variant="subtitle2" fontWeight={800}>Payment outstanding</Typography>
+        <Typography variant="subtitle2" fontWeight={800}>{pay.label} — ₹{inr(pay.balance)} outstanding</Typography>
         <Typography variant="caption" color="text.secondary">
-          Paid ₹{(parseFloat(order.paidAmount) || 0).toLocaleString()} of ₹{(parseFloat(order.total) || 0).toLocaleString()}.
+          Paid ₹{inr(pay.paid)} of ₹{inr(pay.net)}.
         </Typography>
       </Box>
-      <Button variant="contained" color="warning" onClick={() => onOpenRecordPayment?.()} sx={{ borderRadius: 2, textTransform: 'none', fontWeight: 700 }}>
+      <Button variant="contained" color="warning" onClick={() => onOpenRecordPayment?.(order)} sx={{ borderRadius: 2, textTransform: 'none', fontWeight: 700 }}>
         Record Payment
       </Button>
     </Box>

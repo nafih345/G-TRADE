@@ -27,6 +27,11 @@ import {
 } from '@mui/icons-material';
 import { printSalesInvoiceReceipt, downloadPdfInvoice } from '../../utils/printInvoice';
 import { sendInvoiceWhatsApp } from '../../utils/whatsappInvoice';
+import {
+  rowPayment, rowCustomerName, rowFrameLens, deliveryStatusOf, PAYMENT_STATUSES
+} from '../../utils/salesDocStatus';
+
+const inr = (n) => (Number(n) || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
 
 export default function SalesDashboardView({
   orders = [],
@@ -46,21 +51,21 @@ export default function SalesDashboardView({
   // tax invoices — not open quotations or unbilled lab orders.
   const invoiceRows = orders.filter(o => ((o.documentType || o.docType || 'INVOICE').toUpperCase()) === 'INVOICE');
 
-  // Real Database calculations (strictly from passed orders array)
-  const totalRevenue = invoiceRows.reduce((sum, o) => sum + (parseFloat(o.total) || parseFloat(o.amount) || 0), 0);
+  // Real Database calculations (strictly from passed orders array) — net payable and Total Paid
+  // per bill, the same figures and Paid / Partially Paid / Unpaid rule as Sales > Orders.
+  const invoicePayments = invoiceRows.map(rowPayment);
+  const totalRevenue = invoicePayments.reduce((sum, p) => sum + p.net, 0);
   const totalInvoices = invoiceRows.length;
   const avgOrderValue = totalInvoices > 0 ? Math.round(totalRevenue / totalInvoices) : 0;
-  const pendingCollections = invoiceRows.filter(o => (o.payment && (o.payment.includes('Partial') || o.payment === 'Unpaid'))).length;
+  const pendingCollections = invoicePayments.filter(p => p.key !== 'PAID').length;
 
   // Filtered orders list from database
   const filteredOrders = invoiceRows.filter(o => {
-    const custName = o.customer || o.customerName || 'Walk-in Customer';
-    const matchesSearch = custName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                          (o.id && o.id.toLowerCase().includes(searchQuery.toLowerCase())) ||
-                          (o.frame && o.frame.toLowerCase().includes(searchQuery.toLowerCase())) ||
-                          (o.lens && o.lens.toLowerCase().includes(searchQuery.toLowerCase()));
-    
-    const matchesStatus = statusFilter === 'All' || o.status === statusFilter || o.payment === statusFilter;
+    const q = searchQuery.trim().toLowerCase();
+    const { frame, lens, summary } = rowFrameLens(o);
+    const matchesSearch = !q || [rowCustomerName(o), o.invoiceNumber, o.id, frame, lens, summary]
+      .some(v => v && String(v).toLowerCase().includes(q));
+    const matchesStatus = statusFilter === 'All' || rowPayment(o).key === statusFilter;
     return matchesSearch && matchesStatus;
   });
 
@@ -231,10 +236,10 @@ export default function SalesDashboardView({
               onChange={(e) => setStatusFilter(e.target.value)}
               sx={{ minWidth: 160, '& .MuiSelect-select': { borderRadius: 2 } }}
             >
-              <MenuItem value="All">All Statuses</MenuItem>
-              <MenuItem value="Paid">Paid Only</MenuItem>
-              <MenuItem value="Partial">Partial Payment</MenuItem>
-              <MenuItem value="Unpaid">Unpaid</MenuItem>
+              <MenuItem value="All">All Payment Statuses</MenuItem>
+              {Object.values(PAYMENT_STATUSES).map(s => (
+                <MenuItem key={s.key} value={s.key}>{s.label}</MenuItem>
+              ))}
             </TextField>
           </Stack>
         </Box>
@@ -290,15 +295,17 @@ export default function SalesDashboardView({
               </TableHead>
               <TableBody>
                 {filteredOrders.map((ord) => {
-                  const custName = ord.customer || ord.customerName || 'Walk-in Customer';
-                  const matchedCust = customers.find(c => (c.name && c.name.toLowerCase() === custName.toLowerCase()) || (c.id && c.id === ord.customerId));
+                  const custName = rowCustomerName(ord);
+                  const matchedCust = customers.find(c => (c.id && c.id === ord.customerId) || (custName && c.name && c.name.toLowerCase() === custName.toLowerCase()));
                   const rawPhone = ord.phone || ord.customer_phone || matchedCust?.phone || '';
                   const displayPhone = (rawPhone && !rawPhone.includes('9847012345') && !rawPhone.includes('98470 12345')) ? rawPhone : '';
-                  const isPaid = ord.payment === 'Paid';
-                  const isDelivered = ord.status === 'Delivered';
+                  const pay = rowPayment(ord);
+                  const delivery = deliveryStatusOf(ord.status);
+                  const { frame, lens, summary } = rowFrameLens(ord);
+                  const isDelivered = delivery.key === 'DELIVERED';
 
                   const handleUpdatePhone = () => {
-                    const newPhone = prompt(`Enter Registered Phone Number for ${custName}:`, displayPhone);
+                    const newPhone = prompt(`Enter Registered Phone Number for ${custName || 'this customer'}:`, displayPhone);
                     if (newPhone !== null && newPhone.trim() !== '') {
                       try {
                         ord.phone = newPhone.trim();
@@ -307,7 +314,7 @@ export default function SalesDashboardView({
                         localStorage.setItem('optical_sales_invoices', JSON.stringify(updatedInvs));
 
                         const custs = JSON.parse(localStorage.getItem('optical_sales_customers') || '[]');
-                        const updatedCusts = custs.map(c => (c.name && c.name.toLowerCase() === custName.toLowerCase()) ? { ...c, phone: newPhone.trim() } : c);
+                        const updatedCusts = custs.map(c => (custName && c.name && c.name.toLowerCase() === custName.toLowerCase()) ? { ...c, phone: newPhone.trim() } : c);
                         localStorage.setItem('optical_sales_customers', JSON.stringify(updatedCusts));
 
                         window.dispatchEvent(new Event('optical_stock_updated'));
@@ -318,11 +325,17 @@ export default function SalesDashboardView({
                   return (
                     <TableRow key={ord.id} hover>
                       <TableCell sx={{ fontWeight: 800, color: 'primary.main' }}>
-                        {ord.id}
+                        {ord.invoiceNumber || ord.id}
                       </TableCell>
                       <TableCell sx={{ fontSize: '0.85rem' }}>{ord.date}</TableCell>
                       <TableCell>
-                        <Typography variant="subtitle2" fontWeight={800}>{custName}</Typography>
+                        {custName ? (
+                          <Typography variant="subtitle2" fontWeight={800}>{custName}</Typography>
+                        ) : (
+                          <Typography variant="subtitle2" fontWeight={700} color="text.secondary" sx={{ fontStyle: 'italic' }}>
+                            Walk-in (no name)
+                          </Typography>
+                        )}
                         {displayPhone ? (
                           <Typography 
                             variant="caption" 
@@ -347,34 +360,47 @@ export default function SalesDashboardView({
                         )}
                       </TableCell>
                       <TableCell>
-                        <Typography variant="body2" fontWeight={700} noWrap sx={{ maxWidth: 220 }}>
-                          👓 {ord.frame || 'Prescribed Frame'}
-                        </Typography>
-                        <Typography variant="caption" color="text.secondary" display="block" noWrap sx={{ maxWidth: 220 }}>
-                          🔍 {ord.lens || 'Prescribed Lens'}
-                        </Typography>
+                        <Tooltip title={[frame && `Frame: ${frame}`, lens && `Lens: ${lens}`].filter(Boolean).join(' · ') || summary || ''}>
+                          <Box>
+                            {frame || lens ? (
+                              <>
+                                <Typography variant="body2" fontWeight={700} noWrap sx={{ maxWidth: 220 }}>
+                                  👓 {frame || '—'}
+                                </Typography>
+                                <Typography variant="caption" color="text.secondary" display="block" noWrap sx={{ maxWidth: 220 }}>
+                                  🔍 {lens || '—'}
+                                </Typography>
+                              </>
+                            ) : (
+                              <Typography variant="body2" color="text.secondary" noWrap sx={{ maxWidth: 220 }}>
+                                {summary || 'No items'}
+                              </Typography>
+                            )}
+                          </Box>
+                        </Tooltip>
                       </TableCell>
                       <TableCell sx={{ fontWeight: 900, fontSize: '1rem' }}>
-                        ₹{(parseFloat(ord.total) || parseFloat(ord.amount) || 0).toLocaleString()}
+                        ₹{inr(pay.net)}
                       </TableCell>
                       <TableCell>
                         <Chip
-                          label={ord.payment || 'Paid'}
+                          label={pay.label}
                           size="small"
-                          color={isPaid ? 'success' : 'warning'}
-                          variant={isPaid ? 'filled' : 'outlined'}
+                          color={pay.color}
+                          variant={pay.key === 'PAID' ? 'filled' : 'outlined'}
                           sx={{ fontWeight: 700, fontSize: '0.72rem' }}
                         />
-                        <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.3 }}>
-                          {ord.paymentMethod || 'Cash'}
+                        <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.3, whiteSpace: 'nowrap' }}>
+                          Paid ₹{inr(pay.paid)}{pay.balance > 0 ? ` · Due ₹${inr(pay.balance)}` : ''}
+                          {ord.paymentMethod ? ` · ${ord.paymentMethod}` : ''}
                         </Typography>
                       </TableCell>
                       <TableCell>
                         <Chip
-                          label={ord.status || 'Completed'}
+                          label={delivery.label}
                           size="small"
-                          color={isDelivered ? 'info' : 'primary'}
-                          variant="outlined"
+                          color={delivery.color}
+                          variant={isDelivered ? 'filled' : 'outlined'}
                           icon={isDelivered ? <SuccessIcon fontSize="small" /> : <DeliveryIcon fontSize="small" />}
                           sx={{ fontWeight: 700, fontSize: '0.72rem' }}
                         />
