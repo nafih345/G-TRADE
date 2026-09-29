@@ -69,6 +69,12 @@ def health_check_view(request):
         "debug": settings.DEBUG,
         "migrations": migrations_status,
         "pending_migrations": pending_migrations,
+        # Whether this instance is answering every Origin or only the configured
+        # frontends. Origins are public information (the browser sends them in the clear);
+        # no credential is exposed by naming them, and a deploy that silently fell back to
+        # allow-all because FRONTEND_ORIGINS was unset is otherwise invisible from outside.
+        "cors": getattr(settings, 'CORS_POLICY', 'unknown'),
+        "allowed_origins": list(getattr(settings, 'CORS_ALLOWED_ORIGINS', [])),
         "multi_branch": multi_branch,
         "app": "Optical ERP Backend",
         "version": "1.0.0"

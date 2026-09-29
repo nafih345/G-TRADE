@@ -1,32 +1,27 @@
-# Render Blueprint — provisions the whole backend (web service + Postgres) in one go.
+# Render Blueprint — the backend web service, written down so it is reproducible.
 #
-# Apply it from the Render dashboard: New → Blueprint → pick this repo. Render reads this
-# file, creates BOTH resources below and wires DATABASE_URL from the database into the web
-# service automatically, so the service can never again boot pointing at a database that
-# does not exist (the failure that wiped this project's hosted data).
+# The database is deliberately NOT declared here. Render's free Postgres is deleted 30 days
+# after creation, and that is not a hypothetical: instance `dpg-da23a7j7uimc73dpqo70-a`
+# expired, was removed, and the service kept serving with a dead database handle for weeks —
+# every API request returning 500 while the frontend rendered calm, empty screens. Declaring
+# a `databases:` block here would put that timer back.
 #
-# ⚠️  PERSISTENCE WARNING — read before choosing `plan` on the database.
-# Render's FREE Postgres is deleted 30 days after creation. That is exactly what happened
-# here: the old instance (dpg-da23a7j7uimc73dpqo70-a) expired, was removed, and the backend
-# was left with a DATABASE_URL whose hostname no longer resolves. If you keep `plan: free`
-# below you MUST migrate off or re-create within 30 days or the data disappears again.
-# For a database that actually persists, either:
-#   a) change the database `plan` to `basic-256mb` (paid, ~$7/mo), or
-#   b) delete the `databases:` block, create a free-forever Postgres elsewhere
-#      (Neon / Supabase), and set DATABASE_URL on the web service to its connection
-#      string by hand — settings.py accepts any standard Postgres URL.
-
-databases:
-  - name: g-opticals-db
-    databaseName: g_opticals
-    user: g_opticals
-    plan: free
-    region: singapore
-    postgresMajorVersion: "16"
+# Instead the database lives on Neon (free, and not time-limited), and DATABASE_URL is set
+# by hand on the service. backend/config/settings.py already handles a Neon URL correctly:
+# it detects the dotted public hostname and requires TLS, and it prefers
+# POSTGRES_URL_NON_POOLING when Neon injects one so boot-time `migrate` runs on a direct
+# connection.
+#
+# The service name below matches the service that already exists and the hostname the
+# deployed frontend calls (see vercel.json's /api rewrite and
+# frontend/src/utils/backendStatus.js's DEFAULT_DEPLOYED_API_URL). Keep all three in step.
+# If you apply this Blueprint while a hand-made service of the same name exists, Render will
+# create a second one rather than adopt it — delete the old service first, or just mirror
+# these settings onto it by hand.
 
 services:
   - type: web
-    name: g-opticals-backend
+    name: g-trade-backend
     runtime: python
     plan: free
     region: singapore
@@ -37,12 +32,25 @@ services:
     startCommand: gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120
     healthCheckPath: /api/health/
     envVars:
-      # The whole point of the Blueprint: the URL is resolved from the database resource
-      # above, not copy-pasted, so the two can never drift apart.
+      # Set these in the Render dashboard (sync:false = never committed).
+      #
+      # DATABASE_URL — the Neon connection string, e.g.
+      #   postgresql://user:pass@ep-xxxx-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require
+      # An explicit sslmode= in the URL wins over settings.py's own TLS decision, so keeping
+      # Neon's `?sslmode=require` on the end is both correct and self-documenting.
       - key: DATABASE_URL
-        fromDatabase:
-          name: g-opticals-db
-          property: connectionString
+        sync: false
+      # build.sh's `bootstrap_admin` creates this login on the fresh, empty database —
+      # without it there is no way to sign in to a brand-new database at all.
+      - key: DJANGO_SUPERUSER_USERNAME
+        sync: false
+      - key: DJANGO_SUPERUSER_PASSWORD
+        sync: false
+      # Comma-separated https origins of the Vercel frontend, e.g.
+      # https://g-trade-pi.vercel.app — used for CSRF_TRUSTED_ORIGINS, which Django admin
+      # login over HTTPS refuses to work without once DEBUG=False.
+      - key: FRONTEND_ORIGINS
+        sync: false
       - key: SECRET_KEY
         generateValue: true
       # Without this the backend runs with DEBUG=True in production — Render does not set
@@ -55,15 +63,3 @@ services:
       # case where a release ships code ahead of the schema.
       - key: AUTO_MIGRATE
         value: "True"
-      # Set these in the Render dashboard (marked sync:false so they are never committed).
-      # build.sh's `bootstrap_admin` creates this login on the fresh, empty database —
-      # without it there is no way to sign in.
-      - key: DJANGO_SUPERUSER_USERNAME
-        sync: false
-      - key: DJANGO_SUPERUSER_PASSWORD
-        sync: false
-      # Comma-separated https origins of the Vercel frontend, e.g.
-      # https://g-opticals.vercel.app — used for CSRF_TRUSTED_ORIGINS (Django admin login
-      # over HTTPS refuses to work without it once DEBUG=False).
-      - key: FRONTEND_ORIGINS
-        sync: false

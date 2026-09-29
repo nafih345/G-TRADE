@@ -7,6 +7,7 @@ import { BranchProvider } from './context/BranchContext';
 import Sidebar from './components/Sidebar';
 import Header from './components/Header';
 import NotificationHost from './components/NotificationHost';
+import BackendStatusBanner from './components/BackendStatusBanner';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 
@@ -159,6 +160,7 @@ function MainLayout() {
 
         {/* Main Work Area */}
         <Box sx={{ flexGrow: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+          <BackendStatusBanner />
           <Header toggleTheme={toggleTheme} mode={themeMode} onMenuClick={() => setSidebarOpen(true)} />
           
           <Box component="main" sx={{ flexGrow: 1, overflowY: 'auto' }}>

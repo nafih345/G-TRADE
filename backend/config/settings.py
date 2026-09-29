@@ -368,8 +368,37 @@ SIMPLE_JWT = {
 }
 
 # CORS Configuration
-CORS_ALLOW_ALL_ORIGINS = True
+#
+# A deployed backend should only answer browsers on the frontends we actually run, so the
+# blanket allow-all is scoped to the cases that genuinely need it:
+#
+#   * local development (Vite on :5173/:3000) and the packaged desktop build, where the
+#     Origin is localhost or a file:// page and cannot be enumerated in advance;
+#   * a deployed instance whose FRONTEND_ORIGINS has not been set yet — falling back to
+#     allow-all there is deliberate. Tightening CORS on a service that is missing that
+#     variable would take the live frontend off the air on the next deploy, which is a
+#     worse failure than a permissive header. /api/health/ reports the origin policy so
+#     the loose state is visible rather than silent.
+#
+# Otherwise only FRONTEND_ORIGINS (plus this Render service's own hostname, for the admin)
+# is allowed, and Vercel preview builds are matched by pattern since each build gets a new
+# subdomain that cannot be listed ahead of time.
 CORS_ALLOW_CREDENTIALS = True
+
+if IS_CLOUD and FRONTEND_ORIGINS:
+    CORS_ALLOW_ALL_ORIGINS = False
+    CORS_ALLOWED_ORIGINS = list(FRONTEND_ORIGINS)
+    if _render_host:
+        CORS_ALLOWED_ORIGINS.append(f'https://{_render_host}')
+    CORS_ALLOWED_ORIGIN_REGEXES = [r'^https://[a-z0-9-]+\.vercel\.app$']
+else:
+    CORS_ALLOW_ALL_ORIGINS = True
+    CORS_ALLOWED_ORIGINS = []
+    CORS_ALLOWED_ORIGIN_REGEXES = []
+
+# Echoed by /api/health/ so a deploy running with the permissive fallback can be spotted
+# from outside instead of being assumed locked down.
+CORS_POLICY = 'restricted' if not CORS_ALLOW_ALL_ORIGINS else 'allow-all'
 
 # The frontend attaches Multi-Branch context headers to every API call (see
 # frontend/src/utils/apiClient.js). CORS_ALLOW_ALL_ORIGINS only whitelists the Origin, not
