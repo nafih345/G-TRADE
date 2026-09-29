@@ -49,9 +49,24 @@ def health_check_view(request):
     except Exception as e:
         multi_branch = {"error": str(e)}
 
+    # Which database the process actually resolved, host only — never the password. The
+    # outage this endpoint exists to catch was the service booting against a DATABASE_URL
+    # whose Postgres had been deleted; without the host echoed back there was no way to tell
+    # that from a transient connection failure.
+    db_conf = settings.DATABASES.get('default', {})
+    db_target = {
+        "engine": db_conf.get('ENGINE', '').rsplit('.', 1)[-1],
+        "name": str(db_conf.get('NAME', '')),
+        "host": db_conf.get('HOST') or '(local file)',
+    }
+
     return JsonResponse({
         "status": "ok" if db_status == "connected" and migrations_status == "up_to_date" else "degraded",
         "database": db_status,
+        "db_target": db_target,
+        # DEBUG must be false on any deployed instance; surfaced so a misconfigured
+        # deploy is visible from outside instead of only via a leaked traceback page.
+        "debug": settings.DEBUG,
         "migrations": migrations_status,
         "pending_migrations": pending_migrations,
         "multi_branch": multi_branch,
@@ -79,4 +94,19 @@ urlpatterns = [
 
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+elif getattr(settings, 'IS_CLOUD', False):
+    # `static()` above is a no-op once DEBUG=False, and there is no nginx in front of the
+    # app on Render/Vercel — so uploaded files (product images, the company logo used on
+    # every printed bill) would 404 in production with nothing serving them. WhiteNoise only
+    # covers STATIC_ROOT, so wire MEDIA_ROOT up explicitly.
+    #
+    # NOTE: the filesystem on these hosts is ephemeral — files uploaded at runtime are lost
+    # on the next deploy or restart. Moving MEDIA to object storage (S3/Cloudinary) is the
+    # durable fix; this only makes uploads work for the life of a deploy.
+    from django.views.static import serve as _serve
+    from django.urls import re_path as _re_path
+
+    urlpatterns += [
+        _re_path(r'^media/(?P<path>.*)$', _serve, {'document_root': settings.MEDIA_ROOT}),
+    ]
 

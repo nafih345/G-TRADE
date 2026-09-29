@@ -1,3 +1,18 @@
+"""DEPRECATED — use `python manage.py wipe_database` instead.
+
+Kept only so existing local habits keep working. The management command supersedes this
+script and should be used against any hosted database, because this one:
+  * misses the `billing` app entirely, leaving bill templates and billing settings behind;
+  * deletes model-by-model, so a foreign-key ordering failure is caught and reported as
+    "skipped" rather than failing loudly — leaving data behind while printing SUCCESS;
+  * does not reset Postgres sequences, so invoice numbers / Test No / patient codes carry
+    on from their old values instead of restarting;
+  * has no confirmation flag and no dry run, and prints no indication of WHICH database it
+    is about to empty.
+
+See apps/common/management/commands/wipe_database.py.
+"""
+
 import os
 import sys
 import django  # type: ignore

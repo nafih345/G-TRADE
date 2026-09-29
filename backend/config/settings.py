@@ -21,10 +21,54 @@ SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-nova-erp-super-secret
 # (a bundled SQLite file would reset on every cold start). Vercel always sets $VERCEL.
 IS_SERVERLESS = bool(os.environ.get('VERCEL') or os.environ.get('AWS_LAMBDA_FUNCTION_NAME'))
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.environ.get('DEBUG', 'False' if IS_SERVERLESS else 'True') == 'True'
+# True on Render (see render.yaml), which sets $RENDER on every service. Render gives a
+# persistent process and a writable — but ephemeral — filesystem: unlike serverless it can
+# hold DB connections open, but a bundled SQLite file still resets on each deploy/restart,
+# so the database must be external here too.
+IS_RENDER = bool(os.environ.get('RENDER'))
 
+# Any managed cloud host. Used below for anything that differs from a local/desktop run
+# regardless of which platform it is: safe DEBUG default, stdout logging, hashed static.
+IS_CLOUD = IS_SERVERLESS or IS_RENDER
+
+# SECURITY WARNING: don't run with debug turned on in production!
+# The default must be driven by IS_CLOUD, not IS_SERVERLESS — Render does not set $VERCEL,
+# so keying off the latter alone silently served the production backend with DEBUG=True
+# (full tracebacks and the entire URL map exposed on any 404).
+DEBUG = os.environ.get('DEBUG', 'False' if IS_CLOUD else 'True') == 'True'
+
+# The backend is reached through the Vercel rewrite and/or directly by hostname, and Render
+# health checks hit it by internal address, so the host list stays permissive; CSRF is what
+# actually needs pinning down (below).
 ALLOWED_HOSTS = ['*']
+
+# Comma-separated https origins of the frontend, e.g.
+# "https://g-opticals.vercel.app,https://www.gopticals.com". Once DEBUG=False, Django
+# rejects any POST whose Origin is not listed here — which is what breaks the admin login
+# and any cookie-authenticated write on a fresh production deploy.
+FRONTEND_ORIGINS = [
+    o.strip().rstrip('/')
+    for o in os.environ.get('FRONTEND_ORIGINS', '').split(',')
+    if o.strip()
+]
+CSRF_TRUSTED_ORIGINS = list(FRONTEND_ORIGINS)
+
+# Render publishes the service's own external hostname; trust it so the Django admin served
+# straight off onrender.com works without extra configuration.
+_render_host = os.environ.get('RENDER_EXTERNAL_HOSTNAME')
+if _render_host:
+    CSRF_TRUSTED_ORIGINS.append(f'https://{_render_host}')
+
+# Vercel preview deployments get a new subdomain per build, so they cannot be enumerated.
+CSRF_TRUSTED_ORIGINS.append('https://*.vercel.app')
+
+if IS_CLOUD and not DEBUG:
+    # Render and Vercel both terminate TLS at their proxy and forward the original scheme
+    # here; without this Django considers the request plain HTTP and redirect/cookie logic
+    # misfires.
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
 
 # Application definition
 INSTALLED_APPS = [
@@ -57,6 +101,10 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    # Serves STATIC_ROOT directly from the app process. Required on Render/Vercel: with
+    # DEBUG=False Django refuses to serve /static/ itself and there is no nginx in front,
+    # so without this the Django admin loads with no CSS or JS.
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -95,7 +143,7 @@ LOGS_DIR = ROOT_DIR / 'logs' if (ROOT_DIR / 'logs').exists() else BASE_DIR / 'lo
 
 # Ensure logs directory exists. On a read-only serverless filesystem fall back to /tmp,
 # the only writable location (LOGGING is switched to stdout below anyway).
-if IS_SERVERLESS:
+if IS_CLOUD:
     LOGS_DIR = Path('/tmp/optical-erp-logs')
 try:
     os.makedirs(LOGS_DIR, exist_ok=True)
@@ -155,24 +203,45 @@ DATABASE_URL = (
 )
 
 if DATABASE_URL:
+    # Render's *internal* URL (host like `dpg-xxxx-a`, no dots) stays inside their private
+    # network and offers no verifiable certificate, so forcing sslmode=require on it fails to
+    # connect. Any host with a dot in it is being reached across the public internet —
+    # Render external, Neon, Supabase — and must be encrypted. Deciding from the URL rather
+    # than from the platform flag means the same code is correct for every combination.
+    _db_host = DATABASE_URL.split('@')[-1].split('/')[0].split(':')[0]
+    _db_needs_ssl = '.' in _db_host and _db_host not in ('localhost', '127.0.0.1')
+    # `sslmode` already spelled out in the URL wins — never override an explicit choice.
+    if 'sslmode=' in DATABASE_URL:
+        _db_needs_ssl = False
     try:
         import importlib
         dj_database_url = importlib.import_module('dj_database_url')
         DATABASES['default'] = dj_database_url.config(
             default=DATABASE_URL,
+            # Serverless isolates every invocation, so a pooled connection cannot be reused
+            # and only leaks server-side slots. Render runs a long-lived process, so reusing
+            # connections avoids a TCP+TLS handshake on each request.
             conn_max_age=0 if IS_SERVERLESS else 600,
-            ssl_require=IS_SERVERLESS,
+            ssl_require=_db_needs_ssl,
         )
     except ImportError:
-        from urllib.parse import urlparse
+        # Hand-rolled equivalent for the case where dj-database-url did not install. It must
+        # apply the SAME connection lifetime and TLS decision as the branch above, or a
+        # dependency-resolution hiccup would quietly cost the deployed app its connection
+        # reuse and, worse, its encryption — with no error to show for it.
+        from urllib.parse import urlparse, unquote
         url = urlparse(DATABASE_URL)
         DATABASES['default'] = {
             'ENGINE': 'django.db.backends.postgresql',
-            'NAME': url.path[1:],
-            'USER': url.username,
-            'PASSWORD': url.password,
-            'HOST': url.hostname,
-            'PORT': url.port or '5432',
+            'NAME': (url.path or '/').lstrip('/'),
+            # Managed providers hand out generated passwords containing URL-escaped
+            # characters; leaving them escaped fails authentication.
+            'USER': unquote(url.username or ''),
+            'PASSWORD': unquote(url.password or ''),
+            'HOST': url.hostname or '',
+            'PORT': str(url.port or '5432'),
+            'CONN_MAX_AGE': 0 if IS_SERVERLESS else 600,
+            'OPTIONS': {'sslmode': 'require'} if _db_needs_ssl else {},
         }
 elif DB_NAME and DB_USER:
     DATABASES['default'] = {
@@ -221,9 +290,9 @@ LOGGING = {
     },
 }
 
-# Serverless: rotating file handlers are pointless (ephemeral FS) — log to stdout so the
-# platform captures it (Vercel "Runtime Logs", CloudWatch, etc.).
-if IS_SERVERLESS:
+# Cloud: rotating file handlers are pointless on an ephemeral filesystem — log to stdout so
+# the platform captures it (Render "Logs", Vercel "Runtime Logs", CloudWatch, etc.).
+if IS_CLOUD:
     LOGGING['handlers'] = {
         'console': {'level': 'INFO', 'class': 'logging.StreamHandler', 'formatter': 'verbose'},
     }
@@ -255,6 +324,19 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'static'
+
+# WhiteNoise (middleware above) serves STATIC_ROOT. The compressed+manifest backend
+# fingerprints filenames so they can be cached forever; it requires `collectstatic` to have
+# run, which build.sh does, so it is only enabled in the cloud — a local dev run that has
+# never collected static would otherwise raise on every admin page.
+if IS_CLOUD:
+    STORAGES = {
+        'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+        'staticfiles': {
+            'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage',
+        },
+    }
+
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Custom User Model

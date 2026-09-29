@@ -1,0 +1,69 @@
+# Render Blueprint — provisions the whole backend (web service + Postgres) in one go.
+#
+# Apply it from the Render dashboard: New → Blueprint → pick this repo. Render reads this
+# file, creates BOTH resources below and wires DATABASE_URL from the database into the web
+# service automatically, so the service can never again boot pointing at a database that
+# does not exist (the failure that wiped this project's hosted data).
+#
+# ⚠️  PERSISTENCE WARNING — read before choosing `plan` on the database.
+# Render's FREE Postgres is deleted 30 days after creation. That is exactly what happened
+# here: the old instance (dpg-da23a7j7uimc73dpqo70-a) expired, was removed, and the backend
+# was left with a DATABASE_URL whose hostname no longer resolves. If you keep `plan: free`
+# below you MUST migrate off or re-create within 30 days or the data disappears again.
+# For a database that actually persists, either:
+#   a) change the database `plan` to `basic-256mb` (paid, ~$7/mo), or
+#   b) delete the `databases:` block, create a free-forever Postgres elsewhere
+#      (Neon / Supabase), and set DATABASE_URL on the web service to its connection
+#      string by hand — settings.py accepts any standard Postgres URL.
+
+databases:
+  - name: g-opticals-db
+    databaseName: g_opticals
+    user: g_opticals
+    plan: free
+    region: singapore
+    postgresMajorVersion: "16"
+
+services:
+  - type: web
+    name: g-opticals-backend
+    runtime: python
+    plan: free
+    region: singapore
+    rootDir: backend
+    # `bash ./build.sh` rather than `./build.sh` — the repo is authored on Windows, where
+    # git does not track the executable bit, so the script would not be runnable directly.
+    buildCommand: bash ./build.sh
+    startCommand: gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120
+    healthCheckPath: /api/health/
+    envVars:
+      # The whole point of the Blueprint: the URL is resolved from the database resource
+      # above, not copy-pasted, so the two can never drift apart.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: g-opticals-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      # Without this the backend runs with DEBUG=True in production — Render does not set
+      # $VERCEL, which is what settings.py previously used to infer "am I deployed?".
+      - key: DEBUG
+        value: "False"
+      - key: PYTHON_VERSION
+        value: "3.12.5"
+      # build.sh already runs `migrate`. Keep the boot-time hook on as a safety net for the
+      # case where a release ships code ahead of the schema.
+      - key: AUTO_MIGRATE
+        value: "True"
+      # Set these in the Render dashboard (marked sync:false so they are never committed).
+      # build.sh's `bootstrap_admin` creates this login on the fresh, empty database —
+      # without it there is no way to sign in.
+      - key: DJANGO_SUPERUSER_USERNAME
+        sync: false
+      - key: DJANGO_SUPERUSER_PASSWORD
+        sync: false
+      # Comma-separated https origins of the Vercel frontend, e.g.
+      # https://g-opticals.vercel.app — used for CSRF_TRUSTED_ORIGINS (Django admin login
+      # over HTTPS refuses to work without it once DEBUG=False).
+      - key: FRONTEND_ORIGINS
+        sync: false
