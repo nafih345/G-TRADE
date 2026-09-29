@@ -12,3 +12,17 @@ backend/logs
 .venv-1
 .venv-2
 *.exe
+
+# Local env files must never reach a Vercel build.
+#
+# A .vercelignore replaces .gitignore for CLI uploads, so anything listed only in
+# .gitignore still gets uploaded by `vercel deploy`. frontend/.env sets
+# VITE_API_URL=http://localhost:8000 for local dev, and Vite inlines that at build time —
+# a CLI deploy therefore shipped a production bundle hard-wired to localhost, with no
+# backend URL in it at all. Git-triggered builds were never affected (the file is
+# git-ignored and simply absent); this closes the same hole for CLI deploys.
+.env
+*.env
+!*.env.example
+.env.local
+.env.*.local
