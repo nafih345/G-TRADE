@@ -73,8 +73,33 @@ a database plan, or this recurs in 30 days.
    `frontend/.env` sets it to `http://localhost:8000` for local dev; that file is
    git-ignored so it never reaches Vercel, and `vite.config.js` now prints a warning if a
    build ever does inline a localhost URL.
-4. Deploy, then copy the resulting URL into `FRONTEND_ORIGINS` on Render and redeploy the
+4. **Check Deployment Protection.** The existing project has *Vercel Authentication* turned
+   on: every request 302-redirects to `vercel.com/sso-api`, so only people logged into the
+   Vercel team can open the app — staff and customers get a login wall, not the ERP.
+   Turn it off at *Settings → Deployment Protection → Vercel Authentication → Disabled*.
+5. **Confirm `VITE_API_URL` is NOT set** in *Settings → Environment Variables*. If an old
+   value is there (especially a localhost one) it is inlined into the bundle and every API
+   call breaks. Absent is correct.
+6. Deploy, then copy the resulting URL into `FRONTEND_ORIGINS` on Render and redeploy the
    backend. Without it, Django (now `DEBUG=False`) rejects admin logins from that origin.
+
+### Existing project (`g-trade-3o94`)
+
+It is already connected to GitHub `main` — the `g-trade-git-main-…vercel.app` alias exists —
+so a push to `main` auto-deploys. Two settings must match this repo's `vercel.json`:
+
+- **Root Directory must be the repository root**, not `frontend`. `vercel.json` lives at the
+  root and supplies the build; if Root Directory is `frontend`, Vercel never reads it and
+  both rewrites are silently lost.
+- Framework Preset: *Other* (the build is driven by `vercel.json`, not auto-detection).
+
+### Order of operations
+
+Deploying Vercel before Render exists is fine — the bundle hardcodes
+`https://g-opticals-backend.onrender.com` either way, and the app simply shows network
+errors on API calls until the backend is up. What matters is that the Render service ends up
+named **exactly** `g-opticals-backend`. If it does not, the frontend needs rebuilding (see
+below), so it is less work to create Render first.
 
 ### If Render gives the service a different hostname
 
