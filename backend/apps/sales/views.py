@@ -794,6 +794,7 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
                 item_type=raw.get('item_type') or raw.get('itemType') or 'PRODUCT',
                 service_details=raw.get('service_details') or raw.get('serviceDetails') or None,
                 description=raw.get('description') or raw.get('name') or '',
+                power=raw.get('power') or '',
                 quantity=raw.get('quantity') or raw.get('qty') or 1,
                 unit_price=raw.get('unit_price') or raw.get('price') or 0,
                 tax_rate=raw.get('tax_rate') or raw.get('taxPercent') or 0,
@@ -1099,9 +1100,19 @@ class WholesaleDeliveryChallanViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.AllowAny]
 
 class WholesaleInvoiceViewSet(viewsets.ModelViewSet):
-    queryset = WholesaleInvoice.objects.all()
+    queryset = WholesaleInvoice.objects.select_related('dealer').order_by('-invoice_date', '-created_at')
     serializer_class = WholesaleInvoiceSerializer
     permission_classes = [permissions.AllowAny]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        dealer = self.request.query_params.get('dealer')
+        if dealer:
+            qs = qs.filter(dealer_id=dealer)
+        invoice_number = self.request.query_params.get('invoice_number')
+        if invoice_number:
+            qs = qs.filter(invoice_number=invoice_number)
+        return qs
 
 class WholesalePaymentCollectionViewSet(viewsets.ModelViewSet):
     queryset = WholesalePaymentCollection.objects.all()

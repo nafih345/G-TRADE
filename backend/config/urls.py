@@ -49,15 +49,29 @@ def health_check_view(request):
     except Exception as e:
         multi_branch = {"error": str(e)}
 
-    # Which database the process actually resolved, host only — never the password. The
-    # outage this endpoint exists to catch was the service booting against a DATABASE_URL
-    # whose Postgres had been deleted; without the host echoed back there was no way to tell
-    # that from a transient connection failure.
+    # Which database the process actually resolved. Host, port, database name and TLS state
+    # only — never the user, never the password. The outage this endpoint exists to catch was
+    # the service booting against a DATABASE_URL whose Postgres had been deleted; without the
+    # host echoed back there was no way to tell that from a transient connection failure.
+    #
+    # `source` names the environment variable the connection string came from, which
+    # separates the two failures that look identical from outside: a DATABASE_URL that is
+    # set but wrong, versus one the service never received at all.
     db_conf = settings.DATABASES.get('default', {})
+    db_options = db_conf.get('OPTIONS') or {}
     db_target = {
         "engine": db_conf.get('ENGINE', '').rsplit('.', 1)[-1],
         "name": str(db_conf.get('NAME', '')),
         "host": db_conf.get('HOST') or '(local file)',
+        "port": str(db_conf.get('PORT') or ''),
+        "source": getattr(settings, 'DATABASE_SOURCE', None) or '(none - local config)',
+        # Encryption state of the link. A public (dotted) host answering "disabled" means
+        # credentials are crossing the internet in the clear — visible here rather than never.
+        "sslmode": db_options.get('sslmode') or 'disabled',
+        # Connection reuse. Pooling a connection to a provider that suspends when idle needs
+        # conn_health_checks true, or the first request after a quiet spell fails.
+        "conn_max_age": db_conf.get('CONN_MAX_AGE') or 0,
+        "conn_health_checks": bool(db_conf.get('CONN_HEALTH_CHECKS', False)),
     }
 
     return JsonResponse({

@@ -191,6 +191,10 @@ class InvoiceItem(BaseUUIDModel):
     # (fitting, adjustment) can be added without filling any of it.
     service_details = models.JSONField(blank=True, null=True)
     description = models.CharField(max_length=255, blank=True, null=True)
+    # Prescribed power for this line, already formatted for the bill ("RE: SPH -1.25 CYL -0.50
+    # | LE: ..."). Only the eye(s) the sale actually prescribed for are present, and it stays
+    # blank when no power was entered — the bill prints this line only when it is non-empty.
+    power = models.CharField(max_length=255, blank=True, default='')
     quantity = models.IntegerField()
     unit_price = models.DecimalField(max_digits=12, decimal_places=2)
     tax_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0.0)  # Percentage
@@ -549,6 +553,9 @@ class WholesaleInvoice(BaseUUIDModel):
     paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     due_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     status = models.CharField(max_length=20, default='Unpaid')
+    # The full POS invoice record (line items, summary, payment, delivery, notes) as built by
+    # the Wholesale POS screen — the source of truth for reprints, reports and dealer history.
+    details = models.JSONField(default=dict, blank=True)
 
     def __str__(self):
         return f"W-Inv {self.invoice_number} - {self.dealer.business_name}"

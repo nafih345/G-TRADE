@@ -205,6 +205,31 @@ const EMPTY_RX = {
   ipdOS: '', addOS: '',
   notes: ''
 };
+// Rx -> the power description carried on a billing line and printed on the bill.
+// Each eye is only included when a value was actually entered for it, so a prescription with
+// only a right eye prints only RE, only a left eye prints only LE, both prints both, and an
+// empty prescription yields '' (no power text anywhere — grid, saved document, or bill).
+const formatEyePower = (sph, cyl, axis, add) => {
+  const val = (v) => (v ?? '').toString().trim();
+  const parts = [];
+  if (val(sph)) parts.push(`SPH ${val(sph)}`);
+  if (val(cyl)) parts.push(`CYL ${val(cyl)}`);
+  if (val(axis)) parts.push(`AXIS ${val(axis)}`);
+  if (val(add)) parts.push(`ADD ${val(add)}`);
+  return parts.join(' ');
+};
+
+const buildRxPowerText = (rx = {}, lensIndex = '') => {
+  const re = formatEyePower(rx.sphOD, rx.cylOD, rx.axisOD, rx.addOD);
+  const le = formatEyePower(rx.sphOS, rx.cylOS, rx.axisOS, rx.addOS);
+  if (!re && !le) return '';
+  const eyes = [];
+  if (re) eyes.push(`RE: ${re}`);
+  if (le) eyes.push(`LE: ${le}`);
+  const idx = (lensIndex ?? '').toString().trim();
+  return `${eyes.join(' | ')}${idx ? ` [Idx: ${idx}]` : ''}`;
+};
+
 const EMPTY_ENTRY = {
   productId: '', barcode: '', item: '', modelNo: '', color: '', size: '',
   brand: '', supplier: '', rack: '', stock: null,
@@ -932,15 +957,16 @@ export default function NewSaleWizard({
     const tax = (taxable * taxPercent) / 100;
     const total = taxable + tax;
 
-    let power = '—';
+    // No default description: a line only carries power text when a power value was actually
+    // entered. A lens picked with its own power string still wins over the prescription grid;
+    // otherwise the text is built per-eye, so RE-only / LE-only / both each print exactly what
+    // was prescribed, and a blank prescription leaves this empty.
+    let power = '';
     if (powerChecked) {
-      if (src.power) {
-        power = `${src.power} [Idx: ${lensIndex}]`;
-      } else if (rxData.sphOD || rxData.sphOS) {
-        power = `OD:${rxData.sphOD || '0'}/${rxData.cylOD || '0'} | OS:${rxData.sphOS || '0'}/${rxData.cylOS || '0'} [Idx: ${lensIndex}]`;
-      } else {
-        power = `Power Active [Idx: ${lensIndex}]`;
-      }
+      const idx = (lensIndex ?? '').toString().trim();
+      power = src.power
+        ? `${src.power}${idx ? ` [Idx: ${idx}]` : ''}`
+        : buildRxPowerText(rxData, lensIndex);
     }
 
     return { qty, price, discMode, discValue, discPercent, taxPercent, gross, disc, tax, total, power };
@@ -980,7 +1006,7 @@ export default function NewSaleWizard({
       stock: src.stock ?? null,
       category: src.category || 'FRAME',
       group: src.group || (isService ? 'SERVICE' : 'GENERIC'),
-      power: isService ? (src.serviceDescription || '—') : power,
+      power: isService ? (src.serviceDescription || '') : power,
       serviceDescription: isService ? (src.serviceDescription || '') : undefined,
       qty,
       price,
@@ -1043,7 +1069,7 @@ export default function NewSaleWizard({
       stock: found.stock ?? found.qty ?? null,
       category: (found.type || found.category || 'FRAME').toUpperCase(),
       group: found.group || 'GENERIC',
-      power: '—',
+      power: '',
       qty: 1,
       price,
       disc: 0,
@@ -1120,7 +1146,7 @@ export default function NewSaleWizard({
         size: clean(item.size, '—'),
         brand: clean(item.brand, isSvc ? 'SERVICE' : '—'),
         category: clean(item.category, item.category).toUpperCase(),
-        power: clean(item.power, '—'),
+        power: clean(item.power, ''),
         serviceDescription: isSvc ? clean(item.power, item.serviceDescription || '') : item.serviceDescription,
       };
     }));
@@ -1359,7 +1385,7 @@ export default function NewSaleWizard({
         : product ? String(product.type || product.category || 'FRAME').toUpperCase()
           : (/lens/i.test(description) ? 'LENS' : 'FRAME')),
       group: li?.group || (isService ? 'SERVICE' : 'GENERIC'),
-      power: li?.power || (isService ? (it.service_details?.problem_description || '—') : '—'),
+      power: li?.power || it.power || (isService ? (it.service_details?.problem_description || '') : ''),
       serviceDescription: isService ? (li?.serviceDescription || '') : undefined,
       qty, price, disc, gross, discMode, discValue, discPercent, tax, taxPercent,
       total: gross - disc + tax,
@@ -1660,6 +1686,9 @@ export default function NewSaleWizard({
             item_type: i.itemType || (i.category === 'SERVICE' ? 'SERVICE' : 'PRODUCT'),
             service_details: i.serviceDetails || null,
             description: i.item,
+            // Prescribed power for this line — empty unless a power was actually entered, so
+            // the bill can print it (per eye) only where it exists.
+            power: i.power || '',
             quantity: i.qty,
             unit_price: i.price,
             tax_rate: i.taxPercent,

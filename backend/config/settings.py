@@ -194,13 +194,35 @@ DB_USER = os.environ.get('DB_USER')
 DB_PASSWORD = os.environ.get('DB_PASSWORD')
 DB_HOST = os.environ.get('DB_HOST')
 DB_PORT = os.environ.get('DB_PORT', '5432')
-# Vercel Postgres / Neon inject POSTGRES_URL(+ _NON_POOLING); other hosts use DATABASE_URL.
-# Prefer the non-pooling URL so `migrate` on boot runs on a direct connection.
-DATABASE_URL = (
-    os.environ.get('DATABASE_URL')
-    or os.environ.get('POSTGRES_URL_NON_POOLING')
-    or os.environ.get('POSTGRES_URL')
-)
+# Vercel Postgres / Neon inject POSTGRES_URL(+ _NON_POOLING); other hosts (Render) use
+# DATABASE_URL. Prefer the non-pooling URL so `migrate` on boot runs on a direct connection.
+#
+# DATABASE_SOURCE records *which* variable answered - the name only, never the value - so
+# /api/health/ can report where the connection came from without printing a password.
+DATABASE_URL = None
+DATABASE_SOURCE = None
+for _db_env_var in ('DATABASE_URL', 'POSTGRES_URL_NON_POOLING', 'POSTGRES_URL'):
+    _db_env_val = os.environ.get(_db_env_var)
+    if _db_env_val and _db_env_val.strip():
+        DATABASE_URL = _db_env_val.strip()
+        DATABASE_SOURCE = _db_env_var
+        break
+
+
+def _database_hostname(url):
+    """Hostname out of a connection URL, without tripping over the password.
+
+    urlparse handles what a naive `url.split('@')[-1]` does not: a password containing '@'
+    or ':', and - the case that actually bit - a URL carrying no credentials at all, where
+    the split returns the whole string, so the "is this host public?" test below answered
+    "no" and the connection was made in the clear.
+    """
+    from urllib.parse import urlparse
+    try:
+        return (urlparse(url).hostname or '').lower()
+    except ValueError:
+        return ''
+
 
 if DATABASE_URL:
     # Render's *internal* URL (host like `dpg-xxxx-a`, no dots) stays inside their private
@@ -208,20 +230,29 @@ if DATABASE_URL:
     # connect. Any host with a dot in it is being reached across the public internet —
     # Render external, Neon, Supabase — and must be encrypted. Deciding from the URL rather
     # than from the platform flag means the same code is correct for every combination.
-    _db_host = DATABASE_URL.split('@')[-1].split('/')[0].split(':')[0]
+    _db_host = _database_hostname(DATABASE_URL)
     _db_needs_ssl = '.' in _db_host and _db_host not in ('localhost', '127.0.0.1')
     # `sslmode` already spelled out in the URL wins — never override an explicit choice.
     if 'sslmode=' in DATABASE_URL:
         _db_needs_ssl = False
+    # Serverless isolates every invocation, so a pooled connection cannot be reused and only
+    # leaks server-side slots. Render runs a long-lived process, so reusing connections
+    # avoids a TCP+TLS handshake on each request.
+    _db_conn_max_age = 0 if IS_SERVERLESS else 600
+    # ...but a managed Postgres on a free plan (Neon, Supabase) suspends itself when idle and
+    # drops its sockets. Holding a connection open for 600s then means handing a request a
+    # connection the server has already closed — "server closed the connection unexpectedly"
+    # on the first call after any quiet spell. CONN_HEALTH_CHECKS revalidates a pooled
+    # connection before reuse and reconnects instead of raising. Pointless where nothing is
+    # pooled, so it tracks the same condition as CONN_MAX_AGE.
+    _db_conn_health_checks = not IS_SERVERLESS
     try:
         import importlib
         dj_database_url = importlib.import_module('dj_database_url')
         DATABASES['default'] = dj_database_url.config(
             default=DATABASE_URL,
-            # Serverless isolates every invocation, so a pooled connection cannot be reused
-            # and only leaks server-side slots. Render runs a long-lived process, so reusing
-            # connections avoids a TCP+TLS handshake on each request.
-            conn_max_age=0 if IS_SERVERLESS else 600,
+            conn_max_age=_db_conn_max_age,
+            conn_health_checks=_db_conn_health_checks,
             ssl_require=_db_needs_ssl,
         )
     except ImportError:
@@ -240,7 +271,8 @@ if DATABASE_URL:
             'PASSWORD': unquote(url.password or ''),
             'HOST': url.hostname or '',
             'PORT': str(url.port or '5432'),
-            'CONN_MAX_AGE': 0 if IS_SERVERLESS else 600,
+            'CONN_MAX_AGE': _db_conn_max_age,
+            'CONN_HEALTH_CHECKS': _db_conn_health_checks,
             'OPTIONS': {'sslmode': 'require'} if _db_needs_ssl else {},
         }
 elif DB_NAME and DB_USER:
@@ -252,6 +284,27 @@ elif DB_NAME and DB_USER:
         'HOST': DB_HOST,
         'PORT': DB_PORT,
     }
+    DATABASE_SOURCE = 'DB_NAME/DB_USER'
+
+# A managed host with no external database configured must never quietly fall through to the
+# SQLite default set further up. That file lives on the container's ephemeral disk: every
+# write appears to succeed, and every deploy or restart discards the lot — while
+# `bootstrap_admin` obligingly recreates a working login, so the app looks perfectly healthy
+# sitting on an empty database. That is indistinguishable from, and was mistaken for, the
+# dead-database outage this deployment already suffered once.
+#
+# Refuse to start instead. A failed release leaves the previous one serving and names the
+# missing variable in Render's build log, which is strictly better than losing another week
+# of data in silence. Local and desktop runs are untouched — they are not IS_CLOUD.
+if IS_CLOUD and str(DATABASES['default'].get('ENGINE', '')).endswith('sqlite3'):
+    from django.core.exceptions import ImproperlyConfigured
+
+    raise ImproperlyConfigured(
+        "Refusing to start: no external database is configured, but this process is running "
+        "on a managed host (Render/Vercel), where the SQLite fallback lives on an ephemeral "
+        "disk and is destroyed on every deploy and restart. "
+        "Set DATABASE_URL on the service to the Postgres connection string."
+    )
 
 # File Logging Configuration with Rotation
 LOGGING = {

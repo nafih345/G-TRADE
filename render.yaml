@@ -38,6 +38,31 @@ services:
       #   postgresql://user:pass@ep-xxxx-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require
       # An explicit sslmode= in the URL wins over settings.py's own TLS decision, so keeping
       # Neon's `?sslmode=require` on the end is both correct and self-documenting.
+      #
+      # `sync: false` means "a human sets this in the dashboard" — the value is never
+      # committed, so no connection string or password lands in git.
+      #
+      # Render can inject this itself instead, with no hand-copied value at all, IF the
+      # database is a Render one. That would be the tidier arrangement, and it is the one
+      # thing this file deliberately does not do: on the free plan the referenced database
+      # is deleted after 30 days and takes the data with it (see the header). Only adopt
+      # the block below on a PAID Render Postgres, which does not expire:
+      #
+      #   databases:
+      #     - name: g-trade-db
+      #       plan: basic-256mb        # NOT `free` — free expires after 30 days
+      #       region: singapore
+      #
+      #   # ...and in this service's envVars, replacing the `sync: false` entry:
+      #   - key: DATABASE_URL
+      #     fromDatabase:
+      #       name: g-trade-db
+      #       property: connectionString
+      #
+      # settings.py handles either shape unchanged: it reads DATABASE_URL however it
+      # arrives, and decides TLS from the hostname (Render-internal `dpg-…-a` hosts have no
+      # dot and stay unencrypted inside the private network; Neon's dotted public host gets
+      # sslmode=require).
       - key: DATABASE_URL
         sync: false
       # build.sh's `bootstrap_admin` creates this login on the fresh, empty database —
@@ -59,7 +84,10 @@ services:
         value: "False"
       - key: PYTHON_VERSION
         value: "3.12.5"
-      # build.sh already runs `migrate`. Keep the boot-time hook on as a safety net for the
-      # case where a release ships code ahead of the schema.
+      # Load-bearing, not a nicety. build.sh runs `migrate` on release but no longer fails
+      # the build when the database is unreachable — a dead database must not be able to pin
+      # the service to an older release, which is precisely what happened here. This hook
+      # (apps/common/startup.py) is what then catches the schema up once the database comes
+      # back, so turning it off leaves that gap open.
       - key: AUTO_MIGRATE
         value: "True"

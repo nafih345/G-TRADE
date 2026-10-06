@@ -67,6 +67,11 @@ function MainLayout() {
       // the "Search Registered Patients" icon button) instead of the intended Save action.
       if (target.closest('#optical-single-form-container') || target.closest('#optical-step-container')) return;
 
+      // Screens using pages/wholesale/keyboardNav.js (Wholesale Distribution + its dialogs) run their
+      // own Enter / arrow chain, which also covers selects, textareas and opt-in buttons/checkboxes.
+      // This handler would pre-empt it (it runs first, in capture) and click a dialog's Save early.
+      if (target.closest('[data-nav-scope]')) return;
+
       // 1. Inside a Modal Dialog
       const activeDialog = target.closest('.MuiDialog-root') || document.querySelector('.MuiDialog-root');
       if (activeDialog) {

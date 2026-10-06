@@ -53,6 +53,7 @@ import {
 } from '@mui/icons-material';
 import axios from 'axios';
 import QuickDatePickerField from '../components/common/QuickDatePickerField';
+import { navScopeProps, focusField, enterOpensSelectProps } from './wholesale/keyboardNav';
 import ConfirmActionDialog from '../components/common/ConfirmActionDialog';
 import BillPreview from '../billing/BillPreview';
 import { printBill } from '../billing/printBill';
@@ -64,6 +65,7 @@ import {
   ADDITIONAL_CHARGE_TYPES, NOTE_TEMPLATES, SPLIT_PAYMENT_MODES, WHOLESALE_API,
   uid, readLS, writeLS, resolvePriceForDealer, computeLineTotals, buildDealerLedger,
   fmtINR, canOverridePrice, isUuid, fetchAllPages, mapDealerFromApi, mapDealerToApi,
+  saveInvoiceToBackend, cacheInvoice, syncWholesaleInvoices,
 } from './wholesale/wholesaleConstants';
 import {
   NewDealerDialog, LedgerDialog, RecordPaymentDialog, DealerProfileDialog, PreviousOrdersDialog, BulkAddDialog,
@@ -153,7 +155,7 @@ export default function WholesaleSales() {
   const [salesRep, setSalesRep] = useState('');
   const [orderStatus, setOrderStatus] = useState('Confirmed');
 
-  // Invoice-level discount / scheme (F6) — kept separate from each line's own % discount.
+  // Invoice-level discount / scheme (F7) — kept separate from each line's own % discount.
   const [invoiceDiscount, setInvoiceDiscount] = useState(null);
 
   // Delivery + Packing/Dispatch
@@ -183,6 +185,12 @@ export default function WholesaleSales() {
   const [newDealer, setNewDealer] = useState(NEW_DEALER_DEFAULTS);
   const [savingDealer, setSavingDealer] = useState(false);
   const [savingInvoice, setSavingInvoice] = useState(false);
+  // Bumped whenever the invoice cache changes (server sync, save, status change) so the
+  // dealer history / ledger memos re-read it.
+  const [invoicesVersion, setInvoicesVersion] = useState(0);
+  // F10 / Ctrl+S = Complete & Print: set by that hotkey, consumed once the invoice is saved (also
+  // across the credit-limit override confirm); a plain Complete Sale click clears it.
+  const printAfterSaveRef = useRef(false);
   const [heldInvoices, setHeldInvoices] = useState([]);
   const [heldModalOpen, setHeldModalOpen] = useState(false);
   const [printModalOpen, setPrintModalOpen] = useState(false);
@@ -229,6 +237,7 @@ export default function WholesaleSales() {
           const mapped = rows.map(mapDealerFromApi);
           setCustomers(mapped);
           writeLS(LS_KEYS.customers, mapped);
+          syncWholesaleInvoices(axios, mapped).then(() => { if (!cancelled) setInvoicesVersion(v => v + 1); });
         } else if (cached.length === 0) {
           setCustomers(INITIAL_DEMO_CUSTOMERS);
           writeLS(LS_KEYS.customers, INITIAL_DEMO_CUSTOMERS);
@@ -397,12 +406,12 @@ export default function WholesaleSales() {
     return all
       .filter(inv => inv.customer?.id === selectedCustomer.id || inv.customer?.code === selectedCustomer.code)
       .sort((a, b) => new Date(b.date) - new Date(a.date));
-  }, [selectedCustomer, printableInvoice]);
+  }, [selectedCustomer, printableInvoice, invoicesVersion]);
 
   const dealerLedger = useMemo(() => {
     if (!selectedCustomer) return [];
     return buildDealerLedger(selectedCustomer, readLS(LS_KEYS.invoices, []), readLS(LS_KEYS.returns, []).concat(readLS(LS_KEYS.creditNotes, [])), readLS(LS_KEYS.payments, []));
-  }, [selectedCustomer, printableInvoice]);
+  }, [selectedCustomer, printableInvoice, invoicesVersion]);
 
   // A time-boxed scheme (startDate/endDate) is only live "today" — outside that window it's
   // treated as inactive rather than silently discounting the invoice.
@@ -563,39 +572,55 @@ export default function WholesaleSales() {
     || cancelInvoiceConfirmOpen || returnConfirmOpen || recordPaymentOpen || dealerProfileOpen || replacementConfirmOpen;
 
   // --- KEYBOARD SHORTCUTS SCOPED TO THIS SCREEN ---
+  // F2 / Alt+N New Dealer · F3 Dealer search · F4 Bulk Add · F5 Product search · F6 Excel Import ·
+  // F7 Discounts · F8 Reorder last · Alt+P Price list · Delete / F9 Remove row · Alt+D Delivery ·
+  // F10 / Ctrl+S Complete & Print · Alt+H Hold · Alt+S Draft · Ctrl+P Print last · Esc closes
+  // (MUI dialogs/menus/lists close themselves). Enter / arrows field-to-field: wholesale/keyboardNav.js.
   useEffect(() => {
     const handleKeyDown = (e) => {
-      if (anyDialogOpen) return;
+      const k = (e.key || '').toLowerCase();
+      const fn = /^f([1-9]|1[0-2])$/.test(k) ? Number(k.slice(1)) : 0;
+      const ctrl = e.ctrlKey || e.metaKey;
+      const alt = e.altKey && !ctrl;
+      const isShortcut = (fn >= 2 && fn <= 10) || (ctrl && !e.altKey && (k === 's' || k === 'p'))
+        || (alt && ['n', 'p', 'd', 'h', 's'].includes(k));
+      // Browser defaults (F3 find, F5 reload, F6 address bar, F10 menu, Ctrl+S save page, Alt+D
+      // address bar…) are blocked even while a dialog is open — F5 there would wipe the cart.
+      if (isShortcut) e.preventDefault();
+      if (anyDialogOpen || (e.repeat && isShortcut)) return;
       const tag = (e.target?.tagName || '').toUpperCase();
       const inField = tag === 'INPUT' || tag === 'TEXTAREA';
 
-      if (e.key === 'F2') {
-        e.preventDefault();
+      if (fn === 2 || (alt && k === 'n')) {
+        openNewDealer();
+      } else if (fn === 3) {
         customerSearchInputRef.current?.focus();
-      } else if (e.key === 'F3') {
-        e.preventDefault();
-        barcodeSearchInputRef.current?.focus();
-      } else if (e.key === 'F4') {
-        e.preventDefault();
+      } else if (fn === 4) {
         setBulkAddOpen(true);
-      } else if (e.key === 'F6') {
-        e.preventDefault();
+      } else if (fn === 5) {
+        barcodeSearchInputRef.current?.focus();
+      } else if (fn === 6) {
+        setExcelImportOpen(true);
+      } else if (fn === 7) {
         setSchemeOpen(true);
-      } else if (e.key === 'F7') {
-        e.preventDefault();
+      } else if (fn === 8) {
+        if (dealerOrders.length > 0) applyOrderToCart(dealerOrders[0], 'reorder');
+        else showToast(selectedCustomer ? 'This dealer has no previous invoice to reorder.' : 'Select a dealer first.', 'warning');
+      } else if (alt && k === 'p') {
+        cyclePriceList();
+      } else if (fn === 9 || (e.key === 'Delete' && !inField)) {
+        removeHighlightedRow(e.target);
+      } else if (alt && k === 'd') {
+        const start = document.querySelector('[data-delivery-type][data-nav-stop]');
+        start?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        start?.focus({ preventScroll: true });
+      } else if (fn === 10 || (ctrl && k === 's')) {
+        handleAttemptCompleteSale({ print: true });
+      } else if (alt && k === 'h') {
         handleHoldInvoice();
-      } else if (e.key === 'F8') {
-        e.preventDefault();
+      } else if (alt && k === 's') {
         handleSaveDraft();
-      } else if (e.key === 'F9') {
-        e.preventDefault();
-        if (selectedCustomer && cartItems.length > 0) {
-          handleAttemptCompleteSale();
-        } else {
-          showToast('Cannot submit: Select a dealer and add products to cart.', 'warning');
-        }
-      } else if (e.ctrlKey && (e.key === 'p' || e.key === 'P')) {
-        e.preventDefault();
+      } else if (ctrl && k === 'p') {
         if (printableInvoice) setPrintModalOpen(true);
         else showToast('Complete a sale first to print an invoice.', 'warning');
       } else if (e.key === 'Escape') {
@@ -605,19 +630,41 @@ export default function WholesaleSales() {
         } else if (tag === 'INPUT') {
           e.target.blur();
         }
-      } else if (e.key === 'Delete' && !inField) {
-        if (selectedRowIndex >= 0 && selectedRowIndex < cartItems.length) {
-          e.preventDefault();
-          handleRemoveItem(selectedRowIndex);
-          setSelectedRowIndex(-1);
-        }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [anyDialogOpen, selectedCustomer, cartItems, selectedRowIndex, printableInvoice]);
+  }, [anyDialogOpen, selectedCustomer, cartItems, selectedRowIndex, printableInvoice, dealerOrders, invoicePriceList]);
+
+  // Alt+P — Wholesale → Retail → Special → Wholesale for this invoice (the dropdown still offers every
+  // list). Like the dropdown, it prices lines added from now on.
+  const cyclePriceList = () => {
+    if (!selectedCustomer) { showToast('Select a dealer first.', 'warning'); return; }
+    const cycle = ['WHOLESALE', 'RETAIL', 'SPECIAL'];
+    const current = invoicePriceList || selectedCustomer.priceList;
+    const next = cycle[(cycle.indexOf(current) + 1) % cycle.length];
+    setInvoicePriceList(next);
+    showToast(`Price list: ${PRICE_LIST_OPTIONS.find(o => o.value === next)?.label || next}`, 'info');
+  };
+
+  // Delete / F9 — removes the row the cursor is in (Qty, Disc…), else the clicked/highlighted row;
+  // the cursor then lands on the row that moved up into its place, or back in product search.
+  const removeHighlightedRow = (target) => {
+    const rowEl = target?.closest?.('[data-cart-row]');
+    const idx = rowEl ? Number(rowEl.getAttribute('data-cart-row')) : selectedRowIndex;
+    if (!(idx >= 0 && idx < cartItems.length)) {
+      showToast('Highlight a line (click it, or put the cursor in its Qty) to remove it.', 'warning');
+      return;
+    }
+    handleRemoveItem(idx);
+    setSelectedRowIndex(-1);
+    const focusIdx = Math.min(idx, cartItems.length - 2);
+    setTimeout(() => {
+      if (!focusField(document.querySelector(`input[data-cart-qty="${focusIdx}"]`))) barcodeSearchInputRef.current?.focus();
+    }, 30);
+  };
 
   // Park the cursor in the barcode field on load so a scanner works without a click.
   useEffect(() => {
@@ -673,7 +720,7 @@ export default function WholesaleSales() {
     const avail = parseFloat(prod.availableStock ?? prod.stock ?? 0);
     if (avail <= 0) {
       showToast(`Out of Stock: ${prod.name} has 0 available inventory.`, 'error');
-      return;
+      return false;
     }
 
     setCartItems(prev => {
@@ -685,6 +732,19 @@ export default function WholesaleSales() {
       }
       return [...prev, buildCartLine(prod, qty)];
     });
+    return true;
+  };
+
+  // Picking a product from the dropdown (keyboard or mouse) jumps straight to that line's Qty;
+  // Enter in Qty returns to the product search for the next item. Barcode scans stay in the
+  // search box so a scanner can fire codes back-to-back.
+  const focusCartQty = (prod) => {
+    const existingIdx = cartItems.findIndex(item => (item.id === prod.id || item.code === prod.code) && !item.isFreeGift);
+    const rowIdx = existingIdx !== -1 ? existingIdx : cartItems.length;
+    setTimeout(() => {
+      const qtyInput = document.querySelector(`input[data-cart-qty="${rowIdx}"]`);
+      if (!focusField(qtyInput)) barcodeSearchInputRef.current?.focus();
+    }, 30);
   };
 
   const handleBarcodeScan = (e) => {
@@ -849,6 +909,17 @@ export default function WholesaleSales() {
 
   // Dealer selection also seeds Sales Rep + delivery address (auto-filled from the dealer's own
   // shipping address, editable only by authorized users) + resets any per-invoice price-list override.
+  // "Add New Dealer" — from the button, the dropdown's last option, "+" in an empty dealer
+  // search, or Alt+N. Whatever was typed into the search pre-fills the phone or the name.
+  const openNewDealer = (query = '') => {
+    const q = String(query || '').trim();
+    if (q) {
+      const isPhone = /^[+\d][\d\s-]{5,}$/.test(q);
+      setNewDealer({ ...NEW_DEALER_DEFAULTS, ...(isPhone ? { phone: q } : { name: q }) });
+    }
+    setNewDealerOpen(true);
+  };
+
   const handleSelectCustomer = (val) => {
     setSelectedCustomer(val);
     setSalesRep(val?.salesExec || '');
@@ -857,7 +928,7 @@ export default function WholesaleSales() {
     setDelivery(prev => ({ ...prev, address: val?.shippingAddress || prev.address }));
   };
 
-  // --- Discount / Scheme (F6) ---
+  // --- Discount / Scheme (F7) ---
   const handleApplyScheme = (payload) => {
     if (payload.type === 'BOGO') {
       const { buyProduct, buyQty, getProduct, getQty } = payload;
@@ -924,7 +995,8 @@ export default function WholesaleSales() {
   const handleViewOrder = (order) => { setPrintableInvoice(order); setPrintModalOpen(true); };
 
   // Trigger Completion or Open Confirmation Dialog if Credit Exceeded
-  function handleAttemptCompleteSale() {
+  function handleAttemptCompleteSale(opts) {
+    printAfterSaveRef.current = opts?.print === true;
     if (!selectedCustomer) {
       showToast('Please select a wholesale dealer first.', 'error');
       return;
@@ -1006,24 +1078,65 @@ export default function WholesaleSales() {
     };
   }
 
-  // Save Draft (F8) — persists the invoice as a Draft without touching stock, dealer
+  // Save Draft (Ctrl+S) — persists the invoice as a Draft without touching stock, dealer
   // outstanding or the financial ledger. The cart is left as-is so work can continue.
-  function handleSaveDraft() {
+  async function handleSaveDraft() {
     if (cartItems.length === 0) {
       showToast('Cannot save an empty invoice as draft.', 'warning');
       return;
     }
-    const draft = buildInvoiceObject('Draft');
-    const savedInvoices = readLS(LS_KEYS.invoices, []);
-    writeLS(LS_KEYS.invoices, [draft, ...savedInvoices]);
-    showToast(`Draft saved as ${draft.invoiceNo}.`, 'success');
+    const dealer = await ensureBackendDealer(selectedCustomer);
+    const draft = { ...buildInvoiceObject('Draft'), customer: dealer };
+    const { invoice, synced } = await persistInvoice(draft);
+    showToast(synced ? `Draft saved as ${invoice.invoiceNo}.` : `Draft ${invoice.invoiceNo} saved on this device only — the server could not be reached; it will upload automatically.`, synced ? 'success' : 'warning');
+  }
+
+  // A dealer picked from the offline cache / demo list has no server id, and an invoice row
+  // needs a real Dealer FK — register it first. Returns the (possibly re-keyed) dealer, or the
+  // original one if the server is unreachable.
+  async function ensureBackendDealer(dealer) {
+    if (!dealer || isUuid(dealer.id)) return dealer;
+    try {
+      const res = await axios.post(`${WHOLESALE_API}/dealers/`, mapDealerToApi({ ...dealer, code: dealer.code || `DL-${Math.floor(1000 + Math.random() * 9000)}` }));
+      const registered = { ...dealer, ...mapDealerFromApi(res.data), billingAddress: dealer.billingAddress, shippingAddress: dealer.shippingAddress, outstanding: parseFloat(dealer.outstanding) || 0 };
+      setCustomers(prev => {
+        const next = prev.map(c => (c.id === dealer.id ? registered : c));
+        writeLS(LS_KEYS.customers, next);
+        return next;
+      });
+      setSelectedCustomer(prev => (prev && prev.id === dealer.id ? registered : prev));
+      return registered;
+    } catch (e) {
+      return dealer;
+    }
+  }
+
+  // Saves the invoice to the database (WholesaleInvoice + details) and the local cache. When the
+  // server is unreachable it is cached with pendingSync and uploaded on the next sync.
+  async function persistInvoice(inv) {
+    let invoice = inv;
+    let synced = false;
+    try {
+      invoice = await saveInvoiceToBackend(axios, inv);
+      synced = true;
+    } catch (e) {
+      invoice = { ...inv, pendingSync: true };
+    }
+    cacheInvoice(invoice, inv.invoiceNo);
+    setInvoicesVersion(v => v + 1);
+    return { invoice, synced };
   }
 
   // Complete Sale Execution
   async function executeCompleteSale() {
     setCreditLimitConfirmOpen(false);
     setSavingInvoice(true);
-    const completedInvoice = buildInvoiceObject(orderStatus === 'Draft' ? 'Confirmed' : orderStatus);
+    const dealer = await ensureBackendDealer(selectedCustomer);
+    const built = { ...buildInvoiceObject(orderStatus === 'Draft' ? 'Confirmed' : orderStatus), customer: dealer };
+
+    // Save the invoice itself first, so its number is final (a clash is renumbered) before the
+    // stock adjustments and receipt below reference it.
+    const { invoice: completedInvoice, synced } = await persistInvoice(built);
     const invoiceNo = completedInvoice.invoiceNo;
     const invoiceDate = completedInvoice.date;
 
@@ -1063,19 +1176,20 @@ export default function WholesaleSales() {
 
     // 2. Update Dealer Ledger — locally for instant UI feedback, and best-effort against the
     // real Dealer record (PATCH outstanding_balance) so it stays correct system-wide.
-    const newOutstanding = parseFloat(selectedCustomer.outstanding || 0) + completedInvoice.dueAmount;
+    const newOutstanding = parseFloat(dealer.outstanding || 0) + completedInvoice.dueAmount;
     const updatedCustomers = customers.map(c => {
-      if (c.id === selectedCustomer.id || c.code === selectedCustomer.code) {
-        return { ...c, outstanding: newOutstanding, lastPurchaseDate: invoiceDate };
+      if (c.id === dealer.id || c.code === dealer.code) {
+        // `customers` predates ensureBackendDealer's re-keying, so carry the server id over.
+        return { ...c, id: dealer.id, outstanding: newOutstanding, lastPurchaseDate: invoiceDate };
       }
       return c;
     });
     setCustomers(updatedCustomers);
     writeLS(LS_KEYS.customers, updatedCustomers);
-    const currentUpdatedCust = updatedCustomers.find(c => c.id === selectedCustomer.id || c.code === selectedCustomer.code);
+    const currentUpdatedCust = updatedCustomers.find(c => c.id === dealer.id || c.code === dealer.code);
     if (currentUpdatedCust) setSelectedCustomer(currentUpdatedCust);
-    if (isUuid(selectedCustomer.id)) {
-      try { await axios.patch(`${WHOLESALE_API}/dealers/${selectedCustomer.id}/`, { outstanding_balance: newOutstanding }); } catch (e) {}
+    if (isUuid(dealer.id)) {
+      try { await axios.patch(`${WHOLESALE_API}/dealers/${dealer.id}/`, { outstanding_balance: newOutstanding }); } catch (e) {}
     }
 
     // 3. Post Financial Journal Entry
@@ -1087,9 +1201,9 @@ export default function WholesaleSales() {
         voucherNo: journalNo,
         date: invoiceDate,
         voucherType: 'JOURNAL',
-        narration: `Wholesale POS Invoice #${invoiceNo} - ${selectedCustomer.name} (${payMode})`,
+        narration: `Wholesale POS Invoice #${invoiceNo} - ${dealer.name} (${payMode})`,
         entries: [
-          { accountCode: payMode === 'Credit Sale' ? '1100' : '1001', accountName: payMode === 'Credit Sale' ? `Accounts Receivable (${selectedCustomer.name})` : `Cash/Bank Account (${payMode})`, debit: summary.grandTotal, credit: 0 },
+          { accountCode: payMode === 'Credit Sale' ? '1100' : '1001', accountName: payMode === 'Credit Sale' ? `Accounts Receivable (${dealer.name})` : `Cash/Bank Account (${payMode})`, debit: summary.grandTotal, credit: 0 },
           { accountCode: '4001', accountName: 'Wholesale Sales Income', debit: 0, credit: summary.subtotal - summary.totalDiscount },
           { accountCode: '2100', accountName: 'Output GST Payable (18%)', debit: 0, credit: summary.totalGst },
         ],
@@ -1097,38 +1211,34 @@ export default function WholesaleSales() {
       writeLS(LS_KEYS.journals, [newJournal, ...existingJournals]);
     } catch (e) {}
 
-    // 4. Best-effort secondary index rows on the real backend — a lightweight cross-module
-    // record (no line items) other ERP screens could query; the full invoice (items, delivery,
-    // schemes, notes) stays in optical_wholesale_invoices, same as before.
-    if (isUuid(selectedCustomer.id)) {
+    // 4. Receipt for the amount collected at the counter (the invoice row itself was saved above).
+    if (isUuid(dealer.id) && completedInvoice.amountReceived > 0) {
       try {
-        await axios.post(`${WHOLESALE_API}/invoices/`, {
-          invoice_number: invoiceNo, dealer: selectedCustomer.id, order_ref: referenceNo || '',
-          invoice_date: invoiceDate, due_date: completedInvoice.dueDate || invoiceDate,
-          grand_total: summary.grandTotal, paid_amount: completedInvoice.amountReceived,
-          due_amount: completedInvoice.dueAmount, status: completedInvoice.status,
+        await axios.post(`${WHOLESALE_API}/collections/`, {
+          receipt_number: `RCPT-${Math.floor(100000 + Math.random() * 900000)}`, dealer: dealer.id,
+          invoice_number: invoiceNo, payment_date: invoiceDate, payment_method: payMode,
+          amount_paid: completedInvoice.amountReceived, reference_note: refNo || '',
         });
       } catch (e) {}
-      if (completedInvoice.amountReceived > 0) {
-        try {
-          await axios.post(`${WHOLESALE_API}/collections/`, {
-            receipt_number: `RCPT-${Math.floor(100000 + Math.random() * 900000)}`, dealer: selectedCustomer.id,
-            invoice_number: invoiceNo, payment_date: invoiceDate, payment_method: payMode,
-            amount_paid: completedInvoice.amountReceived, reference_note: refNo || '',
-          });
-        } catch (e) {}
-      }
     }
 
-    // 5. Save Invoice & Open Completion / Print
-    const savedInvoices = readLS(LS_KEYS.invoices, []);
-    writeLS(LS_KEYS.invoices, [completedInvoice, ...savedInvoices]);
+    // 5. Open Completion / Print
 
     setPrintableInvoice(completedInvoice);
     setCompletionOpen(true);
+    if (printAfterSaveRef.current) {
+      printAfterSaveRef.current = false;
+      printBill({ doc: completedInvoice, documentType: 'WHOLESALE_BILL' }).then((opened) => {
+        if (!opened) {
+          showToast('Print pop-up was blocked — opening the print preview instead.', 'warning');
+          setPrintModalOpen(true);
+        }
+      });
+    }
     setSavingInvoice(false);
     resetSaleForm();
-    showToast(`Wholesale Sale Completed! Invoice #${invoiceNo} posted.`, 'success');
+    if (synced) showToast(`Wholesale Sale Completed! Invoice #${invoiceNo} posted.`, 'success');
+    else showToast(`Invoice #${invoiceNo} completed but saved on this device only — the server could not be reached; it will upload automatically.`, 'warning');
   }
 
   // --- More Actions: Cancel / Return / Replacement / Credit Note (operate on the last completed invoice) ---
@@ -1159,10 +1269,12 @@ export default function WholesaleSales() {
     }
   }
 
-  function updateInvoiceInStorage(invoiceNo, patch) {
+  async function updateInvoiceInStorage(invoiceNo, patch) {
     const all = readLS(LS_KEYS.invoices, []);
-    const updated = all.map(inv => inv.invoiceNo === invoiceNo ? { ...inv, ...patch } : inv);
-    writeLS(LS_KEYS.invoices, updated);
+    const current = all.find(inv => inv.invoiceNo === invoiceNo) || (printableInvoice?.invoiceNo === invoiceNo ? printableInvoice : null);
+    if (!current) return;
+    const { synced } = await persistInvoice({ ...current, ...patch });
+    if (!synced) showToast(`Invoice ${invoiceNo} updated on this device only — it will upload when the server is reachable.`, 'warning');
   }
 
   // Reduces/increases a dealer's outstanding locally (instant UI) and best-effort against
@@ -1209,7 +1321,7 @@ export default function WholesaleSales() {
     if (!printableInvoice) return;
     await restockInvoiceItems(printableInvoice, 'Cancelled wholesale invoice');
     if (printableInvoice.dueAmount > 0) adjustDealerOutstanding(printableInvoice.customer, -printableInvoice.dueAmount);
-    updateInvoiceInStorage(printableInvoice.invoiceNo, { orderStatus: 'Cancelled', status: 'Cancelled' });
+    await updateInvoiceInStorage(printableInvoice.invoiceNo, { orderStatus: 'Cancelled', status: 'Cancelled' });
     setCancelInvoiceConfirmOpen(false);
     showToast(`Invoice ${printableInvoice.invoiceNo} cancelled and stock restored.`, 'success');
   }
@@ -1266,16 +1378,18 @@ export default function WholesaleSales() {
     showToast(`Payment of ₹${amount.toLocaleString('en-IN')} recorded (${receiptNo}).`, 'success');
   }
 
+  // The trailing "Add New Dealer" row keeps dealer creation reachable with ArrowDown + Enter.
   const dealerSearchFilter = (opts, state) => {
+    const addNew = { __addNew: true, query: state.inputValue.trim() };
     const q = state.inputValue.trim().toLowerCase();
-    if (!q) return opts;
-    return opts.filter(c =>
+    if (!q) return [...opts, addNew];
+    return [...opts.filter(c =>
       (c.name || '').toLowerCase().includes(q) ||
       (c.code || '').toLowerCase().includes(q) ||
       (c.phone || '').toLowerCase().includes(q) ||
       (c.gstin || '').toLowerCase().includes(q) ||
       (c.email || '').toLowerCase().includes(q)
-    );
+    ), addNew];
   };
 
   // Frequently Purchased (Quick Reorder) — tallies this dealer's past invoice line items by
@@ -1409,7 +1523,8 @@ export default function WholesaleSales() {
         </Alert>
       )}
 
-      <Grid container spacing={2.5} alignItems="flex-start">
+      {/* Enter / Up / Down walk every field on the screen in order — see wholesale/keyboardNav.js */}
+      <Grid container spacing={2.5} alignItems="flex-start" {...navScopeProps}>
         {/* ================= LEFT: DEALER + PRODUCTS ================= */}
         <Grid item xs={12} lg={8}>
           <Stack spacing={2.5}>
@@ -1417,24 +1532,48 @@ export default function WholesaleSales() {
             <Card variant="outlined" sx={{ p: 2, borderRadius: 3, bgcolor: '#ffffff', borderColor: '#e2e8f0' }}>
               <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}>
                 <Typography variant="subtitle2" fontWeight={800} color="#0f172a">Wholesale Dealer</Typography>
-                <Chip label="F2" size="small" sx={{ height: 18, fontSize: '0.65rem', fontWeight: 700, bgcolor: '#f1f5f9', color: '#64748b' }} />
+                <Chip label="F3" size="small" sx={{ height: 18, fontSize: '0.65rem', fontWeight: 700, bgcolor: '#f1f5f9', color: '#64748b' }} />
               </Stack>
 
               <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems={{ sm: 'center' }}>
                 <Autocomplete
                   fullWidth
+                  autoHighlight
                   options={customers}
                   filterOptions={dealerSearchFilter}
-                  getOptionLabel={(o) => (o ? `${o.name}${o.code ? ` (${o.code})` : ''}` : '')}
+                  getOptionLabel={(o) => (o?.__addNew ? '' : o ? `${o.name}${o.code ? ` (${o.code})` : ''}` : '')}
                   isOptionEqualToValue={(o, v) => o.id === v.id}
                   value={selectedCustomer}
-                  onChange={(e, newVal) => handleSelectCustomer(newVal)}
+                  onChange={(e, newVal) => {
+                    if (newVal?.__addNew) { openNewDealer(newVal.query); return; }
+                    handleSelectCustomer(newVal);
+                    // Enter on a highlighted dealer confirms it and goes to Order Information → Reference
+                    // Number (that card only renders once a dealer is picked, hence the timeout).
+                    if (newVal) setTimeout(() => focusField(document.getElementById('ws-ref-no')), 30);
+                  }}
+                  renderOption={(props, o) => (o.__addNew ? (
+                    <li {...props} key="__add_new_dealer">
+                      <Stack direction="row" spacing={1} alignItems="center" sx={{ width: '100%', color: '#4f46e5' }}>
+                        <AddIcon sx={{ fontSize: 18 }} />
+                        <Typography variant="body2" fontWeight={800} sx={{ flex: 1 }}>
+                          Add New Dealer{o.query ? ` "${o.query}"` : ''}
+                        </Typography>
+                        <Chip label="+ / F2 / Alt+N" size="small" sx={{ height: 18, fontSize: '0.6rem', fontWeight: 700, bgcolor: '#eef2ff', color: '#4f46e5' }} />
+                      </Stack>
+                    </li>
+                  ) : (
+                    <li {...props} key={o.id || o.code}>{`${o.name}${o.code ? ` (${o.code})` : ''}`}</li>
+                  ))}
                   renderInput={(params) => (
                     <TextField
                       {...params}
                       inputRef={customerSearchInputRef}
                       size="small"
-                      placeholder="Search dealer by name, code, phone, GSTIN or email..."
+                      placeholder="Search dealer by name, code, phone, GSTIN or email...  (+ adds a new dealer)"
+                      onKeyDown={(e) => {
+                        // "+" on an empty search = Add New Dealer ("+91..." can still be typed after a digit).
+                        if (e.key === '+' && !e.target.value) { e.preventDefault(); openNewDealer(); }
+                      }}
                       InputProps={{
                         ...params.InputProps,
                         startAdornment: (<><SearchIcon sx={{ color: '#94a3b8', mr: 0.5, fontSize: 18 }} />{params.InputProps.startAdornment}</>),
@@ -1443,8 +1582,8 @@ export default function WholesaleSales() {
                     />
                   )}
                 />
-                <Button variant="outlined" size="small" startIcon={<AddIcon />} onClick={() => setNewDealerOpen(true)} sx={{ fontWeight: 700, textTransform: 'none', whiteSpace: 'nowrap', flexShrink: 0 }}>
-                  New Dealer
+                <Button variant="outlined" size="small" startIcon={<AddIcon />} onClick={() => openNewDealer()} sx={{ fontWeight: 700, textTransform: 'none', whiteSpace: 'nowrap', flexShrink: 0 }}>
+                  New Dealer <Chip label="F2 / Alt+N" size="small" sx={{ ml: 0.75, height: 16, fontSize: '0.6rem', bgcolor: '#f1f5f9', color: '#64748b' }} />
                 </Button>
               </Stack>
               {dealersLoading && customers.length === 0 && (
@@ -1522,15 +1661,17 @@ export default function WholesaleSales() {
                 <Typography variant="subtitle2" fontWeight={800} color="#0f172a" sx={{ mb: 1.5 }}>Order Information</Typography>
                 <Grid container spacing={1.5}>
                   <Grid item xs={12} sm={6} md={3}>
-                    <TextField fullWidth size="small" label="Reference Number" value={referenceNo} onChange={(e) => setReferenceNo(e.target.value)} />
+                    <TextField fullWidth size="small" id="ws-ref-no" label="Reference Number" value={referenceNo} onChange={(e) => setReferenceNo(e.target.value)} />
                   </Grid>
                   <Grid item xs={12} sm={6} md={3}>
-                    <TextField fullWidth size="small" label="Customer PO Number" value={poNumber} onChange={(e) => setPoNumber(e.target.value)} />
+                    <TextField fullWidth size="small" label="Customer PO Number" value={poNumber} onChange={(e) => setPoNumber(e.target.value)} inputProps={{ 'data-nav-right': '' }} />
                   </Grid>
                   <Grid item xs={12} sm={6} md={3}>
                     <TextField
                       select fullWidth size="small" label="Warehouse" value={selectedWarehouseId}
                       onChange={(e) => setSelectedWarehouseId(e.target.value)}
+                      // Enter opens the list; Up/Down + Enter picks and moves on to Order Status.
+                      SelectProps={enterOpensSelectProps}
                     >
                       {warehouses.length === 0 && <MenuItem value="">Main Warehouse</MenuItem>}
                       {warehouses.map(w => <MenuItem key={w.id} value={String(w.id)}>{w.name}</MenuItem>)}
@@ -1543,7 +1684,7 @@ export default function WholesaleSales() {
                   </Grid>
                   <Grid item xs={12} sm={6} md={3}>
                     <TextField
-                      select fullWidth size="small" label="Price List" value={invoicePriceList || selectedCustomer.priceList}
+                      select fullWidth size="small" label="Price List (Alt+P)" value={invoicePriceList || selectedCustomer.priceList}
                       onChange={(e) => setInvoicePriceList(e.target.value)}
                     >
                       {PRICE_LIST_OPTIONS.map(p => <MenuItem key={p.value} value={p.value}>{p.label}</MenuItem>)}
@@ -1553,6 +1694,7 @@ export default function WholesaleSales() {
                     <TextField
                       select fullWidth size="small" label="Sales Representative" value={salesRep}
                       onChange={(e) => setSalesRep(e.target.value)}
+                      SelectProps={{ SelectDisplayProps: { 'data-nav-enter': '#ws-product-search' } }}
                     >
                       {Array.from(new Set([...DEMO_SALES_REPS, ...customers.map(c => c.salesExec).filter(Boolean)])).map(r => (
                         <MenuItem key={r} value={r}>{r}</MenuItem>
@@ -1568,12 +1710,16 @@ export default function WholesaleSales() {
               <Box sx={{ p: 2 }}>
                 <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}>
                   <Typography variant="subtitle2" fontWeight={800} color="#0f172a">Products</Typography>
-                  <Chip label="F3" size="small" sx={{ height: 18, fontSize: '0.65rem', fontWeight: 700, bgcolor: '#f1f5f9', color: '#64748b' }} />
+                  <Chip label="F5" size="small" sx={{ height: 18, fontSize: '0.65rem', fontWeight: 700, bgcolor: '#f1f5f9', color: '#64748b' }} />
                 </Stack>
 
                 <Autocomplete
                   freeSolo
                   fullWidth
+                  autoHighlight
+                  // On the Autocomplete, not the TextField: its own generated id would override one
+                  // set on the input. Cart Qty's Enter jumps back here via this id.
+                  id="ws-product-search"
                   options={products}
                   value={null}
                   inputValue={barcodeInput}
@@ -1595,10 +1741,14 @@ export default function WholesaleSales() {
                   }}
                   onChange={(e, val) => {
                     if (val && typeof val !== 'string') {
-                      handleAddProductToCart(val);
+                      const added = handleAddProductToCart(val);
                       setBarcodeInput('');
-                      showToast(`Added: ${val.name}`, 'success');
-                      setTimeout(() => barcodeSearchInputRef.current?.focus(), 0);
+                      if (added) {
+                        showToast(`Added: ${val.name}`, 'success');
+                        focusCartQty(val);
+                      } else {
+                        setTimeout(() => barcodeSearchInputRef.current?.focus(), 0);
+                      }
                     }
                   }}
                   renderInput={(params) => (
@@ -1607,11 +1757,13 @@ export default function WholesaleSales() {
                       inputRef={barcodeSearchInputRef}
                       size="small"
                       placeholder="Scan barcode or search by name, SKU, model, brand..."
+                      // Enter on an empty search = done adding items → on to Delivery.
+                      inputProps={{ ...params.inputProps, 'data-nav-enter': barcodeInput ? undefined : '[data-delivery-type][data-nav-stop]' }}
                       onKeyDownCapture={handleBarcodeScan}
                       InputProps={{
                         ...params.InputProps,
                         startAdornment: (<><QrCodeScannerIcon sx={{ color: '#4f46e5', mr: 0.5, fontSize: 20 }} />{params.InputProps.startAdornment}</>),
-                        endAdornment: (<><Chip label="F3" size="small" sx={{ height: 18, fontSize: '0.62rem', fontWeight: 700, bgcolor: '#f1f5f9', color: '#64748b', mr: 0.5 }} />{params.InputProps.endAdornment}</>),
+                        endAdornment: (<><Chip label="F5" size="small" sx={{ height: 18, fontSize: '0.62rem', fontWeight: 700, bgcolor: '#f1f5f9', color: '#64748b', mr: 0.5 }} />{params.InputProps.endAdornment}</>),
                       }}
                     />
                   )}
@@ -1644,14 +1796,14 @@ export default function WholesaleSales() {
                     Bulk Add <Chip label="F4" size="small" sx={{ ml: 0.75, height: 16, fontSize: '0.6rem', bgcolor: '#f1f5f9', color: '#64748b' }} />
                   </Button>
                   <Button size="small" variant="outlined" startIcon={<UploadFileIcon />} onClick={() => setExcelImportOpen(true)} sx={{ fontWeight: 700, textTransform: 'none' }}>
-                    Excel Import
+                    Excel Import <Chip label="F6" size="small" sx={{ ml: 0.75, height: 16, fontSize: '0.6rem', bgcolor: '#f1f5f9', color: '#64748b' }} />
                   </Button>
                   <Button size="small" variant="outlined" startIcon={<DiscountIcon />} onClick={() => setSchemeOpen(true)} sx={{ fontWeight: 700, textTransform: 'none' }}>
-                    Discounts / Schemes <Chip label="F6" size="small" sx={{ ml: 0.75, height: 16, fontSize: '0.6rem', bgcolor: '#f1f5f9', color: '#64748b' }} />
+                    Discounts / Schemes <Chip label="F7" size="small" sx={{ ml: 0.75, height: 16, fontSize: '0.6rem', bgcolor: '#f1f5f9', color: '#64748b' }} />
                   </Button>
                   {dealerOrders.length > 0 && (
                     <Button size="small" variant="outlined" startIcon={<ReorderIcon />} onClick={() => applyOrderToCart(dealerOrders[0], 'reorder')} sx={{ fontWeight: 700, textTransform: 'none' }}>
-                      Reorder Last Invoice
+                      Reorder Last Invoice <Chip label="F8" size="small" sx={{ ml: 0.75, height: 16, fontSize: '0.6rem', bgcolor: '#f1f5f9', color: '#64748b' }} />
                     </Button>
                   )}
                 </Stack>
@@ -1737,6 +1889,7 @@ export default function WholesaleSales() {
                           <React.Fragment key={`${item.id}-${idx}`}>
                             <TableRow
                               hover
+                              data-cart-row={idx}
                               onClick={() => setSelectedRowIndex(idx)}
                               sx={{
                                 bgcolor: rowSelected ? '#eef2ff' : (isStockExceeded ? '#fef2f2' : (item.isFreeGift ? '#f0fdf4' : 'inherit')),
@@ -1761,12 +1914,12 @@ export default function WholesaleSales() {
                               <TableCell onClick={(e) => e.stopPropagation()}>
                                 <Stack direction="row" spacing={0.5} alignItems="center">
                                   <TextField
-                                    size="small" placeholder="Batch" value={item.batch}
+                                    size="small" placeholder="Batch" value={item.batch} inputProps={{ 'data-nav-skip': '' }}
                                     onChange={(e) => handleUpdateItemField(idx, 'batch', e.target.value)}
                                     sx={{ width: 70, '& .MuiInputBase-input': { py: 0.25, px: 0.5, fontSize: '0.72rem' } }}
                                   />
                                   <TextField
-                                    size="small" type="date" value={item.expiry} error={expired}
+                                    size="small" type="date" value={item.expiry} error={expired} inputProps={{ 'data-nav-skip': '' }}
                                     onChange={(e) => handleUpdateItemField(idx, 'expiry', e.target.value)}
                                     sx={{ width: 128, '& .MuiInputBase-input': { py: 0.25, px: 0.5, fontSize: '0.72rem' } }}
                                   />
@@ -1779,6 +1932,7 @@ export default function WholesaleSales() {
                                   <IconButton size="small" sx={{ p: 0.25 }} onClick={() => handleUpdateItemQty(idx, -1)}><RemoveIcon sx={{ fontSize: 15 }} /></IconButton>
                                   <TextField
                                     size="small" type="number" error={isStockExceeded} value={item.qty}
+                                    inputProps={{ 'data-cart-qty': idx, 'data-nav-enter': `[data-cart-disc="${idx}"]:not(:disabled)` }}
                                     onChange={(e) => handleUpdateItemQty(idx, e.target.value, true)}
                                     sx={{ width: 46, '& .MuiInputBase-input': { py: 0.25, px: 0.25, textAlign: 'center', fontWeight: 700, fontSize: '0.8rem' } }}
                                   />
@@ -1811,6 +1965,8 @@ export default function WholesaleSales() {
                               <TableCell align="right" onClick={(e) => e.stopPropagation()}>
                                 <TextField
                                   size="small" type="number" value={item.discount} disabled={item.isFreeGift}
+                                  // Line entry: product → Qty → Disc % → back to the search for the next item.
+                                  inputProps={{ 'data-cart-disc': idx, 'data-nav-enter': '#ws-product-search' }}
                                   onChange={(e) => handleUpdateItemField(idx, 'discount', parseFloat(e.target.value) || 0)}
                                   sx={{ width: 52, '& .MuiInputBase-input': { py: 0.25, px: 0.5, textAlign: 'right', fontSize: '0.8rem' } }}
                                 />
@@ -1822,9 +1978,11 @@ export default function WholesaleSales() {
                                   <IconButton size="small" sx={{ p: 0.25 }} onClick={() => setNotesOpenIdx(notesOpenIdx === idx ? -1 : idx)}>
                                     <NoteIcon sx={{ fontSize: 15, color: item.notes ? '#4f46e5' : '#cbd5e1' }} />
                                   </IconButton>
-                                  <IconButton size="small" sx={{ p: 0.25 }} onClick={() => handleRemoveItem(idx)}>
-                                    <DeleteIcon sx={{ fontSize: 16, color: '#94a3b8' }} />
-                                  </IconButton>
+                                  <Tooltip title="Remove line (Delete / F9)">
+                                    <IconButton size="small" sx={{ p: 0.25 }} onClick={() => handleRemoveItem(idx)}>
+                                      <DeleteIcon sx={{ fontSize: 16, color: '#94a3b8' }} />
+                                    </IconButton>
+                                  </Tooltip>
                                 </Stack>
                               </TableCell>
                             </TableRow>
@@ -1861,16 +2019,37 @@ export default function WholesaleSales() {
                 <Stack direction="row" spacing={1} alignItems="center">
                   <DeliveryIcon sx={{ fontSize: 18, color: '#4f46e5' }} />
                   <Typography variant="subtitle2" fontWeight={800} color="#0f172a">Delivery</Typography>
+                  <Chip label="Alt+D" size="small" sx={{ height: 18, fontSize: '0.65rem', fontWeight: 700, bgcolor: '#f1f5f9', color: '#64748b' }} />
                 </Stack>
                 <ToggleButtonGroup
                   value={delivery.type} exclusive size="small"
                   onChange={(e, v) => { if (v) setDelivery({ ...delivery, type: v }); }}
+                  // Keyboard: the selected option is a stop in the Enter / arrow chain; Left/Right switch type.
+                  onKeyDown={(e) => {
+                    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+                    e.preventDefault();
+                    const i = DELIVERY_TYPES.indexOf(delivery.type);
+                    const next = DELIVERY_TYPES[(i + (e.key === 'ArrowRight' ? 1 : -1) + DELIVERY_TYPES.length) % DELIVERY_TYPES.length];
+                    setDelivery({ ...delivery, type: next });
+                    setTimeout(() => document.querySelector(`[data-delivery-type="${next}"]`)?.focus(), 0);
+                  }}
                   sx={{ '& .MuiToggleButton-root': { textTransform: 'none', fontWeight: 700, fontSize: '0.7rem', py: 0.25, px: 1, border: '1px solid #e2e8f0 !important', '&.Mui-selected': { bgcolor: '#4f46e5', color: '#fff', '&:hover': { bgcolor: '#4338ca' } } } }}
                 >
-                  {DELIVERY_TYPES.map(t => <ToggleButton key={t} value={t}>{t}</ToggleButton>)}
+                  {DELIVERY_TYPES.map(t => (
+                    <ToggleButton
+                      key={t} value={t} data-delivery-type={t}
+                      {...(t === delivery.type ? { 'data-nav-stop': 'advance' } : { tabIndex: -1 })}
+                    >{t}</ToggleButton>
+                  ))}
                 </ToggleButtonGroup>
               </Stack>
               <Grid container spacing={1.5}>
+                {/* Date first: the keyboard chain runs Delivery Date → Shipping Address → … → Complete Sale */}
+                {delivery.type !== 'Pickup' && (
+                  <Grid item xs={12} sm={6}>
+                    <QuickDatePickerField label="Expected Delivery Date" value={delivery.expectedDate} onChange={(v) => setDelivery({ ...delivery, expectedDate: v })} />
+                  </Grid>
+                )}
                 <Grid item xs={12} sm={delivery.type === 'Pickup' ? 12 : 6}>
                   <TextField
                     fullWidth size="small" multiline minRows={1} label="Shipping Address" value={delivery.address}
@@ -1882,11 +2061,6 @@ export default function WholesaleSales() {
                     } : undefined}
                   />
                 </Grid>
-                {delivery.type !== 'Pickup' && (
-                  <Grid item xs={12} sm={6}>
-                    <QuickDatePickerField label="Expected Delivery Date" value={delivery.expectedDate} onChange={(v) => setDelivery({ ...delivery, expectedDate: v })} />
-                  </Grid>
-                )}
                 {(delivery.type === 'Courier' || delivery.type === 'Transport') && (
                   <>
                     <Grid item xs={12} sm={6}>
@@ -1898,7 +2072,7 @@ export default function WholesaleSales() {
                   </>
                 )}
                 <Grid item xs={12}>
-                  <TextField fullWidth size="small" multiline minRows={1} label="Delivery Notes" value={delivery.notes} onChange={(e) => setDelivery({ ...delivery, notes: e.target.value })} />
+                  <TextField fullWidth size="small" multiline minRows={1} label="Delivery Notes" value={delivery.notes} onChange={(e) => setDelivery({ ...delivery, notes: e.target.value })} inputProps={{ 'data-nav-enter': '#ws-complete-sale:not(:disabled)' }} />
                 </Grid>
               </Grid>
             </Card>
@@ -2134,25 +2308,25 @@ export default function WholesaleSales() {
             {/* ACTIONS */}
             <Stack spacing={1}>
               <Button
-                variant="contained" fullWidth size="large"
+                variant="contained" fullWidth size="large" id="ws-complete-sale" data-nav-stop
                 disabled={Boolean(!selectedCustomer || cartItems.length === 0 || savingInvoice)}
                 onClick={handleAttemptCompleteSale}
                 startIcon={savingInvoice ? <CircularProgress size={16} sx={{ color: '#fff' }} /> : <CheckedIcon />}
-                endIcon={<Chip label="F9" size="small" sx={{ height: 18, fontSize: '0.62rem', fontWeight: 700, bgcolor: 'rgba(255,255,255,0.25)', color: '#fff' }} />}
+                endIcon={<Chip label="F10 / Ctrl+S" size="small" sx={{ height: 18, fontSize: '0.62rem', fontWeight: 700, bgcolor: 'rgba(255,255,255,0.25)', color: '#fff' }} />}
                 sx={{ bgcolor: '#4f46e5', fontWeight: 800, py: 1.1, textTransform: 'none', '&:hover': { bgcolor: '#4338ca' } }}
               >
                 {savingInvoice ? 'Processing…' : 'Complete Sale'}
               </Button>
               <Stack direction="row" spacing={1}>
                 <Button fullWidth size="small" variant="outlined" disabled={cartItems.length === 0} onClick={handleSaveDraft} startIcon={<SaveIcon />} sx={{ fontWeight: 700, textTransform: 'none' }}>
-                  Save Draft <Chip label="F8" size="small" sx={{ ml: 0.5, height: 16, fontSize: '0.58rem', bgcolor: '#f1f5f9', color: '#64748b' }} />
+                  Save Draft <Chip label="Alt+S" size="small" sx={{ ml: 0.5, height: 16, fontSize: '0.58rem', bgcolor: '#f1f5f9', color: '#64748b' }} />
                 </Button>
                 <Button fullWidth size="small" variant="outlined" color="warning" disabled={cartItems.length === 0} onClick={handleHoldInvoice} startIcon={<HoldIcon />} sx={{ fontWeight: 700, textTransform: 'none' }}>
-                  Hold <Chip label="F7" size="small" sx={{ ml: 0.5, height: 16, fontSize: '0.58rem', bgcolor: '#f1f5f9', color: '#64748b' }} />
+                  Hold <Chip label="Alt+H" size="small" sx={{ ml: 0.5, height: 16, fontSize: '0.58rem', bgcolor: '#f1f5f9', color: '#64748b' }} />
                 </Button>
               </Stack>
               <Typography variant="caption" color="text.secondary" sx={{ textAlign: 'center', mt: 0.25 }}>
-                F2 Dealer &middot; F3 Product &middot; F4 Bulk Add &middot; F6 Discount &middot; F7 Hold &middot; F8 Draft &middot; F9 Complete &middot; Ctrl+P Print &middot; Esc Clear Search &middot; Del Remove Row
+                F2 / Alt+N New Dealer &middot; F3 Dealer &middot; F4 Bulk Add &middot; F5 Product &middot; F6 Excel Import &middot; F7 Discounts &middot; F8 Reorder Last &middot; Alt+P Price List &middot; Del / F9 Remove Line &middot; Alt+D Delivery &middot; F10 / Ctrl+S Save &amp; Print &middot; Alt+S Draft &middot; Alt+H Hold &middot; Ctrl+P Reprint &middot; Esc Close &middot; Enter / &darr; Next field &middot; &uarr; Previous &middot; Space Open list
               </Typography>
             </Stack>
           </Stack>
@@ -2232,7 +2406,7 @@ export default function WholesaleSales() {
         open={creditLimitConfirmOpen} title="Credit Limit Override Confirmation"
         message={`Completing this Credit Sale for ${selectedCustomer?.name} will push their total outstanding balance (${fmtINR((parseFloat(selectedCustomer?.outstanding || 0) + summary.grandTotal))}) over their assigned Credit Limit (${fmtINR(selectedCustomer?.creditLimit || 0)}). Do you wish to override and complete this sale?`}
         type="warning" confirmText="Override & Complete Sale"
-        onClose={() => setCreditLimitConfirmOpen(false)}
+        onClose={() => { setCreditLimitConfirmOpen(false); printAfterSaveRef.current = false; }}
         onConfirm={executeCompleteSale}
       />
       <ConfirmActionDialog

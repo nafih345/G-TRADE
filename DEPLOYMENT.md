@@ -26,6 +26,33 @@ Two things made that invisible instead of loud:
 The fix is to keep the database off Render's free tier entirely — see
 [§1a](#1a-create-the-database-on-neon).
 
+### Why it could not be fixed by deploying the fix
+
+The three faults above were all repaired in code on 29 Sep. Production did not pick any of
+them up, and the reason is a loop worth naming:
+
+`build.sh` ran `migrate` under `set -o errexit`. With the database deleted, `migrate` failed,
+so **the build failed**, so Render kept serving the last release that built — the one from
+before the fixes, still running `DEBUG=True`, still carrying the old `/api/health/` that
+could not report which host it had resolved. A dead database had pinned the code in place,
+and the only release able to diagnose the problem was the one that could not ship.
+
+You can see which release is live without dashboard access, because the old and new health
+endpoints answer with different shapes:
+
+```
+curl -s https://g-trade-backend.onrender.com/api/health/
+```
+
+If the JSON has **no `db_target` and no `debug` key**, the running build predates the fixes
+regardless of what `git log` says, and the first thing to fix is the deploy, not the code.
+
+`migrate` and `bootstrap_admin` are now non-fatal in `build.sh`: they still run on every
+release, but a database outage can no longer stop the code from shipping. The schema is
+caught up afterwards by `AUTO_MIGRATE` on boot, and `/api/health/` reports
+`"migrations": "pending"` with the names until it is. That trade is deliberate — a visible,
+self-correcting schema lag beats an invisible, self-locking release freeze.
+
 ---
 
 ## Why production showed an older Wholesale POS
@@ -118,6 +145,12 @@ On the **`g-trade-backend`** service → *Environment*, set:
 | `AUTO_MIGRATE` | `True` |
 | `SECRET_KEY` | any long random string, if not already set |
 
+`DATABASE_URL` is no longer optional on a managed host. If it is missing, `settings.py`
+raises `ImproperlyConfigured` and the service refuses to boot, naming the variable in the
+build log. It used to fall back to SQLite on the container's ephemeral disk instead — which
+looks perfectly healthy (`bootstrap_admin` even recreates a working login) while discarding
+every row on each deploy. A refused start is the loud version of that.
+
 Confirm under *Settings* that **Root Directory** is `backend` and **Build Command** is
 `bash ./build.sh` — that script runs `collectstatic`, `migrate`, then `bootstrap_admin`.
 **A brand-new Neon database has no users at all, so without those two `DJANGO_SUPERUSER_*`
@@ -133,15 +166,29 @@ This is the check that would have caught the original outage:
 curl https://g-trade-backend.onrender.com/api/health/
 ```
 
-Expect all four of:
+Expect all of:
 
 - `"status": "ok"` — not `"degraded"`
+- `"database": "connected"`
 - `"debug": false` — must be false
+- `"migrations": "up_to_date"` with `"pending_migrations": []`
 - `"db_target": { "host": "ep-….neon.tech" }` — the Neon host, not a `dpg-…` one
-- `"migrations": "up_to_date"`
+- `"db_target": { "source": "DATABASE_URL" }` — names the variable the connection string
+  actually came from, which separates "`DATABASE_URL` is wrong" from "`DATABASE_URL` never
+  reached the process"
+- `"db_target": { "sslmode": "require" }` — a dotted public host reporting `disabled` means
+  credentials are crossing the internet in the clear
+- `"db_target": { "conn_health_checks": true }` — Neon suspends an idle database and drops
+  its sockets; without this the first request after a quiet spell fails with "server closed
+  the connection unexpectedly"
+
+The endpoint reports host, port, database name and TLS state. It never reports the user or
+the password, and it deliberately does not report row counts — how many invoices a shop has
+written is not something to publish unauthenticated. Use `db_status` (below) for that.
 
 If `"database"` still reports `could not translate host name "dpg-…"`, `DATABASE_URL` did
-not take — it is still the deleted Render instance.
+not take — it is still the deleted Render instance. If the response has no `db_target` key
+at all, you are looking at a pre-29-Sep build and the deploy itself never went through.
 
 > First request after ~15 minutes idle takes ~50s on the free plan — the instance spins
 > down. That is why the frontend calls Render directly instead of through Vercel's proxy,
@@ -217,6 +264,27 @@ quoting the API address and `/api/health/`'s own explanation. Before it existed,
 outage looked exactly like a business with no data yet: the dashboard read "₹0.00" and
 "System Operations Normal" while every request behind it returned 500.
 
+### 1d. Proving the data is still there
+
+`/api/health/` answers "is the database reachable", not "is my data still in it". For the
+second question there is a read-only command that talks to whichever database
+`DATABASE_URL` names — run it from your own machine, since Render's free plan has no shell:
+
+```
+# PowerShell, from the repo root
+$env:DATABASE_URL = "<the same connection string the service uses>"
+cd backend; python manage.py db_status
+```
+
+It prints the resolved target (password never read, username reduced to its first
+character), whether the connection succeeds, any pending migrations, and a row count per
+table. It writes nothing and migrates nothing.
+
+Run it **before and after** any migration or `DATABASE_URL` change and compare the totals.
+Equal or larger means nothing was dropped. A sudden zero means you are pointed at a
+different — or brand-new — database, which is exactly the failure this deployment has
+already had once.
+
 ---
 
 ## 3. Clearing all data on demand
@@ -263,5 +331,15 @@ A freshly provisioned database is already empty, so you only need this to re-cle
 - **Uploaded files are ephemeral.** `MEDIA_ROOT` is on the container filesystem, so product
   images and the company logo used on printed bills survive only until the next deploy or
   restart. Object storage (S3/Cloudinary) is the durable fix.
-- `AUTO_MIGRATE=True` stays on as a safety net, but `build.sh` already migrates on release —
-  the schema should never trail the code again.
+- `AUTO_MIGRATE=True` is now load-bearing rather than a safety net. `build.sh` still runs
+  `migrate` on every release, but no longer fails the build when the database is
+  unreachable, so a release can ship with the schema briefly behind the code; the boot hook
+  in `apps/common/startup.py` is what closes that gap, and `/api/health/` reports
+  `"migrations": "pending"` until it does. Turning it off reopens the gap.
+- **One migration is unsafe to replay on a populated database.**
+  `financial/0003_alter_journalentry_reference_id` drops `journalentry.reference_id` and
+  re-adds it, because Postgres cannot cast integer to uuid in place. It was written against
+  an empty table and is already applied everywhere it matters, so it is harmless on any
+  database that has run it. But a database still sitting at `financial/0002` **with journal
+  entries in it** would lose the invoice/payment back-references when it catches up. Check
+  with `python manage.py db_status` before migrating such a database, and back it up first.

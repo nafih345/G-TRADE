@@ -9,6 +9,35 @@ const num = (v) => {
 };
 const first = (...vals) => vals.find((v) => v !== undefined && v !== null && v !== '');
 
+// A line's prescription text, as printed under the item description.
+// Older bills stored a placeholder ("—", "Power Active [Idx: 1.56]") on every line and
+// zero-filled the eye that had no prescription ("OD:0/0 | OS:-1.25/-0.50"). Both are scrubbed
+// here so a reprint of an old document shows power only where power was really entered.
+const LEGACY_BOTH_EYES = /^OD:([^/|]*)\/([^|]*)\|\s*OS:([^/]*)\/(.*)$/i;
+
+function cleanPower(value) {
+  const s = String(value ?? '').trim();
+  if (!s || /^[-–—]+$/.test(s) || /^n\/?a$/i.test(s) || /^power active/i.test(s)) return '';
+  const m = s.match(LEGACY_BOTH_EYES);
+  if (!m) return s;
+  // Trailing "[Idx: 1.56]" rides on the left eye's last field — keep it on the rebuilt string.
+  const tail = m[4].match(/\[[^\]]*\]\s*$/);
+  const suffix = tail ? ` ${tail[0].trim()}` : '';
+  const eye = (sph, cyl) => {
+    const s1 = String(sph).trim();
+    const c1 = String(cyl).replace(/\[[^\]]*\]\s*$/, '').trim();
+    const blank = (v) => !v || num(v) === 0;
+    if (blank(s1) && blank(c1)) return '';
+    return `SPH ${s1 || '0'} CYL ${c1 || '0'}`;
+  };
+  const eyes = [];
+  const re = eye(m[1], m[2]);
+  const le = eye(m[3], m[4]);
+  if (re) eyes.push(`RE: ${re}`);
+  if (le) eyes.push(`LE: ${le}`);
+  return eyes.length ? `${eyes.join(' | ')}${suffix}` : '';
+}
+
 // Fallback company identity — matches what the old hard-coded renderers printed, so an
 // install that has not filled in Settings → Store Profile sees no change.
 const FALLBACK_COMPANY = {
@@ -70,6 +99,9 @@ function adaptSalesLike(doc, documentType) {
       hsn: first(it.hsn, it.hsn_code, it.hsnCode) || '',
       size: first(it.size) || '',
       color: first(it.color, it.colour) || '',
+      // Prescribed power for this line — printed under the description, and only when the
+      // sale actually recorded a power (per eye: RE only, LE only, or both).
+      power: cleanPower(first(it.power, it.powerText, it.rxPower)),
       qty,
       unit: first(it.unit, it.uom) || '',
       rate,

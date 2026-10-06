@@ -11,17 +11,20 @@ import {
   Visibility as ViewIcon, Search as SearchIcon, Payment as PaymentIcon
 } from '@mui/icons-material';
 import { ORDER_STATUS_COLORS, SCHEME_TYPES, PRICE_LIST_OPTIONS, fmtINR } from './wholesaleConstants';
+import { navDialogProps } from './keyboardNav';
 
 // ---------------------------------------------------------------------------
 // New Dealer
 // ---------------------------------------------------------------------------
 export function NewDealerDialog({ open, value, onChange, onClose, onSave, saving }) {
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
+    // Keyboard-only entry: Enter / ArrowDown → next field, ArrowUp → previous; the last field's
+    // Enter lands on "Register Dealer" (a second Enter saves) so nothing submits prematurely.
+    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth {...navDialogProps}>
       <DialogTitle sx={{ fontWeight: 850 }}>Register New Wholesale Dealer</DialogTitle>
       <DialogContent dividers>
         <Stack spacing={2} sx={{ pt: 1 }}>
-          <TextField fullWidth size="small" label="Dealer Code" placeholder="Auto-generated e.g. DL-00104" value={value.code} onChange={(e) => onChange({ ...value, code: e.target.value })} />
+          <TextField fullWidth size="small" autoFocus label="Dealer Code" placeholder="Auto-generated e.g. DL-00104" value={value.code} onChange={(e) => onChange({ ...value, code: e.target.value })} />
           <TextField fullWidth size="small" label="Business / Dealer Name *" value={value.name} onChange={(e) => onChange({ ...value, name: e.target.value })} />
           <TextField fullWidth size="small" label="Contact Person Name" value={value.contactPerson} onChange={(e) => onChange({ ...value, contactPerson: e.target.value })} />
           <Grid container spacing={2}>
@@ -57,8 +60,11 @@ export function NewDealerDialog({ open, value, onChange, onClose, onSave, saving
         </Stack>
       </DialogContent>
       <DialogActions sx={{ px: 3, py: 2 }}>
+        <Typography variant="caption" color="text.secondary" sx={{ mr: 'auto' }}>
+          Enter / ↓ next field &middot; ↑ previous &middot; Shift+Enter new line &middot; Space opens a list
+        </Typography>
         <Button onClick={onClose}>Cancel</Button>
-        <Button variant="contained" disabled={saving} onClick={onSave} sx={{ backgroundColor: '#4f46e5', fontWeight: 800 }}>
+        <Button variant="contained" data-nav-stop disabled={saving} onClick={onSave} sx={{ backgroundColor: '#4f46e5', fontWeight: 800 }}>
           {saving ? 'Saving…' : 'Register Dealer'}
         </Button>
       </DialogActions>
@@ -171,12 +177,12 @@ export function RecordPaymentDialog({ open, dealer, onClose, onRecord }) {
   React.useEffect(() => { if (open) { setAmount(''); setMode('Cash'); setRefNo(''); } }, [open]);
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth>
+    <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth {...navDialogProps}>
       <DialogTitle sx={{ fontWeight: 850 }}>Record Payment — {dealer?.name}</DialogTitle>
       <DialogContent dividers>
         <Stack spacing={2} sx={{ pt: 1 }}>
           <Typography variant="body2" color="text.secondary">Current Outstanding: <b>{fmtINR(dealer?.outstanding)}</b></Typography>
-          <TextField fullWidth size="small" type="number" label="Amount Received (₹)" value={amount} onChange={(e) => setAmount(e.target.value)} />
+          <TextField fullWidth size="small" autoFocus type="number" label="Amount Received (₹)" value={amount} onChange={(e) => setAmount(e.target.value)} />
           <TextField select fullWidth size="small" label="Payment Mode" value={mode} onChange={(e) => setMode(e.target.value)}>
             {['Cash', 'UPI', 'Card', 'Bank Transfer'].map(m => <MenuItem key={m} value={m}>{m}</MenuItem>)}
           </TextField>
@@ -187,6 +193,7 @@ export function RecordPaymentDialog({ open, dealer, onClose, onRecord }) {
         <Button onClick={onClose}>Cancel</Button>
         <Button
           variant="contained"
+          data-nav-stop
           disabled={!amount || parseFloat(amount) <= 0}
           onClick={() => onRecord({ amount: parseFloat(amount) || 0, mode, refNo })}
           sx={{ backgroundColor: '#4f46e5', fontWeight: 800 }}
@@ -297,12 +304,14 @@ export function BulkAddDialog({ open, products, onClose, onAdd }) {
   const selectedCount = Object.keys(selected).length;
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
+    // Keyboard: type to filter → Enter / ↓ walks the rows; Enter on a row's checkbox ticks it and
+    // jumps to its Qty, Enter in Qty goes to the next row; the chain ends on "Add Selected".
+    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth {...navDialogProps}>
       <DialogTitle sx={{ fontWeight: 850 }}>Bulk Add Products</DialogTitle>
       <DialogContent dividers sx={{ p: 0 }}>
         <Box sx={{ p: 2, pb: 1 }}>
           <TextField
-            fullWidth size="small" placeholder="Search products to multi-select..."
+            fullWidth size="small" autoFocus placeholder="Search products to multi-select..."
             value={search} onChange={(e) => setSearch(e.target.value)}
             InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon sx={{ fontSize: 18, color: '#94a3b8' }} /></InputAdornment> }}
           />
@@ -324,7 +333,7 @@ export function BulkAddDialog({ open, products, onClose, onAdd }) {
               return (
                 <TableRow key={p.id} hover selected={isSel}>
                   <TableCell padding="checkbox">
-                    <Checkbox size="small" checked={isSel} onChange={() => toggle(p)} disabled={stock <= 0} />
+                    <Checkbox size="small" checked={isSel} onChange={() => toggle(p)} disabled={stock <= 0} inputProps={{ 'data-nav-stop': '' }} />
                   </TableCell>
                   <TableCell onClick={() => stock > 0 && toggle(p)} sx={{ cursor: stock > 0 ? 'pointer' : 'default' }}>
                     <Typography variant="body2" fontWeight={700}>{p.name}</Typography>
@@ -350,7 +359,7 @@ export function BulkAddDialog({ open, products, onClose, onAdd }) {
       <DialogActions sx={{ px: 2, py: 1.5 }}>
         <Typography variant="caption" color="text.secondary" sx={{ mr: 'auto' }}>{selectedCount} product(s) selected</Typography>
         <Button onClick={onClose}>Cancel</Button>
-        <Button variant="contained" disabled={selectedCount === 0} onClick={handleAdd} startIcon={<AddIcon />} sx={{ backgroundColor: '#4f46e5', fontWeight: 800 }}>
+        <Button variant="contained" data-nav-stop disabled={selectedCount === 0} onClick={handleAdd} startIcon={<AddIcon />} sx={{ backgroundColor: '#4f46e5', fontWeight: 800 }}>
           Add Selected to Cart
         </Button>
       </DialogActions>
@@ -448,7 +457,7 @@ export function ExcelImportDialog({ open, onClose, onImport }) {
 }
 
 // ---------------------------------------------------------------------------
-// Discounts & Schemes (F6)
+// Discounts & Schemes (F7)
 // ---------------------------------------------------------------------------
 export function SchemeDialog({ open, onClose, dealer, schemes, products, invoiceDiscount, onApply }) {
   const [type, setType] = useState(invoiceDiscount?.type || 'PERCENT');
@@ -477,11 +486,11 @@ export function SchemeDialog({ open, onClose, dealer, schemes, products, invoice
   };
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth>
+    <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth {...navDialogProps}>
       <DialogTitle sx={{ fontWeight: 850 }}>Discounts & Schemes</DialogTitle>
       <DialogContent dividers>
         <Stack spacing={2} sx={{ pt: 1 }}>
-          <TextField select fullWidth size="small" label="Discount Type" value={type} onChange={(e) => setType(e.target.value)}>
+          <TextField select fullWidth size="small" autoFocus label="Discount Type" value={type} onChange={(e) => setType(e.target.value)}>
             {SCHEME_TYPES.filter(t => t.value !== 'DEALER').map(t => <MenuItem key={t.value} value={t.value}>{t.label}</MenuItem>)}
           </TextField>
 
@@ -561,6 +570,7 @@ export function SchemeDialog({ open, onClose, dealer, schemes, products, invoice
             : (type === 'BRAND' || type === 'CATEGORY' || type === 'PRODUCT') ? (!target || !value)
             : !value
           }
+          data-nav-stop
           onClick={handleApply}
           sx={{ backgroundColor: '#4f46e5', fontWeight: 800 }}
         >
@@ -584,14 +594,14 @@ export function CreditNoteDialog({ open, invoice, onClose, onCreate }) {
 
   if (!invoice) return null;
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth>
+    <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth {...navDialogProps}>
       <DialogTitle sx={{ fontWeight: 850 }}>Create Credit Note</DialogTitle>
       <DialogContent dividers>
         <Stack spacing={2} sx={{ pt: 1 }}>
           <Typography variant="body2" color="text.secondary">
             Against Invoice <b>{invoice.invoiceNo}</b> — {invoice.customer?.name}
           </Typography>
-          <TextField fullWidth size="small" type="number" label="Credit Note Amount (₹)" value={amount} onChange={(e) => setAmount(e.target.value)} />
+          <TextField fullWidth size="small" autoFocus type="number" label="Credit Note Amount (₹)" value={amount} onChange={(e) => setAmount(e.target.value)} />
           <TextField fullWidth size="small" multiline minRows={2} label="Reason" value={reason} onChange={(e) => setReason(e.target.value)} />
         </Stack>
       </DialogContent>
@@ -599,6 +609,7 @@ export function CreditNoteDialog({ open, invoice, onClose, onCreate }) {
         <Button onClick={onClose}>Cancel</Button>
         <Button
           variant="contained"
+          data-nav-stop
           disabled={!amount || parseFloat(amount) <= 0}
           onClick={() => onCreate({ amount: parseFloat(amount) || 0, reason })}
           sx={{ backgroundColor: '#4f46e5', fontWeight: 800 }}

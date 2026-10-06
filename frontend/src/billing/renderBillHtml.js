@@ -292,6 +292,12 @@ function renderItems(model, cfg, thermal, currency) {
       if (c.key === 'name' && cfg.showBrandUnderName && item.brand) {
         val += `<div class="brand">${esc(item.brand)}</div>`;
       }
+      // Prescribed power, printed only when the sale recorded one. The adapter already dropped
+      // the eye(s) with no prescription, so this is RE only, LE only, or both — never a
+      // placeholder for a line that carries no power.
+      if (c.key === 'name' && item.power) {
+        val += `<div class="power">${esc(item.power)}</div>`;
+      }
       return `<td style="text-align:${c.align || 'left'};">${val}</td>`;
     });
     return `<tr>${tds.join('')}</tr>`;
@@ -410,6 +416,7 @@ function buildStyles(template, thermal, styles) {
     .items th { text-align: left; font-size: .82em; font-weight: 700; }
     .items td { font-size: .9em; vertical-align: top; }
     .items .brand { font-size: .78em; color: #64748b; }
+    .items .power { font-size: .78em; color: ${accent}; font-weight: 700; }
     .totals { margin-left: auto; }
     .totals.left { margin-left: 0; }
     .totals .row { display: flex; justify-content: space-between; gap: 24px; padding: 2px 0; }

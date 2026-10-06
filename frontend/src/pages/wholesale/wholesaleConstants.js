@@ -4,11 +4,10 @@
 // Backend reuse: apps.sales already ships a full (previously unused) wholesale schema —
 // Dealer ("WholesaleCustomer"), WholesalePriceList, WholesaleReturn, WholesaleInvoice,
 // WholesalePaymentCollection — all plain ModelViewSets under /api/sales/wholesale/*.
-// This module talks to those instead of re-inventing dealer/return/payment storage;
-// localStorage stays only as an offline cache + the rich line-item invoice record
-// (WholesaleInvoice has no items field, so the full invoice — items, delivery, schemes,
-// notes — still lives in optical_wholesale_invoices; the backend row is a best-effort
-// secondary index other ERP modules could query).
+// This module talks to those instead of re-inventing dealer/return/payment storage.
+// WholesaleInvoice.details holds the full POS invoice (items, summary, delivery, notes), so
+// the database is the source of truth; optical_wholesale_invoices is a cache that also keeps
+// invoices saved while the server was unreachable (pendingSync) until they upload.
 
 export const WHOLESALE_API = '/api/sales/wholesale';
 
@@ -304,4 +303,127 @@ export function buildDealerLedger(dealer, invoices, returns = [], payments = [])
 
 export function fmtINR(n) {
   return `₹${(parseFloat(n) || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+}
+
+// ---- Wholesale invoice <-> backend WholesaleInvoice (details JSON carries the full record) ----
+
+// Attachments are inline base64 (up to 3 MB each) — kept in the local copy for reprint, but
+// only their metadata goes to the database so a row never balloons by megabytes.
+function detailsForApi(inv) {
+  const { backendId, pendingSync, ...rest } = inv;
+  return {
+    ...rest,
+    attachments: (inv.attachments || []).map(({ dataUrl, ...meta }) => meta),
+  };
+}
+
+export function invoiceToApi(inv) {
+  return {
+    invoice_number: inv.invoiceNo,
+    dealer: inv.customer?.id,
+    order_ref: inv.referenceNo || '',
+    invoice_date: inv.date,
+    due_date: inv.dueDate || inv.date,
+    grand_total: Number(inv.summary?.grandTotal || 0).toFixed(2),
+    paid_amount: Number(inv.amountReceived || 0).toFixed(2),
+    due_amount: Number(inv.dueAmount || 0).toFixed(2),
+    status: String(inv.status || 'Unpaid').slice(0, 20),
+    details: detailsForApi(inv),
+  };
+}
+
+// Rows created before `details` existed have no line items — rebuild the minimum the POS
+// and reports need from the row's own columns.
+export function invoiceFromApi(row, dealersById = {}) {
+  const d = row.details && typeof row.details === 'object' ? row.details : {};
+  const grandTotal = parseFloat(row.grand_total) || 0;
+  return {
+    items: [],
+    summary: { totalQty: 0, subtotal: grandTotal, totalDiscount: 0, totalGst: 0, grandTotal },
+    customer: dealersById[row.dealer] || { id: row.dealer, name: '' },
+    payMode: 'Credit Sale',
+    ...d,
+    id: row.invoice_number,
+    invoiceNo: row.invoice_number,
+    date: row.invoice_date,
+    status: row.status,
+    amountReceived: parseFloat(row.paid_amount) || 0,
+    dueAmount: parseFloat(row.due_amount) || 0,
+    backendId: row.id,
+  };
+}
+
+const newInvoiceNo = () => `WINV-${Math.floor(100000 + Math.random() * 900000)}`;
+
+// Creates (POST) or updates (PATCH by backendId) the invoice. A clash on the random invoice
+// number gets a fresh number and a retry. Returns the invoice with backendId set; throws if the
+// server refuses or is unreachable so the caller can tell the user it is only saved locally.
+export async function saveInvoiceToBackend(axios, inv) {
+  if (!isUuid(inv.customer?.id)) throw new Error('Dealer is not registered on the server');
+  if (inv.backendId) {
+    const res = await axios.patch(`${WHOLESALE_API}/invoices/${inv.backendId}/`, invoiceToApi(inv));
+    return { ...inv, backendId: res.data.id, pendingSync: false };
+  }
+  let attempt = { ...inv };
+  for (let i = 0; i < 3; i += 1) {
+    try {
+      const res = await axios.post(`${WHOLESALE_API}/invoices/`, invoiceToApi(attempt));
+      return { ...attempt, backendId: res.data.id, pendingSync: false };
+    } catch (e) {
+      const clash = e?.response?.status === 400 && e.response.data?.invoice_number;
+      if (!clash || i === 2) throw e;
+      const invoiceNo = newInvoiceNo();
+      attempt = { ...attempt, id: invoiceNo, invoiceNo };
+    }
+  }
+  return attempt;
+}
+
+// Replaces (or prepends) one invoice in the local cache, matched by invoice number.
+export function cacheInvoice(inv, previousNo = inv.invoiceNo) {
+  const all = readLS(LS_KEYS.invoices, []).filter(x => x.invoiceNo !== previousNo && x.invoiceNo !== inv.invoiceNo);
+  writeLS(LS_KEYS.invoices, [inv, ...all]);
+}
+
+// Pulls every wholesale invoice from the database into the local cache. Server rows win;
+// local rows the server doesn't know are kept (legacy pre-sync history, offline saves), and
+// any flagged pendingSync are uploaded now. Returns the merged list; on a network error the
+// cache is returned untouched.
+export async function syncWholesaleInvoices(axios, dealers = []) {
+  const local = readLS(LS_KEYS.invoices, []);
+  let rows;
+  try {
+    rows = await fetchAllPages(axios, `${WHOLESALE_API}/invoices/`);
+  } catch (e) {
+    return local;
+  }
+  const dealersById = Object.fromEntries(dealers.filter(d => d?.id).map(d => [d.id, d]));
+  const localByNo = Object.fromEntries(local.map(x => [x.invoiceNo, x]));
+  const server = await Promise.all(rows.map(async (r) => {
+    const inv = invoiceFromApi(r, dealersById);
+    const cached = localByNo[inv.invoiceNo];
+    // Rows posted before `details` existed are bare totals; this browser may still hold the
+    // full record, so keep it and backfill the server copy.
+    if (cached && !(r.details && Object.keys(r.details).length)) {
+      const full = { ...cached, status: inv.status, backendId: r.id, pendingSync: false };
+      try { await axios.patch(`${WHOLESALE_API}/invoices/${r.id}/`, { details: detailsForApi(full) }); } catch (e) {}
+      return full;
+    }
+    return inv;
+  }));
+  const serverNos = new Set(server.map(x => x.invoiceNo));
+  const localOnly = [];
+  for (const inv of local.filter(x => !serverNos.has(x.invoiceNo))) {
+    if (inv.pendingSync && isUuid(inv.customer?.id)) {
+      try { server.unshift(await saveInvoiceToBackend(axios, inv)); continue; } catch (e) {}
+    }
+    // A cached row the server once had (backendId) but no longer lists was deleted there.
+    if (!inv.backendId) localOnly.push(inv);
+  }
+  const merged = [...localOnly, ...server].sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  // Keep the local copy's base64 attachments, which the server only stores as metadata.
+  const withFiles = merged.map(x => (localByNo[x.invoiceNo]?.attachments?.some(a => a.dataUrl)
+    ? { ...x, attachments: localByNo[x.invoiceNo].attachments } : x));
+  writeLS(LS_KEYS.invoices, withFiles);
+  return withFiles;
 }

@@ -20,6 +20,10 @@ import {
   AccountBalanceWallet as OutstandingIcon,
   TrendingUp as TrendingUpIcon
 } from '@mui/icons-material';
+import axios from 'axios';
+import {
+  LS_KEYS, WHOLESALE_API, readLS, fetchAllPages, mapDealerFromApi, syncWholesaleInvoices,
+} from './wholesale/wholesaleConstants';
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer
 } from 'recharts';
@@ -108,16 +112,30 @@ export default function WholesaleReports() {
   const [detailInvoice, setDetailInvoice] = useState(null);
 
   // ---- Load data written by the Wholesale POS terminal ----
+  // The database is the source of truth (WholesaleInvoice.details + Dealer); the local cache
+  // renders instantly and covers offline use until the sync answers.
   useEffect(() => {
-    try {
-      setInvoicesRaw(JSON.parse(localStorage.getItem('optical_wholesale_invoices') || '[]'));
-    } catch (e) {}
-    try {
-      setCustomers(JSON.parse(localStorage.getItem('optical_wholesale_customers') || '[]'));
-    } catch (e) {}
+    let cancelled = false;
+    setInvoicesRaw(readLS(LS_KEYS.invoices, []));
+    setCustomers(readLS(LS_KEYS.customers, []));
+    (async () => {
+      let dealers = readLS(LS_KEYS.customers, []);
+      try {
+        const rows = await fetchAllPages(axios, `${WHOLESALE_API}/dealers/`);
+        if (rows.length) dealers = rows.map(mapDealerFromApi);
+      } catch (e) {}
+      const invoices = await syncWholesaleInvoices(axios, dealers);
+      if (cancelled) return;
+      setCustomers(dealers);
+      setInvoicesRaw(invoices);
+    })();
+    return () => { cancelled = true; };
   }, []);
 
-  const allInvoices = useMemo(() => invoicesRaw.map(normaliseInvoice), [invoicesRaw]);
+  // Drafts were never billed and cancelled invoices were reversed — neither is revenue.
+  const allInvoices = useMemo(() => invoicesRaw
+    .filter(inv => inv.orderStatus !== 'Draft' && inv.status !== 'Draft' && inv.status !== 'Cancelled' && inv.orderStatus !== 'Cancelled')
+    .map(normaliseInvoice), [invoicesRaw]);
 
   const payModes = useMemo(
     () => ['All', ...Array.from(new Set(allInvoices.map(i => i.payMode))).filter(Boolean)],
