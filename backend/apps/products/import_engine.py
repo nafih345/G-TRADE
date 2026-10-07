@@ -9,10 +9,16 @@ single bad batch never aborts the rest of the import.
 """
 import csv
 import datetime
+import os
+import re
+import tempfile
+import threading
 import time
 import uuid
+import zipfile
 
 from django.db import transaction, close_old_connections, connections
+from django.utils import timezone
 from openpyxl import load_workbook
 
 from .models import Product, ImportBatch, ImportErrorLog
@@ -20,6 +26,13 @@ from .views import infer_category_name
 from .barcode_utils import reserve_barcodes
 
 CHUNK_SIZE = 500
+# A running job saves (and so bumps updated_at) after every chunk, which takes
+# seconds. Anything quiet for this long lost its thread (a server restart,
+# Render's free-tier spin-down, a redeploy) and gets resumed by the watchdog.
+STALE_AFTER_SECONDS = 180
+MAX_RESUMES = 5
+ACTIVE_STATUSES = ('PENDING', 'PROCESSING')
+ROW_TAG_RE = re.compile(rb'<(?:\w+:)?row[\s>]')
 NEEDS_BARCODE = '__NEEDS_BARCODE__'
 
 # Same fuzzy column-name matching the previous synchronous importer used,
@@ -197,10 +210,31 @@ def quick_count_total_rows(file_path, ext):
         return max(0, count - 1)
     if ext == 'xlsx':
         wb = load_workbook(file_path, read_only=True)
-        ws = wb.worksheets[0]
-        total = max(0, (ws.max_row or 1) - 1)
-        wb.close()
-        return total
+        try:
+            ws = wb.worksheets[0]
+            # The <dimension> tag is optional: files written by other tools omit it and
+            # openpyxl then reports max_row as None or 1, which showed "0 / 0" progress.
+            if ws.max_row and ws.max_row > 1:
+                return ws.max_row - 1
+            sheet_path = getattr(ws, '_worksheet_path', None)
+        finally:
+            wb.close()
+        if not sheet_path:
+            return 0
+        # Count <row> tags straight from the zipped XML: ~1s for 120k rows, where
+        # parsing the sheet through openpyxl just to count it takes ~25s.
+        count = 0
+        tail = b''
+        with zipfile.ZipFile(file_path) as zf, zf.open(sheet_path) as f:
+            while True:
+                block = f.read(1 << 20)
+                if not block:
+                    break
+                buf = tail + block
+                # Matches lying wholly inside the carried-over tail were counted last time.
+                count += sum(1 for m in ROW_TAG_RE.finditer(buf) if m.end() > len(tail))
+                tail = buf[-16:]
+        return max(0, count - 1)
     import pandas as pd
     df = pd.read_excel(file_path, dtype=str)
     return len(df)
@@ -392,28 +426,106 @@ def _process_chunk(batch, chunk_rows, resolved, duplicate_strategy,
     return imported, failed, duplicate
 
 
+_running_lock = threading.Lock()
+_running_ids = set()
+
+
+def start_import_thread(batch_id):
+    """Starts run_import_job on a daemon thread unless this process already runs it."""
+    key = str(batch_id)
+    with _running_lock:
+        if key in _running_ids:
+            return False
+        _running_ids.add(key)
+
+    def target():
+        try:
+            run_import_job(batch_id)
+        finally:
+            with _running_lock:
+                _running_ids.discard(key)
+
+    threading.Thread(target=target, daemon=True, name=f"import-{key[:8]}").start()
+    return True
+
+
+def resume_stalled_imports():
+    """
+    Restarts imports whose background thread died. Called from the polling
+    endpoints, so simply having the Import page open is enough to revive a job
+    after a restart. The conditional UPDATE is the claim: with several gunicorn
+    workers polling, only one of them wins a given stalled batch.
+    """
+    cutoff = timezone.now() - datetime.timedelta(seconds=STALE_AFTER_SECONDS)
+    stalled = (ImportBatch.objects
+               .filter(status__in=ACTIVE_STATUSES, updated_at__lt=cutoff, is_deleted=False)
+               .only('id', 'updated_at'))
+    for b in stalled:
+        with _running_lock:
+            if str(b.id) in _running_ids:
+                continue
+        claimed = ImportBatch.objects.filter(id=b.id, updated_at=b.updated_at).update(updated_at=timezone.now())
+        if claimed:
+            start_import_thread(b.id)
+
+
+def _materialize_file(batch, ext):
+    """Returns (path, is_temp). Prefers the media file; falls back to the DB copy."""
+    try:
+        if batch.file and os.path.exists(batch.file.path):
+            return batch.file.path, False
+    except Exception:
+        pass
+    if batch.file_data:
+        fd, tmp_path = tempfile.mkstemp(suffix=f'.{ext}')
+        with os.fdopen(fd, 'wb') as f:
+            f.write(bytes(batch.file_data))
+        return tmp_path, True
+    raise FileNotFoundError("The uploaded file is no longer on the server. Please upload it again.")
+
+
+def _log(batch, message):
+    batch.logs = (batch.logs or []) + [f"{datetime.datetime.now().strftime('%H:%M:%S')} - {message}"]
+
+
 def run_import_job(batch_id):
     close_old_connections()
     try:
         batch = ImportBatch.objects.get(id=batch_id)
     except ImportBatch.DoesNotExist:
         return
+    if batch.status not in ACTIVE_STATUSES:
+        return
 
     start_time = time.time()
+    tmp_path = None
     try:
+        # Resuming: every row up to processed_rows was committed together with its
+        # counters (see flush), so those rows are skipped rather than written twice.
+        skip_rows = batch.processed_rows or 0
+        resumes = sum(1 for line in (batch.logs or []) if 'Resuming' in str(line))
+        if batch.status == 'PROCESSING':
+            if resumes >= MAX_RESUMES:
+                raise RuntimeError(f"Import was interrupted {resumes} times without finishing; giving up.")
+            _log(batch, f"Resuming after interruption at row {skip_rows}")
+        else:
+            _log(batch, "Import started")
         batch.status = 'PROCESSING'
-        batch.save(update_fields=['status'])
+        batch.remarks = 'Importing in background...'
+        batch.save(update_fields=['status', 'remarks', 'logs', 'updated_at'])
 
         ext = detect_ext(batch.file_name)
-        file_path = batch.file.path
+        file_path, is_temp = _materialize_file(batch, ext)
+        if is_temp:
+            tmp_path = file_path
 
         total_rows = quick_count_total_rows(file_path, ext)
         headers, row_gen = open_row_stream(file_path, ext)
         resolved = resolve_field_headers(headers)
 
-        batch.total_rows = total_rows
+        batch.total_rows = max(total_rows, skip_rows)
         batch.column_headers = headers
-        batch.save(update_fields=['total_rows', 'column_headers'])
+        batch.save(update_fields=['total_rows', 'column_headers', 'updated_at'])
 
         existing_skus = set(Product.objects.exclude(sku__isnull=True).values_list('sku', flat=True))
         # barcode -> (product_name, sku), so a duplicate can both report which
@@ -425,65 +537,91 @@ def run_import_job(batch_id):
         }
         seen_barcodes_in_file = {}
 
-        processed = imported = failed = duplicate = 0
+        processed = skip_rows
+        imported = batch.imported_rows or 0
+        failed = batch.failed_rows or 0
+        duplicate = batch.duplicate_rows or 0
         chunk = []
+
+        def save_progress(p, i, f, d):
+            batch.processed_rows = p
+            batch.imported_rows = i
+            batch.failed_rows = f
+            batch.duplicate_rows = d
+            fields = ['processed_rows', 'imported_rows', 'failed_rows', 'duplicate_rows', 'updated_at']
+            if p > batch.total_rows:
+                batch.total_rows = p
+                fields.append('total_rows')
+            batch.save(update_fields=fields)
 
         def flush(chunk_rows):
             nonlocal processed, imported, failed, duplicate
             if not chunk_rows:
                 return
             try:
-                d_imported, d_failed, d_duplicate = _process_chunk(
-                    batch, chunk_rows, resolved, batch.duplicate_strategy,
-                    existing_skus, existing_barcodes, seen_barcodes_in_file
-                )
+                # Rows and progress counters commit together, so after a crash
+                # processed_rows is exactly where the resume has to pick up.
+                with transaction.atomic():
+                    d_imported, d_failed, d_duplicate = _process_chunk(
+                        batch, chunk_rows, resolved, batch.duplicate_strategy,
+                        existing_skus, existing_barcodes, seen_barcodes_in_file
+                    )
+                    save_progress(processed + len(chunk_rows), imported + d_imported,
+                                  failed + d_failed, duplicate + d_duplicate)
             except Exception as chunk_err:
-                ImportErrorLog.objects.bulk_create([
-                    ImportErrorLog(
-                        batch=batch, sheet_name='Sheet 1', row_number=r_no,
-                        product_code='', error_type='CHUNK_FAILED',
-                        error_message=str(chunk_err), raw_data=r_data
-                    ) for r_no, r_data in chunk_rows
-                ], batch_size=CHUNK_SIZE)
                 d_imported, d_failed, d_duplicate = 0, len(chunk_rows), 0
+                with transaction.atomic():
+                    ImportErrorLog.objects.bulk_create([
+                        ImportErrorLog(
+                            batch=batch, sheet_name='Sheet 1', row_number=r_no,
+                            product_code='', error_type='CHUNK_FAILED',
+                            error_message=str(chunk_err), raw_data=r_data
+                        ) for r_no, r_data in chunk_rows
+                    ], batch_size=CHUNK_SIZE)
+                    save_progress(processed + len(chunk_rows), imported, failed + d_failed, duplicate)
 
             processed += len(chunk_rows)
             imported += d_imported
             failed += d_failed
             duplicate += d_duplicate
-            batch.processed_rows = processed
-            batch.imported_rows = imported
-            batch.failed_rows = failed
-            batch.duplicate_rows = duplicate
-            batch.save(update_fields=['processed_rows', 'imported_rows', 'failed_rows', 'duplicate_rows'])
 
         row_no = 1  # header was row 1
         for row_dict in row_gen:
             row_no += 1
+            if row_no - 1 <= skip_rows:
+                continue
             chunk.append((row_no, row_dict))
             if len(chunk) >= CHUNK_SIZE:
                 flush(chunk)
                 chunk = []
         flush(chunk)
 
-        processing_time = round(time.time() - start_time, 2)
+        processing_time = round((batch.processing_time or 0) + time.time() - start_time, 2)
         batch.processing_time = processing_time
+        batch.total_rows = processed
         batch.status = 'SUCCESS' if failed == 0 else ('PARTIAL' if imported > 0 else 'FAILED')
         batch.remarks = (
             f"Imported {imported}, skipped/duplicate {duplicate}, failed {failed} "
             f"of {processed} rows read in {processing_time}s."
         )
-        batch.logs = (batch.logs or []) + [
-            f"{datetime.datetime.now().strftime('%H:%M:%S')} - Import finished: "
-            f"{imported} imported, {duplicate} duplicates, {failed} failed, {processing_time}s"
-        ]
-        batch.save(update_fields=['processing_time', 'status', 'remarks', 'logs'])
+        _log(batch, f"Import finished: {imported} imported, {duplicate} duplicates, "
+                    f"{failed} failed, {processing_time}s")
+        batch.file_data = None  # finished; the bytes were only kept for resuming
+        batch.save(update_fields=['processing_time', 'total_rows', 'status', 'remarks', 'logs',
+                                  'file_data', 'updated_at'])
     except Exception as e:
         try:
             batch.status = 'FAILED'
             batch.remarks = f"Import crashed: {e}"
-            batch.save(update_fields=['status', 'remarks'])
+            _log(batch, f"Import crashed: {e}")
+            batch.file_data = None
+            batch.save(update_fields=['status', 'remarks', 'logs', 'file_data', 'updated_at'])
         except Exception:
             pass
     finally:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
         connections.close_all()

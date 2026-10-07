@@ -1,29 +1,36 @@
 import React, { useState } from 'react';
 import axios from 'axios';
-import { Card, Typography, Button, TextField, MenuItem, Stack, Alert } from '@mui/material';
+import { Card, Typography, Button, TextField, MenuItem, Stack, Alert, LinearProgress } from '@mui/material';
 import { CloudUpload as UploadIcon } from '@mui/icons-material';
 
 export default function ImportUploadPanel({ onImportStarted }) {
   const [file, setFile] = useState(null);
   const [duplicateStrategy, setDuplicateStrategy] = useState('UPDATE');
   const [uploading, setUploading] = useState(false);
+  const [uploadPct, setUploadPct] = useState(0);
   const [error, setError] = useState(null);
 
   const handleUpload = async () => {
     if (!file) { setError('Please select an Excel or CSV file first.'); return; }
     setUploading(true);
+    setUploadPct(0);
     setError(null);
     const formData = new FormData();
     formData.append('file', file);
     formData.append('duplicate_strategy', duplicateStrategy);
     try {
       const res = await axios.post('/api/import/upload/', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' }
+        headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (ev) => { if (ev.total) setUploadPct(Math.round((ev.loaded / ev.total) * 100)); },
       });
       onImportStarted(res.data.batch_id);
       setFile(null);
     } catch (e) {
-      setError(e.response?.data?.error || 'Failed to start import. Please try again.');
+      const data = e.response?.data;
+      setError(
+        (data && typeof data === 'object' && data.error) ||
+        (e.response ? `Server error (${e.response.status}) while starting the import.` : 'Could not reach the server. Check your connection and try again.')
+      );
     } finally {
       setUploading(false);
     }
@@ -57,9 +64,19 @@ export default function ImportUploadPanel({ onImportStarted }) {
         </TextField>
 
         <Button variant="contained" onClick={handleUpload} disabled={uploading || !file} sx={{ fontWeight: 800, px: 3 }}>
-          {uploading ? 'Starting Import...' : 'Start Import'}
+          {uploading ? (uploadPct < 100 ? `Uploading ${uploadPct}%...` : 'Starting Import...') : 'Start Import'}
         </Button>
       </Stack>
+
+      {uploading && (
+        <LinearProgress variant="determinate" value={uploadPct} sx={{ mt: 2, height: 6, borderRadius: 3 }} />
+      )}
+      {file && !uploading && (
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1.5 }}>
+          {(file.size / (1024 * 1024)).toFixed(1)} MB selected. Once the upload finishes you can leave this page;
+          the import keeps running on the server.
+        </Typography>
+      )}
     </Card>
   );
 }

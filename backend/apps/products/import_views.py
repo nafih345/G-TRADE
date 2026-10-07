@@ -61,6 +61,13 @@ class ImportRowsPagination(PageNumberPagination):
     max_page_size = 500
 
 
+def _resume_stalled():
+    try:
+        import_engine.resume_stalled_imports()
+    except Exception as e:
+        print("Import watchdog notice:", e)
+
+
 def _batch_summary(b):
     return {
         'id': str(b.id),
@@ -109,19 +116,29 @@ def start_import(request):
     uploaded_by = request.data.get('uploaded_by', 'Administrator')
     batch_num = f"BATCH-{datetime.datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
 
-    with transaction.atomic():
-        batch = ImportBatch.objects.create(
-            batch_number=batch_num,
-            file=file_obj,
-            file_name=file_obj.name,
-            original_file_name=file_obj.name,
-            uploaded_by=uploaded_by,
-            status='PENDING',
-            duplicate_strategy=duplicate_strategy,
-            remarks='Queued for background import.'
-        )
-        transaction.on_commit(
-            lambda: threading.Thread(target=import_engine.run_import_job, args=(batch.id,), daemon=True).start()
+    file_bytes = file_obj.read()
+    file_obj.seek(0)
+    if not file_bytes:
+        return Response({'error': 'The selected file is empty.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        with transaction.atomic():
+            batch = ImportBatch.objects.create(
+                batch_number=batch_num,
+                file=file_obj,
+                file_data=file_bytes,
+                file_name=file_obj.name,
+                original_file_name=file_obj.name,
+                uploaded_by=uploaded_by,
+                status='PENDING',
+                duplicate_strategy=duplicate_strategy,
+                remarks='Queued for background import.'
+            )
+            transaction.on_commit(lambda: import_engine.start_import_thread(batch.id))
+    except Exception as e:
+        return Response(
+            {'error': f'Could not save the import to the database: {e}'.strip()},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE
         )
 
     return Response({
@@ -136,8 +153,9 @@ def start_import(request):
 @permission_classes([permissions.AllowAny])
 def get_import_status(request, pk):
     """Lightweight polling endpoint — just the progress counters, no row data."""
+    _resume_stalled()
     try:
-        batch = ImportBatch.objects.get(id=pk)
+        batch = ImportBatch.objects.defer('file_data').get(id=pk)
     except ImportBatch.DoesNotExist:
         return Response({'error': 'Import batch not found.'}, status=status.HTTP_404_NOT_FOUND)
     return Response(_batch_summary(batch))
@@ -222,7 +240,9 @@ def get_import_history(request):
         ImportBatch.objects.filter(is_deleted=True).delete()
         ImportBatch.objects.filter(status='DELETED').delete()
 
-        batches = ImportBatch.objects.filter(is_deleted=False).exclude(status='DELETED').order_by('-uploaded_date')
+        _resume_stalled()
+        batches = (ImportBatch.objects.filter(is_deleted=False).exclude(status='DELETED')
+                   .defer('file_data').order_by('-uploaded_date'))
         return Response([_batch_summary(b) for b in batches])
     except Exception as e:
         print("Notice getting import history:", e)

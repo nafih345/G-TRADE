@@ -150,7 +150,10 @@ function MainLayout() {
     return (
       <ThemeProvider theme={getTheme('light')}>
         <CssBaseline />
-        <Login />
+        <Routes>
+          <Route path="/super-admin/login" element={<Login key="super-admin" variant="superAdmin" />} />
+          <Route path="*" element={<Login key="staff" />} />
+        </Routes>
         <NotificationHost />
       </ThemeProvider>
     );
@@ -172,6 +175,7 @@ function MainLayout() {
             <Suspense fallback={<LinearProgress color="primary" sx={{ height: 3 }} />}>
               <Routes>
                 <Route path="/" element={<Dashboard />} />
+                <Route path="/super-admin/login" element={<Navigate to="/" replace />} />
                 
                 {/* Optical Services Sub-Routes */}
                 <Route path="/optical/eyetest" element={<OpticalServices />} />

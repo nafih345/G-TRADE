@@ -19,10 +19,18 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
         return self.request.user
 
 
+class IsSuperAdmin(permissions.BasePermission):
+    def has_permission(self, request, view):
+        u = request.user
+        return bool(u and u.is_authenticated and (u.is_superuser or u.role == 'SUPER_ADMIN'))
+
+
 class RegisterUserView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = UserSerializer
-    permission_classes = [permissions.AllowAny]  # In production, restrict this to Super Admin / Admin
+    # Was AllowAny, which let anyone create a SUPER_ADMIN account and walk past the
+    # login role gate (settings.LOGIN_ENABLED_ROLES).
+    permission_classes = [IsSuperAdmin]
 
     def perform_create(self, serializer):
         user = serializer.save()

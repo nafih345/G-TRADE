@@ -31,6 +31,10 @@ class ImportBatch(models.Model):
     file_name = models.CharField(max_length=255)
     original_file_name = models.CharField(max_length=255, blank=True, null=True)
     file = models.FileField(upload_to='import_batches/', blank=True, null=True)
+    # Copy of the uploaded bytes, kept only while the import is unfinished. Hosted
+    # containers (Render) lose MEDIA_ROOT on every restart/spin-down, so this is what
+    # lets a stalled import resume instead of dying with "file not found".
+    file_data = models.BinaryField(blank=True, null=True, editable=False)
     uploaded_by = models.CharField(max_length=150, default='Administrator')
     uploaded_date = models.DateTimeField(auto_now_add=True)
     status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='PENDING')

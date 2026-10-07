@@ -420,6 +420,16 @@ SIMPLE_JWT = {
     'USER_ID_CLAIM': 'user_id',
 }
 
+# Roles allowed to obtain a login token. Only Super Admin for now: the Admin / Manager /
+# Accountant / Cashier accounts and their permissions are not set up yet, so the login
+# endpoint refuses them (code "role_not_enabled"). Widen this list — or set
+# LOGIN_ENABLED_ROLES=SUPER_ADMIN,ADMINISTRATOR,... in the environment — once they are.
+LOGIN_ENABLED_ROLES = [
+    r.strip().upper()
+    for r in os.environ.get('LOGIN_ENABLED_ROLES', 'SUPER_ADMIN').split(',')
+    if r.strip()
+]
+
 # CORS Configuration
 #
 # A deployed backend should only answer browsers on the frontends we actually run, so the

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Box, Card, Typography, Button, Tab, Tabs, Stack, IconButton,
@@ -24,6 +24,9 @@ import ImportProgressCard from './ImportProgressCard';
 import VirtualizedProductGrid from './VirtualizedProductGrid';
 import FailedRecordsPanel from './FailedRecordsPanel';
 
+const ACTIVE_BATCH_KEY = 'excel_import_active_batch';
+const RUNNING_STATUSES = ['PENDING', 'PROCESSING'];
+
 const TABS = [
   { value: 'upload', label: 'Upload & Progress', icon: <UploadIcon /> },
   { value: 'preview', label: 'Data Preview', icon: <PreviewIcon /> },
@@ -37,7 +40,15 @@ export default function ExcelImportManager() {
   const [activeTab, setActiveTab] = useState('upload');
   const [alertMsg, setAlertMsg] = useState(null);
 
-  const [activeBatchId, setActiveBatchId] = useState(null);
+  // Remembered so leaving the page (or reloading) mid-import brings the live
+  // progress card straight back instead of an empty upload form.
+  const [activeBatchId, setActiveBatchIdState] = useState(() => {
+    try { return localStorage.getItem(ACTIVE_BATCH_KEY) || null; } catch (e) { return null; }
+  });
+  const setActiveBatchId = (id) => {
+    setActiveBatchIdState(id);
+    try { id ? localStorage.setItem(ACTIVE_BATCH_KEY, id) : localStorage.removeItem(ACTIVE_BATCH_KEY); } catch (e) {}
+  };
   const [previewBatch, setPreviewBatch] = useState(null); // { id, batch_number }
   const [errorsBatch, setErrorsBatch] = useState(null); // { id, batch_number }
 
@@ -48,14 +59,26 @@ export default function ExcelImportManager() {
   const { data: batches = [], refetch: refetchHistory } = useQuery({
     queryKey: ['import-history'],
     queryFn: async () => (await axios.get('/api/import/history/')).data || [],
+    refetchInterval: (query) => ((query.state.data || []).some(b => RUNNING_STATUSES.includes(b.status)) ? 3000 : false),
   });
+
+  // An import started from another tab/device (or before a reload that lost the
+  // remembered id) still gets its progress card.
+  useEffect(() => {
+    if (activeBatchId) return;
+    const running = batches.find(b => RUNNING_STATUSES.includes(b.status));
+    if (running) setActiveBatchId(running.id);
+  }, [batches, activeBatchId]);
 
   const handleImportStarted = (batchId) => {
     setActiveBatchId(batchId);
     setAlertMsg(null);
+    refetchHistory();
   };
 
   const handleImportDone = (batch) => {
+    // Keep the finished card on screen, but don't resurrect it on the next visit.
+    try { localStorage.removeItem(ACTIVE_BATCH_KEY); } catch (e) {}
     refetchHistory();
     queryClient.invalidateQueries({ queryKey: ['product-grid'] });
     setPreviewBatch({ id: batch.id, batch_number: batch.batch_number });
@@ -126,7 +149,7 @@ export default function ExcelImportManager() {
       {activeTab === 'upload' && (
         <>
           <ImportUploadPanel onImportStarted={handleImportStarted} />
-          <ImportProgressCard batchId={activeBatchId} onDone={handleImportDone} />
+          <ImportProgressCard batchId={activeBatchId} onDone={handleImportDone} onMissing={() => setActiveBatchId(null)} />
         </>
       )}
 
@@ -190,7 +213,7 @@ export default function ExcelImportManager() {
                     <TableCell>
                       <Chip
                         label={b.status} size="small" sx={{ fontWeight: 800 }}
-                        color={{ SUCCESS: 'success', PARTIAL: 'warning', FAILED: 'error', PROCESSING: 'primary' }[b.status] || 'default'}
+                        color={{ SUCCESS: 'success', PARTIAL: 'warning', FAILED: 'error', PROCESSING: 'primary', PENDING: 'info' }[b.status] || 'default'}
                       />
                     </TableCell>
                     <TableCell align="right" sx={{ fontWeight: 700 }}>{b.total_rows}</TableCell>
