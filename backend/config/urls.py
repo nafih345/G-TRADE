@@ -49,6 +49,14 @@ def health_check_view(request):
     except Exception as e:
         multi_branch = {"error": str(e)}
 
+    data_reset_epoch = None
+    try:
+        from apps.common.models import DataResetMarker
+        reset_at = DataResetMarker.current()
+        data_reset_epoch = reset_at.isoformat() if reset_at else None
+    except Exception:
+        pass  # table not migrated yet — no wipe to report
+
     # Which database the process actually resolved. Host, port, database name and TLS state
     # only — never the user, never the password. The outage this endpoint exists to catch was
     # the service booting against a DATABASE_URL whose Postgres had been deleted; without the
@@ -90,7 +98,9 @@ def health_check_view(request):
         "cors": getattr(settings, 'CORS_POLICY', 'unknown'),
         "allowed_origins": list(getattr(settings, 'CORS_ALLOWED_ORIGINS', [])),
         "multi_branch": multi_branch,
-        "app": "Optical ERP Backend",
+        # Last wipe_database run; browsers clear their cached records when this changes.
+        "data_reset_epoch": data_reset_epoch,
+        "app":"Optical ERP Backend",
         "version": "1.0.0"
     })
 

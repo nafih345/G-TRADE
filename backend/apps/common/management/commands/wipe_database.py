@@ -103,6 +103,10 @@ class Command(BaseCommand):
         if options['include_users']:
             self._wipe_users()
 
+        # Tell every browser its cached copies of the deleted records are now stale.
+        from apps.common.models import DataResetMarker
+        DataResetMarker.stamp()
+
         remaining = sum(self._row_counts(tables).values())
         self.stdout.write("")
         if remaining:

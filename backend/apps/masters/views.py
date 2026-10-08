@@ -90,7 +90,10 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         try:
-            if not ProductCategory.objects.exists():
+            # Seed only a brand-new install: after wipe_database the empty list is deliberate,
+            # and re-seeding here would undo the wipe on the very next page load.
+            from apps.common.models import DataResetMarker
+            if not ProductCategory.objects.exists() and DataResetMarker.current() is None:
                 for cat in DEFAULT_CATEGORIES:
                     ProductCategory.objects.get_or_create(code=cat['code'], defaults=cat)
         except Exception:

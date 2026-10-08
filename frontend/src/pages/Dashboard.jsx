@@ -22,7 +22,7 @@ import {
   CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend
 } from 'recharts';
 import { useNavigate } from 'react-router-dom';
-import axios from 'axios';
+import { fetchAllPages } from '../utils/fetchAllPages';
 
 export default function Dashboard() {
   const navigate = useNavigate();
@@ -37,56 +37,37 @@ export default function Dashboard() {
   // Fetch Live Database Data
   useEffect(() => {
     const fetchDashboardData = async () => {
-      // Local-storage pools first (both, before any await) so the page paints instantly
-      // instead of purchaseOrders sitting blank behind the Eye Tests/Products network calls.
-      try {
-        const savedSales = JSON.parse(localStorage.getItem('optical_sales_invoices') || '[]');
-        setSalesInvoices(savedSales);
-      } catch (e) {}
-      try {
-        const savedPos = JSON.parse(localStorage.getItem('optical_purchase_orders') || '[]');
-        setPurchaseOrders(savedPos);
-      } catch (e) {}
+      // The database is the source of truth: a successful response replaces state even when it
+      // is empty, otherwise a cleared database kept showing stale browser copies. The
+      // localStorage pools are only an offline fallback, used when the API can't be reached.
+      // Lists are paginated (PAGE_SIZE 20), so read every page rather than a bare array.
+      const readLocal = (key) => {
+        try { return JSON.parse(localStorage.getItem(key) || '[]'); } catch (e) { return []; }
+      };
 
       // 1. Sales Invoices
       try {
-        const invRes = await axios.get('/api/sales/invoices/?document_type=INVOICE');
-        if (invRes.data && Array.isArray(invRes.data) && invRes.data.length > 0) {
-          setSalesInvoices(invRes.data);
-        }
-      } catch (e) {}
+        setSalesInvoices(await fetchAllPages('/api/sales/invoices/?document_type=INVOICE'));
+      } catch (e) {
+        setSalesInvoices(readLocal('optical_sales_invoices'));
+      }
 
       // 2. Eye Tests
       try {
-        const examRes = await axios.get('/api/sales/eye-examinations/');
-        if (examRes.data && Array.isArray(examRes.data)) {
-          setEyeTests(examRes.data);
-        }
+        setEyeTests(await fetchAllPages('/api/sales/eye-examinations/'));
       } catch (e) {}
 
       // 3. Products / Low Stock
       try {
-        const prodRes = await axios.get('/api/products/items/');
-        if (prodRes.data && Array.isArray(prodRes.data)) {
-          setProducts(prodRes.data);
-        }
+        setProducts(await fetchAllPages('/api/products/items/'));
       } catch (e) {}
 
       // 4. Purchase Orders
       try {
-        let poRes;
-        try {
-          poRes = await axios.get('/api/purchasing/orders/');
-        } catch (e1) {
-          poRes = await axios.get('/api/purchase/orders/');
-        }
-        if (poRes?.data) {
-          const poList = Array.isArray(poRes.data) ? poRes.data : (poRes.data.results || []);
-          if (poList.length > 0) {
-            setPurchaseOrders(poList);
-          }
-        }
-      } catch (e) {}
+        setPurchaseOrders(await fetchAllPages('/api/purchase/orders/'));
+      } catch (e) {
+        setPurchaseOrders(readLocal('optical_purchase_orders'));
+      }
     };
 
     fetchDashboardData();
@@ -284,7 +265,7 @@ export default function Dashboard() {
                 {salesInvoices.length > 0 && (
                   <AlertItem 
                     title="Order Assembly Pending" 
-                    desc={`Order ${salesInvoices[0].invoiceNumber || salesInvoices[0].id} for ${salesInvoices[0].customerName || 'Patient'} requires lens fitting.`} 
+                    desc={`Order ${salesInvoices[0].invoice_number || salesInvoices[0].invoiceNumber || salesInvoices[0].id} for ${salesInvoices[0].customer_name || salesInvoices[0].customerName || 'Patient'} requires lens fitting.`} 
                     severity="info" 
                   />
                 )}
@@ -379,9 +360,9 @@ export default function Dashboard() {
                     ) : (
                       salesInvoices.slice(0, 5).map((row) => (
                         <TableRow key={row.id} hover>
-                          <TableCell sx={{ fontWeight: 700, color: '#2563EB' }}>{row.invoiceNumber || row.id}</TableCell>
-                          <TableCell sx={{ fontWeight: 600 }}>{row.customerName || 'Walk-in Patient'}</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>₹{(parseFloat(row.total || 0)).toFixed(2)}</TableCell>
+                          <TableCell sx={{ fontWeight: 700, color: '#2563EB' }}>{row.invoice_number || row.invoiceNumber || row.id}</TableCell>
+                          <TableCell sx={{ fontWeight: 600 }}>{row.customer_name || row.customerName || 'Walk-in Patient'}</TableCell>
+                          <TableCell sx={{ fontWeight: 700 }}>₹{(parseFloat(row.net_amount || row.total || 0)).toFixed(2)}</TableCell>
                           <TableCell>
                             <Chip label="Paid" color="success" size="small" sx={{ fontWeight: 700 }} />
                           </TableCell>

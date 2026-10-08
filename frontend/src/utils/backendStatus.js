@@ -6,6 +6,7 @@
 // was gone. resolveApiBaseUrl() makes the target repointable without a rebuild;
 // installBackendHealthWatch() makes a dead target visible.
 import axios from 'axios';
+import { clearLocalDataIfReset } from './localDataReset';
 
 export const API_BASE_OVERRIDE_KEY = 'api_base_url';
 
@@ -79,6 +80,10 @@ export async function checkBackendHealth() {
   const baseUrl = axios.defaults.baseURL || '(same origin)';
   try {
     const { data } = await axios.get('/api/health/', { timeout: 90000 });
+    if (clearLocalDataIfReset(data?.data_reset_epoch)) {
+      window.location.reload();
+      return state;
+    }
     if (data?.status === 'ok') {
       setState({ status: 'ok', detail: '', baseUrl, source: 'health' });
       return state;

@@ -57,3 +57,26 @@ class BaseUUIDModel(models.Model):
 
     def hard_delete(self, using=None, keep_parents=False):
         super().delete(using=using, keep_parents=keep_parents)
+
+
+class DataResetMarker(models.Model):
+    """When the business data was last wiped (see the wipe_database command).
+
+    Browsers keep their own copies of sales, patients and payments in localStorage, and the
+    Sales screens merge those copies back in so offline work is never lost. After a wipe that
+    merge would bring the deleted rows straight back, so /api/health/ publishes this stamp and
+    each browser drops its cached records the first time it sees a new one. Lives in `common`
+    because wipe_database never truncates this app.
+    """
+    reset_at = models.DateTimeField()
+
+    @classmethod
+    def current(cls):
+        marker = cls.objects.order_by('-reset_at').first()
+        return marker.reset_at if marker else None
+
+    @classmethod
+    def stamp(cls):
+        from django.utils import timezone
+        cls.objects.all().delete()
+        return cls.objects.create(reset_at=timezone.now()).reset_at
