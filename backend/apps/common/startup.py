@@ -51,18 +51,24 @@ def run_startup_migrations():
         targets = executor.loader.graph.leaf_nodes()
         plan = executor.migration_plan(targets)
 
+        from django.core.management import call_command
         if not plan:
             logger.info("AUTO_MIGRATE: database schema is up to date.")
-            return
-
-        pending = ", ".join(f"{m.app_label}.{m.name}" for m, _ in plan)
-        logger.warning("AUTO_MIGRATE: applying %d pending migration(s): %s", len(plan), pending)
-
-        from django.core.management import call_command
-        call_command('migrate', interactive=False, verbosity=1)
-        logger.warning("AUTO_MIGRATE: migrations applied successfully.")
+        else:
+            pending = ", ".join(f"{m.app_label}.{m.name}" for m, _ in plan)
+            logger.warning("AUTO_MIGRATE: applying %d pending migration(s): %s", len(plan), pending)
+            call_command('migrate', interactive=False, verbosity=1)
+            logger.warning("AUTO_MIGRATE: migrations applied successfully.")
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("AUTO_MIGRATE: failed to apply migrations: %s", exc)
+        return
+
+    # A wiped database has no users, so nobody could sign in. bootstrap_admin is a no-op
+    # once the account exists (see that command for where the credentials come from).
+    try:
+        call_command('bootstrap_admin', verbosity=0)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.exception("bootstrap_admin at startup failed: %s", exc)
 
 
 def run_migrations_now(reason=""):

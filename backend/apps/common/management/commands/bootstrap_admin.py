@@ -13,9 +13,13 @@ Reads the same variable names Django's own `createsuperuser --noinput` uses:
 
 import os
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
 from django.db.utils import OperationalError, ProgrammingError
+
+
+DEV_SUPERUSER = ('superadmin', 'superadmin321')
 
 
 class Command(BaseCommand):
@@ -32,6 +36,12 @@ class Command(BaseCommand):
         username = os.environ.get('DJANGO_SUPERUSER_USERNAME', '').strip()
         password = os.environ.get('DJANGO_SUPERUSER_PASSWORD', '')
         email = os.environ.get('DJANGO_SUPERUSER_EMAIL', '').strip() or None
+
+        # Local development only: fall back to the agreed dev login so a wiped local database
+        # never leaves the app with no way in. Never applies with DEBUG off (the hosted
+        # deploy), where the account must come from the env vars above.
+        if not username and not password and settings.DEBUG:
+            username, password = DEV_SUPERUSER
 
         if not username or not password:
             self.stdout.write(
