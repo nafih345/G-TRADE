@@ -87,7 +87,7 @@ export const AuthProvider = ({ children }) => {
    *                         is only Super Admin, typed in directly — e.g. superadmin).
    *
    * Returns { success: true } or { success: false, reason } where reason is one of
-   * 'invalid_credentials' | 'role_not_enabled' | 'not_super_admin' | 'network'.
+   * 'invalid_credentials' | 'role_not_enabled' | 'not_super_admin' | 'network' | 'server'.
    */
   const login = async (username, password, { portal = 'staff' } = {}) => {
     let data;
@@ -98,6 +98,8 @@ export const AuthProvider = ({ children }) => {
       if (!res) return { success: false, reason: 'network' };
       const code = res.data?.code;
       if (code === 'role_not_enabled') return { success: false, reason: 'role_not_enabled' };
+      // A 5xx (e.g. the database is unreachable) is not a wrong password — don't say it is.
+      if (res.status >= 500) return { success: false, reason: 'server' };
       return { success: false, reason: 'invalid_credentials' };
     }
 

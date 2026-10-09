@@ -44,18 +44,24 @@ const STAFF_NOT_CONFIGURED =
   'Account not configured — access denied. Sign-in for Admin, Manager, Accountant and Cashier '
   + 'is disabled until those roles and their permissions are set up.';
 
+const SERVER_ERROR =
+  'The server could not process the sign-in (it may not be able to reach its database). '
+  + 'Please try again shortly or contact the administrator.';
+
 // Messages per login() failure reason (see AuthContext), for each sign-in page.
 const ERRORS = {
   staff: {
     invalid_credentials: 'Invalid username or password.',
     role_not_enabled: STAFF_NOT_CONFIGURED,
     network: 'Cannot reach the server. Check your connection and try again.',
+    server: SERVER_ERROR,
   },
   superAdmin: {
     invalid_credentials: 'Invalid username or password.',
     role_not_enabled: 'This account is not a Super Admin. Access denied.',
     not_super_admin: 'This account is not a Super Admin. Access denied.',
     network: 'Cannot reach the server. Check your connection and try again.',
+    server: SERVER_ERROR,
   },
 };
 
