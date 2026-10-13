@@ -1507,6 +1507,13 @@ export default function NewSaleWizard({
 
   // Live, uncommitted line for a product formally chosen in the Optical DB selector — shown as
   // a highlighted preview row in the billing grid so staff see the full detail line before Add.
+  // Stock as the products list has it now (it's reloaded after every sale / stock change), so a
+  // line picked before the reload doesn't keep showing the figure from when it was picked.
+  const liveStock = (productId, fallback) => {
+    if (!productId) return fallback;
+    const p = products.find(x => String(x.id) === String(productId));
+    return p ? (p.stock ?? p.qty ?? fallback) : fallback;
+  };
   const previewSource = entryInput.item ? entryInput : null;
   const previewLine = previewSource ? computeEntryLine(previewSource) : null;
 
@@ -2671,7 +2678,7 @@ export default function NewSaleWizard({
                 {(selectedProductDetail.category || selectedProductDetail.type) && (
                   <Chip size="small" label={`Category: ${(selectedProductDetail.category || selectedProductDetail.type).toString().toUpperCase()}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
                 )}
-                <Chip size="small" label={`Stock: ${selectedProductDetail.stock ?? '—'}`} color={parseInt(selectedProductDetail.stock) > 0 ? 'success' : 'error'} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
+                <Chip size="small" label={`Stock: ${liveStock(selectedProductDetail.id, selectedProductDetail.stock) ?? '—'}`} color={parseInt(liveStock(selectedProductDetail.id, selectedProductDetail.stock)) > 0 ? 'success' : 'error'} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
                 <Chip size="small" label={`Price: ₹${selectedProductDetail.price || selectedProductDetail.sellingPrice || 0}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
                 {selectedProductDetail.barcode && (
                   <Chip size="small" label={`Barcode: ${selectedProductDetail.barcode}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
@@ -2852,9 +2859,9 @@ export default function NewSaleWizard({
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6, flexWrap: 'wrap' }}>
                           <Chip label="PREVIEW" size="small" color="info" sx={{ fontWeight: 900, height: 18, fontSize: '0.6rem' }} />
                           {previewSource.item}
-                          {previewSource.stock != null && (
-                            <Box component="span" sx={{ fontSize: '0.65rem', fontWeight: 800, color: parseInt(previewSource.stock) > 0 ? 'success.main' : 'error.main' }}>
-                              Stock: {previewSource.stock}
+                          {liveStock(previewSource.productId, previewSource.stock) != null && (
+                            <Box component="span" sx={{ fontSize: '0.65rem', fontWeight: 800, color: parseInt(liveStock(previewSource.productId, previewSource.stock)) > 0 ? 'success.main' : 'error.main' }}>
+                              Stock: {liveStock(previewSource.productId, previewSource.stock)}
                             </Box>
                           )}
                         </Box>

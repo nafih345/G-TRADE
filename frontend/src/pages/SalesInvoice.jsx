@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, lazy, Suspense } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, lazy, Suspense } from 'react';
 import axios from 'axios';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { normalizeSalesRow, summarizeLines, rowCustomerName, rowPayment } from '../utils/salesDocStatus';
@@ -87,6 +87,53 @@ const normalizeTaxPercent = (...candidates) => {
     if (!isNaN(n)) return n;
   }
   return 18;
+};
+
+// A /api/products/products/ row in the shape the New Sale / POS pickers read.
+const formatApiProduct = (p) => ({
+  id: String(p.id || p.product_id),
+  name: p.name || p.product_name,
+  brand: p.brand || 'Generic',
+  type: p.category_name || p.category || (p.type || 'Frame'),
+  category: p.category || p.category_name || (p.type || 'Frame'),
+  price: parseFloat(p.price || p.selling_price || p.unit_price || 0),
+  costPrice: parseFloat(p.cost_price || 0),
+  taxRate: normalizeTaxPercent(p.tax_rate, p.gst),
+  stock: parseInt(p.stock, 10) || 0,
+  barcode: p.barcode || '',
+  extra_barcodes: p.extra_barcodes || [],
+  sku: p.sku || p.product_code || '',
+  hsn_code: p.hsn_code || '',
+  colour: p.colour || p.color || '',
+  size: p.size || '',
+  frameType: p.frame_type || '',
+  rack: p.rack || p.rack_location || '',
+  supplier: p.supplier || p.supplier_name || '',
+  description: p.description || '',
+  extra_data: p.extra_data || {},
+  image: (p.category_name || p.category || p.type || '').toLowerCase().includes('lens') ? '🔍' : '👓'
+});
+
+// The database is the source of truth for stock: API rows replace any same-id copy (including
+// the localStorage first-paint copy), and the browser cache's stock is corrected to match so the
+// next first paint doesn't flash the stale opening figure again.
+const mergeApiProducts = (prev, prodList) => {
+  const apiFormatted = prodList.map(formatApiProduct);
+  const map = new Map();
+  [...prev, ...apiFormatted].forEach(item => map.set(item.id || item.name, item));
+  try {
+    const stockById = new Map(apiFormatted.map(p => [p.id, p.stock]));
+    const local = JSON.parse(localStorage.getItem('optical_inventory_items') || '[]');
+    let changed = false;
+    const synced = local.map(it => {
+      const s = stockById.get(String(it.id));
+      if (s === undefined || parseInt(it.stock, 10) === s) return it;
+      changed = true;
+      return { ...it, stock: s };
+    });
+    if (changed) localStorage.setItem('optical_inventory_items', JSON.stringify(synced));
+  } catch (e) {}
+  return Array.from(map.values());
 };
 
 // --- MASTER DATABASE ARRAYS (Starts blank until entered/fetched from DB) ---
@@ -218,35 +265,8 @@ export default function SalesInvoice() {
           })));
         }
 
-        if (prodList.length > 0) {
-          const apiFormatted = prodList.map(p => ({
-            id: String(p.id || p.product_id),
-            name: p.name || p.product_name,
-            brand: p.brand || 'Generic',
-            type: p.category_name || p.category || (p.type || 'Frame'),
-            category: p.category || p.category_name || (p.type || 'Frame'),
-            price: parseFloat(p.price || p.selling_price || p.unit_price || 0),
-            costPrice: parseFloat(p.cost_price || 0),
-            taxRate: normalizeTaxPercent(p.tax_rate, p.gst),
-            stock: p.stock || 0,
-            barcode: p.barcode || '',
-            extra_barcodes: p.extra_barcodes || [],
-            sku: p.sku || p.product_code || '',
-            hsn_code: p.hsn_code || '',
-            colour: p.colour || p.color || '',
-            size: p.size || '',
-            frameType: p.frame_type || '',
-            rack: p.rack || p.rack_location || '',
-            supplier: p.supplier || p.supplier_name || '',
-            description: p.description || '',
-            extra_data: p.extra_data || {},
-            image: (p.category_name || p.category || p.type || '').toLowerCase().includes('lens') ? '🔍' : '👓'
-          }));
-          setProducts(prev => {
-            const map = new Map();
-            [...prev, ...apiFormatted].forEach(item => map.set(item.id || item.name, item));
-            return Array.from(map.values());
-          });
+        if (Array.isArray(prodList) && prodList.length > 0) {
+          setProducts(prev => mergeApiProducts(prev, prodList));
         }
 
         if (invList.length > 0) {
@@ -415,6 +435,35 @@ export default function SalesInvoice() {
     window.addEventListener('optical_stock_updated', fetchOpticalDbData);
     return () => window.removeEventListener('optical_stock_updated', fetchOpticalDbData);
   }, []);
+
+  // Products-only reload so the stock shown in the New Sale / POS pickers follows the database
+  // after every sale, purchase, return or edit — not just the figure from when this page opened.
+  const refreshProducts = useCallback(async () => {
+    try {
+      const res = await axios.get('/api/products/products/');
+      const prodList = (res && res.data && res.data.results) || (res && res.data) || [];
+      if (Array.isArray(prodList) && prodList.length > 0) {
+        setProducts(prev => mergeApiProducts(prev, prodList));
+      }
+    } catch (e) {}
+  }, []);
+
+  // Pick up stock moved on another screen, tab or device when staff come back to this one.
+  useEffect(() => {
+    const onFocus = () => refreshProducts();
+    const onVisible = () => { if (document.visibilityState === 'visible') refreshProducts(); };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [refreshProducts]);
+
+  // Entering a billing tab always starts from the current stock.
+  useEffect(() => {
+    if (activeTab === 'new-sale' || activeTab === 'pos-billing') refreshProducts();
+  }, [activeTab, refreshProducts]);
 
   // Handle auto-population when returning from Eye Test section
   useEffect(() => {
@@ -899,6 +948,8 @@ export default function SalesInvoice() {
           onCancelEdit={() => navigate('/sales/orders')}
           onNavigateToEyeTest={() => navigate('/optical/eyetest')}
           onCheckoutComplete={(completedOrder) => {
+            // The sale just moved stock on the server — reload so the next search shows it.
+            refreshProducts();
             const lines = summarizeLines(completedOrder.items);
             const newOrd = normalizeSalesRow({
               id: completedOrder.id || `INV-${Math.floor(1000 + Math.random() * 9000)}`,
@@ -953,6 +1004,8 @@ export default function SalesInvoice() {
           customers={customersWithLoyalty}
           onOpenRecordPayment={() => setRecordPaymentDialogOpen(true)}
           onCheckoutComplete={(completedOrder) => {
+            // The sale just moved stock on the server — reload so the next search shows it.
+            refreshProducts();
             const newOrd = normalizeSalesRow({
               id: completedOrder.id || `INV-${Math.floor(1000 + Math.random() * 9000)}`,
               invoiceNumber: completedOrder.invoiceNumber || completedOrder.id,
