@@ -15,9 +15,13 @@ import {
   Inventory2 as StockIcon,
   Straighten as SizeIcon,
   Info as InfoIcon,
-  DeleteOutline as DeleteIcon
+  DeleteOutline as DeleteIcon,
+  EditOutlined as EditIcon,
+  Check as SaveIcon,
+  Close as CloseIcon
 } from '@mui/icons-material';
 import BarcodeSection from './BarcodeSection';
+import { notify } from '../../utils/notify';
 
 export const opticalCategories = [
   'Frames', 'Prescription Lenses', 'Sunglasses', 'Contact Lenses',
@@ -36,8 +40,20 @@ const LS_KEYS = {
   subCategory: 'optical_attr_subcategories',
   group: 'optical_attr_groups',
   size: 'optical_attr_sizes',
-  color: 'optical_attr_colors'
+  color: 'optical_attr_colors',
+  material: 'optical_attr_materials',
+  refractive: 'optical_attr_refractive_indexes',
+  lensDesign: 'optical_attr_lens_designs',
+  coating: 'optical_attr_coatings',
+  // Built-in category/brand names the user deleted or renamed, so the fallback
+  // lists above don't bring them back.
+  hiddenCategories: 'optical_attr_hidden_categories',
+  hiddenBrands: 'optical_attr_hidden_brands'
 };
+const DEFAULT_MATERIALS = ['Acetate', 'TR90', 'Metal', 'Titanium', 'Stainless Steel', 'Polycarbonate', 'CR39'];
+const DEFAULT_REFRACTIVE = ['1.50 Standard CR39', '1.56 Mid Index Blue Cut', '1.60 Hi-Index', '1.67 Ultra Thin', '1.74 Super High Index'];
+const DEFAULT_LENS_DESIGNS = ['Single Vision', 'Progressive Digital', 'Bifocal D-Seg', 'Office / Workspace'];
+const DEFAULT_COATINGS = ['Anti-Glare (ARC)', 'Blue Cut UV420', 'Photochromic Auto-Tint', 'Polarized Sun Shield', 'Hard Coated Scratch Resistant'];
 
 const DEFAULT_GROUPS = ['Optical Frame', 'Sunglass', 'Ophthalmic Lens', 'Contact Lens', 'Accessory', 'Solution & Care'];
 const DEFAULT_SIZES = ['Small', 'Medium', 'Large', '48-18-140', '50-20-145', '52-18-140', '54-16-140', '56-16-145'];
@@ -46,8 +62,10 @@ const DEFAULT_SUBCATEGORIES = ['Full Rim', 'Half Rim / Supra', 'Rimless', 'Titan
 
 const readList = (key, fallback) => {
   try {
-    const arr = JSON.parse(localStorage.getItem(key) || '[]');
-    return Array.isArray(arr) && arr.length ? arr : fallback;
+    const raw = localStorage.getItem(key);
+    if (raw == null) return fallback;
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : fallback;
   } catch {
     return fallback;
   }
@@ -71,23 +89,155 @@ const blankProduct = (overrides = {}) => ({
   ...overrides
 });
 
-// A freeSolo select with a "+" that persists a brand-new option (to the backend
-// master where one exists, otherwise to a local list).
-function AttributeField({ label, value, onChange, options, onPersist, disabled }) {
+// A freeSolo select with a "+" that opens a small master for the option list:
+// add a new entry, rename one or delete one (to the backend master where one
+// exists, otherwise to a local list).
+function AttributeField({ label, value, onChange, options, onPersist, onRename, onRemove, disabled }) {
   const [addOpen, setAddOpen] = useState(false);
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
+  const [filter, setFilter] = useState('');
+  const [editing, setEditing] = useState(null); // { from, to }
+
+  const canManage = Boolean(onRename || onRemove);
 
   const commit = async () => {
     const v = draft.trim();
     if (!v) return;
+    if (options.some(o => o.toLowerCase() === v.toLowerCase())) {
+      notify(`"${v}" already exists in ${label}.`);
+      return;
+    }
     setBusy(true);
     try { await onPersist?.(v); } catch {}
     setBusy(false);
     onChange(v);
-    setAddOpen(false);
     setDraft('');
+    if (!canManage) setAddOpen(false);
   };
+
+  const saveRename = async () => {
+    const from = editing?.from;
+    const to = (editing?.to || '').trim();
+    if (!from || !to || to === from) { setEditing(null); return; }
+    if (options.some(o => o !== from && o.toLowerCase() === to.toLowerCase())) {
+      notify(`"${to}" already exists in ${label}.`);
+      return;
+    }
+    setBusy(true);
+    try { await onRename(from, to); } catch { notify(`Could not rename "${from}".`); }
+    setBusy(false);
+    if (value === from) onChange(to);
+    setEditing(null);
+  };
+
+  const remove = async (name) => {
+    if (!window.confirm(`Delete "${name}" from ${label}?`)) return;
+    setBusy(true);
+    try { await onRemove(name); } catch { notify(`Could not delete "${name}".`); }
+    setBusy(false);
+    if (value === name) onChange('');
+  };
+
+  const shown = options.filter(o => o.toLowerCase().includes(filter.trim().toLowerCase()));
+  const close = () => { setAddOpen(false); setEditing(null); setFilter(''); };
+
+  if (canManage) {
+    return (
+      <>
+        <Stack direction="row" spacing={0.5} alignItems="flex-start">
+          <Autocomplete
+            freeSolo
+            fullWidth
+            size="small"
+            disabled={disabled}
+            options={options}
+            value={value || ''}
+            onInputChange={(e, v) => onChange(v || '')}
+            onChange={(e, v) => onChange(v || '')}
+            renderInput={(params) => <TextField {...params} label={label} />}
+          />
+          <Tooltip title={`Add / Edit / Delete ${label}`}>
+            <span>
+              <IconButton size="small" color="primary" sx={{ mt: 0.3 }} disabled={disabled} onClick={() => { setDraft(''); setAddOpen(true); }}>
+                <AddIcon fontSize="small" />
+              </IconButton>
+            </span>
+          </Tooltip>
+        </Stack>
+
+        <Dialog open={addOpen} onClose={close} maxWidth="xs" fullWidth>
+          <DialogTitle sx={{ fontWeight: 800 }}>{label} Master</DialogTitle>
+          <DialogContent>
+            <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
+              <TextField
+                autoFocus fullWidth size="small" label={`New ${label}`} value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } }}
+              />
+              <Button variant="contained" onClick={commit} disabled={busy || !draft.trim()} startIcon={<AddIcon />}>Add</Button>
+            </Stack>
+
+            <Divider sx={{ my: 2 }} />
+
+            <TextField
+              fullWidth size="small" placeholder={`Search ${label}…`} value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              sx={{ mb: 1 }}
+            />
+            <Box sx={{ maxHeight: 320, overflowY: 'auto', border: 1, borderColor: 'divider', borderRadius: 2 }}>
+              {shown.length === 0 && (
+                <Typography variant="body2" color="text.secondary" sx={{ p: 2, textAlign: 'center' }}>No entries</Typography>
+              )}
+              {shown.map((o, i) => (
+                <Stack
+                  key={o}
+                  direction="row" alignItems="center" spacing={1}
+                  sx={{ px: 1.5, py: 0.5, borderTop: i ? 1 : 0, borderColor: 'divider', bgcolor: o === value ? 'action.selected' : 'transparent' }}
+                >
+                  {editing?.from === o ? (
+                    <>
+                      <TextField
+                        autoFocus fullWidth size="small" value={editing.to}
+                        onChange={(e) => setEditing({ from: o, to: e.target.value })}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') { e.preventDefault(); saveRename(); }
+                          if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setEditing(null); }
+                        }}
+                      />
+                      <Tooltip title="Save"><span><IconButton size="small" color="success" disabled={busy} onClick={saveRename}><SaveIcon fontSize="small" /></IconButton></span></Tooltip>
+                      <Tooltip title="Cancel"><IconButton size="small" onClick={() => setEditing(null)}><CloseIcon fontSize="small" /></IconButton></Tooltip>
+                    </>
+                  ) : (
+                    <>
+                      <Typography
+                        variant="body2" sx={{ flex: 1, cursor: 'pointer', fontWeight: o === value ? 800 : 500 }}
+                        onClick={() => { onChange(o); close(); }}
+                      >
+                        {o}
+                      </Typography>
+                      {onRename && (
+                        <Tooltip title="Edit"><span><IconButton size="small" color="primary" disabled={busy} onClick={() => setEditing({ from: o, to: o })}><EditIcon fontSize="small" /></IconButton></span></Tooltip>
+                      )}
+                      {onRemove && (
+                        <Tooltip title="Delete"><span><IconButton size="small" color="error" disabled={busy} onClick={() => remove(o)}><DeleteIcon fontSize="small" /></IconButton></span></Tooltip>
+                      )}
+                    </>
+                  )}
+                </Stack>
+              ))}
+            </Box>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+              Click a name to select it for this product.
+            </Typography>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={close}>Close</Button>
+          </DialogActions>
+        </Dialog>
+      </>
+    );
+  }
 
   return (
     <>
@@ -198,8 +348,15 @@ export default function ProductMasterDialog({
   const [groupOptions, setGroupOptions] = useState(() => readList(LS_KEYS.group, DEFAULT_GROUPS));
   const [sizeOptions, setSizeOptions] = useState(() => readList(LS_KEYS.size, DEFAULT_SIZES));
   const [colorOptions, setColorOptions] = useState(() => readList(LS_KEYS.color, DEFAULT_COLORS));
+  const [materialOptions, setMaterialOptions] = useState(() => readList(LS_KEYS.material, DEFAULT_MATERIALS));
+  const [refractiveOptions, setRefractiveOptions] = useState(() => readList(LS_KEYS.refractive, DEFAULT_REFRACTIVE));
+  const [lensDesignOptions, setLensDesignOptions] = useState(() => readList(LS_KEYS.lensDesign, DEFAULT_LENS_DESIGNS));
+  const [coatingOptions, setCoatingOptions] = useState(() => readList(LS_KEYS.coating, DEFAULT_COATINGS));
+  // name → backend id for the two lists that live in the masters tables.
+  const [categoryRecords, setCategoryRecords] = useState({});
+  const [brandRecords, setBrandRecords] = useState({});
 
-  const set = (patch) => setP(prev => ({ ...prev, ...patch }));
+  const set =(patch) => setP(prev => ({ ...prev, ...patch }));
 
   useEffect(() => {
     if (!open) return;
@@ -209,33 +366,85 @@ export default function ProductMasterDialog({
     setImageFile(null);
     setImagePreview(isEdit ? (editProduct.image || '') : '');
 
-    axios.get('/api/masters/categories/')
-      .then(r => {
-        const names = (r.data?.results || r.data || []).map(c => c.name).filter(Boolean);
-        if (names.length) setCategoryOptions(Array.from(new Set([...names, ...opticalCategories])));
-      }).catch(() => {});
-    axios.get('/api/masters/brands/')
-      .then(r => {
-        const names = (r.data?.results || r.data || []).map(b => b.name).filter(Boolean);
-        if (names.length) setBrandOptions(Array.from(new Set([...names, ...opticalBrands])));
-      }).catch(() => {});
+    const loadMaster = (url, defaults, hiddenKey, setOptions, setRecords) =>
+      axios.get(url)
+        .then(r => {
+          const rows = (r.data?.results || r.data || []).filter(x => x?.name);
+          const hidden = new Set(readList(hiddenKey, []));
+          const records = {};
+          rows.forEach(x => { records[x.name] = x.id; });
+          setRecords(records);
+          setOptions(Array.from(new Set([...rows.map(x => x.name), ...defaults.filter(d => !hidden.has(d))])));
+        }).catch(() => {
+          const hidden = new Set(readList(hiddenKey, []));
+          setOptions(defaults.filter(d => !hidden.has(d)));
+        });
+    loadMaster('/api/masters/categories/', opticalCategories, LS_KEYS.hiddenCategories, setCategoryOptions, setCategoryRecords);
+    loadMaster('/api/masters/brands/', opticalBrands, LS_KEYS.hiddenBrands, setBrandOptions, setBrandRecords);
   }, [open, defaultSupplier, defaultCategory, isEdit, editProduct]);
 
-  const persistCategory = async (name) => {
-    setCategoryOptions(o => Array.from(new Set([name, ...o])));
-    try { await axios.post('/api/masters/categories/', { name, code: genCode(name) }); } catch {}
-  };
-  const persistBrand = async (name) => {
-    setBrandOptions(o => Array.from(new Set([name, ...o])));
-    try { await axios.post('/api/masters/brands/', { name, code: genCode(name) }); } catch {}
-  };
-  const persistLocal = (key, setter) => async (name) => {
-    setter(o => {
-      const next = Array.from(new Set([name, ...o]));
+  const hideDefault = (key, name) => writeList(key, Array.from(new Set([...readList(key, []), name])));
+
+  // Backend masters (Category / Brand). Products reference these by FK, so a
+  // rename shows up on every product and a delete just clears the link.
+  const backendMaster = (url, hiddenKey, records, setRecords, setOptions) => ({
+    persist: async (name) => {
+      setOptions(o => Array.from(new Set([name, ...o])));
+      try {
+        const r = await axios.post(url, { name, code: genCode(name) });
+        if (r.data?.id) setRecords(m => ({ ...m, [name]: r.data.id }));
+      } catch {}
+    },
+    rename: async (from, to) => {
+      const id = records[from];
+      if (id) {
+        await axios.patch(`${url}${id}/`, { name: to });
+      } else {
+        // Built-in name with no DB row yet — create the new one, hide the old.
+        const r = await axios.post(url, { name: to, code: genCode(to) });
+        if (r.data?.id) setRecords(m => ({ ...m, [to]: r.data.id }));
+      }
+      hideDefault(hiddenKey, from);
+      setRecords(m => {
+        const next = { ...m };
+        if (id) { delete next[from]; next[to] = id; }
+        return next;
+      });
+      setOptions(o => Array.from(new Set(o.map(x => (x === from ? to : x)))));
+    },
+    remove: async (name) => {
+      const id = records[name];
+      if (id) await axios.delete(`${url}${id}/`);
+      hideDefault(hiddenKey, name);
+      setRecords(m => { const next = { ...m }; delete next[name]; return next; });
+      setOptions(o => o.filter(x => x !== name));
+    }
+  });
+  const categoryMaster = backendMaster('/api/masters/categories/', LS_KEYS.hiddenCategories, categoryRecords, setCategoryRecords, setCategoryOptions);
+  const brandMaster = backendMaster('/api/masters/brands/', LS_KEYS.hiddenBrands, brandRecords, setBrandRecords, setBrandOptions);
+
+  // Local lists (Sub-Category / Group / Size / Color / Material). These are
+  // stored as plain text on each product, so a rename only affects new entries.
+  const localMaster = (key, setter) => {
+    const update = (fn) => setter(o => {
+      const next = fn(o);
       writeList(key, next);
       return next;
     });
+    return {
+      persist: async (name) => update(o => Array.from(new Set([name, ...o]))),
+      rename: async (from, to) => update(o => Array.from(new Set(o.map(x => (x === from ? to : x))))),
+      remove: async (name) => update(o => o.filter(x => x !== name))
+    };
   };
+  const subCategoryMaster = localMaster(LS_KEYS.subCategory, setSubCategoryOptions);
+  const groupMaster = localMaster(LS_KEYS.group, setGroupOptions);
+  const sizeMaster = localMaster(LS_KEYS.size, setSizeOptions);
+  const colorMaster = localMaster(LS_KEYS.color, setColorOptions);
+  const materialMaster = localMaster(LS_KEYS.material, setMaterialOptions);
+  const refractiveMaster = localMaster(LS_KEYS.refractive, setRefractiveOptions);
+  const lensDesignMaster = localMaster(LS_KEYS.lensDesign, setLensDesignOptions);
+  const coatingMaster = localMaster(LS_KEYS.coating, setCoatingOptions);
 
   const onPickImage = (file) => {
     if (!file) return;
@@ -246,6 +455,17 @@ export default function ProductMasterDialog({
   };
 
   const isLens = p.category === 'Prescription Lenses';
+
+  // Lens Mode starts with the usual lens spec filled in (still editable / clearable).
+  useEffect(() => {
+    if (!open || !isLens) return;
+    setP(prev => ({
+      ...prev,
+      frameType: prev.frameType || '1.56 Mid Index Blue Cut',
+      lensType: prev.lensType || 'Single Vision',
+      coating: prev.coating || 'Blue Cut UV420'
+    }));
+  }, [open, isLens]);
 
   const purchaseNum = parseFloat(p.purchasePrice) || 0;
   const mrpNum = parseFloat(p.mrp) || 0;
@@ -482,16 +702,16 @@ export default function ProductMasterDialog({
             <Section title="Classification" icon={<CategoryIcon fontSize="small" />}>
               <Grid container spacing={2}>
                 <Grid item xs={12} sm={6} md={3}>
-                  <AttributeField label="Category" value={p.category} onChange={(v) => set({ category: v })} options={categoryOptions} onPersist={persistCategory} />
+                  <AttributeField label="Category" value={p.category} onChange={(v) => set({ category: v })} options={categoryOptions} onPersist={categoryMaster.persist} onRename={categoryMaster.rename} onRemove={categoryMaster.remove} />
                 </Grid>
                 <Grid item xs={12} sm={6} md={3}>
-                  <AttributeField label="Sub-Category" value={p.subCategory} onChange={(v) => set({ subCategory: v })} options={subCategoryOptions} onPersist={persistLocal(LS_KEYS.subCategory, setSubCategoryOptions)} />
+                  <AttributeField label="Sub-Category" value={p.subCategory} onChange={(v) => set({ subCategory: v })} options={subCategoryOptions} onPersist={subCategoryMaster.persist} onRename={subCategoryMaster.rename} onRemove={subCategoryMaster.remove} />
                 </Grid>
                 <Grid item xs={12} sm={6} md={3}>
-                  <AttributeField label="Group" value={p.group} onChange={(v) => set({ group: v })} options={groupOptions} onPersist={persistLocal(LS_KEYS.group, setGroupOptions)} />
+                  <AttributeField label="Group" value={p.group} onChange={(v) => set({ group: v })} options={groupOptions} onPersist={groupMaster.persist} onRename={groupMaster.rename} onRemove={groupMaster.remove} />
                 </Grid>
                 <Grid item xs={12} sm={6} md={3}>
-                  <AttributeField label="Brand / Manufacturer" value={p.brand} onChange={(v) => set({ brand: v })} options={brandOptions} onPersist={persistBrand} />
+                  <AttributeField label="Brand / Manufacturer" value={p.brand} onChange={(v) => set({ brand: v })} options={brandOptions} onPersist={brandMaster.persist} onRename={brandMaster.rename} onRemove={brandMaster.remove} />
                 </Grid>
               </Grid>
             </Section>
@@ -500,42 +720,25 @@ export default function ProductMasterDialog({
             <Section title="Variant Attributes" icon={<SizeIcon fontSize="small" />}>
               <Grid container spacing={2}>
                 <Grid item xs={12} sm={6} md={4}>
-                  <AttributeField label="Size" value={p.size} onChange={(v) => set({ size: v })} options={sizeOptions} onPersist={persistLocal(LS_KEYS.size, setSizeOptions)} />
+                  <AttributeField label="Size" value={p.size} onChange={(v) => set({ size: v })} options={sizeOptions} onPersist={sizeMaster.persist} onRename={sizeMaster.rename} onRemove={sizeMaster.remove} />
                 </Grid>
                 <Grid item xs={12} sm={6} md={4}>
-                  <AttributeField label="Color" value={p.color} onChange={(v) => set({ color: v })} options={colorOptions} onPersist={persistLocal(LS_KEYS.color, setColorOptions)} />
+                  <AttributeField label="Color" value={p.color} onChange={(v) => set({ color: v })} options={colorOptions} onPersist={colorMaster.persist} onRename={colorMaster.rename} onRemove={colorMaster.remove} />
                 </Grid>
                 <Grid item xs={12} sm={6} md={4}>
-                  <TextField label="Material" fullWidth size="small" value={p.material} onChange={(e) => set({ material: e.target.value })} placeholder="e.g. Acetate, TR90, Metal" />
+                  <AttributeField label="Material" value={p.material} onChange={(v) => set({ material: v })} options={materialOptions} onPersist={materialMaster.persist} onRename={materialMaster.rename} onRemove={materialMaster.remove} />
                 </Grid>
 
                 {isLens && (
                   <>
                     <Grid item xs={12} sm={4}>
-                      <TextField select label="Refractive Index" fullWidth size="small" value={p.frameType || '1.56'} onChange={(e) => set({ frameType: e.target.value })}>
-                        <MenuItem value="1.50">1.50 Standard CR39</MenuItem>
-                        <MenuItem value="1.56">1.56 Mid Index Blue Cut</MenuItem>
-                        <MenuItem value="1.60">1.60 Hi-Index</MenuItem>
-                        <MenuItem value="1.67">1.67 Ultra Thin</MenuItem>
-                        <MenuItem value="1.74">1.74 Super High Index</MenuItem>
-                      </TextField>
+                      <AttributeField label="Refractive Index" value={p.frameType} onChange={(v) => set({ frameType: v })} options={refractiveOptions} onPersist={refractiveMaster.persist} onRename={refractiveMaster.rename} onRemove={refractiveMaster.remove} />
                     </Grid>
                     <Grid item xs={12} sm={4}>
-                      <TextField select label="Lens Design Type" fullWidth size="small" value={p.lensType || 'Single Vision'} onChange={(e) => set({ lensType: e.target.value })}>
-                        <MenuItem value="Single Vision">Single Vision</MenuItem>
-                        <MenuItem value="Progressive Digital">Progressive Digital</MenuItem>
-                        <MenuItem value="Bifocal D-Seg">Bifocal D-Seg</MenuItem>
-                        <MenuItem value="Office / Workspace">Office / Workspace</MenuItem>
-                      </TextField>
+                      <AttributeField label="Lens Design Type" value={p.lensType} onChange={(v) => set({ lensType: v })} options={lensDesignOptions} onPersist={lensDesignMaster.persist} onRename={lensDesignMaster.rename} onRemove={lensDesignMaster.remove} />
                     </Grid>
                     <Grid item xs={12} sm={4}>
-                      <TextField select label="Coating Technology" fullWidth size="small" value={p.coating || 'Blue Cut UV420'} onChange={(e) => set({ coating: e.target.value })}>
-                        <MenuItem value="Anti-Glare (ARC)">Anti-Glare (ARC)</MenuItem>
-                        <MenuItem value="Blue Cut UV420">Blue Cut UV420</MenuItem>
-                        <MenuItem value="Photochromic Auto-Tint">Photochromic Auto-Tint</MenuItem>
-                        <MenuItem value="Polarized Sun Shield">Polarized Sun Shield</MenuItem>
-                        <MenuItem value="Hard Coated Scratch Resistant">Hard Coated Scratch Resistant</MenuItem>
-                      </TextField>
+                      <AttributeField label="Coating Technology" value={p.coating} onChange={(v) => set({ coating: v })} options={coatingOptions} onPersist={coatingMaster.persist} onRename={coatingMaster.rename} onRemove={coatingMaster.remove} />
                     </Grid>
                   </>
                 )}
