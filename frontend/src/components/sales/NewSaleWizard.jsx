@@ -458,6 +458,8 @@ export default function NewSaleWizard({
   // Raw text currently typed into the Optical DB Product Selector. Drives a live preview row in
   // the billing grid for the best-matching product even before the user commits a selection.
   const [productSearchText, setProductSearchText] = useState('');
+  // Highlighted search-match row in the billing grid (keyboard ↑/↓ or mouse hover).
+  const [matchIndex, setMatchIndex] = useState(-1);
 
   // --- ITEM CATEGORY MODE: Product | Lens | Services ---
   // Drives the middle entry toolbar: 'product' shows the Optical DB selector, 'lens' opens the
@@ -1534,6 +1536,37 @@ export default function NewSaleWizard({
         `${s.name || ''} ${s.code || ''} ${s.description || ''}`.toLowerCase().includes(searchQuery))
       .slice(0, 6);
   })();
+  // Products then services, in the order the grid shows them — the list ↑/↓ walk and Enter adds
+  // from while the cursor is in the Optical DB selector. -1 = nothing highlighted.
+  const matchEntries = [
+    ...searchMatches.map(p => buildEntryFromProduct(p)),
+    ...serviceMatches.map(s => buildEntryFromService(s)),
+  ];
+  const activeMatch = matchIndex >= 0 && matchIndex < matchEntries.length ? matchIndex : -1;
+  const addMatch = (src) => {
+    handleAddItem(src);
+    setMatchIndex(-1);
+  };
+  const handleSearchKeyDown = (e) => {
+    const count = matchEntries.length;
+    if (e.key === 'ArrowDown' && count) {
+      e.preventDefault();
+      setMatchIndex(activeMatch < 0 || activeMatch >= count - 1 ? 0 : activeMatch + 1);
+    } else if (e.key === 'ArrowUp' && count) {
+      e.preventDefault();
+      setMatchIndex(activeMatch <= 0 ? count - 1 : activeMatch - 1);
+    } else if (e.key === 'Enter' && activeMatch >= 0) {
+      e.preventDefault();
+      addMatch(matchEntries[activeMatch]);
+    } else if (e.key === 'Escape' && activeMatch >= 0) {
+      setMatchIndex(-1);
+    }
+  };
+  // Keep the highlighted row on screen while ↑/↓ walk a list taller than the viewport.
+  useEffect(() => {
+    if (activeMatch < 0) return;
+    document.querySelector(`[data-match-idx="${activeMatch}"]`)?.scrollIntoView({ block: 'nearest' });
+  }, [activeMatch]);
 
   // 3️⃣ PART 3 FINANCIAL CALCULATIONS
   const totalQty = itemsList.reduce((sum, item) => sum + (parseInt(item.qty) || 0), 0);
@@ -2352,14 +2385,18 @@ export default function NewSaleWizard({
                   find an item by typing whichever detail they actually have on hand. */}
               <Grid item xs={12} sm={2.8} md={2.7}>
                 {/* Plain search box — no results popup. Typing here filters the product
-                    matches shown as rows in the billing grid below; click a row's + to add. */}
+                    matches shown as rows in the billing grid below; ↑/↓ highlight a row and
+                    Enter adds it, or click the row. */}
                 <TextField
                   fullWidth
                   size="small"
                   label="Optical DB Selector"
                   placeholder="🔍 Search Products, Lenses & Services..."
                   value={productSearchText}
-                  onChange={(e) => setProductSearchText(e.target.value)}
+                  onChange={(e) => { setProductSearchText(e.target.value); setMatchIndex(-1); }}
+                  onKeyDown={handleSearchKeyDown}
+                  onBlur={() => setMatchIndex(-1)}
+                  data-own-enter={activeMatch >= 0 ? 'true' : undefined}
                   InputProps={{ style: { fontSize: '0.78rem', fontWeight: 800, color: '#2563eb' } }}
                 />
               </Grid>
@@ -2755,12 +2792,24 @@ export default function NewSaleWizard({
                     </TableRow>
                   )}
 
-                  {searchMatches.map((p) => {
-                    const src = buildEntryFromProduct(p);
+                  {searchMatches.map((p, i) => {
+                    const src = matchEntries[i];
                     const line = computeEntryLine(src);
                     const stock = p.stock ?? p.qty;
+                    const active = activeMatch === i;
                     return (
-                      <TableRow key={`match-${p.id || p.barcode || src.item}`} hover sx={{ bgcolor: '#f0f9ff', '& td': { borderBottom: '1px dashed #bfdbfe' } }}>
+                      <TableRow
+                        key={`match-${p.id || p.barcode || src.item}`}
+                        data-match-idx={i}
+                        onMouseEnter={() => setMatchIndex(i)}
+                        onClick={() => addMatch(src)}
+                        sx={{
+                          cursor: 'pointer',
+                          bgcolor: active ? '#bfdbfe' : '#f0f9ff',
+                          outline: active ? '2px solid #2563eb' : 'none', outlineOffset: -2,
+                          '& td': { borderBottom: '1px dashed #bfdbfe' },
+                        }}
+                      >
                         <TableCell sx={{ fontWeight: 800, color: 'primary.main', fontSize: '0.8rem' }}>{src.barcode || '—'}</TableCell>
                         <TableCell sx={{ fontWeight: 700, fontSize: '0.8rem' }}>
                           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6, flexWrap: 'wrap' }}>
@@ -2796,7 +2845,7 @@ export default function NewSaleWizard({
                         <TableCell align="right" sx={{ fontWeight: 900, color: 'primary.main', fontSize: '0.85rem' }}>₹{line.total.toFixed(2)}</TableCell>
                         <TableCell align="center">
                           <Tooltip title="Add to bill">
-                            <IconButton size="small" color="success" onClick={() => handleAddItem(src)}>
+                            <IconButton size="small" color="success" onClick={(e) => { e.stopPropagation(); addMatch(src); }}>
                               <AddIcon fontSize="small" />
                             </IconButton>
                           </Tooltip>
@@ -2813,11 +2862,24 @@ export default function NewSaleWizard({
                     </TableRow>
                   )}
 
-                  {serviceMatches.map((s) => {
-                    const src = buildEntryFromService(s);
+                  {serviceMatches.map((s, j) => {
+                    const idx = searchMatches.length + j;
+                    const src = matchEntries[idx];
                     const line = computeEntryLine(src);
+                    const active = activeMatch === idx;
                     return (
-                      <TableRow key={`svc-${s.id || s.code || s.name}`} hover sx={{ bgcolor: '#fffbeb', '& td': { borderBottom: '1px dashed #fcd34d' } }}>
+                      <TableRow
+                        key={`svc-${s.id || s.code || s.name}`}
+                        data-match-idx={idx}
+                        onMouseEnter={() => setMatchIndex(idx)}
+                        onClick={() => addMatch(src)}
+                        sx={{
+                          cursor: 'pointer',
+                          bgcolor: active ? '#fde68a' : '#fffbeb',
+                          outline: active ? '2px solid #b45309' : 'none', outlineOffset: -2,
+                          '& td': { borderBottom: '1px dashed #fcd34d' },
+                        }}
+                      >
                         <TableCell sx={{ fontWeight: 800, color: '#b45309', fontSize: '0.8rem' }}>{src.barcode || '—'}</TableCell>
                         <TableCell sx={{ fontWeight: 700, fontSize: '0.8rem' }}>
                           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6, flexWrap: 'wrap' }}>
@@ -2841,7 +2903,7 @@ export default function NewSaleWizard({
                         <TableCell align="right" sx={{ fontWeight: 900, color: '#b45309', fontSize: '0.85rem' }}>₹{line.total.toFixed(2)}</TableCell>
                         <TableCell align="center">
                           <Tooltip title="Add service to bill">
-                            <IconButton size="small" color="success" onClick={() => handleAddItem(src)}>
+                            <IconButton size="small" color="success" onClick={(e) => { e.stopPropagation(); addMatch(src); }}>
                               <AddIcon fontSize="small" />
                             </IconButton>
                           </Tooltip>

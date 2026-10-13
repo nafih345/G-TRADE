@@ -72,6 +72,10 @@ function MainLayout() {
       // This handler would pre-empt it (it runs first, in capture) and click a dialog's Save early.
       if (target.closest('[data-nav-scope]')) return;
 
+      // A field that is currently handling Enter itself (e.g. New Sale's Optical DB selector while
+      // a search-match row is highlighted — Enter adds that row instead of moving to the next field).
+      if (target.closest('[data-own-enter="true"]')) return;
+
       // 1. Inside a Modal Dialog
       const activeDialog = target.closest('.MuiDialog-root') || document.querySelector('.MuiDialog-root');
       if (activeDialog) {
