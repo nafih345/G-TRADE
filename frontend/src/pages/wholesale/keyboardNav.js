@@ -22,6 +22,10 @@
 //   data-nav-enter="<css>"   → Enter jumps to that element instead of the next field
 //   data-nav-right           → ArrowRight with the caret at the end of the text also moves on
 //
+// Regions that run their own Enter / arrow logic (e.g. the POS entry row and billing grid) put
+// `data-nav-own` on a wrapper: keys pressed inside it are left alone, but its fields still count
+// as stops in the chain, so Enter / arrows from outside can land on them.
+//
 // Select fields that should open on Enter (pick with Up/Down, Enter confirms and moves on): spread
 // `enterOpensSelectProps` into the TextField's `SelectProps`.
 
@@ -96,6 +100,7 @@ const handleEnter = (e, el) => {
 const onKeyDownCapture = (e) => {
   if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
   const el = e.target;
+  if (el.closest?.('[data-nav-own]')) return;
   if (e.key === 'ArrowRight' && el.hasAttribute?.('data-nav-right') && !e.shiftKey
       && el.selectionStart === el.value.length && el.selectionEnd === el.value.length) {
     if (focusRelative(el, 1)) { e.preventDefault(); e.stopPropagation(); }
@@ -139,6 +144,7 @@ const onKeyDown = (e) => {
   if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
   if (e.key !== 'Enter') return;
   const el = e.target;
+  if (el.closest?.('[data-nav-own]')) return;
   if (!isAutocompleteInput(el) || el.getAttribute('aria-expanded') === 'true') return;
   handleEnter(e, el);
 };

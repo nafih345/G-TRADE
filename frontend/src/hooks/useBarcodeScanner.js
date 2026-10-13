@@ -3,7 +3,9 @@ import { useEffect, useRef } from 'react';
 // Detects hardware USB/Bluetooth barcode-scanner input: scanners emit keystrokes
 // much faster than a human types, then send Enter. Buffers keydown events and
 // fires onScan(code) when Enter arrives after a fast enough burst of keys.
-export default function useBarcodeScanner(onScan, { minLength = 3, maxGapMs = 120, exemptRefs = [] } = {}) {
+// `capture: true` listens in the capture phase, so a screen whose own capture-phase Enter handling
+// (e.g. keyboardNav.js) would otherwise swallow the scan's Enter still sees it.
+export default function useBarcodeScanner(onScan, { minLength = 3, maxGapMs = 120, exemptRefs = [], capture = false } = {}) {
   const onScanRef = useRef(onScan);
   onScanRef.current = onScan;
 
@@ -33,8 +35,8 @@ export default function useBarcodeScanner(onScan, { minLength = 3, maxGapMs = 12
       }
     };
 
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener('keydown', handleKeyDown, capture);
+    return () => window.removeEventListener('keydown', handleKeyDown, capture);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [minLength, maxGapMs]);
+  }, [minLength, maxGapMs, capture]);
 }

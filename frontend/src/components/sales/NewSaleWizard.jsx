@@ -43,6 +43,9 @@ import {
 import PrintInvoiceModal from './PrintInvoiceModal';
 import ServiceMasterDialog from './ServiceMasterDialog';
 import ProductMasterDialog from '../inventory/ProductMasterDialog';
+import { navScopeProps, enterOpensSelectProps, focusField, focusRelative } from '../../pages/wholesale/keyboardNav';
+import { ShortcutHelpDialog, Kbd } from '../../pages/wholesale/WholesaleDialogs';
+import { NEW_SALE_SHORTCUTS, useNewSaleShortcuts } from './newSaleShortcuts';
 
 // Standard Indian GST slabs offered in the Tax % dropdowns.
 const TAX_SLABS = [0, 5, 12, 18, 28];
@@ -1086,7 +1089,9 @@ export default function NewSaleWizard({
     setItemsList(prev => [...prev, newItem]);
   };
 
-  useBarcodeScanner(handleBarcodeScan);
+  // Capture phase: the keyboard-nav chain stops Enter from bubbling while a dropdown has focus,
+  // which would otherwise swallow a scan's final Enter.
+  useBarcodeScanner(handleBarcodeScan, { capture: true });
 
   // 3️⃣ PART 3 HANDLER: Remove Item from Grid
   const handleRemoveItem = (id) => {
@@ -1558,6 +1563,10 @@ export default function NewSaleWizard({
     } else if (e.key === 'Enter' && activeMatch >= 0) {
       e.preventDefault();
       addMatch(matchEntries[activeMatch]);
+    } else if (e.key === 'Enter' && count) {
+      // Matches listed but none picked yet — highlight the first; the next Enter adds it.
+      e.preventDefault();
+      setMatchIndex(0);
     } else if (e.key === 'Escape' && activeMatch >= 0) {
       setMatchIndex(-1);
     }
@@ -1567,6 +1576,114 @@ export default function NewSaleWizard({
     if (activeMatch < 0) return;
     document.querySelector(`[data-match-idx="${activeMatch}"]`)?.scrollIntoView({ block: 'nearest' });
   }, [activeMatch]);
+
+  // ---- KEYBOARD (single-screen POS) --------------------------------------------------------
+  // The whole screen is one keyboardNav chain (Enter / ↑ / ↓ = next / previous field). On top of
+  // that, NEW_SALE_SHORTCUTS jumps between sections (Ctrl+/ lists them). Fields are found by
+  // `data-ns-field` so the shortcuts don't need a ref per input.
+  const posRootRef = useRef(null);
+  const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
+  const focusNsField = (key) => {
+    const el = posRootRef.current?.querySelector(`[data-ns-field="${key}"]`);
+    if (!el || el.disabled) return false;
+    el.scrollIntoView({ block: 'nearest' });
+    return focusField(el);
+  };
+  // Focus after React has rendered whatever the key just revealed (a tab, the Rx grid…).
+  const focusNsFieldSoon = (key) => setTimeout(() => focusNsField(key), 30);
+  const switchItemMode = (mode) => {
+    handleItemModeChange(mode);
+    if (mode !== 'service') focusNsFieldSoon('search');
+  };
+  const nsShortcutsActive = viewMode === 'single-page' && !formLocked;
+  const nsShortcuts = {
+    customerName: () => focusNsField('customerName'),
+    patient: () => {
+      const el = posRootRef.current?.querySelector('[data-ns-field="patient"]');
+      if (!el) return false;
+      el.focus();
+      // MUI Select opens on Space; dispatching it reuses its own open logic (and the
+      // enterOpensSelectProps bookkeeping that moves on once a patient is picked).
+      el.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+      return true;
+    },
+    testNo: () => focusNsField('testNo'),
+    docOrder: () => handleDocTypeChange('Order'),
+    docInvoice: () => handleDocTypeChange('Invoice'),
+    docQuotation: () => handleDocTypeChange('Quotation'),
+    rxGrid: () => { setShowRx(true); setActiveRxTab('prescription'); focusNsFieldSoon('rx'); },
+    rxTab: () => setActiveRxTab('prescription'),
+    historyTab: () => setActiveRxTab('history'),
+    rxToggle: () => setShowRx(v => !v),
+    tabProduct: () => switchItemMode('product'),
+    tabLens: () => switchItemMode('lens'),
+    tabService: () => switchItemMode('service'),
+    search: () => {
+      if (itemMode === 'service') { switchItemMode('product'); return; }
+      focusNsField('search');
+    },
+    qty: () => focusNsField('qty'),
+    power: () => setPowerChecked(v => !v),
+    newLens: () => setLensDialogOpen(true),
+    removeRow: () => {
+      const rowEl = document.activeElement?.closest?.('[data-item-row]');
+      if (!rowEl || !posRootRef.current?.contains(rowEl)) return false;
+      handleRemoveItem(rowEl.getAttribute('data-item-row'));
+      focusNsFieldSoon('search');
+      return true;
+    },
+    coupon: () => focusNsField('coupon'),
+    advance: () => focusNsField('advance'),
+    payment: () => focusNsField('pay-cash'),
+    preview: () => handleShowBill(),
+    // A typed-but-uncommitted Advance Paid is already in paySettlement, so no blur is needed.
+    complete: () => { if (!isSaving) handleCompleteBilling(); },
+    help: () => setShortcutHelpOpen(true),
+  };
+  useNewSaleShortcuts(posRootRef, Object.fromEntries(Object.entries(nsShortcuts).map(([id, run]) => [
+    id,
+    (e) => (nsShortcutsActive || id === 'help' ? run(e) : false),
+  ])));
+
+  // Prescription grid: arrows move like a spreadsheet. Each input carries data-rx-cell="row:col" —
+  // rows 0 = DV, 1 = NV, 2 = IPD/ADD; cols 0-3 = RE SPH/CYL/AXIS/VA, 4-7 = LE. IPD/ADD sit under
+  // SPH (0 / 4) and AXIS (2 / 6). Enter keeps the screen-wide order (next field).
+  const handleRxGridKeyDown = (e) => {
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    const el = e.target;
+    const pos = el.getAttribute?.('data-rx-cell');
+    if (!pos) return;
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      focusRelative(el, e.shiftKey ? -1 : 1);
+      return;
+    }
+    const [row, col] = pos.split(':').map(Number);
+    const cells = Array.from(e.currentTarget.querySelectorAll('[data-rx-cell]')).map(c => {
+      const [r, k] = c.getAttribute('data-rx-cell').split(':').map(Number);
+      return { el: c, r, k };
+    });
+    const inRow = (r) => cells.filter(c => c.r === r).sort((a, b) => a.k - b.k);
+    let target;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      const down = e.key === 'ArrowDown';
+      const rowCells = inRow(row + (down ? 1 : -1));
+      if (!rowCells.length) {
+        // Off the top / bottom edge: carry on to the field before / after the grid.
+        e.preventDefault();
+        focusRelative(down ? cells[cells.length - 1].el : cells[0].el, down ? 1 : -1);
+        return;
+      }
+      target = [...rowCells].reverse().find(c => c.k <= col) || rowCells[0];
+    } else if (e.key === 'ArrowRight' && el.selectionEnd === el.value.length) {
+      target = inRow(row).find(c => c.k > col) || inRow(row + 1)[0];
+    } else if (e.key === 'ArrowLeft' && el.selectionStart === 0) {
+      target = [...inRow(row)].reverse().find(c => c.k < col) || inRow(row - 1).slice(-1)[0];
+    }
+    if (!target) return;
+    e.preventDefault();
+    focusField(target.el);
+  };
 
   // 3️⃣ PART 3 FINANCIAL CALCULATIONS
   const totalQty = itemsList.reduce((sum, item) => sum + (parseInt(item.qty) || 0), 0);
@@ -1917,6 +2034,15 @@ export default function NewSaleWizard({
             </Button>
           </Paper>
 
+          {viewMode === 'single-page' && (
+            <Button
+              size="small" variant="outlined" onClick={() => setShortcutHelpOpen(true)}
+              sx={{ fontWeight: 800, fontSize: '0.75rem', textTransform: 'none', borderRadius: 2, gap: 0.75 }}
+            >
+              ⌨ Shortcuts <Kbd>Ctrl+/</Kbd>
+            </Button>
+          )}
+
         </Box>
       </Card>
 
@@ -1959,7 +2085,7 @@ export default function NewSaleWizard({
       {/* MODE 1: ALL-IN-ONE SINGLE SCREEN POS TERMINAL (EASY METHOD) */}
       {/* ========================================================================= */}
       {viewMode === 'single-page' && (
-        <Box>
+        <Box ref={posRootRef} {...navScopeProps}>
           
           {/* 🔴 PART 1: TOP PANEL (PATIENT & SALES HEADER DETAILS CARD) */}
           <Paper variant="outlined" sx={{ p: 2, mb: 2, borderRadius: 3, bgcolor: '#ffffff', borderColor: '#cbd5e1' }}>
@@ -1980,7 +2106,7 @@ export default function NewSaleWizard({
                   fullWidth size="small" label="Test No" placeholder="e.g. 1002"
                   inputRef={firstFieldRef}
                   value={testNo} onChange={(e) => handleTestNoChange(e.target.value)}
-                  inputProps={{ style: { fontWeight: 800, fontSize: '0.85rem' } }}
+                  inputProps={{ 'data-ns-field': 'testNo', style: { fontWeight: 800, fontSize: '0.85rem' } }}
                 />
               </Grid>
 
@@ -1992,7 +2118,11 @@ export default function NewSaleWizard({
                       const cust = customerOptions.find(c => String(c.id) === String(e.target.value));
                       handleSelectCustomer(cust);
                     }}
-                    SelectProps={{ style: { fontWeight: 800, color: '#2563eb', fontSize: '0.85rem' } }}
+                    SelectProps={{
+                      ...enterOpensSelectProps,
+                      SelectDisplayProps: { ...enterOpensSelectProps.SelectDisplayProps, 'data-ns-field': 'patient' },
+                      style: { fontWeight: 800, color: '#2563eb', fontSize: '0.85rem' },
+                    }}
                   >
                     <MenuItem value=""><em>-- Select Patient from Database --</em></MenuItem>
                     {customerOptions.map(c => (
@@ -2052,7 +2182,7 @@ export default function NewSaleWizard({
                     setCustomerInput({ ...customerInput, name: e.target.value });
                     if (customerNameError) setCustomerNameError(false);
                   }}
-                  inputProps={{ style: { fontWeight: 700, fontSize: '0.85rem' } }}
+                  inputProps={{ 'data-ns-field': 'customerName', style: { fontWeight: 700, fontSize: '0.85rem' } }}
                 />
               </Grid>
 
@@ -2206,7 +2336,7 @@ export default function NewSaleWizard({
             </Box>
 
             {showRx && activeRxTab === 'prescription' ? (
-              <Box sx={{ p: 2.5, bgcolor: '#f8fafc' }}>
+              <Box sx={{ p: 2.5, bgcolor: '#f8fafc' }} data-nav-own onKeyDown={handleRxGridKeyDown}>
                 <Grid container spacing={2} alignItems="flex-start">
                   
                   {/* Left Margin DV & NV Pills */}
@@ -2236,16 +2366,16 @@ export default function NewSaleWizard({
                         </TableHead>
                         <TableBody>
                           <TableRow>
-                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.sphOD} onChange={(e) => setRxData({ ...rxData, sphOD: e.target.value })} placeholder="0.00" inputProps={{ style: { textAlign: 'center', fontWeight: 900, color: '#2563eb', fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
-                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.cylOD} onChange={(e) => setRxData({ ...rxData, cylOD: e.target.value })} placeholder="0.00" inputProps={{ style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
-                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.axisOD} onChange={(e) => setRxData({ ...rxData, axisOD: e.target.value })} placeholder="0" inputProps={{ style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
-                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.vaOD} onChange={(e) => setRxData({ ...rxData, vaOD: e.target.value })} placeholder="6/6" inputProps={{ style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
+                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.sphOD} onChange={(e) => setRxData({ ...rxData, sphOD: e.target.value })} placeholder="0.00" inputProps={{ 'data-rx-cell': '0:0', 'data-ns-field': 'rx', style: { textAlign: 'center', fontWeight: 900, color: '#2563eb', fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
+                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.cylOD} onChange={(e) => setRxData({ ...rxData, cylOD: e.target.value })} placeholder="0.00" inputProps={{ 'data-rx-cell': '0:1', style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
+                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.axisOD} onChange={(e) => setRxData({ ...rxData, axisOD: e.target.value })} placeholder="0" inputProps={{ 'data-rx-cell': '0:2', style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
+                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.vaOD} onChange={(e) => setRxData({ ...rxData, vaOD: e.target.value })} placeholder="6/6" inputProps={{ 'data-rx-cell': '0:3', style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
                           </TableRow>
                           <TableRow>
-                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.sphOD_NV} onChange={(e) => setRxData({ ...rxData, sphOD_NV: e.target.value })} placeholder="0.00" inputProps={{ style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
-                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.cylOD_NV} onChange={(e) => setRxData({ ...rxData, cylOD_NV: e.target.value })} placeholder="0.00" inputProps={{ style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
-                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.axisOD_NV} onChange={(e) => setRxData({ ...rxData, axisOD_NV: e.target.value })} placeholder="0" inputProps={{ style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
-                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.vaOD_NV} onChange={(e) => setRxData({ ...rxData, vaOD_NV: e.target.value })} placeholder="N6" inputProps={{ style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
+                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.sphOD_NV} onChange={(e) => setRxData({ ...rxData, sphOD_NV: e.target.value })} placeholder="0.00" inputProps={{ 'data-rx-cell': '1:0', style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
+                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.cylOD_NV} onChange={(e) => setRxData({ ...rxData, cylOD_NV: e.target.value })} placeholder="0.00" inputProps={{ 'data-rx-cell': '1:1', style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
+                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.axisOD_NV} onChange={(e) => setRxData({ ...rxData, axisOD_NV: e.target.value })} placeholder="0" inputProps={{ 'data-rx-cell': '1:2', style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
+                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.vaOD_NV} onChange={(e) => setRxData({ ...rxData, vaOD_NV: e.target.value })} placeholder="N6" inputProps={{ 'data-rx-cell': '1:3', style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
                           </TableRow>
                         </TableBody>
                       </Table>
@@ -2256,13 +2386,13 @@ export default function NewSaleWizard({
                           fullWidth size="small" label="IPD (mm)" placeholder="62" 
                           value={rxData.ipdOD} onChange={(e) => setRxData({ ...rxData, ipdOD: e.target.value })} 
                           InputLabelProps={{ shrink: true, style: { fontWeight: 800, fontSize: '0.8rem' } }}
-                          inputProps={{ style: { fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} 
+                          inputProps={{ 'data-rx-cell': '2:0', style: { fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} 
                         />
                         <TextField 
                           fullWidth size="small" label="ADD" placeholder="+1.00" 
                           value={rxData.addOD} onChange={(e) => setRxData({ ...rxData, addOD: e.target.value })} 
                           InputLabelProps={{ shrink: true, style: { fontWeight: 800, fontSize: '0.8rem', color: '#2563eb' } }}
-                          inputProps={{ style: { fontWeight: 900, color: '#2563eb', fontSize: '0.9rem', padding: '6px' } }} 
+                          inputProps={{ 'data-rx-cell': '2:2', style: { fontWeight: 900, color: '#2563eb', fontSize: '0.9rem', padding: '6px' } }} 
                         />
                       </Box>
                     </Paper>
@@ -2285,16 +2415,16 @@ export default function NewSaleWizard({
                         </TableHead>
                         <TableBody>
                           <TableRow>
-                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.sphOS} onChange={(e) => setRxData({ ...rxData, sphOS: e.target.value })} placeholder="0.00" inputProps={{ style: { textAlign: 'center', fontWeight: 900, color: '#059669', fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
-                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.cylOS} onChange={(e) => setRxData({ ...rxData, cylOS: e.target.value })} placeholder="0.00" inputProps={{ style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
-                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.axisOS} onChange={(e) => setRxData({ ...rxData, axisOS: e.target.value })} placeholder="0" inputProps={{ style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
-                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.vaOS} onChange={(e) => setRxData({ ...rxData, vaOS: e.target.value })} placeholder="6/6" inputProps={{ style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
+                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.sphOS} onChange={(e) => setRxData({ ...rxData, sphOS: e.target.value })} placeholder="0.00" inputProps={{ 'data-rx-cell': '0:4', style: { textAlign: 'center', fontWeight: 900, color: '#059669', fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
+                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.cylOS} onChange={(e) => setRxData({ ...rxData, cylOS: e.target.value })} placeholder="0.00" inputProps={{ 'data-rx-cell': '0:5', style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
+                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.axisOS} onChange={(e) => setRxData({ ...rxData, axisOS: e.target.value })} placeholder="0" inputProps={{ 'data-rx-cell': '0:6', style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
+                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.vaOS} onChange={(e) => setRxData({ ...rxData, vaOS: e.target.value })} placeholder="6/6" inputProps={{ 'data-rx-cell': '0:7', style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
                           </TableRow>
                           <TableRow>
-                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.sphOS_NV} onChange={(e) => setRxData({ ...rxData, sphOS_NV: e.target.value })} placeholder="0.00" inputProps={{ style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
-                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.cylOS_NV} onChange={(e) => setRxData({ ...rxData, cylOS_NV: e.target.value })} placeholder="0.00" inputProps={{ style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
-                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.axisOS_NV} onChange={(e) => setRxData({ ...rxData, axisOS_NV: e.target.value })} placeholder="0" inputProps={{ style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
-                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.vaOS_NV} onChange={(e) => setRxData({ ...rxData, vaOS_NV: e.target.value })} placeholder="N6" inputProps={{ style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
+                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.sphOS_NV} onChange={(e) => setRxData({ ...rxData, sphOS_NV: e.target.value })} placeholder="0.00" inputProps={{ 'data-rx-cell': '1:4', style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
+                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.cylOS_NV} onChange={(e) => setRxData({ ...rxData, cylOS_NV: e.target.value })} placeholder="0.00" inputProps={{ 'data-rx-cell': '1:5', style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
+                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.axisOS_NV} onChange={(e) => setRxData({ ...rxData, axisOS_NV: e.target.value })} placeholder="0" inputProps={{ 'data-rx-cell': '1:6', style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
+                            <TableCell sx={{ p: 0.5 }}><TextField size="small" value={rxData.vaOS_NV} onChange={(e) => setRxData({ ...rxData, vaOS_NV: e.target.value })} placeholder="N6" inputProps={{ 'data-rx-cell': '1:7', style: { textAlign: 'center', fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} /></TableCell>
                           </TableRow>
                         </TableBody>
                       </Table>
@@ -2305,13 +2435,13 @@ export default function NewSaleWizard({
                           fullWidth size="small" label="IPD (mm)" placeholder="62" 
                           value={rxData.ipdOS} onChange={(e) => setRxData({ ...rxData, ipdOS: e.target.value })} 
                           InputLabelProps={{ shrink: true, style: { fontWeight: 800, fontSize: '0.8rem' } }}
-                          inputProps={{ style: { fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} 
+                          inputProps={{ 'data-rx-cell': '2:4', style: { fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }} 
                         />
                         <TextField 
                           fullWidth size="small" label="ADD" placeholder="+1.00" 
                           value={rxData.addOS} onChange={(e) => setRxData({ ...rxData, addOS: e.target.value })} 
                           InputLabelProps={{ shrink: true, style: { fontWeight: 800, fontSize: '0.8rem', color: '#059669' } }}
-                          inputProps={{ style: { fontWeight: 900, color: '#059669', fontSize: '0.9rem', padding: '6px' } }} 
+                          inputProps={{ 'data-rx-cell': '2:6', style: { fontWeight: 900, color: '#059669', fontSize: '0.9rem', padding: '6px' } }} 
                         />
                       </Box>
                     </Paper>
@@ -2397,6 +2527,10 @@ export default function NewSaleWizard({
                   onKeyDown={handleSearchKeyDown}
                   onBlur={() => setMatchIndex(-1)}
                   data-own-enter={activeMatch >= 0 ? 'true' : undefined}
+                  // While matches are listed, ↑/↓/Enter belong to them (handleSearchKeyDown), not
+                  // to the screen's next/previous-field chain.
+                  data-nav-own={matchEntries.length > 0 ? '' : undefined}
+                  inputProps={{ 'data-ns-field': 'search' }}
                   InputProps={{ style: { fontSize: '0.78rem', fontWeight: 800, color: '#2563eb' } }}
                 />
               </Grid>
@@ -2419,7 +2553,7 @@ export default function NewSaleWizard({
                   fullWidth size="small" label="Qty" type="number"
                   value={entryInput.qty} onChange={(e) => setEntryInput({ ...entryInput, qty: e.target.value })}
                   sx={{ '& input[type=number]': { MozAppearance: 'textfield' }, '& input::-webkit-outer-spin-button, & input::-webkit-inner-spin-button': { WebkitAppearance: 'none', margin: 0 } }}
-                  inputProps={{ style: { fontWeight: 900, textAlign: 'center', fontSize: '0.8rem' } }}
+                  inputProps={{ 'data-ns-field': 'qty', style: { fontWeight: 900, textAlign: 'center', fontSize: '0.8rem' } }}
                 />
               </Grid>
 
@@ -2473,7 +2607,10 @@ export default function NewSaleWizard({
               <Grid item xs={12} sm={1.2} md={1.2}>
                 <Button
                   fullWidth variant="contained" size="small" color="primary"
-                  onClick={handleAddItem} startIcon={<AddIcon />}
+                  // In the Enter chain after Tax %: Enter adds the item, then the cursor goes back
+                  // to the search box for the next one.
+                  data-nav-stop=""
+                  onClick={() => { handleAddItem(); focusNsFieldSoon('search'); }} startIcon={<AddIcon />}
                   sx={{ fontWeight: 900, py: 0.8, borderRadius: 2, textTransform: 'none', fontSize: '0.75rem', whiteSpace: 'nowrap' }}
                 >
                   + Add Item
@@ -2978,7 +3115,7 @@ export default function NewSaleWizard({
                         <GridCellInput value={row[field]} onChange={set(field)} onBlur={tidy} {...opts} />
                       );
                       return (
-                      <TableRow key={row.id} hover sx={{ '&:nth-of-type(even)': { bgcolor: '#f8fafc' }, ...(isSvcRow ? { bgcolor: '#fffbeb' } : {}) }}>
+                      <TableRow key={row.id} data-item-row={row.id} hover sx={{ '&:nth-of-type(even)': { bgcolor: '#f8fafc' }, ...(isSvcRow ? { bgcolor: '#fffbeb' } : {}) }}>
                         <TableCell sx={{ fontWeight: 800, color: isSvcRow ? '#b45309' : 'primary.main', fontSize: '0.8rem' }}>{row.barcode}</TableCell>
                         <TableCell sx={{ fontWeight: 700, fontSize: '0.8rem' }}>
                           {row.item}
@@ -3191,7 +3328,7 @@ export default function NewSaleWizard({
                           onChange={(e) => setAdvanceDraft(cleanAmountInput(e.target.value))}
                           onBlur={commitAdvanceDraft}
                           onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
-                          inputProps={{ inputMode: 'decimal', 'aria-label': 'Advance Paid', style: { textAlign: 'right', fontWeight: 800, padding: '2px', fontSize: '0.8rem', color: '#15803d' } }}
+                          inputProps={{ inputMode: 'decimal', 'aria-label': 'Advance Paid', 'data-ns-field': 'advance', style: { textAlign: 'right', fontWeight: 800, padding: '2px', fontSize: '0.8rem', color: '#15803d' } }}
                         />
                       </Tooltip>
                     </Grid>
@@ -3209,7 +3346,7 @@ export default function NewSaleWizard({
                     fullWidth size="small" label="Coupon Code" placeholder="e.g. OPTICAL10"
                     value={couponCode} onChange={(e) => handleCouponChange(e.target.value)}
                     sx={{ mb: 1 }}
-                    inputProps={{ style: { fontWeight: 800, fontSize: '0.8rem' } }}
+                    inputProps={{ 'data-ns-field': 'coupon', style: { fontWeight: 800, fontSize: '0.8rem' } }}
                   />
                   <Button
                     fullWidth variant="contained" size="small"
@@ -3252,7 +3389,7 @@ export default function NewSaleWizard({
                                 const value = cleanAmountInput(e.target.value);
                                 setMultiPay(prev => ({ ...prev, [m.key]: value }));
                               }}
-                              inputProps={{ inputMode: 'decimal', 'aria-label': `${m.caption} amount`, style: { textAlign: 'center', fontWeight: 800, padding: '2px', fontSize: '0.72rem' } }}
+                              inputProps={{ inputMode: 'decimal', 'aria-label': `${m.caption} amount`, 'data-ns-field': `pay-${m.key}`, style: { textAlign: 'center', fontWeight: 800, padding: '2px', fontSize: '0.72rem' } }}
                             />
                           </TableCell>
                         </TableRow>
@@ -3507,6 +3644,11 @@ export default function NewSaleWizard({
         open={serviceMasterOpen}
         onClose={() => setServiceMasterOpen(false)}
         onSaved={handleServiceSaved}
+      />
+
+      <ShortcutHelpDialog
+        open={shortcutHelpOpen} onClose={() => setShortcutHelpOpen(false)}
+        shortcuts={NEW_SALE_SHORTCUTS} title="New Sale"
       />
 
       {/* "+ NEW Lens" — full Product Master form, forced into Lens Mode. Saves the lens to the

@@ -353,7 +353,7 @@ export function invoiceFromApi(row, dealersById = {}) {
   };
 }
 
-const newInvoiceNo = () => `WINV-${Math.floor(100000 + Math.random() * 900000)}`;
+export const newInvoiceNo = () => `WINV-${Math.floor(100000 + Math.random() * 900000)}`;
 
 // Creates (POST) or updates (PATCH by backendId) the invoice. A clash on the random invoice
 // number gets a fresh number and a retry. Returns the invoice with backendId set; throws if the

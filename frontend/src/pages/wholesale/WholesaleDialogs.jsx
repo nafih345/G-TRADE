@@ -12,6 +12,7 @@ import {
 } from '@mui/icons-material';
 import { ORDER_STATUS_COLORS, SCHEME_TYPES, PRICE_LIST_OPTIONS, fmtINR } from './wholesaleConstants';
 import { navDialogProps } from './keyboardNav';
+import { WHOLESALE_SHORTCUTS } from './posShortcuts';
 
 // ---------------------------------------------------------------------------
 // New Dealer
@@ -675,6 +676,82 @@ export function CompletionDialog({ open, invoice, onPrint, onDownloadPdf, onSend
           New Wholesale Sale
         </Button>
       </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard shortcut help (Ctrl+/ or ?) — rendered from the screen's shortcut map (WHOLESALE_SHORTCUTS
+// by default, NEW_SALE_SHORTCUTS for New Sale), the same map its shortcut manager listens with, so
+// it always matches what is implemented.
+// ---------------------------------------------------------------------------
+export function Kbd({ children, dark }) {
+  return (
+    <Box
+      component="kbd"
+      sx={{
+        display: 'inline-block', px: 0.6, py: 0.05, minWidth: 18, textAlign: 'center',
+        fontFamily: 'inherit', fontSize: '0.62rem', fontWeight: 800, lineHeight: 1.5, borderRadius: 1,
+        border: '1px solid', borderBottomWidth: 2, whiteSpace: 'nowrap',
+        ...(dark
+          ? { bgcolor: 'rgba(255,255,255,0.18)', color: '#fff', borderColor: 'rgba(255,255,255,0.35)' }
+          : { bgcolor: '#f8fafc', color: '#475569', borderColor: '#cbd5e1' }),
+      }}
+    >
+      {children}
+    </Box>
+  );
+}
+
+export function ShortcutHelpDialog({ open, onClose, shortcuts = WHOLESALE_SHORTCUTS, title = 'Wholesale POS' }) {
+  const [q, setQ] = useState('');
+  const groups = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    const rows = shortcuts.filter(s => !needle
+      || s.label.toLowerCase().includes(needle)
+      || s.keys.some(k => k.toLowerCase().includes(needle))
+      || s.group.toLowerCase().includes(needle));
+    const out = [];
+    rows.forEach(r => {
+      let g = out.find(x => x.name === r.group);
+      if (!g) { g = { name: r.group, rows: [] }; out.push(g); }
+      g.rows.push(r);
+    });
+    return out;
+  }, [q, shortcuts]);
+
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth {...navDialogProps} TransitionProps={{ ...navDialogProps.TransitionProps, onExited: () => setQ('') }}>
+      <DialogTitle sx={{ fontWeight: 850, pb: 1 }}>Keyboard Shortcuts — {title}</DialogTitle>
+      <DialogContent dividers sx={{ pt: 1.5 }}>
+        <TextField
+          fullWidth size="small" autoFocus placeholder="Search shortcuts (e.g. payment, F9, coupon)…"
+          value={q} onChange={(e) => setQ(e.target.value)}
+          InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon sx={{ fontSize: 18 }} /></InputAdornment> }}
+          sx={{ mb: 1.5 }}
+        />
+        {groups.length === 0 && <Typography variant="body2" color="text.secondary" sx={{ py: 2, textAlign: 'center' }}>No shortcut matches “{q}”.</Typography>}
+        {groups.map(g => (
+          <Box key={g.name} sx={{ mb: 1.5 }}>
+            <Typography variant="caption" fontWeight={900} color="text.secondary" sx={{ letterSpacing: 0.5, textTransform: 'uppercase' }}>{g.name}</Typography>
+            <Table size="small">
+              <TableBody>
+                {g.rows.map(r => (
+                  <TableRow key={r.id} sx={{ '& td': { py: 0.5, borderBottom: '1px solid #f1f5f9' } }}>
+                    <TableCell sx={{ width: 150 }}>
+                      <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+                        {r.keys.map(k => <Kbd key={k}>{k}</Kbd>)}
+                      </Stack>
+                    </TableCell>
+                    <TableCell sx={{ fontSize: '0.8rem', color: '#334155' }}>{r.label}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </Box>
+        ))}
+      </DialogContent>
+      <DialogActions><Button onClick={onClose}>Close (Esc)</Button></DialogActions>
     </Dialog>
   );
 }
