@@ -95,7 +95,7 @@ def detect_ext(filename):
     return None
 
 
-def resolve_field_headers(headers):
+def resolve_field_headers(headers, aliases_map=None):
     """
     Map each logical field to the one real header it matches, computed once per file.
     Two global passes (not one pass per field): every field's *exact* alias match is
@@ -104,11 +104,12 @@ def resolve_field_headers(headers):
     "Barcode" via substring before "SKU/Code" is ever considered, since "Barcode" sorts
     earlier — silently mapping sku and barcode to the same column.
     """
+    aliases_map = aliases_map or FIELD_ALIASES
     lower_headers = [(h, h.lower().strip()) for h in headers]
     resolved = {}
     claimed = set()
 
-    for field, aliases in FIELD_ALIASES.items():
+    for field, aliases in aliases_map.items():
         for alias in aliases:
             alias_l = alias.lower().strip()
             match = next((h for h, hl in lower_headers if hl == alias_l and h not in claimed), None)
@@ -117,7 +118,7 @@ def resolve_field_headers(headers):
                 claimed.add(match)
                 break
 
-    for field, aliases in FIELD_ALIASES.items():
+    for field, aliases in aliases_map.items():
         if field in resolved:
             continue
         for alias in aliases:

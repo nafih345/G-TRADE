@@ -23,56 +23,12 @@ import {
 import BarcodeSection from './BarcodeSection';
 import { notify } from '../../utils/notify';
 
-export const opticalCategories = [
-  'Frames', 'Prescription Lenses', 'Sunglasses', 'Contact Lenses',
-  'Reading Glasses', 'Accessories', 'Lens Solutions', 'Cleaning Kits',
-  'Cases', 'Eye Drops'
-];
-
-export const opticalBrands = [
-  'RayBan', 'Oakley', 'Essilor', 'Zeiss', 'Hoya', 'Crizal',
-  'Kodak', 'Bausch + Lomb', 'Johnson & Johnson'
-];
-
-// Attribute option lists that have no dedicated backend master — kept in localStorage
-// so anything the user adds sticks around for the next entry.
-const LS_KEYS = {
-  subCategory: 'optical_attr_subcategories',
-  group: 'optical_attr_groups',
-  size: 'optical_attr_sizes',
-  color: 'optical_attr_colors',
-  material: 'optical_attr_materials',
-  refractive: 'optical_attr_refractive_indexes',
-  lensDesign: 'optical_attr_lens_designs',
-  coating: 'optical_attr_coatings',
-  // Built-in category/brand names the user deleted or renamed, so the fallback
-  // lists above don't bring them back.
-  hiddenCategories: 'optical_attr_hidden_categories',
-  hiddenBrands: 'optical_attr_hidden_brands'
-};
-const DEFAULT_MATERIALS = ['Acetate', 'TR90', 'Metal', 'Titanium', 'Stainless Steel', 'Polycarbonate', 'CR39'];
-const DEFAULT_REFRACTIVE = ['1.50 Standard CR39', '1.56 Mid Index Blue Cut', '1.60 Hi-Index', '1.67 Ultra Thin', '1.74 Super High Index'];
-const DEFAULT_LENS_DESIGNS = ['Single Vision', 'Progressive Digital', 'Bifocal D-Seg', 'Office / Workspace'];
-const DEFAULT_COATINGS = ['Anti-Glare (ARC)', 'Blue Cut UV420', 'Photochromic Auto-Tint', 'Polarized Sun Shield', 'Hard Coated Scratch Resistant'];
-
-const DEFAULT_GROUPS = ['Optical Frame', 'Sunglass', 'Ophthalmic Lens', 'Contact Lens', 'Accessory', 'Solution & Care'];
-const DEFAULT_SIZES = ['Small', 'Medium', 'Large', '48-18-140', '50-20-145', '52-18-140', '54-16-140', '56-16-145'];
-const DEFAULT_COLORS = ['Black', 'Brown', 'Gunmetal', 'Gold', 'Silver', 'Blue', 'Tortoise', 'Transparent', 'Rose Gold'];
-const DEFAULT_SUBCATEGORIES = ['Full Rim', 'Half Rim / Supra', 'Rimless', 'Titanium', 'Acetate', 'Kids', 'Computer / Blue Cut'];
-
-const readList = (key, fallback) => {
-  try {
-    const raw = localStorage.getItem(key);
-    if (raw == null) return fallback;
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr : fallback;
-  } catch {
-    return fallback;
-  }
-};
-const writeList = (key, list) => {
-  try { localStorage.setItem(key, JSON.stringify(list)); } catch {}
-};
+export { opticalCategories, opticalBrands } from './productAttributeOptions';
+import {
+  opticalCategories, opticalBrands, LS_KEYS, readList, writeList,
+  DEFAULT_MATERIALS, DEFAULT_REFRACTIVE, DEFAULT_LENS_DESIGNS, DEFAULT_COATINGS,
+  DEFAULT_GROUPS, DEFAULT_SIZES, DEFAULT_COLORS, DEFAULT_SUBCATEGORIES
+} from './productAttributeOptions';
 
 const genCode = (name, len = 3) =>
   (name || 'GEN').replace(/[^a-zA-Z0-9]/g, '').slice(0, len).toUpperCase().padEnd(len, 'X')
@@ -92,7 +48,7 @@ const blankProduct = (overrides = {}) => ({
 // A freeSolo select with a "+" that opens a small master for the option list:
 // add a new entry, rename one or delete one (to the backend master where one
 // exists, otherwise to a local list).
-function AttributeField({ label, value, onChange, options, onPersist, onRename, onRemove, disabled }) {
+export function AttributeField({ label, value, onChange, options, onPersist, onRename, onRemove, disabled }) {
   const [addOpen, setAddOpen] = useState(false);
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);

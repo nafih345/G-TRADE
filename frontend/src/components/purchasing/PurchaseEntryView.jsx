@@ -19,10 +19,12 @@ import {
   Inbox as EmptyIcon,
   NoteAdd as DraftIcon,
   ListAlt as ListAltIcon,
-  ViewColumn as ViewColumnIcon
+  ViewColumn as ViewColumnIcon,
+  LibraryAdd as MultiItemsIcon
 } from '@mui/icons-material';
 import QuickDatePickerField from '../common/QuickDatePickerField';
 import ProductMasterDialog from '../inventory/ProductMasterDialog';
+import ProductVariantMaster from '../inventory/variants/ProductVariantMaster';
 import { useDebounce } from '../../hooks/useDebounce';
 import useBarcodeScanner from '../../hooks/useBarcodeScanner';
 import { printPurchaseReceipt } from '../../utils/printPurchase';
@@ -239,6 +241,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
   const [itemsDialogOpen, setItemsDialogOpen] = useState(false);
   const [pendingFocusRow, setPendingFocusRow] = useState(null);
   const [addProductOpen, setAddProductOpen] = useState(false);
+  const [multiItemsOpen, setMultiItemsOpen] = useState(false);
 
   const DEFAULT_COLUMN_VISIBILITY = {
     barcode: true, batch: true, hsn: true, expiry: true, free: true,
@@ -288,6 +291,33 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
       taxRate: parseFloat(p.gst) || defaultGstPercent,
       hsnCode: p.hsnCode || ''
     }, { openDialog: true });
+  };
+
+  // Rows coming back from the shared Add Multiple Items / Product Variant Master dialog. Every
+  // line already references a saved Product (new variants were created there, without stock);
+  // stock only moves when this purchase is saved as Confirmed, like any other line.
+  const handleMultiItemsAdded = (lines) => {
+    if (!lines?.length) return;
+    setRows(prev => {
+      const next = [...prev];
+      lines.forEach(l => {
+        const idx = next.findIndex(r => String(r.productId) === String(l.id));
+        if (idx !== -1) {
+          next[idx] = recalcRow({ ...next[idx], quantity: (parseFloat(next[idx].quantity) || 0) + l.quantity }, 'quantity', gstType, isInterstate);
+          return;
+        }
+        const base = blankRow(
+          { id: l.id, name: l.name, sku: l.sku, barcode: l.barcode, costPrice: l.costPrice, stock: l.stock, taxRate: l.taxRate, hsnCode: l.hsnCode },
+          { quantity: l.quantity, purchaseRate: l.costPrice, gstPercent: l.taxRate, hsnCode: l.hsnCode },
+          defaultGstPercent, defaultCessPercent, defaultVatPercent
+        );
+        const mrp = l.mrp > 0 ? l.mrp : base.mrp;
+        const selling = l.sellingPrice > 0 ? l.sellingPrice : mrp;
+        next.push(recalcRow({ ...base, mrp, sellingPrice: selling }, 'sellingPrice', gstType, isInterstate));
+      });
+      return next;
+    });
+    setItemsDialogOpen(true);
   };
 
   const companyGstin = useMemo(() => {
@@ -793,6 +823,8 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
   // --- Keyboard shortcuts ---
   useEffect(() => {
     const handleShortcut = (e) => {
+      // The Add Multiple Items dialog has its own shortcut map; nothing here may act behind it.
+      if (multiItemsOpen) return;
       if (e.key === 'F2') { e.preventDefault(); dateInputRef.current?.focus(); }
       else if (e.key === 'F3') { e.preventDefault(); supplierInputRef.current?.focus(); }
       else if (e.key === 'F4') { e.preventDefault(); onRequestAddSupplier?.(); }
@@ -1077,6 +1109,17 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
             sx={{ flexShrink: 0, fontWeight: 800, borderRadius: '24px', px: 2, whiteSpace: 'nowrap' }}
           >
             Add New Product
+          </Button>
+        </Tooltip>
+        <Tooltip title="Add several items or variants (colour, size, power…) at once">
+          <Button
+            variant="outlined"
+            size="small"
+            startIcon={<MultiItemsIcon />}
+            onClick={() => setMultiItemsOpen(true)}
+            sx={{ flexShrink: 0, fontWeight: 800, borderRadius: '24px', px: 2, whiteSpace: 'nowrap' }}
+          >
+            Add Multiple Items
           </Button>
         </Tooltip>
       </Paper>
@@ -1403,6 +1446,16 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
         suppliers={supplierNames}
         defaultSupplier={selectedSupplier?.name || selectedSupplier?.company_name || ''}
         onCreated={handleProductMasterCreated}
+      />
+
+      {/* Shared Add Multiple Items / Product Variant Master (same component as Inventory → Products) */}
+      <ProductVariantMaster
+        open={multiItemsOpen}
+        onClose={() => setMultiItemsOpen(false)}
+        context="purchase"
+        supplierName={selectedSupplier?.name || selectedSupplier?.company_name || ''}
+        purchaseGstType={gstType}
+        onAddToPurchase={handleMultiItemsAdded}
       />
     </Box>
   );

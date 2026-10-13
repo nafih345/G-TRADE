@@ -15,7 +15,10 @@ import {
   Tune as AdjustIcon,
   Delete as DeleteIcon,
   Edit as EditIcon,
-  AutoAwesome as SparkleIcon
+  AutoAwesome as SparkleIcon,
+  LibraryAdd as MultiItemsIcon,
+  AccountTree as VariantsIcon,
+  UploadFile as ImportIcon
 } from '@mui/icons-material';
 import axios from 'axios';
 import CategoryManagementView from '../components/inventory/CategoryManagementView';
@@ -25,6 +28,10 @@ import ConfirmActionDialog from '../components/common/ConfirmActionDialog';
 import BarcodePrintDialog from '../components/inventory/BarcodePrintDialog';
 import BarcodeManageDialog from '../components/inventory/BarcodeManageDialog';
 import ProductMasterDialog from '../components/inventory/ProductMasterDialog';
+import ProductVariantMaster from '../components/inventory/variants/ProductVariantMaster';
+import VariantImportDialog from '../components/inventory/variants/VariantImportDialog';
+
+const isBackendId = (v) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(v || ''));
 
 const initialProducts = [];
 
@@ -78,6 +85,9 @@ export default function Products() {
   
   const [addProductCategory, setAddProductCategory] = useState('Frames');
   const [editProduct, setEditProduct] = useState(null);
+  // Add Multiple Items / Manage Variants (shared Product Variant Master)
+  const [variantMaster, setVariantMaster] = useState({ open: false, productId: null, importGroup: null });
+  const [importOpen, setImportOpen] = useState(false);
 
   const [adjustStock, setAdjustStock] = useState({ id: '', name: '', current: 0, change: 0, reason: 'Manual audit' });
   const [dbSuppliers, setDbSuppliers] = useState([]);
@@ -169,7 +179,9 @@ export default function Products() {
             rack: p.rack || 'A1',
             shelf: p.shelf || 'S1',
             warehouse: p.warehouse || 'Main',
-            status: p.is_active === false ? 'Inactive' : 'Active'
+            status: p.is_active === false ? 'Inactive' : 'Active',
+            variantGroup: p.variant_group || null,
+            minimumStock: p.minimum_stock ?? null
           }));
           itemsList = [...itemsList, ...formatted];
         }
@@ -433,6 +445,12 @@ export default function Products() {
           >
             🔬 + Fast Lens Creator
           </Button>
+          <Button variant="outlined" startIcon={<ImportIcon />} onClick={() => setImportOpen(true)} sx={{ fontWeight: 800 }}>
+            Import from Excel
+          </Button>
+          <Button variant="outlined" startIcon={<MultiItemsIcon />} onClick={() => setVariantMaster({ open: true, productId: null, importGroup: null })} sx={{ fontWeight: 800 }}>
+            Add Multiple Items
+          </Button>
           <Button variant="contained" startIcon={<AddIcon />} onClick={handleOpen} sx={{ backgroundColor: '#2563EB', fontWeight: 800 }}>
             Add New Product
           </Button>
@@ -532,7 +550,7 @@ export default function Products() {
                         </TableRow>
                       ) : (
                         filteredProducts.map((product) => {
-                          const isLowStock = product.stock <= 10;
+                          const isLowStock = product.stock <= (product.minimumStock ?? 10);
                           return (
                             <TableRow key={product.id} hover selected={selectedProductIds.has(product.id)}>
                               <TableCell padding="checkbox">
@@ -547,7 +565,10 @@ export default function Products() {
                                 <Typography variant="caption" color="text.secondary">{product.barcode}</Typography>
                               </TableCell>
                               <TableCell>
-                                <Typography variant="body2" fontWeight={600}>{product.name}</Typography>
+                                <Typography variant="body2" component="div" fontWeight={600}>
+                                  {product.name}
+                                  {product.variantGroup && <Chip size="small" label="Variant" variant="outlined" color="primary" sx={{ ml: 0.75, height: 18, fontSize: '0.65rem' }} />}
+                                </Typography>
                                 <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
                                   Brand: {product.brand || 'Generic'}
                                 </Typography>
@@ -579,6 +600,14 @@ export default function Products() {
                                 <Stack direction="row" spacing={0.5} justifyContent="center">
                                   <IconButton color="primary" title="Edit Product" onClick={() => handleOpenEdit(product)}>
                                     <EditIcon fontSize="small" />
+                                  </IconButton>
+                                  <IconButton
+                                    color="primary"
+                                    title={isBackendId(product.id) ? 'Manage Variants / View Stock' : 'Save this product to the database first'}
+                                    disabled={!isBackendId(product.id)}
+                                    onClick={() => setVariantMaster({ open: true, productId: product.id, importGroup: null })}
+                                  >
+                                    <VariantsIcon fontSize="small" />
                                   </IconButton>
                                   <IconButton
                                     color={product.barcode ? 'primary' : 'warning'}
@@ -627,6 +656,23 @@ export default function Products() {
         defaultCategory={addProductCategory}
         editProduct={editProduct}
         onCreated={handleProductCreated}
+      />
+
+      {/* Add Multiple Items / Manage Variants — shared with Purchase Entry */}
+      <ProductVariantMaster
+        open={variantMaster.open}
+        onClose={() => setVariantMaster({ open: false, productId: null, importGroup: null })}
+        context="inventory"
+        initialProductId={variantMaster.productId}
+        initialImportGroup={variantMaster.importGroup}
+      />
+
+      <VariantImportDialog
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        context="inventory"
+        onLoadIntoGrid={(group) => setVariantMaster({ open: true, productId: null, importGroup: group })}
+        onImported={(r) => { if (r.imported_rows) window.dispatchEvent(new Event('optical_stock_updated')); }}
       />
 
       {/* Barcode Label Print Dialog */}

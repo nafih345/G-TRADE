@@ -77,6 +77,60 @@ class ImportErrorLog(models.Model):
         return f"Batch {self.batch.batch_number} Row {self.row_number}: {self.error_message}"
 
 
+class ProductVariantGroup(BaseUUIDModel):
+    """Parent ("style") record that ties sibling Product rows together as variants.
+
+    Each variant is still an ordinary Product (own SKU, barcode, stock, prices), so every
+    sale / purchase / stock / barcode path that references Product keeps working unchanged.
+    This row only holds what the variants share plus which attributes they vary on.
+    Created and edited by the Add Multiple Items / Product Variant Master screen.
+    """
+    name = models.CharField(max_length=255, db_index=True)
+    base_sku = models.CharField(max_length=120, unique=True, blank=True, null=True)
+    description = models.TextField(blank=True, null=True)
+    long_description = models.TextField(blank=True, null=True)
+
+    category = models.ForeignKey('masters.ProductCategory', on_delete=models.SET_NULL, null=True, blank=True, related_name='variant_groups')
+    brand = models.ForeignKey('masters.Brand', on_delete=models.SET_NULL, null=True, blank=True, related_name='variant_groups')
+    unit = models.ForeignKey('masters.Unit', on_delete=models.SET_NULL, null=True, blank=True, related_name='variant_groups')
+    category_name = models.CharField(max_length=150, blank=True, null=True, db_index=True)
+    brand_name = models.CharField(max_length=150, blank=True, null=True)
+    sub_category = models.CharField(max_length=150, blank=True, null=True)
+    group_name = models.CharField(max_length=150, blank=True, null=True)
+    model_number = models.CharField(max_length=150, blank=True, null=True)
+    hsn_code = models.CharField(max_length=15, blank=True, null=True)
+    tax_percent = models.DecimalField(max_digits=5, decimal_places=2, blank=True, null=True)
+
+    # Ordered attribute keys the variants differ on, e.g. ["color", "size"].
+    attribute_keys = models.JSONField(default=list, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return self.name
+
+
+class ProductVariantTemplate(BaseUUIDModel):
+    """Reusable Add Multiple Items configuration (category, attributes, default option
+    values, tax, SKU rule, visible columns). Never holds transaction data."""
+    name = models.CharField(max_length=150, unique=True)
+    category_name = models.CharField(max_length=150, blank=True, null=True)
+    config = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
+class BulkSaveReceipt(models.Model):
+    """Idempotency record for the bulk variant save: a retried request carrying the same
+    client token gets the stored response instead of creating the products twice."""
+    token = models.CharField(max_length=64, unique=True)
+    response = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
 class Product(BaseUUIDModel):
     name = models.CharField(max_length=255)
     sku = models.CharField(max_length=150, unique=True)
@@ -117,6 +171,22 @@ class Product(BaseUUIDModel):
     extra_data = models.JSONField(default=dict, blank=True, null=True)
 
     image = models.ImageField(upload_to='product_images/', blank=True, null=True)
+
+    # Variant link (null for stand-alone products). variant_key is the normalised attribute
+    # combination ("color=black|size=m") — unique inside a group so the same combination
+    # can't be created twice.
+    variant_group = models.ForeignKey(ProductVariantGroup, on_delete=models.SET_NULL, null=True, blank=True, related_name='variants')
+    variant_attributes = models.JSONField(default=dict, blank=True)
+    variant_key = models.CharField(max_length=255, blank=True, null=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['variant_group', 'variant_key'],
+                condition=models.Q(variant_group__isnull=False, variant_key__isnull=False),
+                name='uniq_product_variant_combination',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.name} ({self.sku})"

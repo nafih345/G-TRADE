@@ -189,7 +189,9 @@ class PurchaseInvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
         # a quantity edit never reaches BranchStock: _apply_stock_and_payables skips
         # any product that already has a StockLedger row for this invoice, which
         # every re-saved line always does.
-        old = PurchaseInvoice.objects.filter(pk=serializer.instance.pk).first()
+        # Row lock: two simultaneous saves of the same entry must not both reverse and
+        # re-apply its stock (that would double-count the received quantity).
+        old = PurchaseInvoice.objects.select_for_update().filter(pk=serializer.instance.pk).first()
         if old and old.status not in ('DRAFT', 'CANCELLED'):
             self._reverse_stock_and_payables(old)
 
