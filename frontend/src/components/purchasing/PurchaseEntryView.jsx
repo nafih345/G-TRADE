@@ -630,6 +630,31 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
   // --- Save ---
   // Any grid row whose product only exists in the browser's local inventory is
   // created in the Product Master first, so "Save Purchase" also saves the item.
+  const findBackendProduct = async (r) => {
+    const code = String(r.barcode || '').trim().toLowerCase();
+    const nameKey = (r.productName || '').trim().toLowerCase();
+    const term = code || nameKey;
+    if (!term) return null;
+    try {
+      const res = await axios.get('/api/products/items/', { params: { search: term } });
+      const list = res.data?.results || res.data || [];
+      return (Array.isArray(list) ? list : []).find(p => isBackendId(p.id) && (code
+        ? [p.barcode, p.sku, ...(p.extra_barcodes || [])].some(c => String(c || '').trim().toLowerCase() === code)
+        : (p.name || '').trim().toLowerCase() === nameKey)) || null;
+    } catch (e) {
+      return null;
+    }
+  };
+
+  const tagProductError = (err, r) => {
+    const data = err.response?.data;
+    const detail = data && typeof data === 'object'
+      ? Object.entries(data).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(' ') : v}`).join('; ')
+      : (err.response ? `HTTP ${err.response.status}` : 'server not reachable');
+    err.productLabel = `${r.productName || r.barcode || 'item'} (${detail})`;
+    return err;
+  };
+
   const resolveProductIds = async (itemRows) => {
     const idMap = {};
     for (const r of itemRows) {
@@ -642,18 +667,39 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
       ));
       if (match) { idMap[r.productId] = String(match.id); continue; }
 
-      const res = await axios.post('/api/products/items/', {
-        name: r.productName,
-        sku: r.barcode || `PRD-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-        barcode: r.barcode || null,
-        hsn_code: r.hsnCode || '',
+      // The in-memory list can be stale or miss products (and their printed label codes), so
+      // ask the server before creating — a duplicate barcode/SKU would fail the unique constraint.
+      const existing = await findBackendProduct(r);
+      if (existing) { idMap[r.productId] = String(existing.id); continue; }
+
+      const newSku = () => `PRD-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      const body = {
+        name: (r.productName || r.barcode || 'Item').slice(0, 255),
+        sku: (r.barcode || newSku()).slice(0, 150),
+        barcode: r.barcode ? String(r.barcode).slice(0, 150) : null,
+        hsn_code: String(r.hsnCode || '').slice(0, 15),
         cost_price: parseFloat(r.purchaseRate) || 0,
         retail_price: parseFloat(r.sellingPrice) || 0,
         wholesale_price: parseFloat(r.mrp) || 0,
         stock: 0,
         opening_stock: 0,
         extra_data: { gst: r.gstPercent != null ? String(r.gstPercent) : '' }
-      });
+      };
+      let res;
+      try {
+        res = await axios.post('/api/products/items/', body);
+      } catch (err) {
+        const errs = err.response?.data || {};
+        if (err.response?.status !== 400 || !(errs.sku || errs.barcode)) throw tagProductError(err, r);
+        // Barcode taken → reuse that product; only the SKU taken → retry with a generated one.
+        const taken = errs.barcode ? await findBackendProduct(r) : null;
+        if (taken) { idMap[r.productId] = String(taken.id); continue; }
+        try {
+          res = await axios.post('/api/products/items/', { ...body, sku: newSku(), ...(errs.barcode ? { barcode: null } : {}) });
+        } catch (err2) {
+          throw tagProductError(err2, r);
+        }
+      }
       idMap[r.productId] = String(res.data.id);
     }
     if (Object.keys(idMap).length === 0) return itemRows;
@@ -768,7 +814,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
         itemRows = await resolveProductIds(rows);
         if (itemRows !== rows) setRows(itemRows);
       } catch (e) {
-        alert('Failed to save one or more new products to the Product Master. Please add them via "Add New Product" and try again.');
+        alert(`Couldn't save new product ${e.productLabel || ''} to the Product Master. Fix it via "Add New Product" and try again.`);
         setSaving(false);
         return;
       }
