@@ -11,9 +11,24 @@ from apps.inventory.stock_utils import adjust_branch_stock
 from apps.common.branch_mixins import BranchScopedViewSetMixin
 
 class SupplierSerializer(ModelSerializer):
+    # Free text, not EmailField: email is informational here, and strict validation rejected
+    # the whole supplier (400) whenever staff typed a partial/placeholder address.
+    email = serializers.CharField(max_length=254, required=False, allow_blank=True, allow_null=True)
+
     class Meta:
         model = Supplier
         fields = '__all__'
+
+    def validate_name(self, value):
+        # Same company typed again (any case/spacing) must not become a second supplier row —
+        # duplicates split the payable ledger and clutter the Purchase Entry picker.
+        name = ' '.join((value or '').split())
+        dupes = Supplier.objects.filter(name__iexact=name)
+        if self.instance is not None:
+            dupes = dupes.exclude(pk=self.instance.pk)
+        if dupes.exists():
+            raise serializers.ValidationError(f"A supplier named '{name}' already exists.")
+        return name
 
 class PurchaseOrderItemSerializer(ModelSerializer):
     class Meta:

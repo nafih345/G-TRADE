@@ -206,7 +206,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
   const [purchaseType, setPurchaseType] = useState('CASH');
   const [warehouseId, setWarehouseId] = useState('');
   const [branchId, setBranchId] = useState('');
-  const [gstType, setGstType] = useState('EXCLUSIVE');
+  const [gstType, setGstType] = useState('NO_GST');
   const [defaultGstPercent, setDefaultGstPercent] = useState(0);
   const [defaultCessPercent, setDefaultCessPercent] = useState(0);
   const [defaultVatPercent, setDefaultVatPercent] = useState(0);
@@ -607,7 +607,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
     setPurchaseType('CASH');
     setWarehouseId('');
     setBranchId('');
-    setGstType('EXCLUSIVE');
+    setGstType('NO_GST');
     setDefaultGstPercent(0);
     setDefaultCessPercent(0);
     setDefaultVatPercent(0);

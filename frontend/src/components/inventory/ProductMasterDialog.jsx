@@ -1,9 +1,9 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import axios from 'axios';
 import {
   Dialog, DialogTitle, DialogContent, DialogActions, Grid, TextField,
   MenuItem, Button, Stack, Typography, Paper, Autocomplete, Alert, Chip,
-  IconButton, Tooltip, Box, Divider
+  IconButton, Tooltip, Box, Divider, createFilterOptions
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -22,6 +22,7 @@ import {
 } from '@mui/icons-material';
 import BarcodeSection from './BarcodeSection';
 import { notify } from '../../utils/notify';
+import { navDialogProps, enterOpensSelectProps, focusField, focusRelative, focusNextAfterRender } from '../../pages/wholesale/keyboardNav';
 
 export { opticalCategories, opticalBrands } from './productAttributeOptions';
 import {
@@ -40,24 +41,97 @@ const blankProduct = (overrides = {}) => ({
   size: '', color: '', material: '',
   frameType: '', lensType: '', coating: '',
   supplier: '', warehouse: 'Main', rack: '', stock: '',
-  purchasePrice: '', mrp: '', salePrice: '', gst: '18%',
+  purchasePrice: '', mrp: '', salePrice: '', gst: '0%',
   barcode: '',
   ...overrides
 });
 
+// Opens a field's "+" master from the keyboard: Ctrl + "+" (Ctrl+= / Ctrl+Shift+=) or Alt+N.
+const isAddShortcut = (e) =>
+  (e.ctrlKey && !e.altKey && (e.key === '+' || e.key === '=' || e.code === 'NumpadAdd'))
+  || (e.altKey && !e.ctrlKey && (e.key === 'n' || e.key === 'N'));
+
+// The "+" master renders in a portal, but React still bubbles its key events through the
+// parent dialog's keyboardNav handlers (and App.jsx's global Enter handler sees it as a
+// plain dialog) — mark its Paper so both leave its keys to its own fields.
+const OWN_KEYS_PAPER = { 'data-nav-own': '', 'data-own-enter': 'true' };
+const defaultFilter = createFilterOptions();
+
 // A freeSolo select with a "+" that opens a small master for the option list:
 // add a new entry, rename one or delete one (to the backend master where one
 // exists, otherwise to a local list).
+//
+// Keyboard (inside a keyboardNav scope such as ProductMasterDialog): typing highlights the
+// first match and Enter picks it and moves to the next field in one press; Enter on a closed
+// list just moves on. Ctrl + "+" or Alt+N opens the "+" master; Enter in its "New …" box
+// adds the entry, selects it, closes and moves on.
 export function AttributeField({ label, value, onChange, options, onPersist, onRename, onRemove, disabled }) {
   const [addOpen, setAddOpen] = useState(false);
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [filter, setFilter] = useState('');
   const [editing, setEditing] = useState(null); // { from, to }
+  const fieldRef = useRef(null);
+  const draftRef = useRef(null);
+  const advanceOnCloseRef = useRef(false);
 
   const canManage = Boolean(onRename || onRemove);
 
-  const commit = async () => {
+  const openAdd = () => { setDraft(''); advanceOnCloseRef.current = false; setAddOpen(true); };
+
+  const onFieldKeyDown = (e) => {
+    if (isAddShortcut(e)) {
+      e.preventDefault(); // Ctrl + "+" would otherwise zoom the page
+      e.stopPropagation();
+      if (!disabled) openAdd();
+      return;
+    }
+    // List open: MUI selects the highlighted option (or commits the typed text) on this
+    // Enter — move on once that has rendered. A closed list is left to the keyboardNav chain.
+    if (e.key === 'Enter' && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey
+        && e.target.getAttribute('aria-expanded') === 'true') {
+      focusNextAfterRender(e.target);
+    }
+  };
+
+  // `value` follows every keystroke, so MUI treats the list as "pristine" on the keystroke that
+  // opens it and shows every option unfiltered — "F" + Enter would pick the first entry. Filter
+  // by the typed text ourselves once the user has typed; opening with ↓ still lists everything.
+  const typedRef = useRef(false);
+
+  const fieldInput = (
+    <Autocomplete
+      freeSolo
+      autoHighlight
+      fullWidth
+      size="small"
+      disabled={disabled}
+      options={options}
+      value={value || ''}
+      filterOptions={(opts, state) => defaultFilter(opts, typedRef.current ? { ...state, inputValue: value || '' } : state)}
+      onInputChange={(e, v, reason) => { if (reason === 'input') typedRef.current = true; onChange(v || ''); }}
+      onClose={() => { typedRef.current = false; }}
+      onChange={(e, v) => onChange(v || '')}
+      onKeyDown={onFieldKeyDown}
+      renderInput={(params) => <TextField {...params} label={label} inputRef={fieldRef} />}
+    />
+  );
+
+  // Focus the "New …" box once the dialog has finished opening (autoFocus loses to the
+  // FocusTrap when the dialog is opened by a keystroke). On close, return to the field —
+  // or, after a keyboard add, step past it.
+  const addDialogTransition = {
+    onEntered: () => focusField(draftRef.current),
+    onExited: () => {
+      const el = fieldRef.current;
+      const advance = advanceOnCloseRef.current;
+      advanceOnCloseRef.current = false;
+      if (!el) return;
+      setTimeout(() => { if (!advance || !focusRelative(el, 1)) focusField(el); }, 0);
+    }
+  };
+
+  const commit = async ({ close = false } = {}) => {
     const v = draft.trim();
     if (!v) return;
     if (options.some(o => o.toLowerCase() === v.toLowerCase())) {
@@ -69,7 +143,12 @@ export function AttributeField({ label, value, onChange, options, onPersist, onR
     setBusy(false);
     onChange(v);
     setDraft('');
-    if (!canManage) setAddOpen(false);
+    if (close || !canManage) {
+      advanceOnCloseRef.current = close;
+      setAddOpen(false);
+      setFilter('');
+      setEditing(null);
+    }
   };
 
   const saveRename = async () => {
@@ -102,36 +181,28 @@ export function AttributeField({ label, value, onChange, options, onPersist, onR
     return (
       <>
         <Stack direction="row" spacing={0.5} alignItems="flex-start">
-          <Autocomplete
-            freeSolo
-            fullWidth
-            size="small"
-            disabled={disabled}
-            options={options}
-            value={value || ''}
-            onInputChange={(e, v) => onChange(v || '')}
-            onChange={(e, v) => onChange(v || '')}
-            renderInput={(params) => <TextField {...params} label={label} />}
-          />
-          <Tooltip title={`Add / Edit / Delete ${label}`}>
+          {fieldInput}
+          <Tooltip title={`Add / Edit / Delete ${label} (Ctrl + "+" or Alt+N)`}>
             <span>
-              <IconButton size="small" color="primary" sx={{ mt: 0.3 }} disabled={disabled} onClick={() => { setDraft(''); setAddOpen(true); }}>
+              <IconButton size="small" color="primary" sx={{ mt: 0.3 }} disabled={disabled} tabIndex={-1} onClick={openAdd}>
                 <AddIcon fontSize="small" />
               </IconButton>
             </span>
           </Tooltip>
         </Stack>
 
-        <Dialog open={addOpen} onClose={close} maxWidth="xs" fullWidth>
+        <Dialog open={addOpen} onClose={close} maxWidth="xs" fullWidth TransitionProps={addDialogTransition} PaperProps={OWN_KEYS_PAPER}>
           <DialogTitle sx={{ fontWeight: 800 }}>{label} Master</DialogTitle>
           <DialogContent>
-            <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
+            <Stack direction="row" spacing={1} sx={{ mt: 1 }} alignItems="flex-start">
               <TextField
                 autoFocus fullWidth size="small" label={`New ${label}`} value={draft}
+                inputRef={draftRef}
+                helperText="Enter = add, select & continue"
                 onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } }}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); commit({ close: true }); } }}
               />
-              <Button variant="contained" onClick={commit} disabled={busy || !draft.trim()} startIcon={<AddIcon />}>Add</Button>
+              <Button variant="contained" onClick={() => commit()} disabled={busy || !draft.trim()} startIcon={<AddIcon />}>Add</Button>
             </Stack>
 
             <Divider sx={{ my: 2 }} />
@@ -198,39 +269,30 @@ export function AttributeField({ label, value, onChange, options, onPersist, onR
   return (
     <>
       <Stack direction="row" spacing={0.5} alignItems="flex-start">
-        <Autocomplete
-          freeSolo
-          fullWidth
-          size="small"
-          disabled={disabled}
-          options={options}
-          value={value || ''}
-          onInputChange={(e, v) => onChange(v || '')}
-          onChange={(e, v) => onChange(v || '')}
-          renderInput={(params) => <TextField {...params} label={label} />}
-        />
-        <Tooltip title={`Add new ${label}`}>
+        {fieldInput}
+        <Tooltip title={`Add new ${label} (Ctrl + "+" or Alt+N)`}>
           <span>
-            <IconButton size="small" color="primary" sx={{ mt: 0.3 }} disabled={disabled} onClick={() => { setDraft(''); setAddOpen(true); }}>
+            <IconButton size="small" color="primary" sx={{ mt: 0.3 }} disabled={disabled} tabIndex={-1} onClick={openAdd}>
               <AddIcon fontSize="small" />
             </IconButton>
           </span>
         </Tooltip>
       </Stack>
 
-      <Dialog open={addOpen} onClose={() => setAddOpen(false)} maxWidth="xs" fullWidth>
+      <Dialog open={addOpen} onClose={() => setAddOpen(false)} maxWidth="xs" fullWidth TransitionProps={addDialogTransition} PaperProps={OWN_KEYS_PAPER}>
         <DialogTitle sx={{ fontWeight: 800 }}>Add {label}</DialogTitle>
         <DialogContent>
           <TextField
             autoFocus fullWidth size="small" label={`New ${label}`} value={draft}
+            inputRef={draftRef}
             onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } }}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); commit({ close: true }); } }}
             sx={{ mt: 1 }}
           />
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setAddOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={commit} disabled={busy}>{busy ? 'Adding…' : 'Add'}</Button>
+          <Button variant="contained" onClick={() => commit({ close: true })} disabled={busy}>{busy ? 'Adding…' : 'Add'}</Button>
         </DialogActions>
       </Dialog>
     </>
@@ -276,7 +338,7 @@ const productToForm = (ep) => {
   purchasePrice: (ep.purchasePrice ?? '') === '' ? '' : String(ep.purchasePrice),
   mrp: (ep.mrp ?? '') === '' ? '' : String(ep.mrp),
   salePrice: (ep.salePrice ?? ep.sellingPrice ?? '') === '' ? '' : String(ep.salePrice ?? ep.sellingPrice),
-  gst: ep.gst || '18%',
+  gst: ep.gst || '0%',
   barcode: ep.barcode || ''
   });
 };
@@ -518,7 +580,7 @@ export default function ProductMasterDialog({
       mrp,
       salePrice,
       sellingPrice: salePrice,
-      gst: p.gst || '18%',
+      gst: p.gst || '0%',
       stock,
       rack: p.rack || '',
       warehouse: p.warehouse || 'Main',
@@ -548,7 +610,13 @@ export default function ProductMasterDialog({
 
   return (
     <>
-      <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth PaperProps={{ sx: { borderRadius: 3.5 } }}>
+      {/* Whole form is one keyboardNav chain: Enter / ↓ / ↑ = next / previous field
+          (Classification → Variant → Pricing → GST → Barcode → Stock & Location → Save). */}
+      <Dialog
+        open={open} onClose={onClose} maxWidth="md" fullWidth
+        {...navDialogProps}
+        PaperProps={{ ...navDialogProps.PaperProps, sx: { borderRadius: 3.5 } }}
+      >
         <DialogTitle sx={{ fontWeight: 800, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 1, bgcolor: isLens ? '#0f172a' : '#ffffff', color: isLens ? '#facc15' : 'inherit', transition: 'all 0.3s ease' }}>
           <Stack direction="row" spacing={1.5} alignItems="center">
             <Typography variant="h6" fontWeight={900}>
@@ -729,7 +797,7 @@ export default function ProductMasterDialog({
                   />
                 </Grid>
                 <Grid item xs={12} sm={6} md={3}>
-                  <TextField select label="GST Tax Rate" fullWidth size="small" value={p.gst} onChange={(e) => set({ gst: e.target.value })}>
+                  <TextField select label="GST Tax Rate" fullWidth size="small" value={p.gst} onChange={(e) => set({ gst: e.target.value })} SelectProps={{ ...enterOpensSelectProps }} helperText="Enter, then ↑/↓ + Enter">
                     <MenuItem value="0%">0% (Exempt)</MenuItem>
                     <MenuItem value="5%">5% GST</MenuItem>
                     <MenuItem value="12%">12% GST</MenuItem>
@@ -766,6 +834,7 @@ export default function ProductMasterDialog({
                 productPrice={saleNum || mrpNum || 0}
                 productColour={p.color}
                 productSize={p.size}
+                keyboardNav
                 generateUrl="/api/products/items/next_ean13_candidate/"
               />
             </Section>
@@ -830,7 +899,7 @@ export default function ProductMasterDialog({
 
         <DialogActions sx={{ p: 2, justifyContent: 'space-between', bgcolor: '#f1f5f9' }}>
           <Button onClick={onClose} disabled={saving}>Cancel</Button>
-          <Button onClick={handleSave} variant="contained" disabled={saving} sx={{ backgroundColor: '#2563EB', px: 3.5, py: 1, fontWeight: 900, borderRadius: 2 }}>
+          <Button onClick={handleSave} variant="contained" disabled={saving} data-nav-stop="" sx={{ backgroundColor: '#2563EB', px: 3.5, py: 1, fontWeight: 900, borderRadius: 2 }}>
             {saving ? 'Saving…' : (isEdit ? `Update ${isLens ? 'Lens Option' : 'Product'}` : `Save ${isLens ? 'Lens Option' : 'Product'} to Database`)}
           </Button>
         </DialogActions>

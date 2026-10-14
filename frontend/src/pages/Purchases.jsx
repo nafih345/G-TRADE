@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import QuickDatePickerField from '../components/common/QuickDatePickerField';
 import PurchaseEntryView from '../components/purchasing/PurchaseEntryView';
@@ -95,6 +95,7 @@ export default function Purchases() {
   // Modal Dialog States
   const [addSupplierOpen, setAddSupplierOpen] = useState(false);
   const [editSupplierId, setEditSupplierId] = useState(null);
+  const savingSupplierRef = useRef(false);
   const [returnOpen, setReturnOpen] = useState(false);
   const [createPoOpen, setCreatePoOpen] = useState(false);
   const [selectedPo, setSelectedPo] = useState(null);
@@ -386,24 +387,70 @@ export default function Purchases() {
     setAddSupplierOpen(true);
   };
 
+  // DRF returns field errors as { field: ["msg"] } — surface them instead of a generic
+  // "could not save", otherwise e.g. an invalid email looks like a server outage.
+  const describeSupplierApiError = (e) => {
+    const data = e?.response?.data;
+    if (!data) return '';
+    if (typeof data === 'string') return data.length < 200 ? data : '';
+    if (data.detail) return String(data.detail);
+    const labels = { email: 'Email', supplier_code: 'Supplier Code', name: 'Company Name', phone: 'Phone', gstin: 'GSTIN', city: 'City', account_number: 'Bank Account Number', contact_person: 'Contact Person' };
+    return Object.entries(data)
+      .map(([k, v]) => `${labels[k] || k}: ${Array.isArray(v) ? v.join(' ') : String(v)}`)
+      .join(' | ');
+  };
+
   const handleSaveSupplier = async () => {
-    if (!supplierInput.name) {
+    if (savingSupplierRef.current) return;
+    const name = (supplierInput.name || '').trim();
+    if (!name) {
       alert("Please enter Supplier Company Name.");
       return;
     }
+    const email = (supplierInput.email || '').trim();
 
-    const payload = {
-      name: supplierInput.name,
-      supplier_code: supplierInput.supplierCode || undefined,
-      contact_person: supplierInput.contactPerson,
-      phone: supplierInput.phone,
-      email: supplierInput.email,
-      gstin: supplierInput.gstin,
-      address: supplierInput.address,
-      city: supplierInput.city,
-      payment_terms: supplierInput.paymentTerms,
-      account_number: supplierInput.accountNumber
+    // Same company already registered (case/spacing-insensitive): reuse it instead of
+    // creating a duplicate row — the backend rejects duplicate names too.
+    const normName = (v) => (v || '').toString().trim().replace(/\s+/g, ' ').toLowerCase();
+    const existing = suppliers.find(s => normName(s.name) === normName(name) && String(s.id) !== String(editSupplierId || ''));
+    if (existing) {
+      if (editSupplierId) {
+        alert(`Another supplier named '${existing.name}' already exists.`);
+        return;
+      }
+      setEntryPrefillSupplierId(existing.id);
+      setSupplierInput({ name: '', supplierCode: '', contactPerson: '', phone: '', email: '', gstin: '', address: '', city: '', paymentTerms: 'Net 30', accountNumber: '' });
+      setAddSupplierOpen(false);
+      alert(`Supplier '${existing.name}' already exists — selected the existing supplier.`);
+      return;
+    }
+
+    // Optional fields go as null when blank so length/format validators don't trip on ''.
+    const opt = (v) => {
+      const s = (v ?? '').toString().trim();
+      return s ? s : null;
     };
+    const payload = {
+      name,
+      supplier_code: opt(supplierInput.supplierCode) || undefined,
+      contact_person: opt(supplierInput.contactPerson),
+      phone: opt(supplierInput.phone),
+      email: email || null,
+      gstin: opt(supplierInput.gstin),
+      address: opt(supplierInput.address),
+      city: opt(supplierInput.city),
+      payment_terms: opt(supplierInput.paymentTerms) || 'Net 30',
+      account_number: opt(supplierInput.accountNumber)
+    };
+    savingSupplierRef.current = true;
+    try {
+      await saveSupplierPayload(payload);
+    } finally {
+      savingSupplierRef.current = false;
+    }
+  };
+
+  const saveSupplierPayload = async (payload) => {
 
     // --- EDIT MODE: update an existing supplier in place ---
     if (editSupplierId) {
@@ -414,7 +461,8 @@ export default function Purchases() {
           const res = await axios.patch(`/api/purchase/suppliers/${editSupplierId}/`, payload);
           updated = res.data;
         } catch (e) {
-          alert("Could not update the supplier in the database. Please try again.");
+          const why = describeSupplierApiError(e);
+          alert(why ? `Could not update the supplier — ${why}` : "Could not update the supplier in the database. Please try again.");
           return;
         }
       }
@@ -446,7 +494,8 @@ export default function Purchases() {
       const res = await axios.post('/api/purchase/suppliers/', payload);
       created = res.data;
     } catch (e) {
-      alert("Could not save the supplier to the database. Please try again.");
+      const why = describeSupplierApiError(e);
+      alert(why ? `Could not save the supplier — ${why}` : "Could not save the supplier to the database. Please try again.");
       return;
     }
 

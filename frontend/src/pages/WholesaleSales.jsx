@@ -141,10 +141,7 @@ const ITEM_MODES = [
 const PAY_MODE_BUTTONS = [['Cash', 'Cash'], ['UPI', 'UPI'], ['Card', 'Card'], ['Bank Transfer', 'Bank'], ['Credit Sale', 'Credit'], ['Split Payment', 'Split']];
 const isServiceLine = (item) => item?.itemType === 'SERVICE';
 const isLensProduct = (p) => /lens/i.test(String(p?.category || ''));
-// Entry-row field order for Enter / Shift+Enter.
-const ENTRY_ORDER = ['ws-entry-qty', 'ws-entry-price', 'ws-entry-disc', 'ws-entry-tax'];
 const GRID_COLS = ['qty', 'rate', 'disc', 'gst'];
-const blankEntry = () => ({ product: null, qty: '1', price: '', disc: '0', tax: '' });
 
 // Treat inventory placeholder dashes as "no value" so empty columns stay blank.
 const cellText = (v) => (v == null || v === '' || v === '—' || v === '-' ? '' : v);
@@ -193,9 +190,6 @@ export default function WholesaleSales() {
   // Product entry row (Product / Lens / Services tabs) — search, pick, adjust, Add Item.
   const rootRef = useRef(null);
   const [itemMode, setItemMode] = useState('product');
-  const [categoryFilter, setCategoryFilter] = useState('');
-  const [entry, setEntry] = useState(blankEntry);
-  const [entryErrors, setEntryErrors] = useState({});
   const [searchOpen, setSearchOpen] = useState(false);
   const [matchIndex, setMatchIndex] = useState(0);
   const [services, setServices] = useState([]);
@@ -792,66 +786,40 @@ export default function WholesaleSales() {
     }]);
   };
 
-  // --- Entry row --------------------------------------------------------------------------
+  // --- Product search ---------------------------------------------------------------------
+  // Matches show inside the billing grid itself (in place of the cart lines while typing);
+  // ↑/↓ moves the highlight and Enter adds the highlighted item to the bill (qty 1, list
+  // price, master tax). Qty / price / disc / tax are then edited in the grid cells.
   const modeProducts = useMemo(() => {
     if (itemMode === 'service') return services;
     return products.filter(p => (itemMode === 'lens' ? isLensProduct(p) : !isLensProduct(p)));
   }, [itemMode, products, services]);
 
-  const categoryOptions = useMemo(() => {
-    if (itemMode === 'service') return [];
-    return Array.from(new Set(modeProducts.map(p => cellText(p.category)).filter(Boolean))).sort();
-  }, [itemMode, modeProducts]);
-
   const searchMatches = useMemo(() => {
     const q = barcodeInput.trim().toLowerCase();
     if (!q) return [];
-    const pool = categoryFilter && itemMode !== 'service' ? modeProducts.filter(p => p.category === categoryFilter) : modeProducts;
-    return pool.filter(p => [p.name, p.code, p.sku, p.barcode, p.brand, p.modelNo, p.color, p.size, p.description]
-      .some(v => cellText(v) && String(v).toLowerCase().includes(q))).slice(0, 40);
-  }, [barcodeInput, modeProducts, categoryFilter, itemMode]);
+    return modeProducts.filter(p => [p.name, p.code, p.sku, p.barcode, p.brand, p.modelNo, p.color, p.size, p.category, p.description]
+      .some(v => cellText(v) && String(v).toLowerCase().includes(q))).slice(0, 50);
+  }, [barcodeInput, modeProducts]);
 
-  useEffect(() => { setMatchIndex(0); }, [barcodeInput, itemMode, categoryFilter]);
+  const showSearchResults = searchOpen && Boolean(barcodeInput.trim());
 
-  // Keep the highlighted result scrolled into view while arrowing through the list.
+  useEffect(() => { setMatchIndex(0); }, [barcodeInput, itemMode]);
+
+  // Keep the highlighted result scrolled into view inside the grid (not the page) while arrowing.
   useEffect(() => {
-    if (!searchOpen) return;
-    document.querySelector(`[data-search-idx="${matchIndex}"]`)?.scrollIntoView({ block: 'nearest' });
-  }, [matchIndex, searchOpen]);
-
-  // Bring the pending line into view inside the grid (scrolls only the grid, not the page, so the
-  // entry row the cursor is in stays put).
-  useEffect(() => {
-    if (!entry.product) return;
-    const row = document.getElementById('ws-pending-row');
+    if (!showSearchResults) return;
+    const row = document.querySelector(`[data-search-idx="${matchIndex}"]`);
     const box = row?.closest('.MuiTableContainer-root');
-    if (box) box.scrollTop = box.scrollHeight;
-  }, [entry.product]);
+    if (!row || !box) return;
+    const head = box.querySelector('thead')?.offsetHeight || 0;
+    if (row.offsetTop - head < box.scrollTop) box.scrollTop = row.offsetTop - head;
+    else if (row.offsetTop + row.offsetHeight > box.scrollTop + box.clientHeight) box.scrollTop = row.offsetTop + row.offsetHeight - box.clientHeight;
+  }, [matchIndex, showSearchResults]);
 
-  const selectEntryItem = (item, mode = itemMode) => {
-    if (!item) return;
-    const isSvc = mode === 'service';
-    const qty = parseFloat(entry.qty) >= 1 ? entry.qty : '1';
-    const rate = isSvc ? item.price : priceForProduct(item, parseFloat(qty) || 1).rate;
-    setEntry({ product: item, qty, price: String(rate ?? 0), disc: '0', tax: String(parseFloat(item.gst) || 0) });
-    setEntryErrors({});
+  const clearSearch = () => {
     setBarcodeInput('');
     setSearchOpen(false);
-    setTimeout(() => focusById('ws-entry-qty'), 20);
-  };
-
-  const clearEntry = () => {
-    setEntry(blankEntry());
-    setEntryErrors({});
-    setBarcodeInput('');
-    setSearchOpen(false);
-  };
-
-  const switchItemMode = (mode) => {
-    setItemMode(mode);
-    setCategoryFilter('');
-    clearEntry();
-    setTimeout(() => focusSearch(), 20);
   };
 
   // Enter-from-scanner guard: a scanner that sends CR+LF (or a bounced key) fires two Enters a few
@@ -865,46 +833,35 @@ export default function WholesaleSales() {
     return dup;
   };
 
-  const ENTRY_FIELD_LABEL = { product: 'Item', qty: 'Quantity', price: 'Unit Price', disc: 'Discount %', tax: 'Tax %' };
-  const validateEntry = () => {
-    const errs = {};
-    const qty = Number(entry.qty);
-    const price = Number(entry.price);
-    const disc = Number(entry.disc || 0);
-    const tax = Number(entry.tax || 0);
-    if (!entry.product) errs.product = itemMode === 'service' ? 'Pick a service from the Service Master first' : 'Pick a product first';
-    if (!Number.isFinite(qty) || qty < 1 || !Number.isInteger(qty)) errs.qty = 'Whole number ≥ 1';
-    if (entry.price === '' || !Number.isFinite(price) || price < 0) errs.price = 'Enter a price ≥ 0';
-    if (!Number.isFinite(disc) || disc < 0 || disc > 100) errs.disc = 'Must be 0 – 100';
-    if (!Number.isFinite(tax) || tax < 0 || tax > 100) errs.tax = 'Must be 0 – 100';
-    setEntryErrors(errs);
-    return errs;
+  // Adds one of the picked item to the bill and leaves the cursor in the search box for the next.
+  const addPickedItem = (item, mode = itemMode, stamp) => {
+    if (!item) return;
+    clearSearch();
+    if (isDuplicateFire(`pick:${item.id}`, stamp)) return;
+    const added = mode === 'service' ? (addServiceToCart(item, 1, {}), true) : handleAddProductToCart(item, 1);
+    if (added) showToast(`Added: ${item.name}`, 'success');
+    setTimeout(() => focusSearch(), 20);
   };
 
-  // "+ Add Item" / Enter on Tax % — validates the entry row, adds the line, and puts the cursor
-  // back in the search box for the next scan.
-  const handleAddEntry = () => {
-    const errs = validateEntry();
-    const first = Object.keys(errs)[0];
-    if (first) {
-      showToast(first === 'product' ? errs.product : `${ENTRY_FIELD_LABEL[first]}: ${errs[first]}`, 'error');
-      if (first === 'product') focusSearch();
-      else focusById({ qty: 'ws-entry-qty', price: 'ws-entry-price', disc: 'ws-entry-disc', tax: 'ws-entry-tax' }[first]);
-      return;
-    }
-    const item = entry.product;
-    if (isDuplicateFire(`entry:${item.id}`)) return;
-    const overrides = { rate: Number(entry.price), discount: Number(entry.disc || 0), gst: Number(entry.tax || 0) };
-    let added = true;
-    if (itemMode === 'service') addServiceToCart(item, entry.qty, overrides);
-    else added = handleAddProductToCart(item, Number(entry.qty), overrides);
-    if (!added) return;
-    showToast(`Added: ${item.name}`, 'success');
-    clearEntry();
+  const switchItemMode = (mode) => {
+    setItemMode(mode);
+    clearSearch();
     setTimeout(() => focusSearch(), 20);
   };
 
   const codeMatches = (p, c) => [p.barcode, p.code, p.sku].some(v => cellText(v) && String(v).toLowerCase() === c);
+  const modeNoun = itemMode === 'service' ? 'service' : itemMode === 'lens' ? 'lens' : 'product';
+
+  // "+ Add Item" — adds the highlighted search result (or an exact code typed in the box).
+  const handleAddHighlighted = () => {
+    const q = barcodeInput.trim();
+    if (!q) { showToast('Type or scan in the search box first, then pick with ↑ / ↓.', 'info'); focusSearch(); return; }
+    const c = q.toLowerCase();
+    const exact = itemMode === 'service' ? services.find(p => codeMatches(p, c)) : products.find(p => codeMatches(p, c));
+    const pick = exact || searchMatches[Math.min(matchIndex, searchMatches.length - 1)];
+    if (pick) addPickedItem(pick);
+    else { showToast(`No ${modeNoun} matches "${q}".`, 'error'); focusSearch(); }
+  };
 
   const handleSearchKeyDown = (e) => {
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
@@ -920,10 +877,17 @@ export default function WholesaleSales() {
       setMatchIndex(i => (e.key === 'ArrowDown' ? (i + 1) % searchMatches.length : (i - 1 + searchMatches.length) % searchMatches.length));
       return;
     }
+    // PageUp / PageDown jump 8 results; Ctrl+Home / Ctrl+End go to the first / last one.
+    const jump = { PageDown: 8, PageUp: -8 }[e.key] ?? (e.ctrlKey && e.key === 'Home' ? -Infinity : e.ctrlKey && e.key === 'End' ? Infinity : 0);
+    if (jump && showSearchResults && searchMatches.length) {
+      e.preventDefault();
+      setMatchIndex(i => Math.max(0, Math.min(searchMatches.length - 1, i + jump)));
+      return;
+    }
     if (e.key === 'Escape') {
       if (searchOpen && barcodeInput) { e.preventDefault(); setSearchOpen(false); return; }
       if (barcodeInput) { e.preventDefault(); setBarcodeInput(''); }
-      return; // nothing typed: the global Escape cancels the selected item / leaves the field
+      return; // nothing typed: the global Escape leaves the field
     }
     if (e.key !== 'Enter' || e.ctrlKey || e.metaKey || e.altKey) return;
     e.preventDefault();
@@ -932,31 +896,21 @@ export default function WholesaleSales() {
     if (!q) {
       // The second half of a scanner's CR+LF (the code was already added) — stay put.
       if (e.timeStamp - lastAddRef.current.at < 400) return;
-      if (entry.product) handleAddEntry();
-      else if (cartItems.length) focusPayment();
+      if (cartItems.length) focusPayment();
       return;
     }
     const c = q.toLowerCase();
-    // Exact barcode / SKU / code — add straight away (qty from the entry row, default 1) and stay
-    // here so the next code can be scanned at once. Checked across every product, not just this
-    // tab, so a scan never depends on which tab happens to be open.
+    // Exact barcode / SKU / code — add straight away and stay here so the next code can be
+    // scanned at once. Checked across every product, not just this tab, so a scan never
+    // depends on which tab happens to be open.
     const exact = itemMode === 'service' ? services.find(p => codeMatches(p, c)) : products.find(p => codeMatches(p, c));
-    if (exact) {
-      setBarcodeInput('');
-      setSearchOpen(false);
-      if (isDuplicateFire(`scan:${exact.id}`, e.timeStamp)) return;
-      const qty = parseFloat(entry.qty) >= 1 ? Math.floor(parseFloat(entry.qty)) : 1;
-      let added = true;
-      if (itemMode === 'service') addServiceToCart(exact, qty, {});
-      else added = handleAddProductToCart(exact, qty);
-      if (added) showToast(`Added: ${exact.name}${qty > 1 ? ` × ${qty}` : ''}`, 'success');
-      return;
-    }
+    if (exact) { addPickedItem(exact, itemMode, e.timeStamp); return; }
     if (searchMatches.length) {
-      selectEntryItem(searchMatches[Math.min(matchIndex, searchMatches.length - 1)]);
+      if (!searchOpen) { setSearchOpen(true); return; } // results were hidden with Esc — show them again first
+      addPickedItem(searchMatches[Math.min(matchIndex, searchMatches.length - 1)], itemMode, e.timeStamp);
       return;
     }
-    showToast(`No ${itemMode === 'service' ? 'service' : itemMode === 'lens' ? 'lens' : 'product'} matches "${q}"${categoryFilter ? ` in ${categoryFilter}` : ''}.`, 'error');
+    showToast(`No ${modeNoun} matches "${q}".`, 'error');
   };
 
   // A scan that lands while the cursor is outside any text field (a button, the grid row, the
@@ -974,27 +928,12 @@ export default function WholesaleSales() {
   };
   useBarcodeScanner(handleOutOfFieldScan, { capture: true });
 
-  // Entry fields: Enter → next field (Tax % adds the item), Shift+Enter → previous field.
-  const handleEntryFieldKeyDown = (e) => {
-    if (e.key !== 'Enter' || e.ctrlKey || e.metaKey || e.altKey) return;
-    e.preventDefault();
-    if (e.repeat) return;
-    const order = ENTRY_ORDER.filter(id => { const el = document.getElementById(id); return el && !el.disabled; });
-    const idx = order.indexOf(e.target.id);
-    if (e.shiftKey) {
-      if (idx > 0) focusById(order[idx - 1]); else focusSearch();
-      return;
-    }
-    if (idx === -1 || idx === order.length - 1) handleAddEntry();
-    else focusById(order[idx + 1]);
-  };
-
   // Re-pick the product created from "New Item" once the live catalogue includes it.
   useEffect(() => {
     const want = pendingNewItemRef.current;
     if (!want) return;
     const hit = products.find(p => (want.barcode && p.barcode === want.barcode) || (want.code && p.code === want.code));
-    if (hit) { pendingNewItemRef.current = null; selectEntryItem(hit, isLensProduct(hit) ? 'lens' : 'product'); }
+    if (hit) { pendingNewItemRef.current = null; addPickedItem(hit, isLensProduct(hit) ? 'lens' : 'product'); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [products]);
 
@@ -1045,7 +984,7 @@ export default function WholesaleSales() {
 
   const resetSaleForm = () => {
     setCartItems([]);
-    clearEntry();
+    clearSearch();
     setSelectedRowIndex(-1);
     setCouponInput('');
     setCouponError('');
@@ -1256,7 +1195,6 @@ export default function WholesaleSales() {
   function validateForCompletion() {
     if (!selectedCustomer) return { msg: 'Please select a wholesale dealer first (F1).', focus: 'ws-dealer-search' };
     if (cartItems.length === 0) return { msg: 'The cart is empty. Add products to complete the invoice.', focus: 'ws-product-search' };
-    if (entry.product) return { msg: `"${entry.product.name}" is picked in the entry row but not added — press Enter on Tax % to add it, or Esc to discard it.`, focus: 'ws-entry-qty' };
     const badIdx = lineErrors.findIndex(e => Object.keys(e).length > 0);
     if (badIdx !== -1) {
       const [col, msg] = Object.entries(lineErrors[badIdx])[0];
@@ -1731,10 +1669,10 @@ export default function WholesaleSales() {
     btn?.scrollIntoView({ block: 'center', behavior: 'smooth' });
     btn?.focus({ preventScroll: true });
   };
-  const focusEntryField = (id, label) => {
-    const el = document.getElementById(id);
-    if (el?.disabled) { showToast(`${label} can only be changed by Managers/Admins.`, 'warning'); return; }
-    focusById(id);
+  const focusGrid = () => {
+    if (!cartItems.length) { showToast('The bill is empty — search or scan an item first.', 'info'); focusSearch(); return; }
+    const row = selectedRowIndex >= 0 && selectedRowIndex < cartItems.length ? selectedRowIndex : cartItems.length - 1;
+    focusField(document.querySelector(`input[data-cell-row="${row}"][data-cell-col="qty"]`));
   };
 
   // --- Centralized keyboard shortcuts (map + help text: wholesale/posShortcuts.js) ---
@@ -1750,16 +1688,7 @@ export default function WholesaleSales() {
     tabLens: () => switchItemMode('lens'),
     tabService: () => switchItemMode('service'),
     productSearch: () => focusSearch(),
-    category: () => {
-      if (itemMode === 'service') { showToast('Services have no category filter.', 'info'); return; }
-      const el = document.getElementById('ws-entry-category');
-      el?.scrollIntoView({ block: 'nearest' });
-      el?.focus();
-    },
-    qty: () => focusEntryField('ws-entry-qty', 'Quantity'),
-    price: () => focusEntryField('ws-entry-price', 'Unit Price'),
-    disc: () => focusEntryField('ws-entry-disc', 'Discount %'),
-    tax: () => focusEntryField('ws-entry-tax', 'Tax %'),
+    grid: () => focusGrid(),
     bulkAdd: () => setBulkAddOpen(true),
     excelImport: () => setExcelImportOpen(true),
     schemes: () => setSchemeOpen(true),
@@ -1785,7 +1714,6 @@ export default function WholesaleSales() {
       setTimeout(() => focusById('ws-pack-packages'), 260); // after the Collapse opens
     },
     escape: (e) => {
-      if (entry.product) { clearEntry(); focusSearch(); return true; }
       // Esc in a grid cell leaves the cell but keeps its line selected, so Delete can remove it;
       // a second Esc clears the selection.
       if (e.target?.hasAttribute?.('data-cell-col')) { e.target.blur(); return true; }
@@ -1847,15 +1775,6 @@ export default function WholesaleSales() {
   const paymentStatusLabel = !cartItems.length ? 'No items yet'
     : balanceDue <= 0.009 ? 'Fully paid'
       : totalPaid > 0 ? 'Part paid — balance on dealer credit' : 'Unpaid — full amount on dealer credit';
-  const categoryValue = (() => {
-    const v = entry.product ? cellText(entry.product.category) : categoryFilter;
-    return categoryOptions.includes(v) ? v : '';
-  })();
-  const sel = entry.product;
-  const selStock = sel && itemMode !== 'service' ? parseFloat(sel.availableStock ?? sel.stock ?? 0) : null;
-  // The picked-but-not-yet-added item is shown twice: by name in the search box, and as a
-  // dashed "pending" line at the foot of the billing grid with the entry row's live figures.
-  const pendingTotals = sel ? computeLineTotals({ qty: entry.qty, rate: entry.price, discount: entry.disc, gst: entry.tax }) : null;
   const searchLabel = itemMode === 'service' ? 'Service search' : itemMode === 'lens' ? 'Lens barcode / search' : 'Barcode / product search';
   const freeGiftValue = cartItems.filter(i => i.isFreeGift).reduce((a, i) => a + (parseFloat(i.rate) || 0) * (parseFloat(i.qty) || 0), 0);
   const billDoc = previewDoc || printableInvoice;
@@ -2093,169 +2012,53 @@ export default function WholesaleSales() {
             </Button>
           ))}
           <Typography variant="caption" color="text.secondary" fontWeight={700} sx={{ ml: 'auto', display: { xs: 'none', md: 'block' } }}>
-            Scan or type → <Kbd>↑</Kbd><Kbd>↓</Kbd> <Kbd>Enter</Kbd> pick → Qty / Price / Disc / Tax → <Kbd>Enter</Kbd> adds
+            Scan or type → results list in the grid → <Kbd>↑</Kbd><Kbd>↓</Kbd> choose → <Kbd>Enter</Kbd> adds · <Kbd>F9</Kbd> edit lines
           </Typography>
         </Box>
 
-        <Grid container spacing={1} alignItems="flex-start">
-          <Grid item xs={12} sm={12} md={4} sx={{ position: 'relative' }}>
-            <TextField
-              fullWidth size="small" id="ws-product-search" label={searchLabel} autoComplete="off"
-              placeholder={itemMode === 'service' ? 'Service name or code…' : 'Scan barcode, or type name / SKU / model / brand…'}
-              // Nothing typed but an item picked: show its name. barcodeInput stays empty, so Enter
-              // here still adds it, and typing (the name is pre-selected) starts a new search.
-              value={barcodeInput || (sel ? sel.name : '')}
-              onChange={(e) => { setBarcodeInput(e.target.value); setSearchOpen(true); }}
-              onKeyDown={handleSearchKeyDown}
-              onFocus={(e) => { if (barcodeInput) setSearchOpen(true); else if (sel) e.target.select(); }}
-              onBlur={() => setSearchOpen(false)}
-              error={Boolean(entryErrors.product)}
-              inputProps={{
-                role: 'combobox', 'aria-expanded': searchOpen && searchMatches.length > 0, 'aria-controls': 'ws-search-results',
-                'aria-activedescendant': searchOpen && searchMatches.length ? `ws-search-opt-${matchIndex}` : undefined,
-                style: { fontWeight: 800, fontSize: '0.82rem', color: '#1d4ed8' },
-              }}
-              InputProps={{
-                startAdornment: <InputAdornment position="start"><QrCodeScannerIcon sx={{ color: '#2563eb', fontSize: 20 }} /></InputAdornment>,
-                endAdornment: <InputAdornment position="end"><Kbd>F7</Kbd></InputAdornment>,
-              }}
-              sx={{ bgcolor: '#fff' }}
-            />
-            {searchOpen && barcodeInput.trim() && (
-              <Paper
-                id="ws-search-results" role="listbox" elevation={8}
-                // mousedown would blur the search box before the click lands
-                onMouseDown={(e) => e.preventDefault()}
-                sx={{ position: 'absolute', left: 8, right: 0, top: '100%', mt: 0.5, zIndex: 20, maxHeight: 340, overflowY: 'auto', borderRadius: 2, border: '1px solid #bfdbfe' }}
-              >
-                {searchMatches.length === 0 ? (
-                  <Typography variant="body2" color="text.secondary" sx={{ p: 1.5 }}>
-                    No {itemMode === 'service' ? 'service' : itemMode === 'lens' ? 'lens' : 'product'} matches “{barcodeInput.trim()}”{categoryFilter ? ` in ${categoryFilter}` : ''}. An exact barcode still adds on Enter.
-                  </Typography>
-                ) : searchMatches.map((p, i) => {
-                  const active = i === matchIndex;
-                  const stock = itemMode === 'service' ? null : parseFloat(p.availableStock ?? p.stock ?? 0);
-                  const price = itemMode === 'service' ? p.price : priceForProduct(p).rate;
-                  const attrs = [cellText(p.code), cellText(p.barcode) !== cellText(p.code) ? cellText(p.barcode) : '', cellText(p.brand), cellText(p.modelNo), cellText(p.color), cellText(p.size), cellText(p.category)].filter(Boolean).join(' • ');
-                  return (
-                    <Box
-                      key={p.id || p.code} id={`ws-search-opt-${i}`} data-search-idx={i} role="option" aria-selected={active}
-                      onMouseEnter={() => setMatchIndex(i)} onClick={() => selectEntryItem(p)}
-                      sx={{ px: 1.25, py: 0.75, cursor: 'pointer', bgcolor: active ? '#dbeafe' : 'transparent', borderLeft: active ? '3px solid #2563eb' : '3px solid transparent', borderBottom: '1px solid #f1f5f9' }}
-                    >
-                      <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={1}>
-                        <Typography variant="body2" fontWeight={800} noWrap>{p.name}</Typography>
-                        <Stack direction="row" spacing={1} alignItems="center" sx={{ flexShrink: 0 }}>
-                          <Typography variant="caption" fontWeight={900}>{fmtINR(price)}</Typography>
-                          {stock != null && (
-                            <Typography variant="caption" fontWeight={800} sx={{ color: stock > 5 ? '#059669' : stock > 0 ? '#d97706' : '#dc2626' }}>
-                              {stock > 0 ? `Stock ${stock}` : 'Out of stock'}
-                            </Typography>
-                          )}
-                        </Stack>
-                      </Stack>
-                      {attrs && <Typography variant="caption" color="text.secondary" display="block" noWrap>{attrs}</Typography>}
-                    </Box>
-                  );
-                })}
-              </Paper>
-            )}
-          </Grid>
-
-          <Grid item xs={6} sm={3} md={1.6}>
-            <TextField
-              select fullWidth size="small" label="Category" value={categoryValue} disabled={itemMode === 'service'}
-              onChange={(e) => {
-                const v = e.target.value;
-                setCategoryFilter(v);
-                if (entry.product && v && cellText(entry.product.category) !== v) clearEntry();
-                setTimeout(() => focusSearch(), 30);
-              }}
-              SelectProps={{ SelectDisplayProps: { id: 'ws-entry-category', style: { fontSize: '0.78rem', fontWeight: 800 } } }}
-              sx={{ bgcolor: '#fff' }}
-            >
-              <MenuItem value=""><em>All categories</em></MenuItem>
-              {categoryOptions.map(c => <MenuItem key={c} value={c}>{c}</MenuItem>)}
-            </TextField>
-          </Grid>
-          <Grid item xs={6} sm={3} md={0.9}>
-            <TextField
-              fullWidth size="small" id="ws-entry-qty" label="Qty" type="number" value={entry.qty}
-              onChange={(e) => setEntry(prev => ({ ...prev, qty: e.target.value }))} onKeyDown={handleEntryFieldKeyDown}
-              error={Boolean(entryErrors.qty)} helperText={entryErrors.qty || ''}
-              inputProps={{ min: 1, step: 1, style: { fontWeight: 900, textAlign: 'center', fontSize: '0.8rem' } }}
-              sx={{ bgcolor: '#fff', ...NO_SPIN_SX }} FormHelperTextProps={{ sx: { mx: 0, fontSize: '0.62rem' } }}
-            />
-          </Grid>
-          <Grid item xs={6} sm={3} md={1.2}>
-            <Tooltip title={canOverride ? '' : 'Price comes from the dealer price list — only Managers/Admins can override it'}>
-              <TextField
-                fullWidth size="small" id="ws-entry-price" label="Unit Price ₹" type="number" value={entry.price} disabled={!canOverride}
-                onChange={(e) => setEntry(prev => ({ ...prev, price: e.target.value }))} onKeyDown={handleEntryFieldKeyDown}
-                error={Boolean(entryErrors.price)} helperText={entryErrors.price || ''}
-                inputProps={{ min: 0, step: '0.01', style: { fontWeight: 800, fontSize: '0.8rem' } }}
-                sx={{ bgcolor: '#fff', ...NO_SPIN_SX }} FormHelperTextProps={{ sx: { mx: 0, fontSize: '0.62rem' } }}
-              />
-            </Tooltip>
-          </Grid>
-          <Grid item xs={6} sm={3} md={1}>
-            <TextField
-              fullWidth size="small" id="ws-entry-disc" label="Disc %" type="number" value={entry.disc}
-              onChange={(e) => setEntry(prev => ({ ...prev, disc: e.target.value }))} onKeyDown={handleEntryFieldKeyDown}
-              error={Boolean(entryErrors.disc)} helperText={entryErrors.disc || ''}
-              inputProps={{ min: 0, max: 100, style: { fontWeight: 800, textAlign: 'center', fontSize: '0.8rem', color: '#dc2626' } }}
-              sx={{ bgcolor: '#fff', ...NO_SPIN_SX }} FormHelperTextProps={{ sx: { mx: 0, fontSize: '0.62rem' } }}
-            />
-          </Grid>
-          <Grid item xs={6} sm={3} md={1}>
-            <Tooltip title={canOverride ? '' : 'Tax comes from the product master — only Managers/Admins can change it'}>
-              <TextField
-                fullWidth size="small" id="ws-entry-tax" label="Tax %" type="number" value={entry.tax} disabled={!canOverride}
-                onChange={(e) => setEntry(prev => ({ ...prev, tax: e.target.value }))} onKeyDown={handleEntryFieldKeyDown}
-                error={Boolean(entryErrors.tax)} helperText={entryErrors.tax || ''}
-                inputProps={{ min: 0, max: 100, style: { fontWeight: 900, textAlign: 'center', fontSize: '0.8rem' } }}
-                sx={{ bgcolor: '#fff', ...NO_SPIN_SX }} FormHelperTextProps={{ sx: { mx: 0, fontSize: '0.62rem' } }}
-              />
-            </Tooltip>
-          </Grid>
-          <Grid item xs={6} sm={3} md={1.15}>
-            <Button
-              fullWidth variant="contained" size="small" onClick={handleAddEntry} startIcon={<AddIcon />}
-              sx={{ fontWeight: 900, py: 0.8, borderRadius: 2, textTransform: 'none', fontSize: '0.75rem', whiteSpace: 'nowrap' }}
-            >
-              Add Item
-            </Button>
-          </Grid>
-          <Grid item xs={6} sm={3} md={1.15}>
-            <Button
-              fullWidth variant="contained" size="small" startIcon={<AddIcon />}
-              onClick={() => setNewItemOpen(true)}
-              sx={{ fontWeight: 900, py: 0.8, borderRadius: 2, textTransform: 'none', fontSize: '0.75rem', whiteSpace: 'nowrap', bgcolor: NAVY, color: '#facc15', '&:hover': { bgcolor: '#1e293b' } }}
-            >
-              New {itemMode === 'service' ? 'Service' : itemMode === 'lens' ? 'Lens' : 'Item'}
-            </Button>
-          </Grid>
-        </Grid>
-
-        {/* Picked item — every detail from the product master, so the operator can confirm it */}
-        {sel && (
-          <Box sx={{ mt: 1, p: 0.75, borderRadius: 2, bgcolor: '#ffffff', border: '1px dashed #93c5fd', display: 'flex', flexWrap: 'wrap', gap: 0.6, alignItems: 'center' }}>
-            <Typography variant="caption" fontWeight={900} color="text.secondary" sx={{ mr: 0.25 }}>SELECTED:</Typography>
-            <Chip size="small" label={sel.name} color="primary" sx={{ fontWeight: 800, fontSize: '0.7rem', height: 22 }} />
-            {[
-              ['Barcode', sel.barcode], ['Code', sel.code !== sel.barcode ? sel.code : ''], ['Model', sel.modelNo], ['Colour', sel.color],
-              ['Size', sel.size], ['Power', sel.power], ['Brand', sel.brand], ['Category', sel.category], ['HSN', sel.hsn],
-            ].filter(([, v]) => cellText(v)).map(([k, v]) => (
-              <Chip key={k} size="small" variant="outlined" label={`${k}: ${v}`} sx={{ fontWeight: 700, fontSize: '0.68rem', height: 22 }} />
-            ))}
-            {itemMode !== 'service' && <Chip size="small" variant="outlined" label={`List: ${PRICE_TIER_LABEL[priceForProduct(sel).tier] || 'Wholesale'} ${fmtINR(priceForProduct(sel).rate)}`} sx={{ fontWeight: 700, fontSize: '0.68rem', height: 22 }} />}
-            <Chip size="small" variant="outlined" color="warning" label={`Tax ${entry.tax || 0}%`} sx={{ fontWeight: 700, fontSize: '0.68rem', height: 22 }} />
-            {selStock != null && (
-              <Chip size="small" variant="outlined" color={selStock > 0 ? 'success' : 'error'} label={`Stock: ${selStock}${getWarehouseStockText(sel) ? ` (${getWarehouseStockText(sel)})` : ''}`} sx={{ fontWeight: 700, fontSize: '0.68rem', height: 22 }} />
-            )}
-            <Typography variant="caption" color="text.secondary" sx={{ ml: 'auto' }}><Kbd>Esc</Kbd> discard</Typography>
-          </Box>
-        )}
+        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: { xs: 'wrap', md: 'nowrap' } }}>
+          <TextField
+            fullWidth id="ws-product-search" label={searchLabel} autoComplete="off"
+            placeholder={itemMode === 'service' ? 'Service name or code…' : 'Scan barcode, or type name / SKU / model / brand / colour…'}
+            value={barcodeInput}
+            onChange={(e) => { setBarcodeInput(e.target.value); setSearchOpen(true); }}
+            onKeyDown={handleSearchKeyDown}
+            onFocus={() => { if (barcodeInput) setSearchOpen(true); }}
+            onBlur={() => setSearchOpen(false)}
+            inputProps={{
+              role: 'combobox', 'aria-expanded': showSearchResults && searchMatches.length > 0, 'aria-controls': 'ws-search-results',
+              'aria-activedescendant': showSearchResults && searchMatches.length ? `ws-search-opt-${matchIndex}` : undefined,
+              style: { fontWeight: 800, fontSize: '1rem', color: '#1d4ed8', paddingTop: 13, paddingBottom: 13 },
+            }}
+            InputProps={{
+              startAdornment: <InputAdornment position="start"><QrCodeScannerIcon sx={{ color: '#2563eb', fontSize: 26 }} /></InputAdornment>,
+              endAdornment: (
+                <InputAdornment position="end">
+                  {showSearchResults && (
+                    <Typography variant="caption" fontWeight={800} color="text.secondary" sx={{ mr: 1, whiteSpace: 'nowrap' }}>
+                      {searchMatches.length ? `${matchIndex + 1} / ${searchMatches.length}${searchMatches.length === 50 ? '+' : ''}` : 'No match'}
+                    </Typography>
+                  )}
+                  <Kbd>F7</Kbd>
+                </InputAdornment>
+              ),
+            }}
+            sx={{ bgcolor: '#fff', flex: 1, minWidth: 260, '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
+          />
+          <Button
+            variant="contained" onClick={handleAddHighlighted} startIcon={<AddIcon />}
+            sx={{ fontWeight: 900, py: 1.3, px: 2.5, borderRadius: 2, textTransform: 'none', fontSize: '0.8rem', whiteSpace: 'nowrap', flexShrink: 0 }}
+          >
+            Add Item
+          </Button>
+          <Button
+            variant="contained" startIcon={<AddIcon />}
+            onClick={() => setNewItemOpen(true)}
+            sx={{ fontWeight: 900, py: 1.3, px: 2.5, borderRadius: 2, textTransform: 'none', fontSize: '0.8rem', whiteSpace: 'nowrap', flexShrink: 0, bgcolor: NAVY, color: '#facc15', '&:hover': { bgcolor: '#1e293b' } }}
+          >
+            New {itemMode === 'service' ? 'Service' : itemMode === 'lens' ? 'Lens' : 'Item'}
+          </Button>
+        </Box>
 
         <Stack direction="row" spacing={1} sx={{ mt: 1 }} flexWrap="wrap" useFlexGap alignItems="center">
           <Button size="small" variant="outlined" startIcon={<BulkAddIconMui />} onClick={() => setBulkAddOpen(true)} sx={{ fontWeight: 800, textTransform: 'none', bgcolor: '#fff', py: 0.25 }}>
@@ -2308,8 +2111,81 @@ export default function WholesaleSales() {
                 <TableCell align="center" sx={HEAD_CELL_SX}>Action</TableCell>
               </TableRow>
             </TableHead>
-            <TableBody>
-              {cartItems.length === 0 && !sel && (
+            <TableBody id="ws-search-results">
+              {/* Search results — shown in the grid in place of the bill lines while the search box
+                  has text. ↑/↓ highlight, Enter or click adds one to the bill; Esc returns to the bill. */}
+              {showSearchResults && (
+                <TableRow>
+                  <TableCell colSpan={gridColCount} sx={{ py: 0.6, bgcolor: '#eff6ff', borderBottom: '1px solid #bfdbfe' }}>
+                    <Typography variant="caption" fontWeight={800} color="#1e3a8a">
+                      {searchMatches.length
+                        ? <>{searchMatches.length}{searchMatches.length === 50 ? '+' : ''} {modeNoun} match{searchMatches.length === 1 ? '' : 'es'} for “{barcodeInput.trim()}” — <Kbd>↑</Kbd><Kbd>↓</Kbd> choose · <Kbd>Enter</Kbd> add to bill · <Kbd>Esc</Kbd> back to the bill{cartItems.length ? ` (${cartItems.length} line${cartItems.length === 1 ? '' : 's'})` : ''}</>
+                        : <>No {modeNoun} matches “{barcodeInput.trim()}”. An exact barcode still adds on <Kbd>Enter</Kbd> · <Kbd>Esc</Kbd> back to the bill</>}
+                    </Typography>
+                  </TableCell>
+                </TableRow>
+              )}
+              {showSearchResults && searchMatches.map((p, i) => {
+                const active = i === matchIndex;
+                const svc = itemMode === 'service';
+                const stock = svc ? null : parseFloat(p.availableStock ?? p.stock ?? 0);
+                const price = svc ? (parseFloat(p.price) || 0) : priceForProduct(p).rate;
+                const tax = parseFloat(p.gst) || 0;
+                const inBill = cartItems.find(it => !it.isFreeGift && (svc ? isServiceLine(it) : !isServiceLine(it)) && it.id === p.id);
+                return (
+                  <TableRow
+                    key={p.id || p.code} id={`ws-search-opt-${i}`} data-search-idx={i} role="option" aria-selected={active}
+                    // mousedown would blur the search box (and hide the results) before the click lands
+                    onMouseDown={(e) => e.preventDefault()}
+                    onMouseEnter={() => setMatchIndex(i)} onClick={() => addPickedItem(p)}
+                    sx={{
+                      cursor: 'pointer',
+                      bgcolor: active ? '#dbeafe' : (i % 2 ? '#f8fafc' : '#fff'),
+                      '& > td:first-of-type': { borderLeft: active ? '3px solid #2563eb' : '3px solid transparent' },
+                      '& td': { py: 0.5, fontSize: '0.78rem', whiteSpace: 'nowrap', borderBottom: '1px solid #e2e8f0' },
+                    }}
+                  >
+                    <TableCell sx={{ color: active ? '#2563eb' : '#64748b', fontWeight: 900 }}>{active ? '▶' : i + 1}</TableCell>
+                    <TableCell sx={{ fontWeight: 800, color: svc ? '#b45309' : 'primary.main', fontFamily: 'monospace' }}>{cellText(p.barcode) || cellText(p.code)}</TableCell>
+                    <TableCell>
+                      <Avatar variant="rounded" src={p.image || undefined} alt="" sx={{ width: 28, height: 28, bgcolor: '#f1f5f9', color: '#94a3b8' }}>
+                        <NoImageIcon sx={{ fontSize: 16 }} />
+                      </Avatar>
+                    </TableCell>
+                    <TableCell sx={{ whiteSpace: 'normal !important', minWidth: 180 }}>
+                      <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap" useFlexGap>
+                        <Typography variant="body2" fontWeight={800} sx={{ fontSize: '0.8rem' }}>{p.name}</Typography>
+                        {inBill && <Chip label={`IN BILL × ${inBill.qty}`} size="small" color="primary" variant="outlined" sx={{ height: 16, fontSize: '0.58rem', fontWeight: 900 }} />}
+                      </Stack>
+                      {stock != null && (
+                        <Typography variant="caption" sx={{ fontSize: '0.64rem', fontWeight: 700, color: stock > 5 ? '#059669' : stock > 0 ? '#d97706' : '#dc2626' }}>
+                          {stock > 0 ? `Stock: ${stock}` : 'Out of stock'}{getWarehouseStockText(p) ? ` · ${getWarehouseStockText(p)}` : ''}
+                        </Typography>
+                      )}
+                      {svc && cellText(p.description) && <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.64rem' }}>{p.description}</Typography>}
+                    </TableCell>
+                    <TableCell>{cellText(p.modelNo)}</TableCell>
+                    <TableCell>{cellText(p.color)}</TableCell>
+                    <TableCell>{cellText(p.size)}</TableCell>
+                    <TableCell>{cellText(p.brand)}</TableCell>
+                    <TableCell>
+                      <Chip label={svc ? 'SERVICE' : (cellText(p.category) || '—')} size="small" color={svc ? 'warning' : 'primary'} variant="outlined" sx={{ fontWeight: 800, height: 20, fontSize: '0.62rem' }} />
+                    </TableCell>
+                    {showPowerCol && <TableCell sx={{ color: '#2563eb', fontWeight: 700 }}>{cellText(p.power)}</TableCell>}
+                    <TableCell align="center" sx={{ fontWeight: 900 }}>1</TableCell>
+                    <TableCell align="right" sx={{ fontWeight: 800 }}>{fmtINR(price)}</TableCell>
+                    <TableCell align="right" sx={{ color: '#94a3b8' }}>0%</TableCell>
+                    <TableCell align="right" sx={{ color: '#0f766e', fontWeight: 700 }}>{tax}%</TableCell>
+                    <TableCell align="right" sx={{ fontWeight: 900, color: '#2563eb' }}>{fmtINR(computeLineTotals({ qty: 1, rate: price, discount: 0, gst: tax }).total)}</TableCell>
+                    <TableCell align="center">
+                      {active
+                        ? <Chip label="Enter ↵ add" size="small" color="primary" sx={{ height: 20, fontSize: '0.62rem', fontWeight: 900 }} />
+                        : <AddIcon sx={{ fontSize: 17, color: '#94a3b8' }} />}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+              {!showSearchResults && cartItems.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={gridColCount} align="center" sx={{ py: 4 }}>
                     <Typography variant="body2" color="text.secondary" fontWeight={600}>
@@ -2318,7 +2194,7 @@ export default function WholesaleSales() {
                   </TableCell>
                 </TableRow>
               )}
-              {cartItems.map((item, idx) => {
+              {!showSearchResults && cartItems.map((item, idx) => {
                 const svc = isServiceLine(item);
                 const avail = parseFloat(item.availableStock) || 0;
                 const isStockExceeded = !svc && !item.isFreeGift && ((parseFloat(item.qty) || 0) + (parseFloat(item.freeQty) || 0)) > avail;
@@ -2476,59 +2352,6 @@ export default function WholesaleSales() {
                   </React.Fragment>
                 );
               })}
-              {/* Pending line — the item picked in the search box, not added yet. Its figures are
-                  the entry row's (edit them there); Enter / + Add Item makes it a real line. */}
-              {sel && (
-                <TableRow
-                  id="ws-pending-row"
-                  sx={{
-                    bgcolor: '#eff6ff', outline: '2px dashed #2563eb', outlineOffset: -2,
-                    '& td': { py: 0.5, fontSize: '0.78rem', whiteSpace: 'nowrap', borderBottom: 'none' },
-                  }}
-                >
-                  <TableCell sx={{ color: '#2563eb', fontWeight: 900 }}>+</TableCell>
-                  <TableCell sx={{ fontWeight: 800, color: 'primary.main', fontFamily: 'monospace' }}>{cellText(sel.barcode) || cellText(sel.code)}</TableCell>
-                  <TableCell>
-                    <Avatar variant="rounded" src={sel.image || undefined} alt="" sx={{ width: 28, height: 28, bgcolor: '#f1f5f9', color: '#94a3b8' }}>
-                      <NoImageIcon sx={{ fontSize: 16 }} />
-                    </Avatar>
-                  </TableCell>
-                  <TableCell sx={{ whiteSpace: 'normal !important', minWidth: 180 }}>
-                    <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap" useFlexGap>
-                      <Typography variant="body2" fontWeight={800} sx={{ fontSize: '0.8rem' }}>{sel.name}</Typography>
-                      <Chip label="NOT ADDED YET" size="small" color="primary" sx={{ height: 16, fontSize: '0.58rem', fontWeight: 900 }} />
-                    </Stack>
-                    <Typography variant="caption" sx={{ fontSize: '0.64rem', fontWeight: 700, color: '#64748b' }}>
-                      {selStock != null ? `Stock: ${selStock} · ` : ''}<Kbd>Enter</Kbd> on the entry row adds it · <Kbd>Esc</Kbd> discards
-                    </Typography>
-                  </TableCell>
-                  <TableCell>{cellText(sel.modelNo)}</TableCell>
-                  <TableCell>{cellText(sel.color)}</TableCell>
-                  <TableCell>{cellText(sel.size)}</TableCell>
-                  <TableCell>{cellText(sel.brand)}</TableCell>
-                  <TableCell>
-                    <Chip label={itemMode === 'service' ? 'SERVICE' : (cellText(sel.category) || '—')} size="small" color={itemMode === 'service' ? 'warning' : 'primary'} variant="outlined" sx={{ fontWeight: 800, height: 20, fontSize: '0.62rem' }} />
-                  </TableCell>
-                  {showPowerCol && <TableCell sx={{ color: '#2563eb', fontWeight: 700 }}>{cellText(sel.power)}</TableCell>}
-                  <TableCell align="center" sx={{ fontWeight: 900 }}>{entry.qty || 0}</TableCell>
-                  <TableCell align="right" sx={{ fontWeight: 800 }}>{fmtINR(parseFloat(entry.price) || 0)}</TableCell>
-                  <TableCell align="right" sx={{ color: '#dc2626', fontWeight: 700 }}>{parseFloat(entry.disc) || 0}%</TableCell>
-                  <TableCell align="right" sx={{ color: '#0f766e', fontWeight: 700 }}>{parseFloat(entry.tax) || 0}%</TableCell>
-                  <TableCell align="right" sx={{ fontWeight: 900, color: '#2563eb' }}>{fmtINR(pendingTotals.total)}</TableCell>
-                  <TableCell align="center" sx={{ whiteSpace: 'nowrap' }}>
-                    <Tooltip title="Add to bill">
-                      <IconButton size="small" aria-label={`Add ${sel.name}`} sx={{ p: 0.4 }} onClick={handleAddEntry}>
-                        <AddIcon sx={{ fontSize: 17, color: '#2563eb' }} />
-                      </IconButton>
-                    </Tooltip>
-                    <Tooltip title="Discard (Esc)">
-                      <IconButton size="small" aria-label={`Discard ${sel.name}`} sx={{ p: 0.4 }} onClick={() => { clearEntry(); focusSearch(); }}>
-                        <DeleteIcon sx={{ fontSize: 16, color: '#dc2626' }} />
-                      </IconButton>
-                    </Tooltip>
-                  </TableCell>
-                </TableRow>
-              )}
             </TableBody>
           </Table>
         </TableContainer>
@@ -2948,7 +2771,7 @@ export default function WholesaleSales() {
       <ShortcutHelpDialog open={helpOpen} onClose={() => setHelpOpen(false)} />
 
       {/* "New Item" — the Inventory product master (Lens mode on the Lens tab); the saved product
-          lands in the live catalogue and is picked into the entry row automatically. */}
+          lands in the live catalogue and is added to the bill automatically. */}
       <ProductMasterDialog
         open={newItemOpen && itemMode !== 'service'}
         onClose={() => { setNewItemOpen(false); setTimeout(() => focusSearch(), 80); }}
@@ -2961,7 +2784,7 @@ export default function WholesaleSales() {
         onSaved={(rec) => {
           const svc = { id: String(rec.id), code: rec.code || '', name: rec.name, description: rec.description || '', price: parseFloat(rec.price ?? rec.defaultPrice ?? 0) || 0, gst: parseFloat(rec.taxRate ?? rec.taxPercentage ?? 0) || 0 };
           setServices(prev => [svc, ...prev.filter(x => x.id !== svc.id)]);
-          setTimeout(() => selectEntryItem(svc, 'service'), 120);
+          setTimeout(() => addPickedItem(svc, 'service'), 120);
         }}
       />
 

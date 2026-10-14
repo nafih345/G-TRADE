@@ -20,6 +20,7 @@ import {
 import { useDebounce } from '../../hooks/useDebounce';
 import { renderBarcodeMarkup } from '../../utils/printBarcodeLabels';
 import BarcodePrintDialog from './BarcodePrintDialog';
+import { focusRelative } from '../../pages/wholesale/keyboardNav';
 
 // The "Barcode" section from the spec: input + Generate/Regenerate/Copy/Print/Clear
 // + a live preview that updates on every value change. Two modes:
@@ -37,6 +38,9 @@ export default function BarcodeSection({
   productColour,
   productSize,
   onSaved,
+  // Inside a keyboardNav chain: Enter on an empty input generates a barcode, then
+  // Enter / ↓ / ↑ move to the next / previous field like any other stop.
+  keyboardNav = false,
   // Endpoint that mints the next barcode in create-mode. Defaults to the legacy
   // OPTxxxxxx series; pass the EAN-13 endpoint for a 13-digit numeric series.
   generateUrl = '/api/products/items/next_barcode_candidate/'
@@ -120,6 +124,7 @@ export default function BarcodeSection({
   };
 
   const handleGenerate = async () => {
+    if (busy) return;
     setBusy(true);
     try {
       if (mode === 'create') {
@@ -225,6 +230,18 @@ export default function BarcodeSection({
         value={localValue}
         onChange={(e) => setLocalValue(e.target.value)}
         onBlur={() => { if (canSaveManualEntry) handleSaveManualEntry(); }}
+        inputProps={keyboardNav ? { 'data-nav-own': '' } : undefined}
+        onKeyDown={keyboardNav ? (e) => {
+          if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            if (!localValue.trim()) handleGenerate();
+            focusRelative(e.target, 1);
+          } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            focusRelative(e.target, e.key === 'ArrowDown' ? 1 : -1);
+          }
+        } : undefined}
         error={Boolean(duplicateInfo)}
         helperText={
           duplicateInfo

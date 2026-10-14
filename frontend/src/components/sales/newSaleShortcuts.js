@@ -31,7 +31,6 @@ export const NEW_SALE_SHORTCUTS = [
   { id: 'tabLens', keys: ['F5'], group: 'Items', label: 'Select Lens' },
   { id: 'tabService', keys: ['F6'], group: 'Items', label: 'Select Services' },
   { id: 'search', keys: ['F7'], group: 'Items', label: 'Go to the Optical DB Selector (search)' },
-  { id: 'qty', keys: ['F9'], group: 'Items', label: 'Go to Qty' },
   { id: 'power', keys: ['Alt+P'], group: 'Items', label: 'Tick / untick Power' },
   { id: 'newLens', keys: ['Alt+L'], group: 'Items', label: 'Open + NEW Lens' },
   { id: 'removeRow', keys: ['Ctrl+Delete'], group: 'Items', label: 'Remove the billing line whose cell has the cursor' },

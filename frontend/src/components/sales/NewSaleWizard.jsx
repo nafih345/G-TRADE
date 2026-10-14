@@ -1622,7 +1622,6 @@ export default function NewSaleWizard({
       if (itemMode === 'service') { switchItemMode('product'); return; }
       focusNsField('search');
     },
-    qty: () => focusNsField('qty'),
     power: () => setPowerChecked(v => !v),
     newLens: () => setLensDialogOpen(true),
     removeRow: () => {
@@ -2513,7 +2512,7 @@ export default function NewSaleWizard({
               {/* Select Item from Optical Database — search matches name, barcode, SKU, brand,
                   category, and (for imported products) model no / color / size, so staff can
                   find an item by typing whichever detail they actually have on hand. */}
-              <Grid item xs={12} sm={2.8} md={2.7}>
+              <Grid item xs={12} sm={6.7} md={6.7}>
                 {/* Plain search box — no results popup. Typing here filters the product
                     matches shown as rows in the billing grid below; ↑/↓ highlight a row and
                     Enter adds it, or click the row. */}
@@ -2548,66 +2547,10 @@ export default function NewSaleWizard({
                 </TextField>
               </Grid>
 
-              <Grid item xs={6} sm={0.7} md={0.7}>
-                <TextField 
-                  fullWidth size="small" label="Qty" type="number"
-                  value={entryInput.qty} onChange={(e) => setEntryInput({ ...entryInput, qty: e.target.value })}
-                  sx={{ '& input[type=number]': { MozAppearance: 'textfield' }, '& input::-webkit-outer-spin-button, & input::-webkit-inner-spin-button': { WebkitAppearance: 'none', margin: 0 } }}
-                  inputProps={{ 'data-ns-field': 'qty', style: { fontWeight: 900, textAlign: 'center', fontSize: '0.8rem' } }}
-                />
-              </Grid>
-
-              <Grid item xs={6} sm={1.1} md={1.0}>
-                <TextField
-                  fullWidth size="small" label="Price (₹)" placeholder="0.00"
-                  value={entryInput.price} onChange={(e) => setEntryInput({ ...entryInput, price: e.target.value })}
-                  inputProps={{ style: { fontWeight: 800, fontSize: '0.8rem' } }}
-                />
-              </Grid>
-
-              <Grid item xs={6} sm={1.1} md={1.4}>
-                {/* Discount takes either a % of gross or a flat ₹ amount — the chip picks which. */}
-                <TextField
-                  fullWidth size="small" type="number" placeholder="0"
-                  label={entryInput.discMode === 'AMT' ? 'Disc ₹' : 'Disc %'}
-                  value={entryInput.discValue}
-                  onChange={(e) => setEntryInput({ ...entryInput, discValue: e.target.value })}
-                  sx={DISC_FIELD_SX}
-                  inputProps={{ min: 0, max: entryInput.discMode === 'AMT' ? undefined : 100, style: { fontWeight: 800, textAlign: 'center', fontSize: '0.8rem', color: '#dc2626' } }}
-                  InputProps={{
-                    endAdornment: (
-                      <InputAdornment position="end" sx={{ ml: 0.25 }}>
-                        <DiscModeToggle
-                          mode={entryInput.discMode}
-                          onChange={(mode) => setEntryInput({ ...entryInput, discMode: mode })}
-                        />
-                      </InputAdornment>
-                    ),
-                  }}
-                />
-              </Grid>
-
-              <Grid item xs={6} sm={1.0} md={0.9}>
-                <Autocomplete
-                  freeSolo
-                  options={['0', '5', '12', '18', '21']}
-                  value={String(entryInput.taxPercent ?? 0)}
-                  onChange={(e, val) => setEntryInput({ ...entryInput, taxPercent: val == null ? 0 : val })}
-                  onInputChange={(e, val) => setEntryInput({ ...entryInput, taxPercent: val })}
-                  renderInput={(params) => (
-                    <TextField
-                      {...params}
-                      fullWidth size="small" label="Tax %"
-                      inputProps={{ ...params.inputProps, inputMode: 'decimal', style: { fontWeight: 900, textAlign: 'center', fontSize: '0.8rem', color: '#0f172a' } }}
-                    />
-                  )}
-                />
-              </Grid>
-
               <Grid item xs={12} sm={1.2} md={1.2}>
                 <Button
                   fullWidth variant="contained" size="small" color="primary"
-                  // In the Enter chain after Tax %: Enter adds the item, then the cursor goes back
+                  // In the Enter chain after Category: Enter adds the item, then the cursor goes back
                   // to the search box for the next one.
                   data-nav-stop=""
                   onClick={() => { handleAddItem(); focusNsFieldSoon('search'); }} startIcon={<AddIcon />}
