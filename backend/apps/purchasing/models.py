@@ -1,5 +1,6 @@
 from decimal import Decimal
 from django.db import models
+from django.db.models.functions import Lower
 from apps.common.models import BaseUUIDModel
 
 
@@ -38,6 +39,17 @@ class Supplier(BaseUUIDModel):
     ledger_account = models.ForeignKey(
         'financial.ChartOfAccount', on_delete=models.SET_NULL, null=True, blank=True, related_name='suppliers'
     )
+
+    class Meta:
+        constraints = [
+            # One live supplier per company name (case-insensitive). SupplierSerializer.validate_name
+            # gives the friendly error; this index closes the race between two concurrent saves.
+            # Soft-deleted rows are excluded so a deleted supplier's name can be registered again.
+            models.UniqueConstraint(
+                Lower('name'), condition=models.Q(is_deleted=False),
+                name='uniq_live_supplier_name_ci',
+            ),
+        ]
 
     def __str__(self):
         return self.name

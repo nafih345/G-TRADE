@@ -3,7 +3,7 @@ from rest_framework import viewsets, permissions, status, serializers
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.serializers import ModelSerializer
-from django.db import transaction
+from django.db import transaction, IntegrityError
 from .models import Supplier, PurchaseOrder, PurchaseOrderItem, PurchaseInvoice, PurchaseInvoiceItem
 from .supplier_utils import reserve_supplier_codes, get_or_create_supplier_ledger_account
 from apps.inventory.models import StockLedger
@@ -23,7 +23,7 @@ class SupplierSerializer(ModelSerializer):
         # Same company typed again (any case/spacing) must not become a second supplier row —
         # duplicates split the payable ledger and clutter the Purchase Entry picker.
         name = ' '.join((value or '').split())
-        dupes = Supplier.objects.filter(name__iexact=name)
+        dupes = Supplier.objects.filter(name__iexact=name, is_deleted=False)
         if self.instance is not None:
             dupes = dupes.exclude(pk=self.instance.pk)
         if dupes.exists():
@@ -64,8 +64,11 @@ class PurchaseOrderSerializer(ModelSerializer):
         return instance
 
 class SupplierViewSet(viewsets.ModelViewSet):
-    queryset = Supplier.objects.all()
+    queryset = Supplier.objects.filter(is_deleted=False).order_by('supplier_code', 'name')
     serializer_class = SupplierSerializer
+    # Small master list: return every supplier in one response. The global PAGE_SIZE=20 cut the
+    # Suppliers Directory / pickers off at the first 20 rows.
+    pagination_class = None
     # AllowAny (not IsAuthenticated): this app's demo/offline login issues a mock JWT that
     # LenientJWTAuthentication downgrades to AnonymousUser rather than a hard 401, so an
     # IsAuthenticated endpoint here silently rejected every "Add Supplier" attempt from the
@@ -77,7 +80,12 @@ class SupplierViewSet(viewsets.ModelViewSet):
         supplier_code = serializer.validated_data.get('supplier_code')
         if not supplier_code:
             supplier_code = reserve_supplier_codes()[0]
-        supplier = serializer.save(supplier_code=supplier_code)
+        try:
+            with transaction.atomic():
+                supplier = serializer.save(supplier_code=supplier_code)
+        except IntegrityError:
+            # Lost a race with a concurrent save of the same name (uniq_live_supplier_name_ci).
+            raise serializers.ValidationError({'name': [f"A supplier named '{serializer.validated_data.get('name')}' already exists."]})
         supplier.ledger_account = get_or_create_supplier_ledger_account(supplier)
         supplier.save(update_fields=['ledger_account'])
 

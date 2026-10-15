@@ -9,7 +9,7 @@ import {
   Grid, Table, TableBody, TableCell, TableContainer, 
   TableHead, TableRow, Paper, Chip, Dialog, 
   DialogTitle, DialogContent, DialogActions, TextField, 
-  MenuItem, Stack, IconButton, Divider, Tooltip, InputAdornment, Autocomplete
+  MenuItem, Stack, IconButton, Divider, Tooltip, InputAdornment, Autocomplete, CircularProgress
 } from '@mui/material';
 
 
@@ -30,6 +30,9 @@ import {
 } from '@mui/icons-material';
 
 import axios from 'axios';
+
+// Last successful /api/purchase/suppliers/ response, used to paint the directory instantly.
+const SUPPLIER_CACHE_KEY = 'optical_suppliers_backend_cache';
 
 export default function Purchases() {
   const location = useLocation();
@@ -82,6 +85,7 @@ export default function Purchases() {
 
   // Database State (Starts 100% Blank as requested)
   const [suppliers, setSuppliers] = useState([]);
+  const [suppliersLoading, setSuppliersLoading] = useState(true);
   const [purchaseOrders, setPurchaseOrders] = useState([]);
   const [purchaseEntries, setPurchaseEntries] = useState([]);
   const [stockReceives, setStockReceives] = useState([]);
@@ -208,9 +212,25 @@ export default function Purchases() {
       return localSupps.filter(s => !isSampleOrCorrupt(s));
     };
 
+    // Last successful backend list, so the directory paints instantly on open instead of
+    // waiting on the API (slow on a cold Render instance). Own key: the legacy wipe above
+    // matches 'SUP-10', which every real supplier code starts with.
+    const readCachedBackendSuppliers = () => {
+      try {
+        const cached = JSON.parse(localStorage.getItem(SUPPLIER_CACHE_KEY) || '[]');
+        return Array.isArray(cached) ? cached : [];
+      } catch (e) {
+        return [];
+      }
+    };
+
     // Paint instantly from whatever suppliers are already cached locally.
-    const seedSupps = readLocalSuppliers();
-    if (seedSupps.length) setSuppliers(seedSupps);
+    const cachedBackend = readCachedBackendSuppliers();
+    const seedSupps = cachedBackend.length ? cachedBackend : readLocalSuppliers();
+    if (seedSupps.length) {
+      setSuppliers(seedSupps);
+      setSuppliersLoading(false);
+    }
 
     const fetchPurchaseData = async () => {
       const localSupps = readLocalSuppliers();
@@ -248,11 +268,16 @@ export default function Purchases() {
               balance: parseFloat(s.outstanding_balance || 0)
             }));
           setSuppliers(cleanBackend);
+          try { localStorage.setItem(SUPPLIER_CACHE_KEY, JSON.stringify(cleanBackend)); } catch (e) {}
         } else {
+          try { localStorage.removeItem(SUPPLIER_CACHE_KEY); } catch (e) {}
           setSuppliers(localSupps);
         }
       } catch (err) {
-        setSuppliers(localSupps);
+        const cached = readCachedBackendSuppliers();
+        setSuppliers(cached.length ? cached : localSupps);
+      } finally {
+        setSuppliersLoading(false);
       }
     };
     fetchPurchaseData();
@@ -606,67 +631,52 @@ export default function Purchases() {
         });
       }
 
-      const imported = [];
+      // Skip names already registered (or repeated within the sheet) — the backend rejects
+      // duplicate supplier names, so re-uploading a sheet must not create a second copy.
+      const normName = (v) => (v || '').toString().trim().replace(/\s+/g, ' ').toLowerCase();
+      const seen = new Set(suppliers.map(s => normName(s.name)));
+      let created = 0, skipped = 0, failed = 0;
       for (let i = startIdx; i < rawRows.length; i++) {
         const row = rawRows[i];
         if (!row || !Array.isArray(row) || row.every(cell => !String(cell).trim())) continue;
 
-        const name = String(row[nameIdx] || row[0] || '').trim();
+        const name = String(row[nameIdx] || row[0] || '').trim().replace(/\s+/g, ' ');
         if (!name || isCorruptSupplierName(name)) continue;
+        if (seen.has(normName(name))) { skipped++; continue; }
+        seen.add(normName(name));
 
-        const contactPerson = String(row[contactIdx] || '').trim() || 'N/A';
-        const phone = String(row[phoneIdx] || '').trim() || 'N/A';
-        const email = String(row[emailIdx] || '').trim() || 'N/A';
-        const gstin = String(row[gstinIdx] || '').trim() || 'N/A';
-        const city = String(row[cityIdx] || '').trim() || 'Main Hub';
-        const paymentTerms = String(row[termsIdx] || '').trim() || 'Net 30';
-
-        const suppObj = {
-          id: `SUP-EXCEL-${Math.floor(1000 + Math.random() * 9000)}`,
-          name,
-          contactPerson,
-          phone,
-          email,
-          gstin,
-          city,
-          paymentTerms,
-          balance: 0
-        };
-
-        imported.push(suppObj);
-
-        // Save supplier to Backend Database API
+        const cell = (idx) => String(row[idx] || '').trim() || null;
         try {
-          await axios.post('/api/purchasing/suppliers/', {
-            name: suppObj.name,
-            contact_person: suppObj.contactPerson,
-            phone: suppObj.phone,
-            email: suppObj.email,
-            gstin: suppObj.gstin,
-            city: suppObj.city
+          await axios.post('/api/purchase/suppliers/', {
+            name,
+            contact_person: cell(contactIdx),
+            phone: cell(phoneIdx),
+            email: cell(emailIdx),
+            gstin: cell(gstinIdx),
+            city: cell(cityIdx),
+            payment_terms: cell(termsIdx) || 'Net 30'
           });
-        } catch (err) {}
+          created++;
+        } catch (err) {
+          // 400 on name = someone else registered it meanwhile; anything else is a real failure.
+          if (err?.response?.data?.name) skipped++; else failed++;
+        }
       }
 
-      if (imported.length === 0) {
+      if (created + skipped + failed === 0) {
         alert("No valid supplier rows found in the uploaded file.");
         event.target.value = '';
         return;
       }
 
-      // Update Suppliers state & Local Storage sync
-      const updatedSuppliers = [...imported, ...suppliers];
-      setSuppliers(updatedSuppliers);
-
-      try {
-        const namesOnly = updatedSuppliers.map(s => s.name);
-        localStorage.setItem('optical_suppliers', JSON.stringify(namesOnly));
-        localStorage.setItem('optical_suppliers_db', JSON.stringify(updatedSuppliers));
-        window.dispatchEvent(new Event('optical_suppliers_updated'));
-      } catch (err) {}
+      // Reload the list from the database (the fetch effect listens for this event).
+      window.dispatchEvent(new Event('optical_suppliers_updated'));
 
       setAddSupplierOpen(false);
-      alert(`Successfully imported ${imported.length} supplier(s) from Excel file into Database!`);
+      const parts = [`Imported ${created} supplier(s)`];
+      if (skipped) parts.push(`${skipped} skipped (already exist)`);
+      if (failed) parts.push(`${failed} failed`);
+      alert(parts.join(', ') + '.');
     } catch (err) {
       console.error("Excel upload error:", err);
       alert("Error reading Excel spreadsheet (.xlsx / .xls). Please ensure it is a valid Excel or CSV file.");
@@ -957,6 +967,7 @@ export default function Purchases() {
                         try {
                           localStorage.setItem('optical_suppliers', JSON.stringify([]));
                           localStorage.setItem('optical_suppliers_db', JSON.stringify([]));
+                          localStorage.removeItem(SUPPLIER_CACHE_KEY);
                           window.dispatchEvent(new Event('optical_suppliers_updated'));
                         } catch (e) {}
                         alert("Suppliers database cleared! The table is now 100% blank.");
@@ -1014,7 +1025,16 @@ export default function Purchases() {
                     </TableRow>
                   </TableHead>
                   <TableBody>
-                    {filteredSuppliers.length === 0 ? (
+                    {filteredSuppliers.length === 0 && suppliersLoading ? (
+                      <TableRow>
+                        <TableCell colSpan={7} align="center" sx={{ py: 8 }}>
+                          <CircularProgress size={28} />
+                          <Typography variant="body2" color="text.secondary" sx={{ mt: 1.5 }}>
+                            Loading suppliers…
+                          </Typography>
+                        </TableCell>
+                      </TableRow>
+                    ) : filteredSuppliers.length === 0 ? (
                       <TableRow>
                         <TableCell colSpan={7} align="center" sx={{ py: 8 }}>
                           <Typography variant="body2" color="text.secondary" fontWeight={500}>
