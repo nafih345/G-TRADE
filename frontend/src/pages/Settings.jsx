@@ -14,15 +14,26 @@ import {
   CloudUpload as UploadIcon,
   CheckCircle as SuccessIcon,
   AccountTree as BranchTreeIcon,
-  DesignServices as DesignerIcon
+  DesignServices as DesignerIcon,
+  LocalOffer as LabelIcon
 } from '@mui/icons-material';
+import { useLocation } from 'react-router-dom';
 import axios from 'axios';
 import { useBranch } from '../context/BranchContext';
 import ConfirmActionDialog from '../components/common/ConfirmActionDialog';
 import BillDesignerDashboard from '../components/settings/billing/BillDesignerDashboard';
+import BarcodeLabelSettings from '../components/settings/BarcodeLabelSettings';
+
+// Deep-link ids for /settings?tab=<id> (e.g. the barcode print dialog's
+// "Label Settings" button). Index = tab position.
+const TAB_IDS = ['store', 'billing', 'pos', 'clinical', 'security', 'business', 'bill-designer', 'barcode-labels'];
 
 export default function Settings() {
-  const [activeTab, setActiveTab] = useState(0);
+  const location = useLocation();
+  const tabFromUrl = () => Math.max(0, TAB_IDS.indexOf(new URLSearchParams(location.search).get('tab')));
+  const [activeTab, setActiveTab] = useState(tabFromUrl);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { if (location.search) setActiveTab(tabFromUrl()); }, [location.search]);
   const { multiBranchEnabled, refresh: refreshBranchContext } = useBranch();
   const [multiBranch, setMultiBranch] = useState(false);
   const [confirmEnableOpen, setConfirmEnableOpen] = useState(false);
@@ -217,7 +228,7 @@ export default function Settings() {
 
       {/* Tabs */}
       <Card sx={{ mb: 3, borderRadius: 3 }}>
-        <Tabs value={activeTab} onChange={(e, val) => setActiveTab(val)} sx={{ px: 2, borderBottom: 1, borderColor: 'divider' }}>
+        <Tabs value={activeTab} onChange={(e, val) => setActiveTab(val)} variant="scrollable" scrollButtons="auto" sx={{ px: 2, borderBottom: 1, borderColor: 'divider' }}>
           <Tab label="Store & Clinic Profile" icon={<StoreIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab label="Billing & Tax Config" icon={<BillingIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab label="POS & Barcode Scanner" icon={<BarcodeIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
@@ -225,11 +236,15 @@ export default function Settings() {
           <Tab label="System Security & Backup" icon={<SecurityIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab label="Business Settings" icon={<BranchTreeIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab label="Bill & Invoice Designer" icon={<DesignerIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
+          <Tab label="Barcode Labels" icon={<LabelIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
         </Tabs>
       </Card>
 
       {/* TAB 6: BILL & INVOICE DESIGNER */}
       {activeTab === 6 && <BillDesignerDashboard />}
+
+      {/* TAB 7: BARCODE LABEL DESIGN (used by every barcode Print dialog) */}
+      {activeTab === 7 && <BarcodeLabelSettings />}
 
       {/* TAB 0: STORE PROFILE */}
       {activeTab === 0 && (

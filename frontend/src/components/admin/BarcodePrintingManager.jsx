@@ -210,7 +210,7 @@ export default function BarcodePrintingManager() {
         />
       </Card>
 
-      <BarcodePrintDialog open={printOpen} onClose={() => setPrintOpen(false)} products={selectedProducts} />
+      <BarcodePrintDialog open={printOpen} onClose={() => setPrintOpen(false)} products={selectedProducts} workflow="barcode_printing" />
     </Box>
   );
 }

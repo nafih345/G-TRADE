@@ -234,3 +234,108 @@ class BarcodeHistory(BaseUUIDModel):
 
     def __str__(self):
         return f"{self.product_id}: {self.old_barcode} -> {self.new_barcode}"
+
+
+# ---------------------------------------------------------------------------
+# Barcode label designer (Settings → Barcode Labels)
+# ---------------------------------------------------------------------------
+class LabelTemplate(BaseUUIDModel):
+    """A saved barcode label design. Holds only presentation — which field sits where and
+    how it looks (apps/products/label_fields.py validates `layout`). Product values are
+    never stored; they are resolved from Product rows at preview / print time.
+
+    `version` increments on every update; the previous state is kept as a
+    LabelTemplateVersion row, and updates must send the version they edited
+    (optimistic lock) so two people can't silently overwrite each other's design.
+    Delete is a soft delete (BaseUUIDModel), so a removed template can be restored.
+    """
+    PRINTER_TYPES = [('thermal', 'Thermal roll'), ('a4', 'A4 sheet')]
+
+    name = models.CharField(max_length=120)
+    description = models.CharField(max_length=255, blank=True, default='')
+    printer_type = models.CharField(max_length=10, choices=PRINTER_TYPES, default='thermal')
+    width_mm = models.DecimalField(max_digits=6, decimal_places=2)
+    height_mm = models.DecimalField(max_digits=6, decimal_places=2)
+    layout = models.JSONField(default=dict, blank=True)
+    version = models.PositiveIntegerField(default=1)
+    is_default = models.BooleanField(default=False)
+    # Starter preset this template was seeded from — "Restore Default" resets to it.
+    preset_key = models.CharField(max_length=60, blank=True, default='')
+    updated_by_name = models.CharField(max_length=150, blank=True, default='')
+
+    class Meta:
+        ordering = ['-is_default', 'name']
+
+    def __str__(self):
+        return f"{self.name} ({self.width_mm}x{self.height_mm}mm {self.printer_type})"
+
+    def save(self, *args, **kwargs):
+        from django.db import transaction
+        with transaction.atomic():
+            if self.is_default and not self.is_deleted:
+                LabelTemplate.all_objects.filter(is_default=True).exclude(pk=self.pk).update(is_default=False)
+            super().save(*args, **kwargs)
+
+
+class LabelTemplateVersion(models.Model):
+    """Snapshot of a LabelTemplate as it was *before* an update (kept for restore)."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    template = models.ForeignKey(LabelTemplate, on_delete=models.CASCADE, related_name='versions')
+    version = models.PositiveIntegerField()
+    name = models.CharField(max_length=120)
+    printer_type = models.CharField(max_length=10)
+    width_mm = models.DecimalField(max_digits=6, decimal_places=2)
+    height_mm = models.DecimalField(max_digits=6, decimal_places=2)
+    layout = models.JSONField(default=dict)
+    saved_at = models.DateTimeField(auto_now_add=True)
+    saved_by = models.CharField(max_length=150, blank=True, default='')
+
+    class Meta:
+        ordering = ['-version']
+        constraints = [
+            models.UniqueConstraint(fields=['template', 'version'], name='uniq_label_template_version'),
+        ]
+
+
+class LabelPrintSettings(BaseUUIDModel):
+    """Singleton: which template each workflow prints with + printer calibration.
+    Use LabelPrintSettings.load()."""
+    inventory_template = models.ForeignKey(LabelTemplate, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    purchase_template = models.ForeignKey(LabelTemplate, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    barcode_printing_template = models.ForeignKey(LabelTemplate, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+
+    thermal_printer_name = models.CharField(max_length=120, blank=True, default='')
+    a4_printer_name = models.CharField(max_length=120, blank=True, default='')
+    h_offset_mm = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0'))
+    v_offset_mm = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0'))
+    # Compensates a driver that shrinks/grows output; 100 = exact physical size.
+    print_scale_percent = models.DecimalField(max_digits=5, decimal_places=1, default=Decimal('100'))
+    default_copies = models.PositiveIntegerField(default=1)
+    # Thermal head resolution. Barcode bar widths snap to whole printer dots so every bar
+    # prints the same width (uneven bars are the #1 cause of unscannable thermal labels).
+    # 0 = don't snap.
+    printer_dpi = models.PositiveIntegerField(default=203)
+    # Give every printed label its own persisted EAN-13 from ProductBarcode (existing
+    # behaviour) instead of repeating the product's barcode on each copy.
+    unique_label_series = models.BooleanField(default=True)
+    # Browser-stored designs from before templates lived in the database were imported.
+    legacy_migrated = models.BooleanField(default=False)
+
+    # Fixed primary key: concurrent first requests can't each create their own "singleton".
+    SINGLETON_ID = uuid.UUID('6c1a7b3e-0000-4000-8000-000000001abe')
+
+    class Meta:
+        verbose_name = 'Label Print Settings'
+        verbose_name_plural = 'Label Print Settings'
+
+    @classmethod
+    def load(cls):
+        from django.db import IntegrityError, transaction
+        obj = cls.objects.order_by('created_at').first()
+        if obj is None:
+            try:
+                with transaction.atomic():
+                    obj = cls.objects.create(id=cls.SINGLETON_ID)
+            except IntegrityError:
+                obj = cls.objects.get(id=cls.SINGLETON_ID)
+        return obj

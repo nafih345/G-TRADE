@@ -20,11 +20,13 @@ import {
   NoteAdd as DraftIcon,
   ListAlt as ListAltIcon,
   ViewColumn as ViewColumnIcon,
-  LibraryAdd as MultiItemsIcon
+  LibraryAdd as MultiItemsIcon,
+  QrCode2 as LabelIcon
 } from '@mui/icons-material';
 import QuickDatePickerField from '../common/QuickDatePickerField';
 import ProductMasterDialog from '../inventory/ProductMasterDialog';
 import ProductVariantMaster from '../inventory/variants/ProductVariantMaster';
+import BarcodePrintDialog from '../inventory/BarcodePrintDialog';
 import { useDebounce } from '../../hooks/useDebounce';
 import useBarcodeScanner from '../../hooks/useBarcodeScanner';
 import { printPurchaseReceipt } from '../../utils/printPurchase';
@@ -231,6 +233,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
 
   // Grid
   const [rows, setRows] = useState([]);
+  const [labelPrintOpen, setLabelPrintOpen] = useState(false);
 
   // Summary / Payment
   const [otherCharges, setOtherCharges] = useState(0);
@@ -1478,6 +1481,11 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
 
       {/* 6. Sticky Action Bar */}
       <Box sx={{ position: 'sticky', bottom: 0, mt: 2, py: 1.5, px: 2, bgcolor: 'background.paper', borderTop: '1px solid', borderColor: 'divider', display: 'flex', justifyContent: 'flex-end', gap: 1.5, zIndex: 10 }}>
+        <Tooltip title="Print barcode labels for these items — quantity = purchased + free qty, with each row's batch & expiry">
+          <span style={{ marginRight: 'auto' }}>
+            <Button variant="outlined" startIcon={<LabelIcon />} onClick={() => setLabelPrintOpen(true)} disabled={rows.length === 0} data-testid="purchase-print-labels">Print Labels</Button>
+          </span>
+        </Tooltip>
         <Button variant="outlined" color="inherit" startIcon={<CloseIcon />} onClick={resetForm} disabled={saving}>Cancel (Esc)</Button>
         <Button variant="outlined" startIcon={<DraftIcon />} onClick={() => doSave('DRAFT')} disabled={saving}>Draft</Button>
         <Button variant="outlined" color="primary" startIcon={<SaveIcon />} onClick={() => doSave(status, { andNew: true })} disabled={saving}>Save & New</Button>
@@ -1492,6 +1500,18 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
         suppliers={supplierNames}
         defaultSupplier={selectedSupplier?.name || selectedSupplier?.company_name || ''}
         onCreated={handleProductMasterCreated}
+      />
+
+      {/* Barcode labels for the purchased lines (Settings → Barcode Labels templates) */}
+      <BarcodePrintDialog
+        open={labelPrintOpen}
+        onClose={() => setLabelPrintOpen(false)}
+        workflow="purchase"
+        rows={labelPrintOpen ? rows.map((r) => ({
+          product: { id: r.productId, name: r.productName, barcode: r.barcode, sellingPrice: r.sellingPrice, mrp: r.mrp },
+          qty: (parseFloat(r.quantity) || 0) + (parseFloat(r.freeQuantity) || 0),
+          job: { batch_no: r.batchNumber || '', expiry_date: r.expiryDate || '' },
+        })) : []}
       />
 
       {/* Shared Add Multiple Items / Product Variant Master (same component as Inventory → Products) */}
