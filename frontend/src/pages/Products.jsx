@@ -160,6 +160,7 @@ export default function Products() {
             id: String(p.id),
             code: p.sku || p.code || `PROD-${p.id}`,
             barcode: p.barcode || '',
+            secondaryBarcode: p.secondary_barcode || '',
             name: p.name || 'Unnamed Item',
             brand: p.brand || 'Generic',
             supplier: p.supplier || '',

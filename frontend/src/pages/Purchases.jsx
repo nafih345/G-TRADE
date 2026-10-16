@@ -315,6 +315,8 @@ export default function Purchases() {
         extra_barcodes: p.extra_barcodes || [],
         costPrice: parseFloat(p.purchasePrice || p.cost_price || p.costPrice || 0) || 0,
         retailPrice: parseFloat(p.sellingPrice || p.retail_price || p.retailPrice || p.price || 0) || 0,
+        // Product Master stores MRP in wholesale_price (+ extra_data.mrp)
+        mrp: parseFloat(p.mrp || p.extra_data?.mrp || p.wholesale_price || 0) || 0,
         stock: parseInt(p.stock) || 0,
         taxRate: parseFloat(p.taxRate || p.tax_rate) || 18
       });
@@ -327,11 +329,20 @@ export default function Purchases() {
         const res = await axios.get('/api/products/products/');
         const raw = res.data?.results || res.data || [];
         if (Array.isArray(raw) && raw.length > 0) {
-          setProducts(prev => {
-            const map = new Map();
-            [...prev, ...raw.map(normalize)].forEach(item => map.set(item.id || item.name, item));
-            return Array.from(map.values());
+          // The backend list is authoritative. A localStorage item is kept only when no backend
+          // product shares its id, barcode or SKU — otherwise the same item (one barcode) showed
+          // up twice in the search, once from the stale browser copy and once from the server.
+          const backend = raw.map(p => ({ ...normalize(p), secondaryBarcode: p.secondary_barcode || '' }));
+          const codeKey = (v) => String(v || '').trim().toLowerCase();
+          const taken = new Set();
+          backend.forEach(p => {
+            [p.id, p.barcode, p.sku, p.secondaryBarcode, ...(p.extra_barcodes || []).map(b => b?.code ?? b)]
+              .map(codeKey).filter(Boolean).forEach(k => taken.add(k));
           });
+          const localOnly = localProds.map(normalize).filter(p =>
+            ![p.id, p.barcode, p.sku].map(codeKey).some(k => k && taken.has(k))
+          );
+          setProducts([...backend, ...localOnly]);
         }
       } catch (e) {}
     };
@@ -388,6 +399,7 @@ export default function Purchases() {
           paidAmount: parseFloat(inv.paid_amount || 0),
           balance: parseFloat(inv.balance_amount || 0),
           paymentMethod: inv.payment_method || 'CASH',
+          bankName: inv.bank_account_name || '',
           status: inv.status,
         })));
       }
@@ -1281,7 +1293,26 @@ export default function Purchases() {
                               Bal ₹{p.balance.toFixed(2)}
                             </Typography>
                           </TableCell>
-                          <TableCell><Chip label={p.paymentMethod} size="small" variant="outlined" /></TableCell>
+                          <TableCell>
+                            {(() => {
+                              // Paid / Partially Paid / Unpaid from what's actually been paid
+                              // against the bill (Cash marked Unpaid saves paid_amount = 0).
+                              const pay = p.balance <= 0.005 ? { label: 'Paid', color: 'success' }
+                                : p.paidAmount > 0 ? { label: 'Partially Paid', color: 'warning' }
+                                : { label: 'Unpaid', color: 'error' };
+                              return (
+                                <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" useFlexGap>
+                                  <Chip label={p.paymentMethod} size="small" variant="outlined" />
+                                  <Chip label={pay.label} color={pay.color} size="small" variant="outlined" sx={{ fontWeight: 700 }} />
+                                </Stack>
+                              );
+                            })()}
+                            {p.bankName && (
+                              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.25 }}>
+                                {p.bankName}
+                              </Typography>
+                            )}
+                          </TableCell>
                           <TableCell>
                             <Chip
                               label={statusLabelOf(p.status)}

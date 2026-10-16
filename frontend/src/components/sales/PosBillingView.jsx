@@ -5,6 +5,8 @@ import { barcodeMatchesProduct } from '../../utils/barcodeMatch';
 import { notify } from '../../utils/notify';
 import { isRealCustomerName, summarizeLines } from '../../utils/salesDocStatus';
 import { apiErrorMessage } from '../../utils/apiError';
+import { CASH_PAID, CASH_UNPAID } from '../../utils/paymentModes';
+import PaymentModeDetails from '../common/PaymentModeDetails';
 import { 
   Box, Grid, Card, CardContent, Typography, TextField, InputBase,
   Button, MenuItem, Table, TableBody, TableCell, 
@@ -127,6 +129,10 @@ export default function PosBillingView({
   // Split payment — how much of the total is actually being paid via each mode, mirroring the
   // same "Multi Paymode" pattern used on the New Sale billing screen.
   const [multiPay, setMultiPay] = useState({ cash: '', upi: '', card: '', credit: '' });
+  // Bank linked to the UPI amount, and whether the Cash amount was actually handed over.
+  const [upiBank, setUpiBank] = useState('');
+  const [cashStatus, setCashStatus] = useState(CASH_PAID);
+  const cashUnpaid = cashStatus === CASH_UNPAID;
 
   // Barcode Scanner Machine Connection States
   const [barcodeMachineOpen, setBarcodeMachineOpen] = useState(false);
@@ -265,13 +271,15 @@ export default function PosBillingView({
   const totalDiscount = parseFloat(discountAmount || 0) + loyaltyPointsDiscount;
   const grandTotal = Math.max(0, subtotal + taxAmount - totalDiscount);
 
-  const totalPaid = (parseFloat(multiPay.cash) || 0) + (parseFloat(multiPay.upi) || 0) +
-    (parseFloat(multiPay.card) || 0) + (parseFloat(multiPay.credit) || 0);
+  // Money actually taken: Cash (unless marked Unpaid) + UPI + Card. A Credit amount is sold on
+  // credit — owed, not paid — so it stays in Balance Due.
+  const cashTaken = cashUnpaid ? 0 : (parseFloat(multiPay.cash) || 0);
+  const totalPaid = cashTaken + (parseFloat(multiPay.upi) || 0) + (parseFloat(multiPay.card) || 0);
   const balanceDue = Math.max(0, grandTotal - totalPaid);
   const changeDue = Math.max(0, totalPaid - grandTotal);
   // Derived label for records/receipts — lists whichever modes actually have an amount entered.
   const paymentMethod = [
-    parseFloat(multiPay.cash) > 0 && 'Cash',
+    cashTaken > 0 && 'Cash',
     parseFloat(multiPay.upi) > 0 && 'UPI',
     parseFloat(multiPay.card) > 0 && 'Card',
     parseFloat(multiPay.credit) > 0 && 'Credit'
@@ -694,15 +702,19 @@ export default function PosBillingView({
               <Grid container spacing={1}>
                 <Grid item xs={6}>
                   <TextField
-                    fullWidth size="small" label="Cash (₹)" type="number"
-                    value={multiPay.cash} onChange={(e) => setMultiPay({ ...multiPay, cash: e.target.value })}
+                    fullWidth size="small" label="Cash (₹)" type="number" disabled={cashUnpaid}
+                    value={cashUnpaid ? '' : multiPay.cash} onChange={(e) => setMultiPay({ ...multiPay, cash: e.target.value })}
                   />
+                  <PaymentModeDetails compact method="Cash" cashStatus={cashStatus} onCashStatusChange={setCashStatus} sx={{ mt: 0.5 }} />
                 </Grid>
                 <Grid item xs={6}>
                   <TextField
                     fullWidth size="small" label="UPI / GPay (₹)" type="number"
                     value={multiPay.upi} onChange={(e) => setMultiPay({ ...multiPay, upi: e.target.value })}
                   />
+                  {parseFloat(multiPay.upi) > 0 && (
+                    <PaymentModeDetails compact method="UPI" bankAccount={upiBank} onBankAccountChange={(id) => setUpiBank(id || '')} sx={{ mt: 0.5 }} />
+                  )}
                 </Grid>
                 <Grid item xs={6}>
                   <TextField
@@ -719,7 +731,8 @@ export default function PosBillingView({
               </Grid>
               <Button
                 size="small"
-                onClick={() => setMultiPay(prev => ({ ...prev, cash: balanceDue.toFixed(2) }))}
+                disabled={cashUnpaid}
+                onClick={() => setMultiPay(prev => ({ ...prev, cash: (balanceDue + cashTaken).toFixed(2) }))}
                 sx={{ mt: 1, textTransform: 'none', fontWeight: 700, fontSize: '0.72rem' }}
               >
                 Fill remaining balance into Cash
@@ -759,9 +772,20 @@ export default function PosBillingView({
                   setCustomerDialogOpen(true);
                   return;
                 }
-                // Nothing typed in the pay boxes = paid in full at the counter (Quick Pay). Change
-                // handed back isn't money the shop keeps, so Total Paid never exceeds the bill.
-                const paidNow = totalPaid > 0 ? Math.min(totalPaid, grandTotal) : grandTotal;
+                // Nothing typed in the pay boxes = paid in full in cash at the counter (Quick Pay),
+                // unless Cash is marked Unpaid. Change handed back isn't money the shop keeps: it
+                // comes out of Cash first, then UPI, then Card, so the split never exceeds the bill.
+                const nothingTyped = ['cash', 'upi', 'card', 'credit'].every(k => !(parseFloat(multiPay[k]) > 0));
+                const splits = nothingTyped
+                  ? { cash: cashUnpaid ? 0 : grandTotal, upi: 0, card: 0 }
+                  : { cash: cashTaken, upi: parseFloat(multiPay.upi) || 0, card: parseFloat(multiPay.card) || 0 };
+                let excess = Math.max(0, splits.cash + splits.upi + splits.card - grandTotal);
+                ['cash', 'upi', 'card'].forEach(k => {
+                  const back = Math.min(excess, splits[k]);
+                  splits[k] = Math.round((splits[k] - back) * 100) / 100;
+                  excess -= back;
+                });
+                const paidNow = Math.round((splits.cash + splits.upi + splits.card) * 100) / 100;
 
                 // A real UUID from /api/sales/customers/ can be used as the Invoice.customer FK
                 // directly; a legacy localStorage-only id (e.g. "P-1003") can't, so such a sale is
@@ -783,7 +807,11 @@ export default function PosBillingView({
                     discount_amount: totalDiscount,
                     net_amount: grandTotal,
                     paid_amount: paidNow,
-                    payment_method: paymentMethod,
+                    payment_method: nothingTyped && !cashUnpaid ? 'Cash' : paymentMethod,
+                    // One BILLING receipt per mode (server-side), each posted to its own account —
+                    // UPI to the linked bank picked above.
+                    payment_splits: splits,
+                    payment_banks: { upi: splits.upi > 0 ? (upiBank || null) : null },
                     items: cart.map(i => ({
                       product: i.product.id,
                       description: i.product.name,
@@ -797,18 +825,6 @@ export default function PosBillingView({
                   backendInvoiceId = res.data.id;
                   invNo = res.data.invoice_number || invNo;
 
-                  await axios.post('/api/sales/payments/', {
-                    invoice: backendInvoiceId,
-                    customer: customerId,
-                    customer_name: billName,
-                    amount: paidNow,
-                    method: paymentMethod,
-                    payment_date: new Date().toISOString().split('T')[0],
-                    status: 'Completed',
-                    // Taken at the counter — lets a later New Sale edit of this bill update this
-                    // receipt instead of recording the same money again.
-                    source: 'BILLING'
-                  }).catch(() => {});
                   // Stock deduction + the accounting journal entry both happen server-side
                   // (InvoiceViewSet.perform_create) — no separate calls needed here.
                   window.dispatchEvent(new Event('optical_stock_updated'));
@@ -885,6 +901,8 @@ export default function PosBillingView({
                 setCart([]);
                 setWalkInName('');
                 setMultiPay({ cash: '', upi: '', card: '', credit: '' });
+                setUpiBank('');
+                setCashStatus(CASH_PAID);
                 setDiscountAmount(0);
               }}
               sx={{ borderRadius: 2.5, py: 1.5, fontWeight: 800, textTransform: 'none', fontSize: '1rem' }}

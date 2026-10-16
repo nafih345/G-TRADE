@@ -12,6 +12,8 @@ import {
 } from '@mui/icons-material';
 import { ORDER_STATUS_COLORS, SCHEME_TYPES, PRICE_LIST_OPTIONS, fmtINR } from './wholesaleConstants';
 import { navDialogProps } from './keyboardNav';
+import PaymentModeDetails from '../../components/common/PaymentModeDetails';
+import { needsBank } from '../../utils/paymentModes';
 import { WHOLESALE_SHORTCUTS } from './posShortcuts';
 
 // ---------------------------------------------------------------------------
@@ -174,8 +176,9 @@ export function RecordPaymentDialog({ open, dealer, onClose, onRecord }) {
   const [amount, setAmount] = useState('');
   const [mode, setMode] = useState('Cash');
   const [refNo, setRefNo] = useState('');
+  const [bankAccount, setBankAccount] = useState('');
 
-  React.useEffect(() => { if (open) { setAmount(''); setMode('Cash'); setRefNo(''); } }, [open]);
+  React.useEffect(() => { if (open) { setAmount(''); setMode('Cash'); setRefNo(''); setBankAccount(''); } }, [open]);
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth {...navDialogProps}>
@@ -187,6 +190,7 @@ export function RecordPaymentDialog({ open, dealer, onClose, onRecord }) {
           <TextField select fullWidth size="small" label="Payment Mode" value={mode} onChange={(e) => setMode(e.target.value)}>
             {['Cash', 'UPI', 'Card', 'Bank Transfer'].map(m => <MenuItem key={m} value={m}>{m}</MenuItem>)}
           </TextField>
+          <PaymentModeDetails method={mode} bankAccount={bankAccount} onBankAccountChange={(id) => setBankAccount(id || '')} />
           <TextField fullWidth size="small" label="Reference / Note" value={refNo} onChange={(e) => setRefNo(e.target.value)} />
         </Stack>
       </DialogContent>
@@ -196,7 +200,7 @@ export function RecordPaymentDialog({ open, dealer, onClose, onRecord }) {
           variant="contained"
           data-nav-stop
           disabled={!amount || parseFloat(amount) <= 0}
-          onClick={() => onRecord({ amount: parseFloat(amount) || 0, mode, refNo })}
+          onClick={() => onRecord({ amount: parseFloat(amount) || 0, mode, refNo, bankAccount: needsBank(mode) ? (bankAccount || null) : null })}
           sx={{ backgroundColor: '#4f46e5', fontWeight: 800 }}
         >
           Record Payment

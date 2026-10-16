@@ -5,6 +5,8 @@ import { normalizeSalesRow, summarizeLines, rowCustomerName, rowPayment } from '
 import { apiErrorMessage } from '../utils/apiError';
 import { fetchAllPages } from '../utils/fetchAllPages';
 import { notify } from '../utils/notify';
+import PaymentModeDetails from '../components/common/PaymentModeDetails';
+import { needsBank } from '../utils/paymentModes';
 import { 
   Box, Grid, Card, CardContent, Typography, TextField, 
   Button, MenuItem, Table, TableBody, TableCell, 
@@ -59,7 +61,7 @@ const TabViewFallback = () => (
 
 // Record Payment dialog. invoiceId / invoiceNumber: the Order / Invoice the money is collected
 // against when the dialog was opened from one of its rows.
-const EMPTY_PAY_RECORD = { customerId: '', amount: '', method: 'Cash', invoiceId: '', invoiceNumber: '' };
+const EMPTY_PAY_RECORD = { customerId: '', amount: '', method: 'Cash', bankAccount: '', invoiceId: '', invoiceNumber: '' };
 
 // An Orders-list row for a document the database has AND this device keeps a local copy of. The
 // database wins for everything it stores (customer, amounts paid, statuses, frame/lens); the local
@@ -821,6 +823,7 @@ export default function SalesInvoice() {
         customer_name: custName,
         amount: payAmt,
         method: payRecordInput.method || 'Cash',
+        bank_account: needsBank(payRecordInput.method) ? (payRecordInput.bankAccount || null) : null,
         payment_date: today,
         status: 'Completed'
       });
@@ -900,10 +903,26 @@ export default function SalesInvoice() {
     if (patch.status !== undefined) body.fulfillment_status = patch.status;
     if (patch.deliveredAt !== undefined) body.delivered_at = patch.deliveredAt || null;
     if (patch.fulfillmentNotes !== undefined) body.fulfillment_notes = patch.fulfillmentNotes;
-    if (patch.paidAmount !== undefined) body.paid_amount = parseFloat(patch.paidAmount) || 0;
+    // More money collected (Update dialog): record it as a receipt — the Payments API raises the
+    // bill's Total Paid itself and books it to the chosen Cash / Bank / UPI account. A lowered
+    // figure (a correction) still just overwrites paid_amount.
+    const receiptAmount = patch.paidDelta > 0.009 ? patch.paidDelta : 0;
+    if (patch.paidAmount !== undefined && !receiptAmount) body.paid_amount = parseFloat(patch.paidAmount) || 0;
     if (patch.paymentMethod) body.payment_method = patch.paymentMethod;
 
     try {
+      if (receiptAmount) {
+        await axios.post('/api/sales/payments/', {
+          invoice: order.id,
+          customer: isBackendUuid(order.customerId) ? order.customerId : null,
+          customer_name: order.customer || order.customerName || '',
+          amount: receiptAmount,
+          method: patch.paymentMethod || 'Cash',
+          bank_account: patch.bankAccount || null,
+          payment_date: new Date().toISOString().split('T')[0],
+          status: 'Completed',
+        });
+      }
       await axios.patch(`/api/sales/invoices/${order.id}/`, body);
     } catch (err) {
       console.warn('Failed to save document update to backend:', err);
@@ -2453,6 +2472,11 @@ export default function SalesInvoice() {
               <MenuItem value="UPI (GPay/PhonePe)">UPI (GPay / PhonePe / Paytm)</MenuItem>
               <MenuItem value="Bank Transfer">Bank Transfer (NEFT/IMPS)</MenuItem>
             </TextField>
+            <PaymentModeDetails
+              method={payRecordInput.method}
+              bankAccount={payRecordInput.bankAccount}
+              onBankAccountChange={(id) => setPayRecordInput(prev => ({ ...prev, bankAccount: id || '' }))}
+            />
           </Stack>
         </DialogContent>
         <DialogActions sx={{ p: 2, justifyContent: 'space-between' }}>

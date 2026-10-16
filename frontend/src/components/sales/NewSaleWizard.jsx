@@ -6,6 +6,8 @@ import { barcodeMatchesProduct } from '../../utils/barcodeMatch';
 import { notify } from '../../utils/notify';
 import { isRealCustomerName } from '../../utils/salesDocStatus';
 import { apiErrorMessage } from '../../utils/apiError';
+import { CASH_PAID, CASH_UNPAID, needsBank } from '../../utils/paymentModes';
+import PaymentModeDetails from '../common/PaymentModeDetails';
 import { 
   Box, Card, Typography, Grid, TextField, 
   Button, MenuItem, Table, TableBody, TableCell, 
@@ -247,6 +249,8 @@ const EMPTY_SERVICE_REPAIR = {
   customerItem: '', problemDescription: '', estimatedDelivery: '', technician: '', serviceStatus: 'RECEIVED'
 };
 const EMPTY_MULTI_PAY = { cash: '', cards: '', gpay: '', bank: '' };
+// Bank picked for the UPI and Bank Transfer boxes, keyed like payment_banks ({upi, bank}).
+const EMPTY_PAY_BANKS = { upi: '', bank: '' };
 
 // Document number for a new bill, e.g. INV-2026-4821 / ORD-… / QTN-….
 const DOC_NUMBER_PREFIX = { Order: 'ORD', Quotation: 'QTN', Invoice: 'INV' };
@@ -509,6 +513,11 @@ export default function NewSaleWizard({
   const [outRx, setOutRx] = useState('');
   
   const [multiPay, setMultiPay] = useState({ ...EMPTY_MULTI_PAY });
+  const [payBanks, setPayBanks] = useState({ ...EMPTY_PAY_BANKS });
+  // Cash marked Unpaid = no cash taken on this bill: the Cash box is ignored (kept, not wiped,
+  // so flipping back to Paid restores it) and the amount stays in Balance Due.
+  const [cashStatus, setCashStatus] = useState(CASH_PAID);
+  const cashUnpaid = cashStatus === CASH_UNPAID;
   // Advance Paid box text while it's being typed in (null otherwise) — see applyAdvanceTotal.
   const [advanceDraft, setAdvanceDraft] = useState(null);
 
@@ -1265,6 +1274,8 @@ export default function NewSaleWizard({
     setOverallDisc(0);
     setOutRx('');
     setMultiPay({ ...EMPTY_MULTI_PAY });
+    setPayBanks({ ...EMPTY_PAY_BANKS });
+    setCashStatus(CASH_PAID);
     setAdvanceDraft(null);
     setEditDialogId(null);
     setShowBillOpen(false);
@@ -1477,6 +1488,8 @@ export default function NewSaleWizard({
       split[k] = round2(split[k] + unsplit);
     }
     setMultiPay(Object.fromEntries(PAY_MODES.map(m => [m.key, split[m.key] > 0 ? split[m.key].toFixed(2) : ''])));
+    setPayBanks({ upi: backend?.payment_banks?.upi || '', bank: backend?.payment_banks?.bank || '' });
+    setCashStatus(CASH_PAID);
   };
 
   useEffect(() => {
@@ -1698,7 +1711,8 @@ export default function NewSaleWizard({
   // but it is never a second figure added on top of them. Balance Due = Net Payable − Advance
   // Paid. The footer, the bill preview and the saved bill all read these same figures.
   // While the Advance Paid box is being typed in, everything previews the split it will produce.
-  const effectivePay = advanceDraft === null ? multiPay : applyAdvanceTotal(multiPay, advanceDraft);
+  const draftPay = advanceDraft === null ? multiPay : applyAdvanceTotal(multiPay, advanceDraft);
+  const effectivePay = cashUnpaid ? { ...draftPay, cash: '' } : draftPay;
   const paySettlement = settlePaySplit(effectivePay, netTotal);
   const commitAdvanceDraft = () => {
     if (advanceDraft === null) return;
@@ -1836,6 +1850,9 @@ export default function NewSaleWizard({
           // Each pay mode's amount — the backend records one receipt per mode against this bill
           // (and sets paid_amount to their sum).
           payment_splits: Object.fromEntries(PAY_MODES.map(m => [m.apiKey, paySettlement.recorded[m.key]])),
+          // Which bank each UPI / Bank Transfer amount went into (blank = default bank mapping).
+          payment_banks: Object.fromEntries(PAY_MODES.filter(m => needsBank(m.label)).map(m =>
+            [m.apiKey, paySettlement.recorded[m.key] > 0 ? (payBanks[m.apiKey] || null) : null])),
           items: itemsList.map(i => ({
             product: i.productId || null,
             service: i.serviceId || null,
@@ -3298,6 +3315,7 @@ export default function NewSaleWizard({
                       // don't have to do the subtraction by hand.
                       // (prev, not the render's multiPay: an Advance Paid edit may commit on this
                       // same click, as the box blurs.)
+                      if (cashUnpaid) return;
                       setMultiPay(prev => {
                         const remaining = round2(Math.max(0, netTotal -
                           payAmount(prev.cards) - payAmount(prev.gpay) - payAmount(prev.bank)));
@@ -3323,11 +3341,13 @@ export default function NewSaleWizard({
                     </TableHead>
                     <TableBody>
                       {PAY_MODES.map(m => (
-                        <TableRow key={m.key}>
-                          <TableCell sx={{ py: 0.2, fontSize: '0.72rem', fontWeight: 700 }}>{m.caption}</TableCell>
-                          <TableCell sx={{ p: 0.2 }}>
+                        <React.Fragment key={m.key}>
+                        <TableRow>
+                          <TableCell sx={{ py: 0.2, fontSize: '0.72rem', fontWeight: 700, borderBottom: (m.key === 'cash' || (needsBank(m.label) && payAmount(effectivePay[m.key]) > 0)) ? 'none' : undefined }}>{m.caption}</TableCell>
+                          <TableCell sx={{ p: 0.2, borderBottom: (m.key === 'cash' || (needsBank(m.label) && payAmount(effectivePay[m.key]) > 0)) ? 'none' : undefined }}>
                             <TextField
-                              size="small" placeholder="0.00" value={effectivePay[m.key]}
+                              size="small" placeholder={m.key === 'cash' && cashUnpaid ? 'Unpaid' : '0.00'} value={effectivePay[m.key]}
+                              disabled={m.key === 'cash' && cashUnpaid}
                               onChange={(e) => {
                                 const value = cleanAmountInput(e.target.value);
                                 setMultiPay(prev => ({ ...prev, [m.key]: value }));
@@ -3336,6 +3356,19 @@ export default function NewSaleWizard({
                             />
                           </TableCell>
                         </TableRow>
+                        {(m.key === 'cash' || (needsBank(m.label) && payAmount(effectivePay[m.key]) > 0)) && (
+                          <TableRow>
+                            <TableCell colSpan={2} sx={{ pt: 0, pb: 0.4, px: 0.5 }}>
+                              <PaymentModeDetails
+                                compact method={m.label}
+                                cashStatus={cashStatus} onCashStatusChange={setCashStatus}
+                                bankAccount={payBanks[m.apiKey] || ''}
+                                onBankAccountChange={(id) => setPayBanks(prev => ({ ...prev, [m.apiKey]: id || '' }))}
+                              />
+                            </TableCell>
+                          </TableRow>
+                        )}
+                        </React.Fragment>
                       ))}
                     </TableBody>
                   </Table>

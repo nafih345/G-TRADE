@@ -1,12 +1,12 @@
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.serializers import ModelSerializer, SerializerMethodField
+from rest_framework.serializers import ModelSerializer, SerializerMethodField, ValidationError
 from rest_framework.pagination import PageNumberPagination
 from django.db import transaction, IntegrityError
 from django.db.models import Q
 from .models import Product, BarcodeHistory, ProductBarcode
-from .barcode_utils import reserve_barcodes, reserve_ean13
+from .barcode_utils import find_barcode_owner, reserve_product_barcodes
 
 
 class ProductPagination(PageNumberPagination):
@@ -79,6 +79,15 @@ class ProductSerializer(ModelSerializer):
     class Meta:
         model = Product
         fields = '__all__'
+        # DRF turns the conditional (variant_group, variant_key) UniqueConstraint into a
+        # UniqueTogetherValidator that ignores its condition and makes both fields
+        # required — so every stand-alone product POST failed with 400. Uniqueness of a
+        # variant combination is enforced by the DB constraint and variant_service.
+        validators = []
+        extra_kwargs = {
+            'variant_group': {'required': False},
+            'variant_key': {'required': False},
+        }
 
     def _extra_value(self, obj, *keys):
         # Legacy imported / UI-created products stored variant attributes only inside
@@ -107,8 +116,12 @@ class ProductSerializer(ModelSerializer):
     def get_extra_barcodes(self, obj):
         # Every code in the product's printed per-label EAN-13 series. Billing/POS
         # screens match a scanned code against this list as well as `barcode`, so
-        # any physical tag from a label sheet resolves back to this product.
-        return [b.code for b in obj.extra_barcodes.all()]
+        # any physical tag from a label sheet resolves back to this product. The
+        # manually-entered secondary barcode is included so it scans the same way.
+        codes = [b.code for b in obj.extra_barcodes.all()]
+        if obj.secondary_barcode:
+            codes.append(obj.secondary_barcode)
+        return codes
 
     def _resolve_gst_percent(self, obj):
         # Single source of truth for a product's GST %. Checked in priority order:
@@ -165,7 +178,36 @@ class ProductSerializer(ModelSerializer):
     def validate_barcode(self, value):
         # Normalize blank barcode to None so two blank products don't collide
         # under the unique constraint (NULLs are distinct; empty strings aren't).
-        return value or None
+        return (value or '').strip() or None
+
+    def validate_secondary_barcode(self, value):
+        return (value or '').strip() or None
+
+    def validate(self, attrs):
+        # Every code must scan to exactly one product: check the primary and the
+        # secondary barcode against each other and against every other product's
+        # primary / secondary / printed label codes.
+        attrs = super().validate(attrs)
+        inst = self.instance
+        primary = attrs['barcode'] if 'barcode' in attrs else getattr(inst, 'barcode', None)
+        secondary = attrs['secondary_barcode'] if 'secondary_barcode' in attrs else getattr(inst, 'secondary_barcode', None)
+        errors = {}
+        if primary and secondary and primary == secondary:
+            errors['secondary_barcode'] = 'Second barcode must differ from the primary barcode.'
+        for field in ('barcode', 'secondary_barcode'):
+            value = attrs.get(field)
+            # Unchanged codes are skipped so a full-form PUT never trips over legacy data.
+            if not value or field in errors or value == getattr(inst, field, None):
+                continue
+            owner = find_barcode_owner(value, exclude_pk=getattr(inst, 'pk', None))
+            if owner:
+                errors[field] = f'Barcode "{value}" already belongs to {owner.name}.'
+            elif field == 'secondary_barcode' and inst is not None \
+                    and inst.extra_barcodes.filter(code=value).exists():
+                errors[field] = "That code is already one of this product's printed label codes."
+        if errors:
+            raise ValidationError(errors)
+        return attrs
 
     def _apply_variant_attrs(self, validated_data, input_data):
         # `size` is a read-only SerializerMethodField (so it can fall back to
@@ -220,7 +262,7 @@ class ProductViewSet(viewsets.ModelViewSet):
                 Q(name__icontains=search) | Q(sku__icontains=search) |
                 Q(barcode__icontains=search) | Q(brand_name__icontains=search) |
                 Q(category_name__icontains=search) | Q(supplier_name__icontains=search) |
-                Q(extra_barcodes__code__icontains=search)
+                Q(secondary_barcode__icontains=search) | Q(extra_barcodes__code__icontains=search)
             ).distinct()
         has_barcode = self.request.query_params.get('has_barcode')
         if has_barcode is not None:
@@ -251,7 +293,15 @@ class ProductViewSet(viewsets.ModelViewSet):
 
     def perform_update(self, serializer):
         old_barcode = serializer.instance.barcode
+        old_secondary = serializer.instance.secondary_barcode
         super().perform_update(serializer)
+        new_secondary = serializer.instance.secondary_barcode
+        if old_secondary != new_secondary:
+            BarcodeHistory.objects.create(
+                product=serializer.instance, old_barcode=old_secondary, new_barcode=new_secondary,
+                changed_by=self.request.data.get('changed_by') or 'Administrator',
+                reason='Second barcode ' + ('cleared' if not new_secondary else 'updated'),
+            )
         new_barcode = serializer.instance.barcode
         if old_barcode != new_barcode:
             BarcodeHistory.objects.create(
@@ -280,7 +330,7 @@ class ProductViewSet(viewsets.ModelViewSet):
         new_barcode = None
         last_error = None
         for _attempt in range(3):
-            candidate = reserve_barcodes(count=1)[0]
+            candidate = reserve_product_barcodes(count=1)[0]
             try:
                 with transaction.atomic():
                     product.barcode = candidate
@@ -314,7 +364,7 @@ class ProductViewSet(viewsets.ModelViewSet):
         if not products:
             return Response({'generated': 0, 'products': []})
 
-        codes = reserve_barcodes(count=len(products))
+        codes = reserve_product_barcodes(count=len(products))
         changed_by = request.data.get('changed_by') or 'Administrator'
         history_rows = []
         for product, code in zip(products, codes):
@@ -335,13 +385,13 @@ class ProductViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'], url_path='next_barcode_candidate')
     def next_barcode_candidate(self, request):
-        code = reserve_barcodes(count=1)[0]
+        code = reserve_product_barcodes(count=1)[0]
         return Response({'barcode': code})
 
     @action(detail=False, methods=['post'], url_path='next_ean13_candidate')
     def next_ean13_candidate(self, request):
-        """Next barcode in the 13-digit EAN-13 series (used by the Product Master dialog)."""
-        code = reserve_ean13(count=1)[0]
+        """Next barcode in the configured product series (kept for older clients)."""
+        code = reserve_product_barcodes(count=1)[0]
         return Response({'barcode': code})
 
     @action(detail=True, methods=['post'], url_path='label_barcode_series')
@@ -361,7 +411,7 @@ class ProductViewSet(viewsets.ModelViewSet):
         count = max(1, min(count, 1000))
 
         if not product.barcode:
-            minted = reserve_ean13(count=1)[0]
+            minted = reserve_product_barcodes(count=1)[0]
             product.barcode = minted
             product.save(update_fields=['barcode'])
             BarcodeHistory.objects.create(
@@ -377,7 +427,7 @@ class ProductViewSet(viewsets.ModelViewSet):
         attempts = 0
         while need > 0 and attempts < 5:
             attempts += 1
-            for candidate in reserve_ean13(count=need):
+            for candidate in reserve_product_barcodes(count=need):
                 if candidate == product.barcode or Product.objects.filter(barcode=candidate).exists():
                     continue
                 _obj, created = ProductBarcode.objects.get_or_create(
@@ -405,15 +455,11 @@ class ProductViewSet(viewsets.ModelViewSet):
         if not code:
             return Response({'detail': 'code is required'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if product.barcode == code or product.extra_barcodes.filter(code=code).exists():
+        if code in (product.barcode, product.secondary_barcode) or product.extra_barcodes.filter(code=code).exists():
             return Response({'registered': True, 'primary': product.barcode == code})
 
-        clash = (
-            Product.objects.filter(barcode=code).exclude(pk=product.pk).first()
-            or ProductBarcode.objects.filter(code=code).exclude(product=product).first()
-        )
-        if clash:
-            owner = clash if isinstance(clash, Product) else clash.product
+        owner = find_barcode_owner(code, exclude_pk=product.pk)
+        if owner:
             return Response(
                 {'detail': f'Barcode "{code}" already belongs to {owner.name}.'},
                 status=status.HTTP_409_CONFLICT,
@@ -440,7 +486,7 @@ class ProductViewSet(viewsets.ModelViewSet):
             return Response({'found': False, 'product': None})
         product = (
             Product.objects
-            .filter(Q(barcode=code) | Q(extra_barcodes__code=code))
+            .filter(Q(barcode=code) | Q(secondary_barcode=code) | Q(extra_barcodes__code=code))
             .prefetch_related('extra_barcodes')
             .first()
         )
@@ -457,10 +503,7 @@ class ProductViewSet(viewsets.ModelViewSet):
         exclude_id = request.query_params.get('exclude_id')
         if not barcode:
             return Response({'exists': False, 'product_name': None})
-        qs = Product.objects.filter(Q(barcode=barcode) | Q(extra_barcodes__code=barcode))
-        if exclude_id:
-            qs = qs.exclude(id=exclude_id)
-        existing = qs.first()
+        existing = find_barcode_owner(barcode, exclude_pk=exclude_id)
         return Response({'exists': bool(existing), 'product_name': existing.name if existing else None})
 
     @action(detail=True, methods=['get'], url_path='barcode_history')

@@ -7,7 +7,6 @@ import {
 import {
   Storefront as StoreIcon,
   Receipt as BillingIcon,
-  QrCode as BarcodeIcon,
   Visibility as ClinicalIcon,
   Security as SecurityIcon,
   Save as SaveIcon,
@@ -15,7 +14,8 @@ import {
   CheckCircle as SuccessIcon,
   AccountTree as BranchTreeIcon,
   DesignServices as DesignerIcon,
-  LocalOffer as LabelIcon
+  LocalOffer as LabelIcon,
+  AccountBalance as BankIcon
 } from '@mui/icons-material';
 import { useLocation } from 'react-router-dom';
 import axios from 'axios';
@@ -23,14 +23,19 @@ import { useBranch } from '../context/BranchContext';
 import ConfirmActionDialog from '../components/common/ConfirmActionDialog';
 import BillDesignerDashboard from '../components/settings/billing/BillDesignerDashboard';
 import BarcodeLabelSettings from '../components/settings/BarcodeLabelSettings';
+import BankMasterSettings from '../components/settings/BankMasterSettings';
 
 // Deep-link ids for /settings?tab=<id> (e.g. the barcode print dialog's
 // "Label Settings" button). Index = tab position.
-const TAB_IDS = ['store', 'billing', 'pos', 'clinical', 'security', 'business', 'bill-designer', 'barcode-labels'];
+const TAB_IDS = ['store', 'billing', 'clinical', 'security', 'business', 'bill-designer', 'barcode-labels', 'banks'];
 
 export default function Settings() {
   const location = useLocation();
-  const tabFromUrl = () => Math.max(0, TAB_IDS.indexOf(new URLSearchParams(location.search).get('tab')));
+  // 'pos' is the retired POS & Barcode Scanner tab — it now lives inside Barcode Labels.
+  const tabFromUrl = () => {
+    const id = new URLSearchParams(location.search).get('tab');
+    return Math.max(0, TAB_IDS.indexOf(id === 'pos' ? 'barcode-labels' : id));
+  };
   const [activeTab, setActiveTab] = useState(tabFromUrl);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { if (location.search) setActiveTab(tabFromUrl()); }, [location.search]);
@@ -231,20 +236,74 @@ export default function Settings() {
         <Tabs value={activeTab} onChange={(e, val) => setActiveTab(val)} variant="scrollable" scrollButtons="auto" sx={{ px: 2, borderBottom: 1, borderColor: 'divider' }}>
           <Tab label="Store & Clinic Profile" icon={<StoreIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab label="Billing & Tax Config" icon={<BillingIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
-          <Tab label="POS & Barcode Scanner" icon={<BarcodeIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab label="Clinical & Eye Exam Defaults" icon={<ClinicalIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab label="System Security & Backup" icon={<SecurityIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab label="Business Settings" icon={<BranchTreeIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab label="Bill & Invoice Designer" icon={<DesignerIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab label="Barcode Labels" icon={<LabelIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
+          <Tab label="Bank Master" icon={<BankIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
         </Tabs>
       </Card>
 
-      {/* TAB 6: BILL & INVOICE DESIGNER */}
-      {activeTab === 6 && <BillDesignerDashboard />}
+      {/* TAB 5: BILL & INVOICE DESIGNER */}
+      {activeTab === 5 && <BillDesignerDashboard />}
 
-      {/* TAB 7: BARCODE LABEL DESIGN (used by every barcode Print dialog) */}
-      {activeTab === 7 && <BarcodeLabelSettings />}
+      {/* TAB 6: BARCODE LABELS — scanner/POS preferences + label design (used by every barcode Print dialog) */}
+      {activeTab === 6 && (
+        <>
+          <Card sx={{ p: 3, mb: 3, borderRadius: 4, border: '1px solid', borderColor: 'divider' }}>
+            <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>Barcode Scanner & POS Preferences</Typography>
+            <Grid container spacing={2}>
+              <Grid item xs={12} sm={6}>
+                <TextField 
+                  select 
+                  label="Barcode Label Standard" 
+                  fullWidth 
+                  value={settings.barcodeStandard}
+                  onChange={(e) => setSettings({ ...settings, barcodeStandard: e.target.value })}
+                >
+                  <MenuItem value="EAN-13">EAN-13 (Standard Optical Label)</MenuItem>
+                  <MenuItem value="Code-128">Code-128 (High-Density Frame Tag)</MenuItem>
+                  <MenuItem value="UPC-A">UPC-A (Universal)</MenuItem>
+                  <MenuItem value="QR-Code">QR Code (Compact Spectacle Tag)</MenuItem>
+                </TextField>
+              </Grid>
+
+              <Grid item xs={12} sm={6}>
+                <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between', height: '100%' }}>
+                  <Box>
+                    <Typography variant="subtitle2" fontWeight={700}>Auto-Print Receipt Upon POS Billing</Typography>
+                    <Typography variant="caption" color="text.secondary">Automatically launch print dialog after completing checkout</Typography>
+                  </Box>
+                  <Switch 
+                    checked={settings.autoPrintReceipt}
+                    onChange={(e) => setSettings({ ...settings, autoPrintReceipt: e.target.checked })}
+                    color="primary"
+                  />
+                </Paper>
+              </Grid>
+
+              <Grid item xs={12} sm={6}>
+                <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <Box>
+                    <Typography variant="subtitle2" fontWeight={700}>Barcode Scanner Audio Feedback</Typography>
+                    <Typography variant="caption" color="text.secondary">Play confirmation sound when USB scanner reads barcode</Typography>
+                  </Box>
+                  <Switch 
+                    checked={settings.enableScannerBeep}
+                    onChange={(e) => setSettings({ ...settings, enableScannerBeep: e.target.checked })}
+                    color="primary"
+                  />
+                </Paper>
+              </Grid>
+            </Grid>
+          </Card>
+          <BarcodeLabelSettings />
+        </>
+      )}
+
+      {/* TAB 7: BANK MASTER (banks offered on Bank / UPI payments) */}
+      {activeTab === 7 && <BankMasterSettings />}
 
       {/* TAB 0: STORE PROFILE */}
       {activeTab === 0 && (
@@ -389,59 +448,8 @@ export default function Settings() {
         </Card>
       )}
 
-      {/* TAB 2: POS & BARCODE */}
+      {/* TAB 2: CLINICAL DEFAULTS */}
       {activeTab === 2 && (
-        <Card sx={{ p: 3, borderRadius: 4, border: '1px solid', borderColor: 'divider' }}>
-          <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>Barcode Scanner & POS Preferences</Typography>
-          <Grid container spacing={2}>
-            <Grid item xs={12} sm={6}>
-              <TextField 
-                select 
-                label="Barcode Label Standard" 
-                fullWidth 
-                value={settings.barcodeStandard}
-                onChange={(e) => setSettings({ ...settings, barcodeStandard: e.target.value })}
-              >
-                <MenuItem value="EAN-13">EAN-13 (Standard Optical Label)</MenuItem>
-                <MenuItem value="Code-128">Code-128 (High-Density Frame Tag)</MenuItem>
-                <MenuItem value="UPC-A">UPC-A (Universal)</MenuItem>
-                <MenuItem value="QR-Code">QR Code (Compact Spectacle Tag)</MenuItem>
-              </TextField>
-            </Grid>
-
-            <Grid item xs={12} sm={6}>
-              <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between', height: '100%' }}>
-                <Box>
-                  <Typography variant="subtitle2" fontWeight={700}>Auto-Print Receipt Upon POS Billing</Typography>
-                  <Typography variant="caption" color="text.secondary">Automatically launch print dialog after completing checkout</Typography>
-                </Box>
-                <Switch 
-                  checked={settings.autoPrintReceipt}
-                  onChange={(e) => setSettings({ ...settings, autoPrintReceipt: e.target.checked })}
-                  color="primary"
-                />
-              </Paper>
-            </Grid>
-
-            <Grid item xs={12} sm={6}>
-              <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <Box>
-                  <Typography variant="subtitle2" fontWeight={700}>Barcode Scanner Audio Feedback</Typography>
-                  <Typography variant="caption" color="text.secondary">Play confirmation sound when USB scanner reads barcode</Typography>
-                </Box>
-                <Switch 
-                  checked={settings.enableScannerBeep}
-                  onChange={(e) => setSettings({ ...settings, enableScannerBeep: e.target.checked })}
-                  color="primary"
-                />
-              </Paper>
-            </Grid>
-          </Grid>
-        </Card>
-      )}
-
-      {/* TAB 3: CLINICAL DEFAULTS */}
-      {activeTab === 3 && (
         <Card sx={{ p: 3, borderRadius: 4, border: '1px solid', borderColor: 'divider' }}>
           <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>Clinical & Eye Exam Defaults</Typography>
           <Grid container spacing={2}>
@@ -478,8 +486,8 @@ export default function Settings() {
         </Card>
       )}
 
-      {/* TAB 4: SECURITY & BACKUP */}
-      {activeTab === 4 && (
+      {/* TAB 3: SECURITY & BACKUP */}
+      {activeTab === 3 && (
         <Card sx={{ p: 3, borderRadius: 4, border: '1px solid', borderColor: 'divider' }}>
           <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>System Security & Data Backup</Typography>
           <Grid container spacing={2}>
@@ -522,8 +530,8 @@ export default function Settings() {
         </Card>
       )}
 
-      {/* TAB 5: BUSINESS SETTINGS — MULTI-BRANCH MANAGEMENT */}
-      {activeTab === 5 && (
+      {/* TAB 4: BUSINESS SETTINGS — MULTI-BRANCH MANAGEMENT */}
+      {activeTab === 4 && (
         <Card sx={{ p: 3, borderRadius: 4, border: '1px solid', borderColor: 'divider' }}>
           <Typography variant="h6" fontWeight={800} sx={{ mb: 0.5 }}>Multi-Branch Management</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>

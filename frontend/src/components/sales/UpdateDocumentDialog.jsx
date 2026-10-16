@@ -18,6 +18,9 @@ const PIPELINE_STAGES = [
   'Delivered'
 ];
 
+import PaymentModeDetails from '../common/PaymentModeDetails';
+import { needsBank } from '../../utils/paymentModes';
+
 const PAYMENT_METHODS = ['Cash', 'Card', 'UPI', 'Bank', 'Credit'];
 
 const num = (v) => {
@@ -52,6 +55,7 @@ export default function UpdateDocumentDialog({ open, docView, doc, fullDoc, onCl
       total,
       paidAmount,
       paymentMethod: doc.paymentMethod || doc.paymentMode || src.payment_method || 'Cash',
+      bankAccount: '',
       pipelineStatus:
         doc.status || doc.fulfillmentStatus || src.fulfillment_status || 'Order Received',
       deliveredAt: doc.deliveredAt || src.delivered_at || '',
@@ -85,7 +89,11 @@ export default function UpdateDocumentDialog({ open, docView, doc, fullDoc, onCl
     const patch = {
       paymentStatus: payStatus.short,
       paidAmount: num(form.paidAmount),
-      paymentMethod: form.paymentMethod
+      paymentMethod: form.paymentMethod,
+      // Money newly collected in this update: recorded as its own receipt (method + bank), so
+      // it reaches the books in the right account.
+      paidDelta: Math.round((num(form.paidAmount) - num(form.origPaid)) * 100) / 100,
+      bankAccount: needsBank(form.paymentMethod) ? (form.bankAccount || null) : null
     };
     if (!isQuotation) {
       patch.status = form.pipelineStatus;
@@ -122,6 +130,12 @@ export default function UpdateDocumentDialog({ open, docView, doc, fullDoc, onCl
               {PAYMENT_METHODS.map((m) => <MenuItem key={m} value={m}>{m}</MenuItem>)}
             </TextField>
           </Grid>
+          {needsBank(form.paymentMethod) && (
+            <Grid item xs={12} sm={8} sx={{ ml: { sm: 'auto' } }}>
+              <PaymentModeDetails method={form.paymentMethod}
+                bankAccount={form.bankAccount} onBankAccountChange={(id) => set({ bankAccount: id || '' })} />
+            </Grid>
+          )}
         </Grid>
 
         {/* Balance — paid or not */}

@@ -9,6 +9,7 @@ from .supplier_utils import reserve_supplier_codes, get_or_create_supplier_ledge
 from apps.inventory.models import StockLedger
 from apps.inventory.stock_utils import adjust_branch_stock
 from apps.common.branch_mixins import BranchScopedViewSetMixin
+from apps.financial.banks import validate_bank_account
 
 class SupplierSerializer(ModelSerializer):
     # Free text, not EmailField: email is informational here, and strict validation rejected
@@ -166,10 +167,27 @@ class PurchaseInvoiceSerializer(ModelSerializer):
     # would otherwise fail PK validation on every future save ("object does not exist"),
     # permanently locking that invoice out of edits even though it still reads back fine.
     supplier = serializers.PrimaryKeyRelatedField(queryset=Supplier.all_objects.all())
+    bank_account_name = serializers.CharField(source='bank_account.name', read_only=True, default=None)
 
     class Meta:
         model = PurchaseInvoice
         fields = '__all__'
+
+    def validate_bank_account(self, value):
+        return validate_bank_account(value)
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        method = attrs.get('payment_method', self.instance.payment_method if self.instance else 'CASH')
+        # A bank only means something for BANK / UPI, Paid/Unpaid only for CASH — drop stale
+        # values left over from switching the pay mode, so the books never use them.
+        if method not in ('BANK', 'UPI'):
+            attrs['bank_account'] = None
+        if method != 'CASH':
+            attrs['payment_status'] = ''
+        elif attrs.get('payment_status') == 'UNPAID':
+            attrs['paid_amount'] = 0
+        return attrs
 
     def create(self, validated_data):
         items_data = validated_data.pop('items', [])
@@ -190,6 +208,13 @@ class PurchaseInvoiceSerializer(ModelSerializer):
                 PurchaseInvoiceItem.objects.create(purchase_invoice=instance, **item_data)
 
         return instance
+
+
+def _owes_supplier(invoice):
+    """Whether this entry's balance is still owed to the supplier: a credit purchase, or a cash
+    one whose cash was marked Unpaid."""
+    return invoice.purchase_type == 'CREDIT' or (
+        invoice.payment_method == 'CASH' and invoice.payment_status == 'UNPAID')
 
 
 class PurchaseInvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
@@ -234,7 +259,7 @@ class PurchaseInvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
             adjust_branch_stock(item.product, branch, -int(qty_in))
             ledger_row.delete()
 
-        if invoice.purchase_type == 'CREDIT' and invoice.balance_amount:
+        if _owes_supplier(invoice) and invoice.balance_amount:
             supplier = invoice.supplier
             supplier.outstanding_balance = (supplier.outstanding_balance or 0) - invoice.balance_amount
             supplier.save(update_fields=['outstanding_balance'])
@@ -265,7 +290,7 @@ class PurchaseInvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
                     },
                 )
 
-        if invoice.purchase_type == 'CREDIT' and invoice.balance_amount:
+        if _owes_supplier(invoice) and invoice.balance_amount:
             supplier = invoice.supplier
             supplier.outstanding_balance = (supplier.outstanding_balance or 0) + invoice.balance_amount
             supplier.save()

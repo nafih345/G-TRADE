@@ -15,11 +15,13 @@ import {
   History as HistoryIcon,
   ExpandMore as ExpandMoreIcon,
   ExpandLess as ExpandLessIcon,
-  CheckCircle as CheckIcon
+  CheckCircle as CheckIcon,
+  Settings as SettingsIcon
 } from '@mui/icons-material';
 import { useDebounce } from '../../hooks/useDebounce';
 import { renderBarcodeMarkup } from '../../utils/printBarcodeLabels';
 import BarcodePrintDialog from './BarcodePrintDialog';
+import BarcodeConfigDialog, { BARCODE_CONFIG_URL, describeSeries } from './BarcodeConfigDialog';
 import { focusRelative } from '../../pages/wholesale/keyboardNav';
 
 // The "Barcode" section from the spec: input + Generate/Regenerate/Copy/Print/Clear
@@ -38,11 +40,15 @@ export default function BarcodeSection({
   productColour,
   productSize,
   onSaved,
+  // Optional second scan-in code (Product.secondary_barcode). Same create/manage
+  // split as the primary: onSecondaryChange in create mode, saved via PATCH in manage.
+  secondaryValue = '',
+  onSecondaryChange,
+  onSecondarySaved,
   // Inside a keyboardNav chain: Enter on an empty input generates a barcode, then
   // Enter / ↓ / ↑ move to the next / previous field like any other stop.
   keyboardNav = false,
-  // Endpoint that mints the next barcode in create-mode. Defaults to the legacy
-  // OPTxxxxxx series; pass the EAN-13 endpoint for a 13-digit numeric series.
+  // Endpoint that mints the next barcode in create-mode (the configured series).
   generateUrl = '/api/products/items/next_barcode_candidate/'
 }) {
   const [localValue, setLocalValue] = useState(value || '');
@@ -56,6 +62,12 @@ export default function BarcodeSection({
   const [printOpen, setPrintOpen] = useState(false);
   const [history, setHistory] = useState([]);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [seriesConfig, setSeriesConfig] = useState(null);
+  const [configOpen, setConfigOpen] = useState(false);
+
+  useEffect(() => {
+    axios.get(BARCODE_CONFIG_URL).then((res) => setSeriesConfig(res.data)).catch(() => {});
+  }, []);
 
   useEffect(() => {
     setLocalValue(value || '');
@@ -219,9 +231,25 @@ export default function BarcodeSection({
 
   return (
     <Box>
-      <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 1, display: 'flex', alignItems: 'center', gap: 0.5 }}>
-        <BarcodeIcon fontSize="small" color="action" /> Barcode
-      </Typography>
+      <Stack direction="row" alignItems="center" spacing={0.5} sx={{ mb: 1 }}>
+        <Typography variant="subtitle2" fontWeight={700} sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+          <BarcodeIcon fontSize="small" color="action" /> Barcode
+        </Typography>
+        <Box sx={{ flex: 1 }} />
+        <Button
+          size="small" variant="text" startIcon={<SettingsIcon fontSize="small" />}
+          onClick={() => setConfigOpen(true)} sx={{ textTransform: 'none' }}
+          tabIndex={keyboardNav ? -1 : undefined}
+        >
+          Barcode settings
+        </Button>
+      </Stack>
+      {seriesConfig && describeSeries(seriesConfig) && (
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+          “Generate” issues the next code in the series — {describeSeries(seriesConfig)}
+          {seriesConfig.preview?.samples?.[0] ? ` (next: ${seriesConfig.preview.samples[0]})` : ''}.
+        </Typography>
+      )}
 
       <TextField
         fullWidth
@@ -263,6 +291,16 @@ export default function BarcodeSection({
             </Stack>
           )
         }}
+      />
+
+      <SecondaryBarcodeField
+        mode={mode}
+        productId={productId}
+        primary={localValue}
+        value={secondaryValue}
+        onChange={onSecondaryChange}
+        onSaved={(val) => { onSecondarySaved && onSecondarySaved(val); loadHistory(); }}
+        keyboardNav={keyboardNav}
       />
 
       <Stack direction="row" spacing={1} flexWrap="wrap" sx={{ mt: 1.5, rowGap: 1 }}>
@@ -358,7 +396,95 @@ export default function BarcodeSection({
         </DialogActions>
       </Dialog>
 
+      <BarcodeConfigDialog open={configOpen} onClose={() => setConfigOpen(false)} onSaved={setSeriesConfig} />
+
       <BarcodePrintDialog open={printOpen} onClose={() => setPrintOpen(false)} products={[previewProduct]} />
     </Box>
+  );
+}
+
+// Manually-typed second barcode (e.g. the manufacturer's EAN). Scans to the product
+// like the primary; checked for duplicates against every product's codes.
+function SecondaryBarcodeField({ mode, productId, primary, value, onChange, onSaved, keyboardNav }) {
+  const [local, setLocal] = useState(value || '');
+  const [duplicate, setDuplicate] = useState(null);
+  const [checking, setChecking] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
+
+  useEffect(() => { setLocal(value || ''); }, [value]);
+
+  const debounced = useDebounce(local.trim(), 400);
+  useEffect(() => {
+    let cancelled = false;
+    if (!debounced) { setDuplicate(null); return undefined; }
+    setChecking(true);
+    const params = new URLSearchParams({ barcode: debounced });
+    if (mode === 'manage' && productId) params.set('exclude_id', productId);
+    axios.get(`/api/products/items/check_barcode/?${params.toString()}`)
+      .then((res) => { if (!cancelled) setDuplicate(res.data.exists ? res.data : null); })
+      .catch(() => { if (!cancelled) setDuplicate(null); })
+      .finally(() => { if (!cancelled) setChecking(false); });
+    return () => { cancelled = true; };
+  }, [debounced, mode, productId]);
+
+  const trimmed = local.trim();
+  const sameAsPrimary = Boolean(trimmed) && trimmed === (primary || '').trim();
+  const invalid = Boolean(duplicate) || sameAsPrimary;
+
+  const commit = async () => {
+    setSaveError('');
+    if (trimmed === (value || '') || invalid || checking) return;
+    if (mode === 'create') {
+      onChange && onChange(trimmed);
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await axios.patch(`/api/products/items/${productId}/`, { secondary_barcode: trimmed || null });
+      onSaved && onSaved(res.data.secondary_barcode || '');
+    } catch (e) {
+      setSaveError(e?.response?.data?.secondary_barcode?.[0] || 'Could not save the second barcode.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // In create mode keep the parent in sync as the user types, so Save picks it up
+  // even if the field never blurs.
+  const handleChange = (e) => {
+    setLocal(e.target.value);
+    if (mode === 'create' && onChange) onChange(e.target.value.trim());
+  };
+
+  return (
+    <TextField
+      fullWidth
+      size="small"
+      label="Second barcode (optional)"
+      placeholder="Scan / type another code for this item, e.g. manufacturer EAN"
+      value={local}
+      onChange={handleChange}
+      onBlur={commit}
+      sx={{ mt: 1 }}
+      inputProps={keyboardNav ? { 'data-nav-own': '' } : undefined}
+      onKeyDown={keyboardNav ? (e) => {
+        if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+        if (e.key === 'Enter' || e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          focusRelative(e.target, e.key === 'ArrowUp' ? -1 : 1);
+        }
+      } : undefined}
+      error={invalid || Boolean(saveError)}
+      helperText={
+        sameAsPrimary ? 'Must differ from the primary barcode.'
+          : duplicate ? `Barcode already exists for another product ('${duplicate.product_name}').`
+            : saveError || (saving ? 'Saving…' : checking ? 'Checking availability…' : 'Scans to this item just like the primary barcode.')
+      }
+      InputProps={{
+        endAdornment: (checking || saving) ? <CircularProgress size={16} />
+          : (!invalid && trimmed ? <CheckIcon fontSize="small" color="success" /> : null)
+      }}
+    />
   );
 }

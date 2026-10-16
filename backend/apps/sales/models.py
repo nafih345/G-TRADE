@@ -226,6 +226,9 @@ class Payment(BaseUUIDModel):
     # POS Billing) — one receipt per pay mode, kept in step with the bill whenever it's edited.
     # Blank = recorded separately afterwards (Payments tab), which a bill edit never touches.
     source = models.CharField(max_length=20, blank=True, default='')
+    # BANK / UPI payments: which bank ledger (a BANK-subtype Chart of Accounts row) the money
+    # went to or came from. Blank = the generic Bank / UPI role mapping (see financial/banks.py).
+    bank_account = models.ForeignKey('financial.ChartOfAccount', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
 
     class Meta:
         ordering = ['-payment_date', '-created_at']
@@ -569,6 +572,9 @@ class WholesalePaymentCollection(BaseUUIDModel):
     payment_method = models.CharField(max_length=50)
     amount_paid = models.DecimalField(max_digits=12, decimal_places=2)
     reference_note = models.CharField(max_length=200, blank=True, null=True)
+    # BANK / UPI payments: which bank ledger (a BANK-subtype Chart of Accounts row) the money
+    # went to or came from. Blank = the generic Bank / UPI role mapping (see financial/banks.py).
+    bank_account = models.ForeignKey('financial.ChartOfAccount', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
 
     def __str__(self):
         return f"Coll {self.receipt_number} - ₹{self.amount_paid}"

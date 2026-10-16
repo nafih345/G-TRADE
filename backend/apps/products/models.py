@@ -135,6 +135,10 @@ class Product(BaseUUIDModel):
     name = models.CharField(max_length=255)
     sku = models.CharField(max_length=150, unique=True)
     barcode = models.CharField(max_length=150, unique=True, blank=True, null=True)
+    # Optional second scan-in code (e.g. the manufacturer's own EAN alongside our
+    # in-store code). Entered by hand, never printed as a label series; unique
+    # across barcode / secondary_barcode / ProductBarcode (barcode_utils.find_barcode_owner).
+    secondary_barcode = models.CharField(max_length=150, unique=True, blank=True, null=True)
     description = models.TextField(blank=True, null=True)
     
     category = models.ForeignKey('masters.ProductCategory', on_delete=models.SET_NULL, null=True, blank=True, related_name='products')
@@ -201,11 +205,46 @@ class BarcodeSequence(models.Model):
         return f"{self.prefix} -> {self.last_number}"
 
 
+class BarcodeSeriesConfig(models.Model):
+    """Singleton: how new product barcodes are generated (barcode_utils.reserve_product_barcodes).
+
+    code = resolved prefix pattern + zero-padded running number (+ optional GS1
+    mod-10 check digit), exactly `total_length` characters. `last_number` is the
+    shared counter, bumped atomically with UPDATE ... RETURNING. Use .load()."""
+    CHECK_DIGIT_CHOICES = [('MOD10', 'GS1 mod-10 (EAN / UPC style)'), ('NONE', 'No check digit')]
+
+    # Literal text plus optional date tokens {YY} {YYYY} {MM} {DD}.
+    prefix_pattern = models.CharField(max_length=40, default='20', blank=True)
+    total_length = models.PositiveSmallIntegerField(default=13)
+    check_digit = models.CharField(max_length=10, choices=CHECK_DIGIT_CHOICES, default='MOD10')
+    last_number = models.BigIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by_name = models.CharField(max_length=150, blank=True, default='')
+
+    SINGLETON_ID = 1
+
+    class Meta:
+        verbose_name = 'Barcode Series Configuration'
+
+    def __str__(self):
+        return f"{self.prefix_pattern} / {self.total_length} digits -> {self.last_number}"
+
+    @classmethod
+    def load(cls):
+        obj = cls.objects.filter(id=cls.SINGLETON_ID).first()
+        if obj is None:
+            # Continue the legacy EAN-13 counter (also done by migration 0013).
+            seq = BarcodeSequence.objects.filter(prefix='EAN13').first()
+            obj, _ = cls.objects.get_or_create(
+                id=cls.SINGLETON_ID, defaults={'last_number': seq.last_number if seq else 0})
+        return obj
+
+
 class ProductBarcode(models.Model):
     """Additional scan-in barcodes that all resolve to the same product.
 
     When N labels are printed for one product the printer assigns each label its
-    own code from a running EAN-13 series (see barcode_utils.reserve_ean13), so
+    own code from the configured series (see barcode_utils.reserve_product_barcodes), so
     no two physical tags carry an identical barcode. Every code in that series is
     stored here against the product, so scanning any of them at billing still
     finds the product. Label #1 always reuses ``Product.barcode`` itself.

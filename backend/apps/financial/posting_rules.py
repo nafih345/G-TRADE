@@ -15,6 +15,7 @@ from django.utils import timezone
 
 from .accounting_catalog import payment_role, is_credit_method
 from .services import money
+from .banks import bank_line_kwargs
 
 ZERO = Decimal('0.00')
 
@@ -126,17 +127,17 @@ def build_sales_payment(pay, previous=None):
         # Money against an order / quotation (or unattached) is an advance until invoiced.
         counter_role = 'CUSTOMER_ADVANCES'
         counter_memo = f"Advance{' on ' + inv.invoice_number if inv else ''}"
-    money_role = payment_role(pay.method)
+    money_side = bank_line_kwargs(payment_role(pay.method), pay.bank_account if pay.bank_account_id else None)
     who = pay.customer_name or (inv.customer_name if inv else '') or 'customer'
     is_receipt = amount > 0
     if is_receipt:
-        lines = [_line(money_role, debit=amount, memo=pay.method or 'Cash'),
+        lines = [_line(debit=amount, memo=pay.method or 'Cash', **money_side),
                  _line(counter_role, credit=amount, memo=counter_memo)]
         narration = f"Receipt {pay.receipt_no or ''} from {who}"
     else:  # refund
         amount = -amount
         lines = [_line(counter_role, debit=amount, memo=f"Refund — {counter_memo}"),
-                 _line(money_role, credit=amount, memo=pay.method or 'Cash')]
+                 _line(credit=amount, memo=pay.method or 'Cash', **money_side)]
         narration = f"Refund {pay.receipt_no or ''} to {who}"
     return {
         'date': _date(pay.payment_date), 'branch': pay.branch, 'voucher_type_code': 'RV' if is_receipt else 'PV',
@@ -183,7 +184,8 @@ def build_wholesale_collection(col, previous=None):
         'source_number': col.receipt_number, 'reference_type': 'WHOLESALE_COLLECTION',
         'narration': f"Wholesale collection {col.receipt_number} — {dealer}".strip(' —'),
         'lines': [
-            _line(payment_role(col.payment_method), debit=amount, memo=col.payment_method or ''),
+            _line(debit=amount, memo=col.payment_method or '',
+                  **bank_line_kwargs(payment_role(col.payment_method), col.bank_account if col.bank_account_id else None)),
             _line('WHOLESALE_RECEIVABLE', credit=amount,
                   memo=f"Settles {col.invoice_number}" if col.invoice_number else 'On account'),
         ],
@@ -266,6 +268,8 @@ def build_purchase_payment(pi, previous=None):
     total = money(pi.grand_total)
     if not purchase_invoice_is_live(pi) or total <= 0 or pi.payment_method == 'CREDIT':
         return None
+    if pi.payment_method == 'CASH' and getattr(pi, 'payment_status', '') == 'UNPAID':
+        return None  # cash still owed to the supplier � the payable stays open
     paid = money(pi.paid_amount)
     if pi.purchase_type == 'CASH' and paid <= 0:
         paid = total  # a cash purchase is settled at the counter by definition
@@ -278,7 +282,8 @@ def build_purchase_payment(pi, previous=None):
         'narration': f"Payment for Purchase Entry {pi.invoice_number} — {getattr(pi.supplier, 'name', '')}",
         'lines': [
             _line(debit=paid, memo='Supplier paid', **_payable(pi.supplier)),
-            _line(payment_role(pi.payment_method), credit=paid, memo=pi.payment_method or ''),
+            _line(credit=paid, memo=pi.payment_method or '',
+                  **bank_line_kwargs(payment_role(pi.payment_method), pi.bank_account if pi.bank_account_id else None)),
         ],
     }
 

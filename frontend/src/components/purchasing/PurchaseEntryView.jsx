@@ -24,6 +24,8 @@ import {
   QrCode2 as LabelIcon
 } from '@mui/icons-material';
 import QuickDatePickerField from '../common/QuickDatePickerField';
+import PaymentModeDetails from '../common/PaymentModeDetails';
+import { CASH_PAID, CASH_UNPAID, needsBank } from '../../utils/paymentModes';
 import ProductMasterDialog from '../inventory/ProductMasterDialog';
 import ProductVariantMaster from '../inventory/variants/ProductVariantMaster';
 import BarcodePrintDialog from '../inventory/BarcodePrintDialog';
@@ -52,7 +54,12 @@ const gstinStateCode = (gstin) => {
 const blankRow = (product, overrides = {}, defaultGstPercent = 0, defaultCessPercent = 0, defaultVatPercent = 0) => {
   const rate = parseFloat(overrides.purchaseRate ?? product.costPrice ?? product.price ?? 0) || 0;
   const gstPercent = parseFloat(overrides.gstPercent ?? product.taxRate) || defaultGstPercent;
-  const mrp = +(rate * 1.4).toFixed(2);
+  // Prefer the product's own MRP / selling price (e.g. just entered in Product Master);
+  // the 40% markup is only a fallback for products that have none on record.
+  const knownMrp = parseFloat(overrides.mrp ?? product.mrp) || 0;
+  const knownSelling = parseFloat(overrides.sellingPrice ?? product.sellingPrice ?? product.retailPrice) || 0;
+  const mrp = knownMrp > 0 ? knownMrp : (knownSelling > 0 ? knownSelling : +(rate * 1.4).toFixed(2));
+  const sellingPrice = knownSelling > 0 ? knownSelling : mrp;
   return {
     rowId: `row-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
     productId: product.id,
@@ -81,8 +88,8 @@ const blankRow = (product, overrides = {}, defaultGstPercent = 0, defaultCessPer
     igstPercent: 0,
     igstAmount: 0,
     mrp,
-    sellingPrice: mrp,
-    marginPercent: rate > 0 ? +(((mrp - rate) / rate) * 100).toFixed(2) : 0,
+    sellingPrice,
+    marginPercent: rate > 0 ? +(((sellingPrice - rate) / rate) * 100).toFixed(2) : 0,
     lineTotal: 0
   };
 };
@@ -239,6 +246,10 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
   const [otherCharges, setOtherCharges] = useState(0);
   const [paymentMethod, setPaymentMethod] = useState('CASH');
   const [paidAmount, setPaidAmount] = useState(0);
+  // BANK / UPI: the bank ledger the supplier was paid from. CASH: Paid now, or still owed.
+  const [bankAccount, setBankAccount] = useState('');
+  const [cashStatus, setCashStatus] = useState(CASH_PAID);
+  const cashUnpaid = paymentMethod === 'CASH' && cashStatus === CASH_UNPAID;
 
   const [saving, setSaving] = useState(false);
   const [itemsDialogOpen, setItemsDialogOpen] = useState(false);
@@ -290,6 +301,8 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
       barcode: p.barcode || '',
       costPrice: parseFloat(p.purchasePrice) || 0,
       price: parseFloat(p.sellingPrice) || 0,
+      mrp: parseFloat(p.mrp) || 0,
+      sellingPrice: parseFloat(p.sellingPrice) || 0,
       stock: parseInt(p.stock) || 0,
       taxRate: parseFloat(p.gst) || defaultGstPercent,
       hsnCode: p.hsnCode || ''
@@ -422,6 +435,8 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
       setOtherCharges(parseFloat(inv.other_charges) || 0);
       setPaymentMethod(inv.payment_method || 'CASH');
       setPaidAmount(parseFloat(inv.paid_amount) || 0);
+      setBankAccount(inv.bank_account || '');
+      setCashStatus(inv.payment_status === CASH_UNPAID ? CASH_UNPAID : CASH_PAID);
       const items = Array.isArray(inv.items) ? inv.items : [];
       if (items.length) setDefaultGstPercent(parseFloat(items[0].gst_percent) || 0);
       setRows(items.map(rowFromInvoiceItem));
@@ -463,13 +478,15 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
   }, [rows, otherCharges]);
 
   const balanceAmount = Math.max(0, +(totals.grandTotal - (parseFloat(paidAmount) || 0)).toFixed(2));
-  const dueAmount = purchaseType === 'CREDIT' ? balanceAmount : 0;
+  const dueAmount = (purchaseType === 'CREDIT' || cashUnpaid) ? balanceAmount : 0;
 
   useEffect(() => {
-    if (paymentMethod !== 'CREDIT' && purchaseType === 'CASH') {
+    if (cashUnpaid) {
+      setPaidAmount(0);
+    } else if (paymentMethod !== 'CREDIT' && purchaseType === 'CASH') {
       setPaidAmount(totals.grandTotal);
     }
-  }, [totals.grandTotal, paymentMethod, purchaseType]);
+  }, [totals.grandTotal, paymentMethod, purchaseType, cashUnpaid]);
 
   // --- Product search & add ---
   const filteredProducts = useMemo(() => {
@@ -626,6 +643,8 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
     setOtherCharges(0);
     setPaymentMethod('CASH');
     setPaidAmount(0);
+    setBankAccount('');
+    setCashStatus(CASH_PAID);
     setLinkedPO(null);
     cellRefs.current = {};
   };
@@ -730,8 +749,10 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
     round_off: totals.roundOff,
     grand_total: totals.grandTotal,
     payment_method: paymentMethod,
-    paid_amount: parseFloat(paidAmount) || 0,
+    paid_amount: cashUnpaid ? 0 : (parseFloat(paidAmount) || 0),
     balance_amount: balanceAmount,
+    bank_account: needsBank(paymentMethod) ? (bankAccount || null) : null,
+    payment_status: paymentMethod === 'CASH' ? cashStatus : '',
     is_interstate: isInterstate,
     company_gstin: companyGstin || null,
     supplier_gstin: supplierGstin || null,
@@ -1460,13 +1481,21 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
                 />
               ))}
             </Box>
+            <PaymentModeDetails
+              method={paymentMethod}
+              bankAccount={bankAccount} onBankAccountChange={setBankAccount}
+              cashStatus={cashStatus} onCashStatusChange={setCashStatus}
+              sx={{ mb: 1.5 }}
+            />
             <TextField fullWidth size="small" type="number" label="Paid Amount" inputRef={paidAmountRef}
-              value={paidAmount} onChange={(e) => setPaidAmount(e.target.value)} sx={{ mb: 1.5 }} />
+              value={cashUnpaid ? 0 : paidAmount} disabled={cashUnpaid}
+              helperText={cashUnpaid ? 'Cash not paid yet — the full amount stays owed to the supplier.' : undefined}
+              onChange={(e) => setPaidAmount(e.target.value)} sx={{ mb: 1.5 }} />
             <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
               <Typography variant="body2" color="text.secondary">Balance</Typography>
               <Typography variant="body2" fontWeight={700} color={balanceAmount > 0 ? 'error.main' : 'success.main'}>₹{balanceAmount.toFixed(2)}</Typography>
             </Box>
-            {(paymentMethod !== 'CASH' && dueAmount > 0) && (
+            {((paymentMethod !== 'CASH' || cashUnpaid) && dueAmount > 0) && (
               <>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
                   <Typography variant="body2" color="text.secondary">Due Amount</Typography>

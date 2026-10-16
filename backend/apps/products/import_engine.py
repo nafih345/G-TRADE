@@ -23,7 +23,7 @@ from openpyxl import load_workbook
 
 from .models import Product, ImportBatch, ImportErrorLog
 from .views import infer_category_name
-from .barcode_utils import reserve_barcodes
+from .barcode_utils import reserve_product_barcodes
 
 CHUNK_SIZE = 500
 # A running job saves (and so bumps updated_at) after every chunk, which takes
@@ -369,14 +369,17 @@ def _process_chunk(batch, chunk_rows, resolved, duplicate_strategy,
             ))
             imported += 1
 
-    # reserve_barcodes() calls below are nested inside this atomic block (joining
+    # reserve_product_barcodes() calls below are nested inside this atomic block (joining
     # it via a savepoint) specifically so that if the chunk write rolls back, any
     # reserved-but-unused barcode numbers roll back with it instead of being
     # permanently skipped.
     with transaction.atomic():
         needs_count = sum(1 for p in new_products if p.barcode == NEEDS_BARCODE)
+        # Barcodes this chunk is about to write aren't in the DB yet — keep minted codes off them.
+        chunk_codes = {p.barcode for p in new_products if p.barcode and p.barcode != NEEDS_BARCODE}
+        chunk_codes |= {b for _s, b, _p in update_skus if b and b != NEEDS_BARCODE}
         if needs_count:
-            codes = iter(reserve_barcodes(count=needs_count))
+            codes = iter(reserve_product_barcodes(count=needs_count, avoid=chunk_codes))
             for p in new_products:
                 if p.barcode == NEEDS_BARCODE:
                     p.barcode = next(codes)
@@ -407,7 +410,7 @@ def _process_chunk(batch, chunk_rows, resolved, duplicate_strategy,
                 to_update.append(p)
 
             if pending_generation:
-                gen_codes = iter(reserve_barcodes(count=len(pending_generation)))
+                gen_codes = iter(reserve_product_barcodes(count=len(pending_generation), avoid=chunk_codes))
                 for p in pending_generation:
                     p.barcode = next(gen_codes)
 
@@ -536,6 +539,10 @@ def run_import_job(batch_id):
             code: (pname, psku) for code, pname, psku in
             Product.objects.exclude(barcode__isnull=True).exclude(barcode='').values_list('barcode', 'name', 'sku')
         }
+        # A product's second barcode scans to it too, so an import can't hand it to another.
+        for code, pname, psku in (Product.objects.exclude(secondary_barcode__isnull=True)
+                                  .exclude(secondary_barcode='').values_list('secondary_barcode', 'name', 'sku')):
+            existing_barcodes.setdefault(code, (pname, psku))
         seen_barcodes_in_file = {}
 
         processed = skip_rows

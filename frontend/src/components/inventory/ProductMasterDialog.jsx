@@ -43,6 +43,7 @@ const blankProduct = (overrides = {}) => ({
   supplier: '', warehouse: 'Main', rack: '', stock: '',
   purchasePrice: '', mrp: '', salePrice: '', gst: '0%',
   barcode: '',
+  secondaryBarcode: '',
   ...overrides
 });
 
@@ -339,7 +340,8 @@ const productToForm = (ep) => {
   mrp: (ep.mrp ?? '') === '' ? '' : String(ep.mrp),
   salePrice: (ep.salePrice ?? ep.sellingPrice ?? '') === '' ? '' : String(ep.salePrice ?? ep.sellingPrice),
   gst: ep.gst || '0%',
-  barcode: ep.barcode || ''
+  barcode: ep.barcode || '',
+  secondaryBarcode: ep.secondaryBarcode || ep.secondary_barcode || ''
   });
 };
 
@@ -524,6 +526,7 @@ export default function ProductMasterDialog({
       name: p.name.trim(),
       sku: code,
       barcode: p.barcode || null,
+      secondary_barcode: (p.secondaryBarcode || '').trim() || null,
       category_name: p.category || '',
       brand_name: p.brand || '',
       supplier_name: p.supplier || '',
@@ -564,6 +567,7 @@ export default function ProductMasterDialog({
       code,
       modelNo: p.modelNo || '',
       barcode: savedBarcode,
+      secondaryBarcode: (p.secondaryBarcode || '').trim(),
       name: p.name.trim(),
       brand: p.brand || '',
       supplier: p.supplier || '',
@@ -818,24 +822,23 @@ export default function ProductMasterDialog({
               )}
             </Section>
 
-            {/* ── Barcode (13-digit EAN series) ──────────── */}
-            <Section title="Barcode — 13-digit EAN series" icon={<BarcodeIcon fontSize="small" />}>
-              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-                “Generate Barcode” issues the next code in a running 13-digit EAN-13 series (e.g. 2000000000015, 2000000000022 …).
-              </Typography>
+            {/* ── Barcode (configurable series — see Barcode settings) ── */}
+            <Section title="Barcode" icon={<BarcodeIcon fontSize="small" />}>
               <BarcodeSection
                 mode={isEdit ? 'manage' : 'create'}
                 productId={isEdit ? editProduct.id : undefined}
                 value={p.barcode}
                 onChange={(val) => set({ barcode: val })}
                 onSaved={(val) => set({ barcode: val || '' })}
+                secondaryValue={p.secondaryBarcode}
+                onSecondaryChange={(val) => set({ secondaryBarcode: val })}
+                onSecondarySaved={(val) => set({ secondaryBarcode: val || '' })}
                 productName={p.name}
                 productCode={p.code}
                 productPrice={saleNum || mrpNum || 0}
                 productColour={p.color}
                 productSize={p.size}
                 keyboardNav
-                generateUrl="/api/products/items/next_ean13_candidate/"
               />
             </Section>
 

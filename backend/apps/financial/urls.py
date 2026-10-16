@@ -2,6 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
 from . import views
+from .banks import bank_accounts_view, bank_master_detail_view, bank_master_list_view
 
 router = DefaultRouter()
 router.register(r'groups', views.AccountGroupViewSet, basename='account-group')
@@ -15,6 +16,9 @@ router.register(r'integration/periods', views.FiscalPeriodViewSet, basename='fis
 router.register(r'integration/audit-log', views.FinancialAuditLogViewSet, basename='financial-audit-log')
 
 urlpatterns = [
+    path('bank-accounts/', bank_accounts_view),
+    path('banks/', bank_master_list_view),
+    path('banks/<uuid:pk>/', bank_master_detail_view),
     path('reports/trial-balance/', views.trial_balance_view),
     path('reports/profit-loss/', views.profit_loss_view),
     path('reports/balance-sheet/', views.balance_sheet_view),

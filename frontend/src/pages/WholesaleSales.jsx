@@ -65,6 +65,9 @@ import ServiceMasterDialog from '../components/sales/ServiceMasterDialog';
 import ConfirmActionDialog from '../components/common/ConfirmActionDialog';
 import BillPreview from '../billing/BillPreview';
 import { printBill } from '../billing/printBill';
+import PaymentModeDetails from '../components/common/PaymentModeDetails';
+import useBankAccounts, { bankName as bankNameOf } from '../hooks/useBankAccounts';
+import { CASH_PAID, CASH_UNPAID, needsBank } from '../utils/paymentModes';
 import { downloadPdfInvoice } from '../utils/printInvoice';
 import { useAuth } from '../context/AuthContext';
 import {
@@ -234,6 +237,11 @@ export default function WholesaleSales() {
   const [creditDays, setCreditDays] = useState(30);
   const [refNo, setRefNo] = useState('');
   const [bankName, setBankName] = useState('');
+  // UPI / Bank Transfer: the bank ledger the money lands in. Cash: handed over now, or owed.
+  const [payBankAccount, setPayBankAccount] = useState('');
+  const [cashStatus, setCashStatus] = useState(CASH_PAID);
+  const cashUnpaid = payMode === 'Cash' && cashStatus === CASH_UNPAID;
+  const { banks } = useBankAccounts();
   const [splitPayments, setSplitPayments] = useState([{ mode: 'Cash', amount: '' }]);
 
   // Modals & Confirmation Dialogs
@@ -609,14 +617,14 @@ export default function WholesaleSales() {
       const balanceAmount = Math.max(0, splitTotal - summary.grandTotal);
       return { dueAmount, balanceAmount, paidNow: splitPaidAmount };
     }
-    const received = parseFloat(amountReceived) || (payMode === 'UPI' || payMode === 'Card' ? summary.grandTotal : 0);
+    const received = cashUnpaid ? 0 : (parseFloat(amountReceived) || (payMode === 'UPI' || payMode === 'Card' ? summary.grandTotal : 0));
     if (payMode === 'Credit Sale' || payMode === 'Bank Transfer') {
       return { dueAmount: summary.grandTotal, balanceAmount: 0, paidNow: 0 };
     }
     const dueAmount = Math.max(0, summary.grandTotal - received);
     const balanceAmount = Math.max(0, received - summary.grandTotal);
     return { dueAmount, balanceAmount, paidNow: received };
-  }, [payMode, amountReceived, summary.grandTotal, splitTotal, splitCreditAmount, splitPaidAmount]);
+  }, [payMode, amountReceived, summary.grandTotal, splitTotal, splitCreditAmount, splitPaidAmount, cashUnpaid]);
 
   const dueDate = useMemo(() => {
     if (paymentCalc.dueAmount <= 0.009) return '';
@@ -994,6 +1002,8 @@ export default function WholesaleSales() {
     setChargesList(ADDITIONAL_CHARGE_TYPES.map(name => ({ name, amount: '', taxable: false })));
     setRefNo('');
     setBankName('');
+    setPayBankAccount('');
+    setCashStatus(CASH_PAID);
     setInvoiceDiscount(null);
     setReferenceNo('');
     setPoNumber('');
@@ -1241,7 +1251,9 @@ export default function WholesaleSales() {
       payMode,
       splitPayments: payMode === 'Split Payment' ? splitPayments : undefined,
       refNo,
-      bankName,
+      bankName: needsBank(payMode) ? (bankNameOf(banks, payBankAccount) || bankName) : bankName,
+      bankAccount: needsBank(payMode) ? (payBankAccount || null) : null,
+      cashStatus: payMode === 'Cash' ? cashStatus : undefined,
       amountReceived: paid,
       dueAmount: paymentCalc.dueAmount,
       creditDays,
@@ -1406,14 +1418,23 @@ export default function WholesaleSales() {
     // collection below and the stock adjustments above into the ledger (apps/financial).
 
     // 4. Receipt for the amount collected at the counter (the invoice row itself was saved above).
+    // A split is one receipt per mode (each posted to its own Cash / Bank / UPI account; Credit
+    // rows are owed, not collected); any other mode is a single receipt.
     if (isUuid(dealer.id) && completedInvoice.amountReceived > 0) {
-      try {
-        await axios.post(`${WHOLESALE_API}/collections/`, {
-          receipt_number: `RCPT-${Math.floor(100000 + Math.random() * 900000)}`, dealer: dealer.id,
-          invoice_number: invoiceNo, payment_date: invoiceDate, payment_method: payMode,
-          amount_paid: completedInvoice.amountReceived, reference_note: refNo || '',
-        });
-      } catch (e) {}
+      const receipts = payMode === 'Split Payment'
+        ? (completedInvoice.splitPayments || [])
+            .filter(sp => sp.mode !== 'Credit' && (parseFloat(sp.amount) || 0) > 0)
+            .map(sp => ({ mode: sp.mode, amount: parseFloat(sp.amount), bank: needsBank(sp.mode) ? (sp.bankAccount || null) : null }))
+        : [{ mode: payMode, amount: completedInvoice.amountReceived, bank: completedInvoice.bankAccount || null }];
+      for (const r of receipts) {
+        try {
+          await axios.post(`${WHOLESALE_API}/collections/`, {
+            receipt_number: `RCPT-${Math.floor(100000 + Math.random() * 900000)}`, dealer: dealer.id,
+            invoice_number: invoiceNo, payment_date: invoiceDate, payment_method: r.mode,
+            amount_paid: r.amount, reference_note: refNo || '', bank_account: r.bank,
+          });
+        } catch (e) {}
+      }
     }
 
     // 5. Open Completion / Print
@@ -1565,7 +1586,7 @@ export default function WholesaleSales() {
 
   // Record Payment (dealer ledger) — posts a real WholesalePaymentCollection row and reduces
   // the dealer's outstanding balance both locally and on the backend.
-  async function handleRecordPayment({ amount, mode, refNo: recRef }) {
+  async function handleRecordPayment({ amount, mode, refNo: recRef, bankAccount }) {
     if (!selectedCustomer) return;
     const receiptNo = `RCPT-${Math.floor(100000 + Math.random() * 900000)}`;
     const date = new Date().toISOString().split('T')[0];
@@ -1575,7 +1596,7 @@ export default function WholesaleSales() {
       try {
         await axios.post(`${WHOLESALE_API}/collections/`, {
           receipt_number: receiptNo, dealer: selectedCustomer.id, payment_date: date,
-          payment_method: mode, amount_paid: amount, reference_note: recRef || '',
+          payment_method: mode, amount_paid: amount, reference_note: recRef || '', bank_account: bankAccount || null,
         });
       } catch (e) {}
     }
@@ -2477,25 +2498,28 @@ export default function WholesaleSales() {
                   <Stack direction="row" spacing={0.75} alignItems="flex-start">
                     <TextField
                       fullWidth size="small" id="ws-amount-paid" type="number" label="Amount Paid (Cash) ₹" InputLabelProps={{ shrink: true }}
-                      placeholder={String(summary.grandTotal)} value={amountReceived} onChange={(e) => setAmountReceived(e.target.value)}
+                      disabled={cashUnpaid}
+                      placeholder={String(summary.grandTotal)} value={cashUnpaid ? '' : amountReceived} onChange={(e) => setAmountReceived(e.target.value)}
                       error={amountReceived !== '' && !(parseFloat(amountReceived) >= 0)}
                       inputProps={{ min: 0, style: { fontWeight: 900, color: '#15803d' } }} sx={NO_SPIN_SX}
                     />
-                    <Button size="small" variant="outlined" onClick={() => setAmountReceived(String(summary.grandTotal))} sx={{ textTransform: 'none', fontWeight: 800, py: 0.85, whiteSpace: 'nowrap' }}>Full</Button>
+                    <Button size="small" variant="outlined" disabled={cashUnpaid} onClick={() => setAmountReceived(String(summary.grandTotal))} sx={{ textTransform: 'none', fontWeight: 800, py: 0.85, whiteSpace: 'nowrap' }}>Full</Button>
                   </Stack>
-                  <Typography variant="caption" color="text.secondary">Leave blank or part-pay to put the balance on the dealer's credit.</Typography>
+                  <PaymentModeDetails method="Cash" cashStatus={cashStatus} onCashStatusChange={setCashStatus} />
+                  <Typography variant="caption" color="text.secondary">{cashUnpaid ? "Cash not received — the full amount goes on the dealer's credit." : "Leave blank or part-pay to put the balance on the dealer's credit."}</Typography>
                 </Stack>
               )}
               {(payMode === 'UPI' || payMode === 'Card') && (
                 <Stack spacing={1}>
                   <TextField fullWidth size="small" label="Amount Paid ₹" InputLabelProps={{ shrink: true }} value={summary.grandTotal} InputProps={{ readOnly: true }} inputProps={{ tabIndex: -1 }} sx={{ bgcolor: '#f8fafc' }} />
                   <TextField fullWidth size="small" label="Reference / Txn ID" InputLabelProps={{ shrink: true }} placeholder={payMode === 'UPI' ? 'UPI ref' : 'Approval code'} value={refNo} onChange={(e) => setRefNo(e.target.value)} />
+                  {payMode === 'UPI' && <PaymentModeDetails method="UPI" bankAccount={payBankAccount} onBankAccountChange={(id) => setPayBankAccount(id || '')} />}
                 </Stack>
               )}
               {payMode === 'Bank Transfer' && (
                 <Stack spacing={1}>
                   <TextField fullWidth size="small" label="Reference / Cheque No" InputLabelProps={{ shrink: true }} placeholder="NEFT / RTGS ref" value={refNo} onChange={(e) => setRefNo(e.target.value)} />
-                  <TextField fullWidth size="small" label="Bank Name / Account" InputLabelProps={{ shrink: true }} placeholder="e.g. HDFC Bank" value={bankName} onChange={(e) => setBankName(e.target.value)} />
+                  <PaymentModeDetails method="Bank Transfer" bankAccount={payBankAccount} onBankAccountChange={(id) => setPayBankAccount(id || '')} />
                   <Typography variant="caption" color="text.secondary">Bank transfers stay due until the receipt is recorded against the dealer.</Typography>
                 </Stack>
               )}
@@ -2508,6 +2532,14 @@ export default function WholesaleSales() {
                       </TextField>
                       <TextField fullWidth size="small" type="number" placeholder="Amount" value={sp.amount} onChange={(e) => setSplitPayments(prev => prev.map((p, pi) => pi === i ? { ...p, amount: e.target.value } : p))} inputProps={{ 'aria-label': `Split ${i + 1} amount`, min: 0 }} sx={cellInputSx('100%')} />
                       <IconButton size="small" aria-label="Remove split row" disabled={splitPayments.length <= 1} onClick={() => setSplitPayments(prev => prev.filter((_, pi) => pi !== i))}><DeleteIcon sx={{ fontSize: 15 }} /></IconButton>
+                    </Stack>
+                  ))}
+                  {splitPayments.map((sp, i) => needsBank(sp.mode) && (
+                    <Stack direction="row" spacing={0.5} key={`bank-${i}`} alignItems="center">
+                      <Typography variant="caption" fontWeight={700} sx={{ width: 108, flexShrink: 0 }}>{sp.mode === 'UPI' ? 'UPI bank' : 'Bank'} (row {i + 1})</Typography>
+                      <PaymentModeDetails compact method={sp.mode} bankAccount={sp.bankAccount || ''}
+                        onBankAccountChange={(id) => setSplitPayments(prev => prev.map((p, pi) => pi === i ? { ...p, bankAccount: id || '' } : p))}
+                        sx={{ flex: 1 }} />
                     </Stack>
                   ))}
                   <Stack direction="row" justifyContent="space-between" alignItems="center">

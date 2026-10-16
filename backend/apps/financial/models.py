@@ -95,6 +95,32 @@ class ChartOfAccount(BaseUUIDModel):
         return 'DEBIT' if self.account_type in DEBIT_NORMAL_TYPES else 'CREDIT'
 
 
+class BankDetail(BaseUUIDModel):
+    """Bank master (Settings > Bank Master): the bank-specific details of one BANK-subtype
+    ledger. The ledger itself (code, name, balance) stays a ChartOfAccount row, so payments and
+    journals keep pointing at the account; this only adds what a bank needs on top."""
+    account = models.OneToOneField(ChartOfAccount, on_delete=models.CASCADE, related_name='bank_detail')
+    sl_no = models.PositiveIntegerField(default=0)
+    bank_name = models.CharField(max_length=150, blank=True, default='')
+    branch_name = models.CharField(max_length=150, blank=True, default='')
+    address = models.TextField(blank=True, default='')
+    iban_number = models.CharField(max_length=50, blank=True, default='')
+    vat_reg_number = models.CharField(max_length=30, blank=True, default='')
+    account_number = models.CharField(max_length=40, blank=True, default='')
+    account_holder = models.CharField(max_length=150, blank=True, default='')
+    ifsc_code = models.CharField(max_length=20, blank=True, default='')
+    country_code = models.CharField(max_length=5, blank=True, default='95')
+    country = models.CharField(max_length=60, blank=True, default='INDIA')
+    # "Default account for card transactions" is not stored here: it is the PAYMENT_CARD role's
+    # account mapping (financial/banks.py reads and sets it), so there is one source of truth.
+
+    class Meta:
+        ordering = ['sl_no', 'created_at']
+
+    def __str__(self):
+        return f"{self.sl_no}. {self.bank_name or self.account.name}"
+
+
 class VoucherType(BaseUUIDModel):
     name = models.CharField(max_length=100)
     code = models.CharField(max_length=20, unique=True)

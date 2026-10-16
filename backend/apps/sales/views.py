@@ -24,6 +24,7 @@ from .patient_utils import (
 from apps.inventory.models import StockLedger
 from apps.inventory.stock_utils import adjust_branch_stock
 from apps.common.branch_mixins import BranchScopedViewSetMixin
+from apps.financial.banks import validate_bank_account
 
 class SalesListPagination(PageNumberPagination):
     """The site-wide page (settings PAGE_SIZE = 20) unless a screen asks for more with ?page_size=
@@ -114,6 +115,8 @@ BILLING_PAY_MODES = (
     ('bank', 'Bank Transfer', 'BANK'),
 )
 BILLING_SOURCE = 'BILLING'
+# Split modes whose money lands in a bank the cashier picks (see financial/banks.py).
+BANK_PAY_MODES = ('upi', 'bank')
 _CENT = Decimal('0.01')
 
 
@@ -130,6 +133,14 @@ def _pay_mode_key(method):
     if 'card' in m:
         return 'card'
     return 'cash'
+
+
+def _is_uuid(value):
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (ValueError, TypeError, AttributeError):
+        return False
 
 
 def _void_receipt(payment):
@@ -280,6 +291,8 @@ class InvoiceSerializer(ModelSerializer):
     # What was taken per pay mode at billing ({cash, card, upi, bank}, from the bill's BILLING
     # receipts) — New Sale's edit mode restores its Cash / Card / UPI / Bank boxes from this.
     payment_splits = SerializerMethodField()
+    # Bank picked for the UPI / Bank Transfer boxes ({upi, bank}: ChartOfAccount id or None).
+    payment_banks = SerializerMethodField()
     # Derived from paid_amount (Total Paid) vs net_amount on every read, so the badge can't
     # disagree with the figures: PAID (paid covers net) / PARTIAL / UNPAID (nothing paid).
     payment_status = SerializerMethodField()
@@ -330,6 +343,15 @@ class InvoiceSerializer(ModelSerializer):
                 totals[_pay_mode_key(p.method)] += p.amount or 0
         return {key: str(val.quantize(_CENT)) for key, val in totals.items()}
 
+    def get_payment_banks(self, obj):
+        banks = {key: None for key in BANK_PAY_MODES}
+        for p in obj.payments.all():
+            key = _pay_mode_key(p.method)
+            if (p.source == BILLING_SOURCE and key in banks and p.bank_account_id
+                    and (p.status or '').upper() != 'CANCELLED'):
+                banks[key] = str(p.bank_account_id)
+        return banks
+
     def validate_customer(self, value):
         if value is not None and value.is_deleted and (
             self.instance is None or self.instance.customer_id != value.pk
@@ -375,9 +397,14 @@ class InvoiceSerializer(ModelSerializer):
         return self._names_of_kind(obj, 'LENS')
 
 class PaymentSerializer(ModelSerializer):
+    bank_account_name = serializers.CharField(source='bank_account.name', read_only=True, default=None)
+
     class Meta:
         model = Payment
         fields = '__all__'
+
+    def validate_bank_account(self, value):
+        return validate_bank_account(value)
 
 class ServiceSerializer(ModelSerializer):
     class Meta:
@@ -591,7 +618,7 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
         if self._commits_stock(invoice):
             self._update_inventory(invoice)
         if splits is not None:
-            self._sync_billing_receipts(invoice, splits)
+            self._sync_billing_receipts(invoice, splits, self._payment_banks())
 
     @transaction.atomic
     def perform_update(self, serializer):
@@ -626,7 +653,7 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
 
         invoice = serializer.save(**extra)
         if splits is not None:
-            self._sync_billing_receipts(invoice, splits)
+            self._sync_billing_receipts(invoice, splits, self._payment_banks())
         # Item list is optional on update (e.g. a status-only PATCH from the Orders tab won't
         # include it) — only replace items when the client actually sent a new list.
         if 'items' in self.request.data:
@@ -704,6 +731,27 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
             })
         return splits
 
+    def _payment_banks(self):
+        """{upi, bank}: the validated bank ledger picked for each split box (None = default)."""
+        from apps.financial.models import ChartOfAccount
+        raw = self.request.data.get('payment_banks') or {}
+        if not isinstance(raw, dict):
+            raise serializers.ValidationError({'payment_banks': 'Expected {upi, bank} bank account ids.'})
+        banks = {}
+        for key in BANK_PAY_MODES:
+            value = raw.get(key)
+            if not value:
+                banks[key] = None
+                continue
+            acc = ChartOfAccount.objects.filter(pk=value).first() if _is_uuid(value) else None
+            if acc is None:
+                raise serializers.ValidationError({'payment_banks': f'Unknown bank account for {key.upper()}.'})
+            try:
+                banks[key] = validate_bank_account(acc)
+            except serializers.ValidationError as exc:
+                raise serializers.ValidationError({'payment_banks': exc.detail})
+        return banks
+
     def _mint_invoice_number(self, doc_type):
         """A free PREFIX-YYYY-NNNN number (the shape New Sale shows), widening the random part if
         the year's 4-digit space is getting crowded. all_objects: a soft-deleted document still
@@ -735,7 +783,7 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
             receipt_no = f"RCP-{uuid.uuid4().hex[:10].upper()}"
         return receipt_no
 
-    def _sync_billing_receipts(self, invoice, splits):
+    def _sync_billing_receipts(self, invoice, splits, banks=None):
         """Keep one BILLING receipt per pay mode in step with the bill's split. Each receipt posts
         its own Dr Cash-or-Bank / Cr Receivable entry (signals.py), so cash and card/UPI/bank
         takings land in the right account. Receipts recorded later from the Payments tab (no
@@ -765,6 +813,7 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
                     payment_date=invoice.invoice_date, branch=invoice.branch,
                 )
             keep.amount = amount
+            keep.bank_account = (banks or {}).get(key)
             keep.status = 'Completed'
             keep.customer = customer
             keep.customer_name = customer_name
@@ -1068,9 +1117,14 @@ class WholesaleInvoiceSerializer(ModelSerializer):
         fields = '__all__'
 
 class WholesalePaymentCollectionSerializer(ModelSerializer):
+    bank_account_name = serializers.CharField(source='bank_account.name', read_only=True, default=None)
+
     class Meta:
         model = WholesalePaymentCollection
         fields = '__all__'
+
+    def validate_bank_account(self, value):
+        return validate_bank_account(value)
 
 class WholesaleReturnSerializer(ModelSerializer):
     class Meta:

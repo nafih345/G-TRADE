@@ -157,6 +157,13 @@ class PurchaseInvoice(BaseUUIDModel):
     payment_method = models.CharField(max_length=10, choices=PAYMENT_METHOD_CHOICES, default='CASH')
     paid_amount = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0.0'))
     balance_amount = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0.0'))
+    # BANK / UPI payments: which bank ledger (a BANK-subtype Chart of Accounts row) the money
+    # went to or came from. Blank = the generic Bank / UPI role mapping (see financial/banks.py).
+    bank_account = models.ForeignKey('financial.ChartOfAccount', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    # CASH payments: whether the cash was actually handed over ('PAID') or is still owed
+    # ('UNPAID'). Blank = saved before this existed (a CASH purchase then counts as paid).
+    PAYMENT_STATUS_CHOICES = [('PAID', 'Paid'), ('UNPAID', 'Unpaid')]
+    payment_status = models.CharField(max_length=10, choices=PAYMENT_STATUS_CHOICES, blank=True, default='')
 
     attachment = models.FileField(upload_to='purchase_attachments/', blank=True, null=True)
 

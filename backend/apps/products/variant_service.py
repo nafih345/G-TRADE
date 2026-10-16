@@ -15,7 +15,7 @@ from decimal import Decimal, InvalidOperation
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 
-from .barcode_utils import reserve_ean13
+from .barcode_utils import reserve_product_barcodes
 from .models import (
     BarcodeHistory, BulkSaveReceipt, Product, ProductBarcode, ProductVariantGroup,
 )
@@ -314,6 +314,8 @@ def _validate(payload):
         clash = {}
         for pid, code, name in Product.all_objects.filter(barcode__in=codes).values_list('id', 'barcode', 'name'):
             clash[code] = (str(pid), name)
+        for pid, code, name in Product.all_objects.filter(secondary_barcode__in=codes).values_list('id', 'secondary_barcode', 'name'):
+            clash.setdefault(code, (str(pid), name))
         for pid, code, name in ProductBarcode.objects.filter(code__in=codes).values_list('product_id', 'code', 'product__name'):
             clash.setdefault(code, (str(pid), name))
         for r in rows:
@@ -561,14 +563,8 @@ def _unique_base_sku(base, own_pk):
 
 
 def _free_ean13(count):
-    """Next `count` EAN-13 codes from the shared series that nobody holds yet."""
-    out = []
-    while len(out) < count:
-        batch = reserve_ean13(count=count - len(out))
-        used = set(Product.all_objects.filter(barcode__in=batch).values_list('barcode', flat=True))
-        used |= set(ProductBarcode.objects.filter(code__in=batch).values_list('code', flat=True))
-        out += [c for c in batch if c not in used]
-    return out
+    """Next `count` codes from the shared product series that nobody holds yet."""
+    return reserve_product_barcodes(count=count)
 
 
 def _jsonable(obj):
