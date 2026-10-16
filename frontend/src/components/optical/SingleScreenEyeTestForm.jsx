@@ -314,6 +314,7 @@ export default function SingleScreenEyeTestForm({
                       value={patientData.name || ''}
                       onChange={(e) => setPatientData(prev => ({ ...prev, name: e.target.value }))}
                       placeholder="Enter Patient Name"
+                      inputProps={{ 'data-et-field': 'patientName' }}
                       sx={{ '& input': { fontWeight: 800, color: '#1e3a8a' } }}
                     />
                     {/* Out of the Tab order so Tab goes Patient Name → Address; Alt+F opens the same search. */}
@@ -381,7 +382,7 @@ export default function SingleScreenEyeTestForm({
                     label="Mobile No"
                     value={patientData.phone || ''}
                     onChange={(e) => setPatientData(prev => ({ ...prev, phone: e.target.value }))}
-                    inputProps={{ id: 'eyetest-mobile-input' }}
+                    inputProps={{ id: 'eyetest-mobile-input', 'data-et-field': 'mobile' }}
                     sx={{ '& input': { fontWeight: 700 } }}
                   />
                 </Box>
@@ -422,7 +423,7 @@ export default function SingleScreenEyeTestForm({
                     onChange={(e) => setPatientData(prev => ({ ...prev, idNumber: e.target.value }))}
                   />
                 </Box>
-                <Box sx={{ gridColumn: { md: '5 / 6' } }}>
+                <Box sx={{ gridColumn: { md: '5 / 6' } }} data-et-field="medicalAid">
                   {/* Medical Aid — pick a common scheme or type a custom one. Moved up from the
                       diagnosis section so the scheme is captured alongside the other patient
                       details; still bound to patientData.medicalAidName. */}
@@ -468,7 +469,7 @@ export default function SingleScreenEyeTestForm({
                   then Save, directly under Medical Aid Member Number's column. Save is the last
                   Tab/Enter stop of this section (see handleKeyDownEnter in OpticalServices). */}
               <Box sx={{ display: 'grid', gridTemplateColumns: colTemplate, gap: 1.5, alignItems: 'center', mt: 1.5 }}>
-                <Box sx={{ gridColumn: { md: '1 / 3' } }}>
+                <Box sx={{ gridColumn: { md: '1 / 3' } }} data-et-field="testDate">
                   <QuickDatePickerField
                     label="Date"
                     value={autoDate}
@@ -497,7 +498,7 @@ export default function SingleScreenEyeTestForm({
                     <MenuItem value="ROUTINE REFRACTION">ROUTINE REFRACTION</MenuItem>
                   </TextField>
                 </Box>
-                <Box sx={{ gridColumn: { md: '4 / 6' } }}>
+                <Box sx={{ gridColumn: { md: '4 / 6' } }} data-et-field="optometrist">
                   <TextField
                     fullWidth
                     select
@@ -551,6 +552,7 @@ export default function SingleScreenEyeTestForm({
                 <Grid item xs={8}>
                   <TextField
                     fullWidth size="small" placeholder="VA"
+                    inputProps={{ 'data-et-field': 'ucva' }}
                     value={visualAcuity?.distance?.odWo || ''}
                     onChange={(e) => handleVisualAcuity('distance', 'odWo', e.target.value)}
                   />
@@ -582,6 +584,7 @@ export default function SingleScreenEyeTestForm({
                 <Grid item xs={8}>
                   <TextField
                     fullWidth size="small" placeholder="Pinhole"
+                    inputProps={{ 'data-et-field': 'phva' }}
                     value={visualAcuity?.distance?.odPinhole || ''}
                     onChange={(e) => handleVisualAcuity('distance', 'odPinhole', e.target.value)}
                   />
@@ -614,7 +617,7 @@ export default function SingleScreenEyeTestForm({
 
                 {/* OD */}
                 <Grid item xs={3} sx={{ display: 'flex', alignItems: 'center' }}><Typography variant="caption" fontWeight={800} color="primary.main">OD</Typography></Grid>
-                <Grid item xs={3}><TextField fullWidth size="small" value={objectiveRefraction?.autoRefraction?.od?.sph || ''} onChange={(e) => handleObjectiveAutoRef('od', 'sph', e.target.value)} /></Grid>
+                <Grid item xs={3}><TextField fullWidth size="small" inputProps={{ 'data-et-field': 'ar' }} value={objectiveRefraction?.autoRefraction?.od?.sph || ''} onChange={(e) => handleObjectiveAutoRef('od', 'sph', e.target.value)} /></Grid>
                 <Grid item xs={3}><TextField fullWidth size="small" value={objectiveRefraction?.autoRefraction?.od?.cyl || ''} onChange={(e) => handleObjectiveAutoRef('od', 'cyl', e.target.value)} /></Grid>
                 <Grid item xs={3}><TextField fullWidth size="small" value={objectiveRefraction?.autoRefraction?.od?.axis || ''} onChange={(e) => handleObjectiveAutoRef('od', 'axis', e.target.value)} /></Grid>
 
@@ -641,7 +644,7 @@ export default function SingleScreenEyeTestForm({
 
                 {/* OD */}
                 <Grid item xs={3} sx={{ display: 'flex', alignItems: 'center' }}><Typography variant="caption" fontWeight={800} color="primary.main">OD</Typography></Grid>
-                <Grid item xs={3}><TextField fullWidth size="small" value={objectiveRefraction?.retinoscopy?.od?.sph || ''} onChange={(e) => handleRetinoscopy('od', 'sph', e.target.value)} /></Grid>
+                <Grid item xs={3}><TextField fullWidth size="small" inputProps={{ 'data-et-field': 'streak' }} value={objectiveRefraction?.retinoscopy?.od?.sph || ''} onChange={(e) => handleRetinoscopy('od', 'sph', e.target.value)} /></Grid>
                 <Grid item xs={3}><TextField fullWidth size="small" value={objectiveRefraction?.retinoscopy?.od?.cyl || ''} onChange={(e) => handleRetinoscopy('od', 'cyl', e.target.value)} /></Grid>
                 <Grid item xs={3}><TextField fullWidth size="small" value={objectiveRefraction?.retinoscopy?.od?.axis || ''} onChange={(e) => handleRetinoscopy('od', 'axis', e.target.value)} /></Grid>
 
@@ -664,6 +667,7 @@ export default function SingleScreenEyeTestForm({
                 <Grid item xs={6}>
                   <TextField 
                     fullWidth size="small" label="IOP OD" placeholder="mmHg" 
+                    inputProps={{ 'data-et-field': 'iop' }}
                     value={eyeHealth?.iop?.od || ''} 
                     onChange={(e) => setEyeHealth(prev => ({ ...prev, iop: { ...(prev.iop || {}), od: e.target.value } }))} 
                   />
@@ -755,7 +759,7 @@ export default function SingleScreenEyeTestForm({
                       DV
                     </TableCell>
                     {/* OD DV */}
-                    <TableCell sx={{ p: 0.2 }}><TextField fullWidth size="small" value={medicalHistory?.pgpOdSph || ''} onChange={(e) => setMedicalHistory(prev => ({ ...prev, pgpOdSph: e.target.value }))} inputProps={{ style: { textAlign: 'center', fontWeight: 700, fontSize: '0.78rem', padding: '3px 2px' } }} /></TableCell>
+                    <TableCell sx={{ p: 0.2 }}><TextField fullWidth size="small" value={medicalHistory?.pgpOdSph || ''} onChange={(e) => setMedicalHistory(prev => ({ ...prev, pgpOdSph: e.target.value }))} inputProps={{ 'data-et-field': 'pgp', style: { textAlign: 'center', fontWeight: 700, fontSize: '0.78rem', padding: '3px 2px' } }} /></TableCell>
                     <TableCell sx={{ p: 0.2 }}><TextField fullWidth size="small" value={medicalHistory?.pgpOdCyl || ''} onChange={(e) => setMedicalHistory(prev => ({ ...prev, pgpOdCyl: e.target.value }))} inputProps={{ style: { textAlign: 'center', fontWeight: 700, fontSize: '0.78rem', padding: '3px 2px' } }} /></TableCell>
                     <TableCell sx={{ p: 0.2 }}><TextField fullWidth size="small" value={medicalHistory?.pgpOdAxis || ''} onChange={(e) => setMedicalHistory(prev => ({ ...prev, pgpOdAxis: e.target.value }))} inputProps={{ style: { textAlign: 'center', fontWeight: 700, fontSize: '0.78rem', padding: '3px 2px' } }} /></TableCell>
                     <TableCell sx={{ p: 0.2, borderRight: '1px solid #cbd5e1' }}><TextField fullWidth size="small" value={medicalHistory?.pgpOdVa || ''} onChange={(e) => setMedicalHistory(prev => ({ ...prev, pgpOdVa: e.target.value }))} inputProps={{ style: { textAlign: 'center', fontWeight: 700, fontSize: '0.78rem', padding: '3px 2px' } }} /></TableCell>
@@ -867,7 +871,7 @@ export default function SingleScreenEyeTestForm({
                       DV
                     </TableCell>
                     {/* OD DV */}
-                    <TableCell sx={{ p: 0.2 }}><TextField fullWidth size="small" value={subjectiveRefraction?.od?.sph || ''} onChange={(e) => handleSubjectiveEye('od', 'sph', e.target.value)} placeholder="0.00" inputProps={{ style: { textAlign: 'center', fontWeight: 800, color: '#2563eb', fontSize: '0.78rem', padding: '3px 2px' } }} /></TableCell>
+                    <TableCell sx={{ p: 0.2 }}><TextField fullWidth size="small" value={subjectiveRefraction?.od?.sph || ''} onChange={(e) => handleSubjectiveEye('od', 'sph', e.target.value)} placeholder="0.00" inputProps={{ 'data-et-field': 'accp', style: { textAlign: 'center', fontWeight: 800, color: '#2563eb', fontSize: '0.78rem', padding: '3px 2px' } }} /></TableCell>
                     <TableCell sx={{ p: 0.2 }}><TextField fullWidth size="small" value={subjectiveRefraction?.od?.cyl || ''} onChange={(e) => handleSubjectiveEye('od', 'cyl', e.target.value)} placeholder="0.00" inputProps={{ style: { textAlign: 'center', fontWeight: 800, fontSize: '0.78rem', padding: '3px 2px' } }} /></TableCell>
                     <TableCell sx={{ p: 0.2 }}><TextField fullWidth size="small" value={subjectiveRefraction?.od?.axis || ''} onChange={(e) => handleSubjectiveEye('od', 'axis', e.target.value)} placeholder="0" inputProps={{ style: { textAlign: 'center', fontWeight: 800, fontSize: '0.78rem', padding: '3px 2px' } }} /></TableCell>
                     <TableCell sx={{ p: 0.2, borderRight: '1px solid #bfdbfe' }}><TextField fullWidth size="small" value={subjectiveRefraction?.od?.va || ''} onChange={(e) => handleSubjectiveEye('od', 'va', e.target.value)} placeholder="6/6" inputProps={{ style: { textAlign: 'center', fontWeight: 800, fontSize: '0.78rem', padding: '3px 2px' } }} /></TableCell>
@@ -948,6 +952,7 @@ export default function SingleScreenEyeTestForm({
           <Grid item xs={12} sm={4}>
             <TextField
               fullWidth multiline rows={2} size="small" label="C/O (Chief Complaints)"
+              inputProps={{ 'data-et-field': 'observations' }}
               value={medicalHistory?.medicalHistory || ''}
               onChange={(e) => setMedicalHistory(prev => ({ ...prev, medicalHistory: e.target.value }))}
             />
@@ -962,6 +967,7 @@ export default function SingleScreenEyeTestForm({
           <Grid item xs={12} sm={4}>
             <TextField
               fullWidth multiline rows={2} size="small" label="Doctor / Primary Diagnosis"
+              inputProps={{ 'data-et-field': 'diagnosis' }}
               value={diagnosis?.primary || ''}
               onChange={(e) => setDiagnosis(prev => ({ ...prev, primary: e.target.value }))}
             />
@@ -988,7 +994,7 @@ export default function SingleScreenEyeTestForm({
               onChange={(e) => setDiagnosis(prev => ({ ...prev, remarks: e.target.value }))}
             />
           </Grid>
-          <Grid item xs={12} sm={4}>
+          <Grid item xs={12} sm={4} data-et-field="nextVisit">
             <QuickDatePickerField
               label="Next Visit"
               value={diagnosis.nextReviewDate || nextVisitDate || ''}
@@ -1030,6 +1036,7 @@ export default function SingleScreenEyeTestForm({
               value={diagnosis?.procedureCharge || '0'}
               onChange={(e) => setDiagnosis(prev => ({ ...prev, procedureCharge: e.target.value }))}
               InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
+              inputProps={{ 'data-et-field': 'charges' }}
             />
           </Grid>
 
@@ -1077,13 +1084,13 @@ export default function SingleScreenEyeTestForm({
 
         {/* Row 2: action buttons on their own line, right-aligned, wrapping cleanly on small screens. */}
         <Box sx={{ display: 'flex', gap: 1, justifyContent: { xs: 'stretch', sm: 'flex-end' }, flexWrap: 'wrap', mt: 2 }}>
-          <Button variant="outlined" color="primary" disabled={isLocked} startIcon={<MedicalIcon />} onClick={() => setOrthopticsOpen(true)} sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 2 }}>
+          <Button variant="outlined" color="primary" disabled={isLocked} startIcon={<MedicalIcon />} data-et-action="orthoptics" onClick={() => setOrthopticsOpen(true)} sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 2 }}>
             Orthoptics Form
           </Button>
-          <Button variant="outlined" color="secondary" startIcon={<PrintIcon />} onClick={() => setPrintModalOpen(true)} sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 2 }}>
+          <Button variant="outlined" color="secondary" startIcon={<PrintIcon />} data-et-action="rxPrint" onClick={() => setPrintModalOpen(true)} sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 2 }}>
             Rx Print
           </Button>
-          <Button variant="contained" color="success" disabled={isLocked} startIcon={<SaveIcon />} onClick={onSaveDraft} sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 2, px: 3 }}>
+          <Button variant="contained" color="success" disabled={isLocked} startIcon={<SaveIcon />} data-et-action="saveRecord" onClick={onSaveDraft} sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 2, px: 3 }}>
             Save Clinical Record
           </Button>
           <Button variant="outlined" color="inherit" startIcon={<ClearIcon />} onClick={onClearAll} sx={{ textTransform: 'none', fontWeight: 600, borderRadius: 2 }}>
@@ -1102,6 +1109,7 @@ export default function SingleScreenEyeTestForm({
           <Stack direction="row" spacing={1} alignItems="center">
             <TextField
               size="small" placeholder="Search Test No, Patient ID, Name, Gender, Optometrist..."
+              inputProps={{ 'data-et-field': 'directory' }}
               value={historySearch}
               onChange={(e) => setHistorySearch(e.target.value)}
               sx={{ width: 300 }}

@@ -29,6 +29,8 @@ import {
 // to Eye Test paid for code nobody was using yet. Lazy-load everything but the default form.
 import { stepsList } from '../components/optical/ExaminationStepper';
 import SingleScreenEyeTestForm from '../components/optical/SingleScreenEyeTestForm';
+import { EYE_TEST_SHORTCUTS, EYE_TEST_LENS_OPTIONS, useEyeTestShortcuts, focusEyeTestField } from '../components/optical/eyeTestShortcuts';
+import { ShortcutHelpDialog } from './wholesale/WholesaleDialogs';
 const ExaminationStepper = lazy(() => import('../components/optical/ExaminationStepper'));
 const ExaminationSummarySidebar = lazy(() => import('../components/optical/ExaminationSummarySidebar'));
 const PatientSearchModal = lazy(() => import('../components/optical/PatientSearchModal'));
@@ -822,25 +824,72 @@ export default function OpticalServices() {
     }
   };
 
-  // Handle Keyboard Shortcuts (Alt+N: Next, Alt+P: Prev, Alt+S: Save, Alt+F: Search Patient)
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if (e.altKey && e.key.toLowerCase() === 'n') {
-        e.preventDefault();
-        if (activeStep < stepsList.length - 1) setActiveStep(prev => prev + 1);
-      }
-      if (e.altKey && e.key.toLowerCase() === 'p') {
-        e.preventDefault();
-        if (activeStep > 0) setActiveStep(prev => prev - 1);
-      }
-      if (e.altKey && e.key.toLowerCase() === 'f') {
-        e.preventDefault();
-        setSearchModalOpen(true);
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeStep]);
+  // Keyboard shortcuts (map + help text: components/optical/eyeTestShortcuts.js). Section keys
+  // jump to a section's first field on the single-screen form; Alt+N / Alt+P step the wizard.
+  // Buttons owned by the form (Orthoptics, Rx Print, Save Clinical Record) are clicked through
+  // their data-et-action hook so a disabled (locked) button stays inert.
+  const shortcutRootRef = useRef(null);
+  const clickEyeTestAction = (action) => {
+    const btn = document.querySelector(`[data-et-action="${action}"]`);
+    if (!btn || btn.disabled) return false;
+    btn.click();
+    return true;
+  };
+  const eyeTestShortcuts = {
+    patientName: () => focusEyeTestField('patientName'),
+    newPatient: () => { handleResetAll(); setTimeout(() => focusEyeTestField('patientName'), 30); },
+    searchPatient: () => setSearchModalOpen(true),
+    mobile: () => focusEyeTestField('mobile'),
+    medicalAid: () => focusEyeTestField('medicalAid'),
+    testDate: () => focusEyeTestField('testDate'),
+    optometrist: () => focusEyeTestField('optometrist'),
+    savePatient: () => { if (!isRecordLocked) handleSavePatient(); },
+    ucva: () => focusEyeTestField('ucva'),
+    phva: () => focusEyeTestField('phva'),
+    ar: () => focusEyeTestField('ar'),
+    streak: () => focusEyeTestField('streak'),
+    iop: () => focusEyeTestField('iop'),
+    lens: (e) => {
+      const lens = EYE_TEST_LENS_OPTIONS[Number(e.key) - 1];
+      if (!lens || isRecordLocked) return false;
+      setPrescription(prev => {
+        const current = prev.selectedLenses || [];
+        return { ...prev, selectedLenses: current.includes(lens) ? current.filter(l => l !== lens) : [...current, lens] };
+      });
+      return true;
+    },
+    pgp: () => focusEyeTestField('pgp'),
+    accp: () => focusEyeTestField('accp'),
+    observations: () => focusEyeTestField('observations'),
+    diagnosis: () => focusEyeTestField('diagnosis'),
+    nextVisit: () => focusEyeTestField('nextVisit'),
+    charges: () => focusEyeTestField('charges'),
+    orthoptics: () => clickEyeTestAction('orthoptics'),
+    rxPrint: () => clickEyeTestAction('rxPrint'),
+    saveRecord: () => clickEyeTestAction('saveRecord'),
+    directory: () => focusEyeTestField('directory'),
+  };
+  const singleFormActive = viewMode === 'form' && layoutMode === 'single';
+  useEyeTestShortcuts(shortcutRootRef, {
+    ...Object.fromEntries(Object.entries(eyeTestShortcuts).map(([id, run]) => [
+      id,
+      // Search works from any view; the rest need the single-screen form on screen.
+      (e) => (singleFormActive || id === 'searchPatient' ? run(e) : false),
+    ])),
+    historyQueue: () => setViewMode(prev => (prev === 'list' ? 'form' : 'list')),
+    layout: () => setLayoutMode(prev => (prev === 'single' ? 'wizard' : 'single')),
+    stepNext: () => {
+      if (layoutMode !== 'wizard' || viewMode !== 'form') return false;
+      setActiveStep(prev => Math.min(prev + 1, stepsList.length - 1));
+      return true;
+    },
+    stepPrev: () => {
+      if (layoutMode !== 'wizard' || viewMode !== 'form') return false;
+      setActiveStep(prev => Math.max(prev - 1, 0));
+      return true;
+    },
+    help: () => setShortcutsOpen(true),
+  });
 
   // Selecting an existing patient restores their permanent Patient ID (+ the real backend
   // customerId link) and contact/demographic details, but always starts a NEW visit: a fresh
@@ -1556,7 +1605,7 @@ export default function OpticalServices() {
   };
 
   return (
-    <Box sx={{ p: 4, pb: 8 }}>
+    <Box ref={shortcutRootRef} sx={{ p: 4, pb: 8 }}>
       {/* Module Header */}
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3, flexWrap: 'wrap', gap: 2 }}>
         <Box>
@@ -1595,7 +1644,7 @@ export default function OpticalServices() {
             onClick={() => setShortcutsOpen(true)}
             sx={{ borderRadius: 2, textTransform: 'none' }}
           >
-            Shortcuts
+            Shortcuts (Ctrl+/)
           </Button>
 
           <Button 
@@ -1924,28 +1973,10 @@ export default function OpticalServices() {
       </Suspense>
 
       {/* Keyboard Shortcuts Dialog */}
-      <Dialog open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} PaperProps={{ sx: { borderRadius: 3 } }}>
-        <DialogTitle sx={{ fontWeight: 800 }}>Clinical Keyboard Shortcuts</DialogTitle>
-        <DialogContent>
-          <Stack spacing={1.5} sx={{ mt: 1 }}>
-            <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
-              <Typography variant="body2">Next Examination Step</Typography>
-              <Chip label="Alt + N" size="small" color="primary" />
-            </Box>
-            <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
-              <Typography variant="body2">Previous Step</Typography>
-              <Chip label="Alt + P" size="small" color="primary" />
-            </Box>
-            <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
-              <Typography variant="body2">Smart Patient Search</Typography>
-              <Chip label="Alt + F" size="small" color="primary" />
-            </Box>
-          </Stack>
-        </DialogContent>
-        <DialogActions sx={{ p: 2 }}>
-          <Button onClick={() => setShortcutsOpen(false)} variant="contained">Close</Button>
-        </DialogActions>
-      </Dialog>
+      <ShortcutHelpDialog
+        open={shortcutsOpen} onClose={() => setShortcutsOpen(false)}
+        shortcuts={EYE_TEST_SHORTCUTS} title="Eye Test"
+      />
     </Box>
   );
 }
