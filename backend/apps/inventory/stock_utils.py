@@ -75,6 +75,84 @@ def adjust_branch_stock(product, branch, delta, *, ledger=None):
     return row
 
 
+@transaction.atomic
+def adjust_branch_stock_many(deltas, branch, *, ledger=None):
+    """Batched adjust_branch_stock for one document touching many products.
+
+    deltas: {Product instance: delta}. Same rules as adjust_branch_stock — revive soft-deleted
+    rows, reconcile a product's only row to Product.stock first, keep Product.stock as the
+    sum, one StockLedger row per product — but in a fixed handful of queries instead of ~10
+    per product. That difference is what made a many-line Purchase Entry take seconds on the
+    hosted database, where every query is a network round trip.
+    """
+    from django.utils import timezone
+    from apps.company.models import BranchStock, Warehouse
+    from apps.inventory.models import StockLedger
+
+    deltas = {p: int(d) for p, d in deltas.items() if p is not None}
+    if not deltas:
+        return
+    if branch is None:
+        branch = _default_branch()
+    if branch is None:
+        for product, delta in deltas.items():
+            adjust_branch_stock(product, None, delta, ledger=dict(ledger) if ledger else None)
+        return
+
+    products = {p.pk: p for p in deltas}
+    now = timezone.now()
+    # ignore_conflicts: create only the missing rows, and survive a concurrent writer creating
+    # the same (product, branch) — the get_or_create race adjust_branch_stock handles.
+    BranchStock.all_objects.bulk_create(
+        [BranchStock(product_id=pk, branch=branch, quantity=0) for pk in products],
+        ignore_conflicts=True,
+    )
+    rows = list(BranchStock.all_objects.select_for_update()
+                .filter(branch=branch, product_id__in=products))
+    with_other_rows = set(BranchStock.objects.filter(product_id__in=products)
+                          .exclude(pk__in=[r.pk for r in rows])
+                          .values_list('product_id', flat=True))
+    for row in rows:
+        product = products[row.product_id]
+        row.is_deleted = False
+        if row.product_id not in with_other_rows and (row.quantity or 0) != int(product.stock or 0):
+            row.quantity = int(product.stock or 0)
+        row.quantity = (row.quantity or 0) + deltas[product]
+        row.updated_at = now
+    BranchStock.all_objects.bulk_update(rows, ['quantity', 'is_deleted', 'updated_at'])
+
+    totals = dict(BranchStock.objects.filter(product_id__in=products)
+                  .values_list('product_id').annotate(t=Sum('quantity')))
+    changed = []
+    for pk, product in products.items():
+        total = totals.get(pk) or 0
+        if product.stock != total:
+            product.stock = total
+            product.updated_at = now
+            changed.append(product)
+    if changed:
+        type(changed[0]).objects.bulk_update(changed, ['stock', 'updated_at'])
+
+    if ledger is None:
+        return
+    ledger = dict(ledger)
+    warehouse = ledger.pop('warehouse', None) or Warehouse.objects.filter(branch=branch).first() \
+        or Warehouse.objects.first()
+    if warehouse is None:
+        return
+    ref = ledger.get('reference_id')
+    already = set(StockLedger.objects.filter(reference_id=ref, branch=branch, product_id__in=products)
+                  .values_list('product_id', flat=True)) if ref else set()
+    StockLedger.objects.bulk_create([
+        StockLedger(
+            product=product, warehouse=warehouse, branch=branch, quantity=delta,
+            transaction_type=ledger.get('transaction_type', 'ADJ_ADD' if delta >= 0 else 'ADJ_SUB'),
+            reference_id=ref, notes=ledger.get('notes', ''),
+        )
+        for product, delta in deltas.items() if product.pk not in already
+    ])
+
+
 def _apply_scalar_stock(product, delta):
     product.stock = (product.stock or 0) + delta
     product.save(update_fields=['stock', 'updated_at'])

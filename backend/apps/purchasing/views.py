@@ -4,10 +4,13 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.serializers import ModelSerializer
 from django.db import transaction, IntegrityError
+from django.db.models import Prefetch
+from django.utils import timezone
 from .models import Supplier, PurchaseOrder, PurchaseOrderItem, PurchaseInvoice, PurchaseInvoiceItem
 from .supplier_utils import reserve_supplier_codes, get_or_create_supplier_ledger_account
 from apps.inventory.models import StockLedger
-from apps.inventory.stock_utils import adjust_branch_stock
+from apps.inventory.stock_utils import adjust_branch_stock, adjust_branch_stock_many
+from apps.products.models import Product
 from apps.common.branch_mixins import BranchScopedViewSetMixin
 from apps.financial.banks import validate_bank_account
 
@@ -147,11 +150,21 @@ class PurchaseOrderViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
 # PURCHASE ENTRY (single-page ERP POS-style screen)
 # ==========================================
 
+class _PrefetchedProductField(serializers.PrimaryKeyRelatedField):
+    """Product PK that resolves from the products PurchaseInvoiceSerializer fetched in one
+    query, instead of one lookup per line. Unknown ids fall through to normal validation."""
+
+    def to_internal_value(self, data):
+        product = self.context.get('_purchase_products', {}).get(str(data))
+        return product if product is not None else super().to_internal_value(data)
+
+
 class PurchaseInvoiceItemSerializer(ModelSerializer):
     # Read-only convenience for the Purchase Order Reports list and the "Edit" flow:
     # the raw model only stores the product UUID, but both the report table and the
     # re-populated Purchase Entry grid need the product's display name.
     product_name = serializers.CharField(source='product.name', read_only=True)
+    product = _PrefetchedProductField(queryset=Product.objects.all())
 
     class Meta:
         model = PurchaseInvoiceItem
@@ -176,10 +189,25 @@ class PurchaseInvoiceSerializer(ModelSerializer):
     def validate_bank_account(self, value):
         return validate_bank_account(value)
 
+    def to_internal_value(self, data):
+        # Fetch every line's product in one query up front (see _PrefetchedProductField).
+        items = data.get('items') if hasattr(data, 'get') else None
+        if isinstance(items, list):
+            ids = set()
+            for item in items:
+                try:
+                    ids.add(uuid.UUID(str(item.get('product'))))
+                except (ValueError, TypeError, AttributeError):
+                    pass
+            field = self.fields['items'].child.fields['product']
+            self.context['_purchase_products'] = (
+                {str(p.pk): p for p in field.get_queryset().filter(pk__in=ids)} if ids else {})
+        return super().to_internal_value(data)
+
     def validate(self, attrs):
         attrs = super().validate(attrs)
         method = attrs.get('payment_method', self.instance.payment_method if self.instance else 'CASH')
-        # A bank only means something for BANK / UPI, Paid/Unpaid only for CASH � drop stale
+        # A bank only means something for BANK / UPI, Paid/Unpaid only for CASH — drop stale
         # values left over from switching the pay mode, so the books never use them.
         if method not in ('BANK', 'UPI'):
             attrs['bank_account'] = None
@@ -192,8 +220,10 @@ class PurchaseInvoiceSerializer(ModelSerializer):
     def create(self, validated_data):
         items_data = validated_data.pop('items', [])
         invoice = PurchaseInvoice.objects.create(**validated_data)
-        for item_data in items_data:
-            PurchaseInvoiceItem.objects.create(purchase_invoice=invoice, **item_data)
+        # One INSERT for all lines. bulk_create skips the items' post_save, which only queues
+        # this invoice for accounting — and the header save above has already queued it.
+        PurchaseInvoiceItem.objects.bulk_create(
+            [PurchaseInvoiceItem(purchase_invoice=invoice, **item_data) for item_data in items_data])
         return invoice
 
     def update(self, instance, validated_data):
@@ -204,8 +234,8 @@ class PurchaseInvoiceSerializer(ModelSerializer):
 
         if items_data is not None:
             instance.items.all().delete()
-            for item_data in items_data:
-                PurchaseInvoiceItem.objects.create(purchase_invoice=instance, **item_data)
+            PurchaseInvoiceItem.objects.bulk_create(
+                [PurchaseInvoiceItem(purchase_invoice=instance, **item_data) for item_data in items_data])
 
         return instance
 
@@ -218,16 +248,30 @@ def _owes_supplier(invoice):
 
 
 class PurchaseInvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
-    queryset = PurchaseInvoice.objects.all().order_by('-purchase_date', '-created_at')
+    # Joined/prefetched so serializing a list (or the save response) costs a few queries
+    # instead of supplier + bank + every line's product, one round trip each.
+    queryset = PurchaseInvoice.objects.all().order_by('-purchase_date', '-created_at') \
+        .select_related('supplier', 'bank_account') \
+        .prefetch_related(Prefetch('items', queryset=PurchaseInvoiceItem.objects.select_related('product')))
     serializer_class = PurchaseInvoiceSerializer
     authentication_classes = []
     permission_classes = [permissions.AllowAny]
+
+    def _reload_for_response(self, serializer):
+        """Point the serializer at a prefetched copy so the save response is cheap too."""
+        fresh = self.queryset.model.objects.filter(pk=serializer.instance.pk) \
+            .select_related('supplier', 'bank_account') \
+            .prefetch_related(Prefetch('items', queryset=PurchaseInvoiceItem.objects.select_related('product'))) \
+            .first()
+        if fresh is not None:
+            serializer.instance = fresh
 
     @transaction.atomic
     def perform_create(self, serializer):
         invoice = serializer.save(**self._branch_stamp_kwargs(serializer))
         if invoice.status not in ('DRAFT', 'CANCELLED'):
             self._apply_stock_and_payables(invoice)
+        self._reload_for_response(serializer)
 
     @transaction.atomic
     def perform_update(self, serializer):
@@ -246,18 +290,21 @@ class PurchaseInvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
         invoice = serializer.save()
         if invoice.status not in ('DRAFT', 'CANCELLED'):
             self._apply_stock_and_payables(invoice)
+        self._reload_for_response(serializer)
 
     def _reverse_stock_and_payables(self, invoice):
         from apps.company.models import Branch
         branch = invoice.branch or Branch.get_default()
 
-        for item in invoice.items.all():
-            ledger_row = StockLedger.objects.filter(reference_id=invoice.id, product=item.product, branch=branch).first()
-            if not ledger_row:
-                continue
-            qty_in = (item.quantity or 0) + (item.free_quantity or 0)
-            adjust_branch_stock(item.product, branch, -int(qty_in))
-            ledger_row.delete()
+        # Undo exactly what the ledger says was received, rather than re-deriving it from the
+        # lines: that is the quantity that actually moved BranchStock.
+        rows = list(StockLedger.objects.filter(reference_id=invoice.id, branch=branch).select_related('product'))
+        deltas = {}
+        for row in rows:
+            deltas[row.product] = deltas.get(row.product, 0) - int(row.quantity or 0)
+        adjust_branch_stock_many(deltas, branch)
+        if rows:
+            StockLedger.objects.filter(pk__in=[r.pk for r in rows]).delete()  # soft delete
 
         if _owes_supplier(invoice) and invoice.balance_amount:
             supplier = invoice.supplier
@@ -269,26 +316,37 @@ class PurchaseInvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
         branch = invoice.branch or Branch.get_default()
         warehouse = invoice.warehouse
 
-        for item in invoice.items.all():
-            product = item.product
-            qty_in = (item.quantity or 0) + (item.free_quantity or 0)
-
+        # Batched: a fixed handful of queries for the whole entry, not ~20 per line. On the
+        # hosted stack every query is a round trip to the database, and the per-line version
+        # made a many-line save take seconds.
+        products, qty_by_product = {}, {}
+        for item in invoice.items.select_related('product'):
+            product = products.setdefault(item.product_id, item.product)
             if item.purchase_rate:
                 product.cost_price = item.purchase_rate
             if item.selling_price:
                 product.retail_price = item.selling_price
-            product.save(update_fields=['cost_price', 'retail_price', 'updated_at'])
+            # Two lines of the same product both count (one ledger row carries the sum).
+            qty_by_product[item.product_id] = qty_by_product.get(item.product_id, 0) \
+                + int((item.quantity or 0) + (item.free_quantity or 0))
+        if products:
+            now = timezone.now()
+            for product in products.values():
+                product.updated_at = now
+            Product.objects.bulk_update(products.values(), ['cost_price', 'retail_price', 'updated_at'])
 
-            if not StockLedger.objects.filter(reference_id=invoice.id, product=product).exists():
-                adjust_branch_stock(
-                    product, branch, int(qty_in),
-                    ledger={
-                        'warehouse': warehouse,
-                        'transaction_type': 'IN',
-                        'reference_id': invoice.id,
-                        'notes': f"Received via Purchase Entry {invoice.invoice_number}",
-                    },
-                )
+            received = set(StockLedger.objects.filter(reference_id=invoice.id, product_id__in=products)
+                           .values_list('product_id', flat=True))
+            adjust_branch_stock_many(
+                {products[pk]: qty for pk, qty in qty_by_product.items() if pk not in received},
+                branch,
+                ledger={
+                    'warehouse': warehouse,
+                    'transaction_type': 'IN',
+                    'reference_id': invoice.id,
+                    'notes': f"Received via Purchase Entry {invoice.invoice_number}",
+                },
+            )
 
         if _owes_supplier(invoice) and invoice.balance_amount:
             supplier = invoice.supplier

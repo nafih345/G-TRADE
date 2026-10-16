@@ -166,4 +166,29 @@ export function installBackendHealthWatch() {
   );
 
   checkBackendHealth();
+  installKeepAwake();
+}
+
+// Render's free plan puts the backend to sleep after 15 minutes without a request. Filling in
+// a long Purchase Entry makes no API calls, so the Save that follows used to land on a
+// sleeping server and wait ~50s for it to boot. While the app is open and visible, a cheap
+// health probe every 10 minutes keeps it awake; a tab coming back after a long absence
+// probes at once so the server is warming up while the user reads the screen.
+const KEEP_AWAKE_INTERVAL_MS = 10 * 60 * 1000;
+
+function installKeepAwake() {
+  let host = '';
+  try {
+    host = new URL(axios.defaults.baseURL || window.location.origin, window.location.href).hostname;
+  } catch {
+    return;
+  }
+  if (!/\.onrender\.com$/i.test(host)) return;
+  const pingIfDue = () => {
+    if (document.visibilityState !== 'visible') return;
+    if (Date.now() - lastProbeAt < KEEP_AWAKE_INTERVAL_MS) return;
+    checkBackendHealth();
+  };
+  setInterval(pingIfDue, 60 * 1000);
+  document.addEventListener('visibilitychange', pingIfDue);
 }
