@@ -9,7 +9,7 @@ from decimal import Decimal
 from rest_framework.test import APITestCase
 
 from apps.sales.models import Payment
-from apps.sales.signals import _latest_live_entry
+from apps.financial.services import live_entry
 
 
 class InvoicePaymentSplitTests(APITestCase):
@@ -49,13 +49,16 @@ class InvoicePaymentSplitTests(APITestCase):
         self.assertEqual(self._create({'card': 'abc'}).status_code, 400)
 
     def test_edit_moves_receipts_to_the_new_split(self):
-        inv = self._create({'cash': 100, 'upi': 100}).data['id']
+        with self.captureOnCommitCallbacks(execute=True):
+            inv = self._create({'cash': 100, 'upi': 100}).data['id']
         cash = Payment.objects.get(invoice_id=inv, method='Cash')
+        self.assertIsNotNone(live_entry('sales', 'payment', cash.pk))
         upi = Payment.objects.get(invoice_id=inv, method='UPI')
 
-        res = self.client.patch(f'{self.url}{inv}/', {
-            'net_amount': 380, 'items': [], 'payment_splits': {'upi': 150, 'card': 230},
-        }, format='json')
+        with self.captureOnCommitCallbacks(execute=True):
+            res = self.client.patch(f'{self.url}{inv}/', {
+                'net_amount': 380, 'items': [], 'payment_splits': {'upi': 150, 'card': 230},
+            }, format='json')
         self.assertEqual(res.status_code, 200, res.content)
         self.assertEqual(Decimal(res.data['paid_amount']), Decimal('380'))
         self.assertEqual(self._receipts(inv), {'UPI': Decimal('150'), 'Card': Decimal('230')})
@@ -65,7 +68,7 @@ class InvoicePaymentSplitTests(APITestCase):
         cash_row = Payment.all_objects.get(pk=cash.pk)
         self.assertTrue(cash_row.is_deleted)
         self.assertEqual(cash_row.status, 'CANCELLED')
-        self.assertIsNone(_latest_live_entry('PAYMENT_RECEIPT', cash.pk))
+        self.assertIsNone(live_entry('sales', 'payment', cash.pk))
 
     def test_patch_without_a_split_leaves_receipts_and_paid_amount_alone(self):
         inv = self._create({'cash': 200}).data['id']

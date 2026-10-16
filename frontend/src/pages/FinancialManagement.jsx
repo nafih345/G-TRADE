@@ -40,6 +40,11 @@ import {
 } from '@mui/icons-material';
 import axios from 'axios';
 import ConfirmActionDialog from '../components/common/ConfirmActionDialog';
+import { fetchAllPages } from '../utils/fetchAllPages';
+import { apiError, finGet, finPost, finDelete, newIdempotencyKey } from '../components/financial/financialApi';
+import { GeneralLedgerPanel, TrialBalancePanel, ProfitLossPanel, BalanceSheetPanel, FinancialReportsPanel } from '../components/financial/LedgerReports';
+import VoucherRegister from '../components/financial/VoucherRegister';
+import AccountingIntegrationPanel from '../components/financial/AccountingIntegrationPanel';
 
 // Fixed Sub-Categories per Group (NO COGS!)
 const ACCOUNT_GROUPS = {
@@ -104,6 +109,10 @@ const normalizeAccountType = (type) => {
   return 'Assets';
 };
 
+// UI account types are plural ("Assets"); the backend's AccountGroup.account_type is singular.
+const BACKEND_TYPES = { Assets: 'Asset', Liabilities: 'Liability', Equity: 'Equity', Income: 'Income', Expenses: 'Expense' };
+const toBackendType = (type) => BACKEND_TYPES[normalizeAccountType(type)] || 'Asset';
+
 // React Error Boundary Component to prevent blank dark screen crashes
 class FinancialErrorBoundary extends Component {
   constructor(props) {
@@ -165,7 +174,8 @@ function StandardVoucherForm({ voucherType, accounts, cashOrBankAccounts, partie
 
   const createBlankVoucherState = () => ({
     id: null,
-    voucherNo: `${voucherPrefix}-${Math.floor(1000 + Math.random() * 9000)}`,
+    voucherNo: '',
+    idempotencyKey: newIdempotencyKey(),
     date: new Date().toISOString().split('T')[0],
     party: null,
     mode: 'Normal',
@@ -279,21 +289,24 @@ function StandardVoucherForm({ voucherType, accounts, cashOrBankAccounts, partie
     showToast("Form reset to fresh draft.", "info");
   };
 
-  const handleSave = () => {
-    if (!isValid) return;
+  const [saving, setSaving] = useState(false);
+
+  const handleSave = async () => {
+    if (!isValid || saving || voucherState.isSaved) return;
     const partyName = typeof voucherState.party === 'object' && voucherState.party ? voucherState.party.name : (voucherState.party || 'General Party');
 
     const formattedLines = [];
 
+    // Receipt: Dr cash/bank (payment lines) / Cr accounts. Payment and Contra: Dr accounts /
+    // Cr cash/bank — for a contra the account line is the cash/bank account receiving the transfer.
     accountLines.forEach(l => {
       const amt = parseFloat(l.amount) || 0;
       if (l.account && amt > 0) {
         formattedLines.push({
-          account: l.accountCode,
-          debit: isPayment ? amt : 0,
-          credit: isReceipt ? amt : (isContra ? 0 : amt),
-          narration: l.narration || voucherState.narration,
-          ref_no: l.refNo
+          account: l.account.id || l.accountCode,
+          debit: isReceipt ? 0 : amt,
+          credit: isReceipt ? amt : 0,
+          memo: [l.narration, l.refNo && `Ref ${l.refNo}`].filter(Boolean).join(' · ')
         });
       }
     });
@@ -305,28 +318,24 @@ function StandardVoucherForm({ voucherType, accounts, cashOrBankAccounts, partie
         formattedLines.push({
           account: bankCode,
           debit: isReceipt ? amt : 0,
-          credit: isPayment ? amt : (isContra ? amt : 0),
-          narration: `${p.payMode} Payment - ${p.refNo || ''}`
+          credit: isReceipt ? 0 : amt,
+          memo: `${p.payMode}${p.refNo ? ` ${p.refNo}` : ''}${p.payMode !== 'Cash' && p.refDate ? ` (${p.refDate})` : ''}`
         });
       }
     });
 
-    const newVoucher = {
-      id: `${voucherPrefix}-${Date.now()}`,
-      entry_number: voucherState.voucherNo,
-      date: voucherState.date,
+    setSaving(true);
+    const saved = await onSaveVoucher({
       voucher_type_code: voucherPrefix,
-      voucher_type_name: voucherTitle,
-      party_name: partyName,
-      mode: voucherState.mode,
-      description: voucherState.narration || `${voucherTitle} for ${partyName}`,
-      status: 'POSTED',
-      amount: totalAccountAmount,
-      items: formattedLines
-    };
-
-    onSaveVoucher(newVoucher);
-    setVoucherState(prev => ({ ...prev, isSaved: true }));
+      date: voucherState.date,
+      narration: [voucherState.narration || `${voucherTitle} — ${partyName}`, voucherState.mode === 'Bill to Bill' ? '(Bill to Bill)' : '']
+        .filter(Boolean).join(' '),
+      reference_no: partyName,
+      idempotency_key: voucherState.idempotencyKey,
+      lines: formattedLines
+    });
+    setSaving(false);
+    if (saved) setVoucherState(prev => ({ ...prev, isSaved: true, voucherNo: saved.entry_number }));
   };
 
   return (
@@ -358,7 +367,7 @@ function StandardVoucherForm({ voucherType, accounts, cashOrBankAccounts, partie
             sx={{ backgroundColor: voucherColorHex, color: '#ffffff', fontWeight: 850, fontSize: '0.875rem' }} 
           />
           <Typography variant="subtitle2" color="text.secondary" fontWeight={700}>
-            {voucherState.isSaved ? '✅ Posted Voucher' : '📝 Unsaved Draft'}
+            {voucherState.isSaved ? `✅ Posted ${voucherState.voucherNo}` : '📝 Unsaved Draft'}
           </Typography>
         </Stack>
 
@@ -366,14 +375,11 @@ function StandardVoucherForm({ voucherType, accounts, cashOrBankAccounts, partie
           <Button variant="outlined" size="small" startIcon={<AddIcon />} onClick={handleNew}>
             New
           </Button>
-          <Button variant="outlined" size="small" startIcon={<EditIcon />} disabled={!voucherState.isSaved} onClick={() => showToast("Voucher edit mode enabled", "info")}>
-            Edit
-          </Button>
-          <Button 
+ <Button 
             variant="contained" 
             size="small" 
             startIcon={<CheckIcon />} 
-            disabled={!isValid} 
+            disabled={!isValid || saving || voucherState.isSaved} 
             onClick={handleSave}
             sx={{ backgroundColor: voucherColorHex, fontWeight: 800, '&:hover': { backgroundColor: voucherColorHex } }}
           >
@@ -381,9 +387,6 @@ function StandardVoucherForm({ voucherType, accounts, cashOrBankAccounts, partie
           </Button>
           <Button variant="outlined" size="small" startIcon={<PrintIcon />} disabled={!voucherState.isSaved} onClick={() => window.print()}>
             Print
-          </Button>
-          <Button variant="outlined" size="small" color="error" startIcon={<DeleteIcon />} disabled={!voucherState.isSaved} onClick={() => showToast("Voucher deleted", "info")}>
-            Delete
           </Button>
           <Button variant="outlined" size="small" startIcon={<RefreshIcon />} onClick={handleReset}>
             Refresh
@@ -400,7 +403,7 @@ function StandardVoucherForm({ voucherType, accounts, cashOrBankAccounts, partie
           <Grid item xs={12} sm={6} md={3}>
             <TextField 
               fullWidth size="small" label="Voucher No (Auto)" 
-              value={voucherState.voucherNo} 
+              value={voucherState.voucherNo || 'Assigned when posted'} 
               InputProps={{ readOnly: true }} 
               sx={{ bgcolor: '#f8fafc' }} 
             />
@@ -667,7 +670,7 @@ function StandardVoucherForm({ voucherType, accounts, cashOrBankAccounts, partie
             <Button 
               variant="contained" 
               size="large" 
-              disabled={!isValid} 
+              disabled={!isValid || saving || voucherState.isSaved} 
               onClick={handleSave}
               sx={{ backgroundColor: voucherColorHex, fontWeight: 850, px: 4, py: 1.2, '&:hover': { backgroundColor: voucherColorHex } }}
             >
@@ -696,6 +699,7 @@ function FinancialManagementView() {
     if (path.includes('/financial/profit-loss')) return { top: 5, sub: 'receipt' };
     if (path.includes('/financial/balance-sheet')) return { top: 6, sub: 'receipt' };
     if (path.includes('/financial/reports')) return { top: 7, sub: 'receipt' };
+    if (path.includes('/financial/integration')) return { top: 8, sub: 'receipt' };
     return { top: 0, sub: 'receipt' };
   };
 
@@ -719,7 +723,8 @@ function FinancialManagementView() {
       '/financial/trial-balance',
       '/financial/profit-loss',
       '/financial/balance-sheet',
-      '/financial/reports'
+      '/financial/reports',
+      '/financial/integration'
     ];
     if (newTop === 2) setVoucherSubTab('receipt');
     navigate(topPaths[newTop] || '/financial/dashboard');
@@ -732,41 +737,44 @@ function FinancialManagementView() {
 
   // Master States
   const [accounts, setAccounts] = useState([]);
-  const [journalEntries, setJournalEntries] = useState([]);
   const [partiesList, setPartiesList] = useState([]);
 
+  // Parties for the voucher forms (named in the narration): suppliers and wholesale dealers.
   useEffect(() => {
-    try {
-      const localC = JSON.parse(localStorage.getItem('optical_wholesale_customers') || localStorage.getItem('optical_dealers') || '[]');
-      if (Array.isArray(localC) && localC.length > 0) {
-        setPartiesList(localC);
-      } else {
-        setPartiesList([
-          { id: 'CUST-101', name: 'Metro Optical Store', code: 'CUST-101', category: 'Wholesale Customer' },
-          { id: 'CUST-102', name: 'Vision Care Eye Clinic', code: 'CUST-102', category: 'Retail Customer' },
-          { id: 'SUPP-201', name: 'Titan Eye Supplies', code: 'SUPP-201', category: 'Supplier' },
-          { id: 'SUPP-202', name: 'Essilor India Pvt Ltd', code: 'SUPP-202', category: 'Vendor' }
-        ]);
-      }
-    } catch(e) {}
+    (async () => {
+      const [suppliers, dealers] = await Promise.all([
+        fetchAllPages('/api/purchase/suppliers/').catch(() => []),
+        fetchAllPages('/api/sales/wholesale/dealers/').catch(() => []),
+      ]);
+      setPartiesList([
+        ...(suppliers || []).map(s => ({ id: s.id, name: s.name, code: s.supplier_code, category: 'Supplier' })),
+        ...(dealers || []).map(d => ({ id: d.id, name: d.business_name, code: d.dealer_code, category: 'Wholesale Dealer' })),
+      ]);
+    })();
   }, []);
 
-  const handleSaveStandardVoucher = async (newVoucher) => {
+  // Posts a voucher through the server's posting service. Returns the saved entry, or null
+  // (with the server's reason shown) - a voucher is never "saved" unless it is on the books.
+  const postVoucher = async (payload) => {
     try {
-      await axios.post('/api/financial/journals/', {
-        reference_type: newVoucher.voucher_type_name,
-        reference_id: Math.floor(1000 + Math.random() * 9000),
-        lines: newVoucher.items,
-        date: newVoucher.date,
-        narration: newVoucher.description,
-        voucher_type_code: newVoucher.voucher_type_code
-      }).catch(() => null);
-    } catch(e) {}
+      const entry = await finPost('journals/', payload);
+      showToast(`${entry.voucher_type_name || 'Voucher'} ${entry.entry_number} posted.`, 'success');
+      setLedgerRefreshKey(k => k + 1);
+      loadAccounts();
+      return entry;
+    } catch (e) {
+      showToast(apiError(e, 'The voucher could not be posted.'), 'error');
+      return null;
+    }
+  };
 
-    const updatedJournals = [newVoucher, ...journalEntries];
-    setJournalEntries(updatedJournals);
-    localStorage.setItem('optical_journal_entries', JSON.stringify(updatedJournals));
-    showToast(`${newVoucher.voucher_type_name} '${newVoucher.entry_number}' posted successfully!`, "success");
+  const handleSaveStandardVoucher = postVoucher;
+  const [ledgerRefreshKey, setLedgerRefreshKey] = useState(0);
+  const [ledgerAccountId, setLedgerAccountId] = useState('');
+  const openLedger = (accountId) => {
+    setLedgerAccountId(accountId);
+    setSelectedAccountForView(null);
+    navigate('/financial/ledger');
   };
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -837,7 +845,7 @@ function FinancialManagementView() {
     try {
       await axios.post('/api/financial/groups/', {
         name: `General ${trimmed}`,
-        account_type: newTypeBehavesLike
+        account_type: toBackendType(newTypeBehavesLike)
       }).catch(() => null);
     } catch(e) {}
 
@@ -889,7 +897,7 @@ function FinancialManagementView() {
     try {
       await axios.post('/api/financial/groups/', {
         name: trimmed,
-        account_type: currentType
+        account_type: toBackendType(currentType)
       }).catch(() => null);
     } catch(e) {}
 
@@ -926,207 +934,16 @@ function FinancialManagementView() {
     });
   }, [accounts]);
 
-  // Dedicated Voucher Forms States
-  const [receiptForm, setReceiptForm] = useState({
-    debit_account: '',
-    date: new Date().toISOString().split('T')[0],
-    reference_no: '',
-    narration: '',
-    credit_lines: [{ account: '', amount: '' }]
-  });
-
-  const [paymentForm, setPaymentForm] = useState({
-    credit_account: '',
-    date: new Date().toISOString().split('T')[0],
-    reference_no: '',
-    narration: '',
-    debit_lines: [{ account: '', amount: '' }]
-  });
-
-  const [contraForm, setContraForm] = useState({
-    from_account: '',
-    to_account: '',
-    amount: '',
-    date: new Date().toISOString().split('T')[0],
-    reference_no: '',
-    narration: ''
-  });
-
   const [journalForm, setJournalForm] = useState({
     date: new Date().toISOString().split('T')[0],
     reference_no: '',
     narration: '',
+    idempotency_key: newIdempotencyKey(),
     lines: [
       { account: '', debit: '', credit: '' },
       { account: '', debit: '', credit: '' }
     ]
   });
-
-  // Filters for View All Vouchers
-  const [voucherTypeFilter, setVoucherTypeFilter] = useState('ALL');
-  const [voucherStatusFilter, setVoucherStatusFilter] = useState('ALL');
-
-  // Save Handlers for Voucher Suite
-  const handleSaveReceiptVoucher = async () => {
-    if (!receiptForm.debit_account) {
-      showToast("Receipt Voucher rule: Please select a Cash or Bank Debit Account.", "error");
-      return;
-    }
-    const validLines = receiptForm.credit_lines.filter(l => l.account && parseFloat(l.amount) > 0);
-    if (validLines.length === 0) {
-      showToast("Please add at least one Credit Account line with a valid amount.", "error");
-      return;
-    }
-    const totalAmount = validLines.reduce((sum, l) => sum + (parseFloat(l.amount) || 0), 0);
-    const lines = [
-      { account: receiptForm.debit_account, debit: totalAmount, credit: 0 },
-      ...validLines.map(l => ({ account: l.account, debit: 0, credit: parseFloat(l.amount) }))
-    ];
-
-    try {
-      await axios.post('/api/financial/journals/', {
-        reference_type: 'RECEIPT_VOUCHER',
-        reference_id: Math.floor(1000 + Math.random() * 9000),
-        lines: lines,
-        date: receiptForm.date,
-        narration: receiptForm.narration || 'Money received into cash/bank',
-        voucher_type_code: 'RV'
-      }).catch(() => null);
-    } catch(e) {}
-
-    const newEntry = {
-      id: `RV-${Date.now()}`,
-      entry_number: receiptForm.reference_no || `RV-${new Date().toISOString().slice(0,10).replace(/-/g,'')}-${Math.floor(100 + Math.random()*900)}`,
-      date: receiptForm.date,
-      voucher_type_code: 'RV',
-      voucher_type_name: 'Receipt Voucher',
-      description: receiptForm.narration || 'Money Received into Cash/Bank',
-      status: 'POSTED',
-      amount: totalAmount,
-      items: lines
-    };
-
-    setJournalEntries(prev => [newEntry, ...prev]);
-    localStorage.setItem('optical_journal_entries', JSON.stringify([newEntry, ...journalEntries]));
-
-    setReceiptForm({
-      debit_account: '',
-      date: new Date().toISOString().split('T')[0],
-      reference_no: '',
-      narration: '',
-      credit_lines: [{ account: '', amount: '' }]
-    });
-    showToast(`Receipt Voucher '${newEntry.entry_number}' saved successfully!`, "success");
-  };
-
-  const handleSavePaymentVoucher = async () => {
-    if (!paymentForm.credit_account) {
-      showToast("Payment Voucher rule: Please select a Cash or Bank Credit Account.", "error");
-      return;
-    }
-    const validLines = paymentForm.debit_lines.filter(l => l.account && parseFloat(l.amount) > 0);
-    if (validLines.length === 0) {
-      showToast("Please add at least one Debit Account line with a valid amount.", "error");
-      return;
-    }
-    const totalAmount = validLines.reduce((sum, l) => sum + (parseFloat(l.amount) || 0), 0);
-    const lines = [
-      { account: paymentForm.credit_account, debit: 0, credit: totalAmount },
-      ...validLines.map(l => ({ account: l.account, debit: parseFloat(l.amount), credit: 0 }))
-    ];
-
-    try {
-      await axios.post('/api/financial/journals/', {
-        reference_type: 'PAYMENT_VOUCHER',
-        reference_id: Math.floor(1000 + Math.random() * 9000),
-        lines: lines,
-        date: paymentForm.date,
-        narration: paymentForm.narration || 'Money paid out from cash/bank',
-        voucher_type_code: 'PV'
-      }).catch(() => null);
-    } catch(e) {}
-
-    const newEntry = {
-      id: `PV-${Date.now()}`,
-      entry_number: paymentForm.reference_no || `PV-${new Date().toISOString().slice(0,10).replace(/-/g,'')}-${Math.floor(100 + Math.random()*900)}`,
-      date: paymentForm.date,
-      voucher_type_code: 'PV',
-      voucher_type_name: 'Payment Voucher',
-      description: paymentForm.narration || 'Money Paid from Cash/Bank',
-      status: 'POSTED',
-      amount: totalAmount,
-      items: lines
-    };
-
-    setJournalEntries(prev => [newEntry, ...prev]);
-    localStorage.setItem('optical_journal_entries', JSON.stringify([newEntry, ...journalEntries]));
-
-    setPaymentForm({
-      credit_account: '',
-      date: new Date().toISOString().split('T')[0],
-      reference_no: '',
-      narration: '',
-      debit_lines: [{ account: '', amount: '' }]
-    });
-    showToast(`Payment Voucher '${newEntry.entry_number}' saved successfully!`, "success");
-  };
-
-  const handleSaveContraEntry = async () => {
-    if (!contraForm.from_account || !contraForm.to_account) {
-      showToast("Please select both 'Transfer From' and 'Transfer To' accounts.", "error");
-      return;
-    }
-    if (contraForm.from_account === contraForm.to_account) {
-      showToast("Contra Entry rule: 'Transfer From' and 'Transfer To' accounts cannot be identical.", "error");
-      return;
-    }
-    const amt = parseFloat(contraForm.amount || 0);
-    if (amt <= 0) {
-      showToast("Transfer amount must be greater than zero.", "error");
-      return;
-    }
-
-    const lines = [
-      { account: contraForm.from_account, debit: 0, credit: amt },
-      { account: contraForm.to_account, debit: amt, credit: 0 }
-    ];
-
-    try {
-      await axios.post('/api/financial/journals/', {
-        reference_type: 'CONTRA_ENTRY',
-        reference_id: Math.floor(1000 + Math.random() * 9000),
-        lines: lines,
-        date: contraForm.date,
-        narration: contraForm.narration || 'Contra cash/bank transfer',
-        voucher_type_code: 'CV'
-      }).catch(() => null);
-    } catch(e) {}
-
-    const newEntry = {
-      id: `CV-${Date.now()}`,
-      entry_number: contraForm.reference_no || `CV-${new Date().toISOString().slice(0,10).replace(/-/g,'')}-${Math.floor(100 + Math.random()*900)}`,
-      date: contraForm.date,
-      voucher_type_code: 'CV',
-      voucher_type_name: 'Contra Entry',
-      description: contraForm.narration || 'Inter cash/bank transfer',
-      status: 'POSTED',
-      amount: amt,
-      items: lines
-    };
-
-    setJournalEntries(prev => [newEntry, ...prev]);
-    localStorage.setItem('optical_journal_entries', JSON.stringify([newEntry, ...journalEntries]));
-
-    setContraForm({
-      from_account: '',
-      to_account: '',
-      amount: '',
-      date: new Date().toISOString().split('T')[0],
-      reference_no: '',
-      narration: ''
-    });
-    showToast(`Contra Entry '${newEntry.entry_number}' saved successfully!`, "success");
-  };
 
   const handleSaveJournalVoucher = async () => {
     const validLines = journalForm.lines.filter(l => l.account && (parseFloat(l.debit) > 0 || parseFloat(l.credit) > 0));
@@ -1149,81 +966,24 @@ function FinancialManagementView() {
       credit: parseFloat(l.credit) || 0
     }));
 
-    try {
-      await axios.post('/api/financial/journals/', {
-        reference_type: 'JOURNAL_VOUCHER',
-        reference_id: Math.floor(1000 + Math.random() * 9000),
-        lines: lines,
-        date: journalForm.date,
-        narration: journalForm.narration || 'General adjusting journal voucher',
-        voucher_type_code: 'JV'
-      }).catch(() => null);
-    } catch(e) {}
-
-    const newEntry = {
-      id: `JV-${Date.now()}`,
-      entry_number: journalForm.reference_no || `JV-${new Date().toISOString().slice(0,10).replace(/-/g,'')}-${Math.floor(100 + Math.random()*900)}`,
-      date: journalForm.date,
+    const saved = await postVoucher({
       voucher_type_code: 'JV',
-      voucher_type_name: 'Journal Voucher',
-      description: journalForm.narration || 'General Adjusting Entry',
-      status: 'POSTED',
-      amount: totalD,
-      items: lines
-    };
-
-    setJournalEntries(prev => [newEntry, ...prev]);
-    localStorage.setItem('optical_journal_entries', JSON.stringify([newEntry, ...journalEntries]));
-
+      date: journalForm.date,
+      narration: journalForm.narration || 'General adjusting journal voucher',
+      reference_no: journalForm.reference_no,
+      idempotency_key: journalForm.idempotency_key,
+      lines
+    });
+    if (!saved) return;
     setJournalForm({
       date: new Date().toISOString().split('T')[0],
       reference_no: '',
       narration: '',
+      idempotency_key: newIdempotencyKey(),
       lines: [
         { account: '', debit: '', credit: '' },
         { account: '', debit: '', credit: '' }
       ]
-    });
-    showToast(`Journal Voucher '${newEntry.entry_number}' saved successfully!`, "success");
-  };
-
-  const handleReverseVoucher = async (entry) => {
-    if (!entry) return;
-    if (entry.status === 'REVERSED') {
-      showToast(`Voucher '${entry.entry_number}' is already reversed.`, "warning");
-      return;
-    }
-
-    setConfirmDialog({
-      open: true,
-      title: "Reverse Journal Entry",
-      message: `Are you sure you want to create an immutable reversal for voucher '${entry.entry_number}'? This will create a swapped reversing entry and mark the original as REVERSED.`,
-      type: 'danger',
-      confirmText: "Create Reversal",
-      onConfirm: async () => {
-        try {
-          await axios.post(`/api/financial/journals/${entry.id}/reverse/`, { reason: "User requested reversal" }).catch(() => null);
-        } catch(e) {}
-
-        const revNum = `REV-${entry.entry_number}`;
-        const revEntry = {
-          id: `REV-${Date.now()}`,
-          entry_number: revNum,
-          date: new Date().toISOString().split('T')[0],
-          voucher_type_code: entry.voucher_type_code || 'JV',
-          voucher_type_name: entry.voucher_type_name || 'Reversal Entry',
-          description: `Reversal of ${entry.entry_number}`,
-          status: 'POSTED',
-          amount: entry.amount || 0
-        };
-
-        const updatedJournals = journalEntries.map(j => j.id === entry.id ? { ...j, status: 'REVERSED' } : j);
-        setJournalEntries([revEntry, ...updatedJournals]);
-        localStorage.setItem('optical_journal_entries', JSON.stringify([revEntry, ...updatedJournals]));
-
-        setConfirmDialog(prev => ({ ...prev, open: false }));
-        showToast(`Voucher '${entry.entry_number}' reversed cleanly (Created ${revNum}).`, "success");
-      }
     });
   };
 
@@ -1251,58 +1011,50 @@ function FinancialManagementView() {
     open: false, title: '', message: '', type: 'danger', confirmText: 'Confirm', onConfirm: null
   });
 
-  // Journal Entry Form State
-  const [journalModalOpen, setJournalModalOpen] = useState(false);
 
-  // Load Accounts with full defensive checks (Blank database until user enters accounts)
+  // Chart of Accounts with balances computed from the posted ledger.
+  const [accountGroups, setAccountGroups] = useState([]);
   const loadAccounts = async () => {
-    let accList = [];
     try {
-      const localA = JSON.parse(localStorage.getItem('optical_financial_accounts') || '[]');
-      if (Array.isArray(localA) && localA.length > 0) {
-        // Filter out legacy mock sample accounts
-        accList = localA.filter(a => a && typeof a === 'object' && a.name && a.code && !String(a.id).startsWith('ACC-100') && !String(a.id).startsWith('ACC-200') && !String(a.id).startsWith('ACC-300') && !String(a.id).startsWith('ACC-400') && !String(a.id).startsWith('ACC-500'));
-      }
-    } catch(e) {}
-
-    // Paint immediately from the cached local list before waiting on the network round-trip.
-    if (accList.length > 0) setAccounts(accList);
-
-    try {
-      const res = await axios.get('/api/financial/accounts/').catch(() => axios.get('/api/accounts/accounts/')).catch(() => null);
-      if (res && res.data && Array.isArray(res.data) && res.data.length > 0) {
-        accList = res.data.filter(a => a && typeof a === 'object').map(a => {
-          const mappedType = normalizeAccountType(a.account_type);
-          const groups = getAccountGroups(mappedType);
-          return {
-            id: a.id || `ACC-${a.code}`,
-            code: strVal(a.code),
-            name: strVal(a.name),
-            account_type: mappedType,
-            account_group: a.account_group || groups[0],
-            parent_account_id: a.parent || null,
-            opening_balance: parseFloat(a.opening_balance || 0),
-            current_balance: parseFloat(a.balance || a.opening_balance || 0),
-            branch_name: strVal(a.branch_name, 'Main Branch'),
-            status: (a.status || '').toUpperCase() === 'INACTIVE' ? 'Inactive' : 'Active',
-            description: strVal(a.description)
-          };
-        });
-      }
-    } catch(e) {}
-
-    setAccounts(accList);
-    localStorage.setItem('optical_financial_accounts', JSON.stringify(accList));
+      const [rows, groups] = await Promise.all([
+        finGet('accounts/', { with_balances: 1 }),
+        finGet('groups/'),
+      ]);
+      setAccountGroups(Array.isArray(groups) ? groups : (groups.results || []));
+      const list = Array.isArray(rows) ? rows : (rows.results || []);
+      setAccounts(list.map(a => ({
+        id: a.id,
+        code: strVal(a.code),
+        name: strVal(a.name),
+        account_type: normalizeAccountType(a.account_type),
+        backend_type: a.account_type,
+        account_group: a.account_group_name || '',
+        account_group_id: a.account_group,
+        account_subtype: a.account_subtype || '',
+        parent_account_id: a.parent_account || null,
+        opening_balance: parseFloat(a.opening_balance || 0),
+        opening_balance_date: a.opening_balance_date || '',
+        current_balance: parseFloat(a.ledger_balance || 0),
+        total_debit: parseFloat(a.total_debit || 0),
+        total_credit: parseFloat(a.total_credit || 0),
+        branch_name: 'All Branches',
+        status: a.status === 'Inactive' ? 'Inactive' : 'Active',
+        is_system: !!a.is_system,
+        normal_balance: a.normal_balance,
+        description: strVal(a.description)
+      })));
+    } catch (e) {
+      showToast(apiError(e, 'Could not load the Chart of Accounts.'), 'error');
+    }
   };
 
   const strVal = (v, defaultVal = '') => (v !== null && v !== undefined ? String(v).trim() : defaultVal);
 
   useEffect(() => {
+    // Older builds cached a local copy of accounts/journals that never reached the ledger.
+    try { localStorage.removeItem('optical_financial_accounts'); localStorage.removeItem('optical_journal_entries'); } catch (e) {}
     loadAccounts();
-    try {
-      const localJ = JSON.parse(localStorage.getItem('optical_journal_entries') || '[]');
-      if (Array.isArray(localJ)) setJournalEntries(localJ.filter(j => j && typeof j === 'object'));
-    } catch(e) {}
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Sequential Code Auto-Generator per Group
@@ -1372,6 +1124,7 @@ function FinancialManagementView() {
       account_group: acc.account_group || availableGroups[0],
       parent_account_id: acc.parent_account_id || '',
       opening_balance: acc.opening_balance || 0,
+      opening_balance_date: acc.opening_balance_date || '',
       current_balance: acc.current_balance || 0,
       branch_name: acc.branch_name || 'Main Branch',
       status: acc.status || 'Active',
@@ -1402,67 +1155,53 @@ function FinancialManagementView() {
       return;
     }
 
-    const accObj = {
-      id: isEditingAccount ? accountFormData.id : `ACC-${Math.floor(1000 + Math.random() * 9000)}`,
-      code: codeTrimmed,
-      name: nameTrimmed,
-      account_type: normalizeAccountType(accountFormData.account_type),
-      account_group: accountFormData.account_group,
-      parent_account_id: accountFormData.parent_account_id || null,
-      opening_balance: parseFloat(accountFormData.opening_balance) || 0,
-      current_balance: parseFloat(accountFormData.current_balance || accountFormData.opening_balance) || 0,
-      branch_name: accountFormData.branch_name || 'Main Branch',
-      status: accountFormData.status,
-      description: accountFormData.description || '',
-      created_at: new Date().toISOString().split('T')[0]
-    };
-
     try {
-      if (isEditingAccount) {
-        await axios.put(`/api/accounts/accounts/${accObj.id}/`, accObj).catch(() => null);
-      } else {
-        await axios.post('/api/accounts/accounts/', accObj).catch(() => null);
+      const backendType = toBackendType(accountFormData.account_type);
+      const groupName = (accountFormData.account_group || '').trim() || `General ${normalizeAccountType(accountFormData.account_type)}`;
+      let group = accountGroups.find(g => g.name.toLowerCase() === groupName.toLowerCase());
+      if (group && group.account_type !== backendType) {
+        showToast(`Group '${group.name}' belongs to ${group.account_type} accounts - pick a ${backendType} group.`, 'error');
+        return;
       }
-    } catch(e) {}
-
-    let updated = [];
-    if (isEditingAccount) {
-      updated = accounts.map(a => a.id === accObj.id ? accObj : a);
-    } else {
-      updated = [...accounts, accObj];
+      if (!group) group = await finPost('groups/', { name: groupName, account_type: backendType });
+      const body = {
+        code: codeTrimmed,
+        name: nameTrimmed,
+        account_group: group.id,
+        parent_account: accountFormData.parent_account_id || null,
+        opening_balance: parseFloat(accountFormData.opening_balance) || 0,
+        opening_balance_date: accountFormData.opening_balance_date || null,
+        status: accountFormData.status,
+        description: accountFormData.description || ''
+      };
+      if (isEditingAccount) await axios.put(`/api/financial/accounts/${accountFormData.id}/`, body);
+      else await finPost('accounts/', body);
+      await loadAccounts();
+      setAccountModalOpen(false);
+      showToast(`Account '${codeTrimmed} - ${nameTrimmed}' saved.${parseFloat(body.opening_balance) ? ' Post its opening balance from Accounting Integration > Policy & tools.' : ''}`, "success");
+    } catch (e) {
+      showToast(apiError(e, 'The account could not be saved.'), 'error');
     }
-    setAccounts(updated);
-    localStorage.setItem('optical_financial_accounts', JSON.stringify(updated));
-
-    setAccountModalOpen(false);
-    showToast(`Account '${accObj.code} - ${accObj.name}' saved successfully!`, "success");
   };
 
   // Delete Account Handler with Linked Entries & Balance Warning
   const handleDeleteAccount = (acc) => {
     if (!acc) return;
-    const hasLinkedEntries = (journalEntries || []).some(j => (j.items || []).some(item => item.account_id === acc.id));
-    const hasBalance = Math.abs(parseFloat(acc.current_balance || 0)) > 0;
-
-    const warnMsg = (hasLinkedEntries || hasBalance)
-      ? `Account '${acc.code} - ${acc.name}' has an active balance (₹${(parseFloat(acc.current_balance) || 0).toLocaleString()}) or linked transactions. Are you sure you want to delete it?`
-      : `Are you sure you want to delete account '${acc.code} - ${acc.name}'?`;
-
     setConfirmDialog({
       open: true,
-      title: (hasLinkedEntries || hasBalance) ? "Delete Account Warning" : "Delete Account",
-      message: warnMsg,
+      title: "Delete Account",
+      message: `Delete account '${acc.code} - ${acc.name}'? Accounts with postings, system accounts and mapped accounts cannot be deleted - mark them Inactive instead.`,
       type: 'danger',
       confirmText: "Delete Account",
       onConfirm: async () => {
-        try {
-          await axios.delete(`/api/financial/accounts/${acc.id}/`).catch(() => null);
-        } catch(e) {}
-        const updated = accounts.filter(a => a.id !== acc.id);
-        setAccounts(updated);
-        localStorage.setItem('optical_financial_accounts', JSON.stringify(updated));
         setConfirmDialog(prev => ({ ...prev, open: false }));
-        showToast(`Account '${acc.code}' deleted successfully.`, "success");
+        try {
+          await finDelete(`accounts/${acc.id}/`);
+          await loadAccounts();
+          showToast(`Account '${acc.code}' deleted.`, "success");
+        } catch (e) {
+          showToast(apiError(e, 'The account could not be deleted.'), 'error');
+        }
       }
     });
   };
@@ -1471,7 +1210,7 @@ function FinancialManagementView() {
   const handleExcelImport = (e) => {
     const file = e.target.files?.[0];
     if (file) {
-      showToast(`Uploaded '${file.name}'. Accounts imported into Chart of Accounts!`, "success");
+      showToast(`Importing accounts from '${file.name}' is not available yet - add accounts with + Add Account.`, "warning");
       setImportModalOpen(false);
     }
   };
@@ -1508,7 +1247,7 @@ function FinancialManagementView() {
           <Button 
             variant="outlined" 
             startIcon={<JournalIcon />} 
-            onClick={() => setJournalModalOpen(true)}
+            onClick={() => { setTopTab(2); handleVoucherSubTabChange('journal'); }}
             sx={{ fontWeight: 700 }}
           >
             + Post Journal Voucher
@@ -1533,6 +1272,7 @@ function FinancialManagementView() {
           <Tab icon={<ProfitIcon />} label="Profit & Loss (P&L)" iconPosition="start" />
           <Tab icon={<BalanceIcon />} label="Balance Sheet" iconPosition="start" />
           <Tab icon={<ReportIcon />} label="Financial Reports" iconPosition="start" />
+          <Tab icon={<SwapIcon />} label="Accounting Integration" iconPosition="start" />
         </Tabs>
       </Card>
 
@@ -2147,203 +1887,29 @@ function FinancialManagementView() {
 
       {/* 6. VIEW ALL VOUCHERS VIEW */}
       {topTab === 2 && voucherSubTab === 'all' && (
-        <Card variant="outlined" sx={{ p: 4, borderRadius: 4 }}>
-          <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" gap={2} sx={{ mb: 3 }}>
-            <Box>
-              <Typography variant="h6" fontWeight={850}>View All Vouchers & Journal Register</Typography>
-              <Typography variant="body2" color="text.secondary">
-                Single unified register of all 4 voucher types (Receipt, Payment, Contra, Journal) with status tracking & reversals.
-              </Typography>
-            </Box>
-            <Stack direction="row" spacing={1.5}>
-              <TextField 
-                select size="small" label="Voucher Type"
-                value={voucherTypeFilter}
-                onChange={(e) => setVoucherTypeFilter(e.target.value)}
-                sx={{ minWidth: 160 }}
-              >
-                <MenuItem value="ALL">All Types</MenuItem>
-                <MenuItem value="RV">Receipt Voucher (RV)</MenuItem>
-                <MenuItem value="PV">Payment Voucher (PV)</MenuItem>
-                <MenuItem value="CV">Contra Entry (CV)</MenuItem>
-                <MenuItem value="JV">Journal Voucher (JV)</MenuItem>
-              </TextField>
-              <TextField 
-                select size="small" label="Status"
-                value={voucherStatusFilter}
-                onChange={(e) => setVoucherStatusFilter(e.target.value)}
-                sx={{ minWidth: 140 }}
-              >
-                <MenuItem value="ALL">All Statuses</MenuItem>
-                <MenuItem value="POSTED">POSTED</MenuItem>
-                <MenuItem value="REVERSED">REVERSED</MenuItem>
-                <MenuItem value="CANCELLED">CANCELLED</MenuItem>
-              </TextField>
-            </Stack>
-          </Stack>
-
-          <Table size="small">
-            <TableHead sx={{ bgcolor: '#f8fafc' }}>
-              <TableRow>
-                <TableCell sx={{ fontWeight: 700 }}>Voucher No</TableCell>
-                <TableCell sx={{ fontWeight: 700 }}>Date</TableCell>
-                <TableCell sx={{ fontWeight: 700 }}>Type</TableCell>
-                <TableCell sx={{ fontWeight: 700 }}>Narration</TableCell>
-                <TableCell sx={{ fontWeight: 700, textAlign: 'right' }}>Amount (₹)</TableCell>
-                <TableCell sx={{ fontWeight: 700 }}>Status</TableCell>
-                <TableCell align="center" sx={{ fontWeight: 700 }}>Action</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {journalEntries.filter(j => {
-                if (!j) return false;
-                if (voucherTypeFilter !== 'ALL' && (j.voucher_type_code || j.entry_number.slice(0,2)) !== voucherTypeFilter) return false;
-                if (voucherStatusFilter !== 'ALL' && (j.status || 'POSTED') !== voucherStatusFilter) return false;
-                return true;
-              }).length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={7} align="center" sx={{ py: 6 }}>
-                    <Typography variant="body2" color="text.secondary">No vouchers match the selected filter criteria.</Typography>
-                  </TableCell>
-                </TableRow>
-              ) : (
-                journalEntries.filter(j => {
-                  if (!j) return false;
-                  if (voucherTypeFilter !== 'ALL' && (j.voucher_type_code || j.entry_number.slice(0,2)) !== voucherTypeFilter) return false;
-                  if (voucherStatusFilter !== 'ALL' && (j.status || 'POSTED') !== voucherStatusFilter) return false;
-                  return true;
-                }).map(j => {
-                  const typeCode = j.voucher_type_code || j.entry_number.slice(0,2) || 'JV';
-                  const typeColor = typeCode === 'RV' ? 'success' : typeCode === 'PV' ? 'error' : typeCode === 'CV' ? 'info' : 'secondary';
-                  const statusColor = (j.status || 'POSTED') === 'POSTED' ? 'success' : (j.status || '') === 'REVERSED' ? 'warning' : 'default';
-
-                  return (
-                    <TableRow key={j.id} hover>
-                      <TableCell sx={{ fontWeight: 700, color: 'primary.main', fontFamily: 'monospace' }}>{j.entry_number}</TableCell>
-                      <TableCell>{j.date}</TableCell>
-                      <TableCell><Chip label={typeCode} color={typeColor} size="small" sx={{ fontWeight: 800 }} /></TableCell>
-                      <TableCell>{j.description || j.narration || 'General Voucher Entry'}</TableCell>
-                      <TableCell align="right" sx={{ fontWeight: 800 }}>₹{(parseFloat(j.amount || 0)).toLocaleString()}</TableCell>
-                      <TableCell><Chip label={j.status || 'POSTED'} color={statusColor} size="small" sx={{ fontWeight: 700 }} /></TableCell>
-                      <TableCell align="center">
-                        {j.status !== 'REVERSED' && (
-                          <Tooltip title="Create Immutable Reversal Entry">
-                            <Button 
-                              size="small" variant="outlined" color="warning" 
-                              startIcon={<ReverseIcon />}
-                              onClick={() => handleReverseVoucher(j)}
-                              sx={{ textTransform: 'none', fontWeight: 700, fontSize: '0.72rem' }}
-                            >
-                              Reverse
-                            </Button>
-                          </Tooltip>
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  );
-                })
-              )}
-            </TableBody>
-          </Table>
-        </Card>
+        <VoucherRegister showToast={showToast} refreshKey={ledgerRefreshKey} onChanged={loadAccounts} />
       )}
 
       {/* 7. GENERAL LEDGER VIEW */}
       {topTab === 3 && (
-        <Card variant="outlined" sx={{ p: 4, borderRadius: 4 }}>
-          <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>General Ledger Statement</Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-            Account-wise debit, credit, and running balance ledger statement.
-          </Typography>
-        </Card>
+        <GeneralLedgerPanel accounts={accounts} accountId={ledgerAccountId} onAccountChange={setLedgerAccountId} />
       )}
 
       {/* 8. TRIAL BALANCE VIEW */}
-      {topTab === 4 && (
-        <Card variant="outlined" sx={{ p: 4, borderRadius: 4 }}>
-          <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>Trial Balance Statement</Typography>
-          <Table size="small">
-            <TableHead sx={{ bgcolor: '#f8fafc' }}>
-              <TableRow>
-                <TableCell sx={{ fontWeight: 700 }}>Account Code & Name</TableCell>
-                <TableCell sx={{ fontWeight: 700, textAlign: 'right' }}>Debit (₹)</TableCell>
-                <TableCell sx={{ fontWeight: 700, textAlign: 'right' }}>Credit (₹)</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {accounts.map(a => {
-                if (!a) return null;
-                const behavior = getAccountTypeBehavior(a.account_type);
-                const isDebitSide = behavior.normal_balance === 'DEBIT';
-                const bal = parseFloat(a.current_balance) || 0;
-                return (
-                  <TableRow key={a.id}>
-                    <TableCell sx={{ fontWeight: 600 }}>{a.code} - {a.name}</TableCell>
-                    <TableCell align="right" sx={{ fontWeight: 700 }}>{isDebitSide ? `₹${bal.toLocaleString()}` : '-'}</TableCell>
-                    <TableCell align="right" sx={{ fontWeight: 700 }}>{!isDebitSide ? `₹${bal.toLocaleString()}` : '-'}</TableCell>
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
-        </Card>
-      )}
+      {topTab === 4 && <TrialBalancePanel onOpenLedger={openLedger} />}
 
-      {/* 9. PROFIT & LOSS VIEW (NO COGS) */}
-      {topTab === 5 && (
-        <Card variant="outlined" sx={{ p: 4, borderRadius: 4 }}>
-          <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>Profit & Loss (P&L) Statement</Typography>
-          <Alert severity="info" sx={{ mb: 3, fontWeight: 600 }}>
-            Operating Income vs Operating Expenses statement (Excludes COGS as per Chart of Accounts configuration).
-          </Alert>
-          <Grid container spacing={3}>
-            <Grid item xs={12} md={6}>
-              <Paper variant="outlined" sx={{ p: 3, borderRadius: 3 }}>
-                <Typography variant="subtitle1" fontWeight={800} color="success.main" sx={{ mb: 1.5 }}>Total Operating Income</Typography>
-                <Typography variant="h4" fontWeight={850}>₹{totalIncome.toLocaleString()}</Typography>
-              </Paper>
-            </Grid>
-            <Grid item xs={12} md={6}>
-              <Paper variant="outlined" sx={{ p: 3, borderRadius: 3 }}>
-                <Typography variant="subtitle1" fontWeight={800} color="error.main" sx={{ mb: 1.5 }}>Total Operating Expenses</Typography>
-                <Typography variant="h4" fontWeight={850}>₹{totalExpenses.toLocaleString()}</Typography>
-              </Paper>
-            </Grid>
-          </Grid>
-        </Card>
-      )}
+      {/* 9. PROFIT & LOSS VIEW */}
+      {topTab === 5 && <ProfitLossPanel onOpenLedger={openLedger} />}
 
       {/* 10. BALANCE SHEET VIEW */}
-      {topTab === 6 && (
-        <Card variant="outlined" sx={{ p: 4, borderRadius: 4 }}>
-          <Typography variant="h6" fontWeight={850} sx={{ mb: 2 }}>Balance Sheet Statement</Typography>
-          <Grid container spacing={3}>
-            <Grid item xs={12} md={6}>
-              <Typography variant="subtitle2" fontWeight={800} sx={{ mb: 1 }}>ASSETS</Typography>
-              <Paper variant="outlined" sx={{ p: 2, borderRadius: 3 }}>
-                <Typography variant="h5" fontWeight={850} color="primary.main">₹{totalAssets.toLocaleString()}</Typography>
-              </Paper>
-            </Grid>
-            <Grid item xs={12} md={6}>
-              <Typography variant="subtitle2" fontWeight={800} sx={{ mb: 1 }}>LIABILITIES & EQUITY</Typography>
-              <Paper variant="outlined" sx={{ p: 2, borderRadius: 3 }}>
-                <Typography variant="h5" fontWeight={850} color="error.main">₹{(totalLiabilities + totalEquity).toLocaleString()}</Typography>
-              </Paper>
-            </Grid>
-          </Grid>
-        </Card>
-      )}
+      {topTab === 6 && <BalanceSheetPanel onOpenLedger={openLedger} />}
 
       {/* 11. FINANCIAL REPORTS VIEW */}
-      {topTab === 7 && (
-        <Card variant="outlined" sx={{ p: 4, borderRadius: 4 }}>
-          <Typography variant="h6" fontWeight={850} sx={{ mb: 2 }}>Financial & Audit Reports</Typography>
-          <Stack direction="row" spacing={2}>
-            <Button variant="outlined" startIcon={<FileDownloadIcon />} onClick={() => showToast("Financial Report exported to Excel!", "success")}>Export Excel</Button>
-            <Button variant="outlined" startIcon={<DownloadIcon />} onClick={() => showToast("Financial Report exported to PDF!", "success")}>Export PDF</Button>
-            <Button variant="outlined" startIcon={<PrintIcon />} onClick={() => window.print()}>Print Statements</Button>
-          </Stack>
-        </Card>
+      {topTab === 7 && <FinancialReportsPanel />}
+
+      {/* 12. ACCOUNTING INTEGRATION */}
+      {topTab === 8 && (
+        <AccountingIntegrationPanel accounts={accounts} showToast={showToast} onChanged={loadAccounts} />
       )}
 
       {/* DIALOG: ADD / EDIT ACCOUNT */}
@@ -2602,7 +2168,20 @@ function FinancialManagementView() {
                     type="number" 
                     label="Opening Balance (INR)" 
                     value={accountFormData.opening_balance} 
-                    onChange={(e) => setAccountFormData({ ...accountFormData, opening_balance: e.target.value })} 
+                    onChange={(e) => setAccountFormData({ ...accountFormData, opening_balance: e.target.value })}
+                    helperText="Reaches the ledger when posted from Accounting Integration"
+                  />
+                </Grid>
+
+                <Grid item xs={12} sm={6}>
+                  <TextField
+                    fullWidth
+                    size="small"
+                    type="date"
+                    label="Opening Balance Date"
+                    InputLabelProps={{ shrink: true }}
+                    value={accountFormData.opening_balance_date || ''}
+                    onChange={(e) => setAccountFormData({ ...accountFormData, opening_balance_date: e.target.value })}
                   />
                 </Grid>
 
@@ -2680,15 +2259,25 @@ function FinancialManagementView() {
                 <Typography variant="body2" fontWeight={700}>₹{(parseFloat(selectedAccountForView.opening_balance) || 0).toLocaleString()}</Typography>
               </Stack>
               <Stack direction="row" justifyContent="space-between">
-                <Typography variant="body2" color="text.secondary">Current Balance</Typography>
+                <Typography variant="body2" color="text.secondary">Posted Debits / Credits</Typography>
+                <Typography variant="body2" fontWeight={700}>₹{(selectedAccountForView.total_debit || 0).toLocaleString()} / ₹{(selectedAccountForView.total_credit || 0).toLocaleString()}</Typography>
+              </Stack>
+              <Stack direction="row" justifyContent="space-between">
+                <Typography variant="body2" color="text.secondary">Ledger Balance ({selectedAccountForView.normal_balance === 'DEBIT' ? 'Dr' : 'Cr'})</Typography>
                 <Typography variant="body2" fontWeight={850} color="primary.main">₹{(parseFloat(selectedAccountForView.current_balance) || 0).toLocaleString()}</Typography>
               </Stack>
               <Stack direction="row" justifyContent="space-between">
                 <Typography variant="body2" color="text.secondary">Status</Typography>
                 <Chip label={selectedAccountForView.status} color={selectedAccountForView.status === 'Active' ? 'success' : 'default'} size="small" sx={{ fontWeight: 700 }} />
               </Stack>
+              {selectedAccountForView.is_system && (
+                <Alert severity="info" sx={{ py: 0 }}>System account used by automated posting — it can be renamed but not deleted or deactivated.</Alert>
+              )}
               <Divider />
               <Typography variant="caption" color="text.secondary">{selectedAccountForView.description || 'No description provided.'}</Typography>
+              <Button variant="contained" startIcon={<LedgerIcon />} onClick={() => openLedger(selectedAccountForView.id)}>
+                Open General Ledger
+              </Button>
             </Stack>
           </Box>
         )}

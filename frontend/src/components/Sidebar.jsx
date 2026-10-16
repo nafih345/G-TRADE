@@ -111,7 +111,8 @@ const menuItems = [
       { text: 'Trial Balance', path: '/financial/trial-balance' },
       { text: 'Profit & Loss', path: '/financial/profit-loss' },
       { text: 'Balance Sheet', path: '/financial/balance-sheet' },
-      { text: 'Financial Reports', path: '/financial/reports' }
+      { text: 'Financial Reports', path: '/financial/reports' },
+      { text: 'Accounting Integration', path: '/financial/integration' }
     ]
   },
   {

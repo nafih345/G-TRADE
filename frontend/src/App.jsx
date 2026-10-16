@@ -261,6 +261,7 @@ function MainLayout() {
                 <Route path="/financial/profit-loss" element={<FinancialManagement />} />
                 <Route path="/financial/balance-sheet" element={<FinancialManagement />} />
                 <Route path="/financial/reports" element={<FinancialManagement />} />
+                <Route path="/financial/integration" element={<FinancialManagement />} />
 
 
 
