@@ -1,4 +1,8 @@
-"""Canonical starter templates for the Bill & Invoice Designer.
+"""LEGACY (schema 1) starter templates for the Bill & Invoice Designer.
+
+Superseded by the visual presets in bill_presets.py — fresh installs no longer seed these,
+but installs that already have them keep them, and "Restore Default" on one of them resets it
+from here (matched by preset_key).
 
 These are seeded into the DB the first time the templates endpoint is hit on an empty
 table (see views.ensure_seeded) — the same self-heal approach used for multi-branch.
@@ -226,42 +230,42 @@ def _wholesale():
 
 PRESETS = [
     {
-        'name': 'Standard Invoice', 'template_type': 'STANDARD',
+        'preset_key': 'legacy-standard', 'name': 'Standard Invoice', 'template_type': 'STANDARD',
         'description': 'Professional general-purpose A4 invoice.',
         'paper_size': 'A4', 'orientation': 'portrait',
         'margins': {'top': 15, 'right': 15, 'bottom': 15, 'left': 15},
         'is_default': True, 'config': _standard(),
     },
     {
-        'name': 'Compact Invoice', 'template_type': 'COMPACT',
+        'preset_key': 'legacy-compact', 'name': 'Compact Invoice', 'template_type': 'COMPACT',
         'description': 'Simple, minimal, space-saving A5 invoice.',
         'paper_size': 'A5', 'orientation': 'portrait',
         'margins': {'top': 8, 'right': 8, 'bottom': 8, 'left': 8},
         'config': _compact(),
     },
     {
-        'name': 'Thermal 80mm', 'template_type': 'THERMAL_80',
+        'preset_key': 'legacy-thermal-80', 'name': 'Thermal 80mm', 'template_type': 'THERMAL_80',
         'description': 'Optimised for 80mm thermal receipt printers. Auto height.',
         'paper_size': '80mm', 'orientation': 'portrait',
         'margins': {'top': 3, 'right': 3, 'bottom': 3, 'left': 3},
         'config': _thermal('80mm'),
     },
     {
-        'name': 'Thermal 58mm', 'template_type': 'THERMAL_58',
+        'preset_key': 'legacy-thermal-58', 'name': 'Thermal 58mm', 'template_type': 'THERMAL_58',
         'description': 'Optimised for 58mm thermal receipt printers. Auto height.',
         'paper_size': '58mm', 'orientation': 'portrait',
         'margins': {'top': 2, 'right': 2, 'bottom': 2, 'left': 2},
         'config': _thermal('58mm'),
     },
     {
-        'name': 'Jewellery Invoice', 'template_type': 'JEWELLERY',
+        'preset_key': 'legacy-jewellery', 'name': 'Jewellery Invoice', 'template_type': 'JEWELLERY',
         'description': 'Weight, making charge, stone charge and hallmark details.',
         'paper_size': 'A4', 'orientation': 'portrait',
         'margins': {'top': 12, 'right': 12, 'bottom': 12, 'left': 12},
         'config': _jewellery(),
     },
     {
-        'name': 'Wholesale Invoice', 'template_type': 'WHOLESALE',
+        'preset_key': 'legacy-wholesale', 'name': 'Wholesale Invoice', 'template_type': 'WHOLESALE',
         'description': 'SKU, quantity, wholesale rate, discount and totals.',
         'paper_size': 'A4', 'orientation': 'portrait',
         'margins': {'top': 12, 'right': 12, 'bottom': 12, 'left': 12},
@@ -279,3 +283,10 @@ DEFAULT_ASSIGNMENTS = {
     'QUOTATION': 'Standard Invoice',
     'PAYMENT_RECEIPT': 'Compact Invoice',
 }
+
+
+def legacy_preset(key):
+    for spec in PRESETS:
+        if spec.get('preset_key') == key:
+            return copy.deepcopy(spec)
+    return None

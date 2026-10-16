@@ -3,6 +3,17 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import QuickDatePickerField from '../components/common/QuickDatePickerField';
 import PurchaseEntryView from '../components/purchasing/PurchaseEntryView';
 import { printPurchaseReceipt } from '../utils/printPurchase';
+import { printBill } from '../billing/printBill';
+
+// Debit note for a purchase return, printed with the PURCHASE_RETURN template. The return
+// row carries one item and the credit amount requested; nothing else is computed.
+const printPurchaseReturn = (r) => printBill({
+  documentType: 'PURCHASE_RETURN',
+  doc: {
+    returnNo: r.id, date: r.date, supplierName: r.supplier, reason: r.reason, status: r.status,
+    creditAmount: r.creditAmount, items: [{ name: r.item, qty: r.qty, total: r.creditAmount }],
+  },
+});
 import { useDebounce } from '../hooks/useDebounce';
 import { 
   Box, Card, CardContent, Typography, Button, Tab, Tabs, 
@@ -1438,6 +1449,7 @@ export default function Purchases() {
                       <TableCell sx={{ fontWeight: 700 }}>Date Logged</TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>Requested Credit Note</TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>Status</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }} align="right">Print</TableCell>
                     </TableRow>
                   </TableHead>
                   <TableBody>
@@ -1477,6 +1489,11 @@ export default function Purchases() {
                           <TableCell>{r.date}</TableCell>
                           <TableCell sx={{ fontWeight: 700 }}>₹{(r.creditAmount || 0).toFixed(2)}</TableCell>
                           <TableCell><Chip label={r.status} color="warning" size="small" sx={{ fontWeight: 700 }} /></TableCell>
+                          <TableCell align="right">
+                            <Tooltip title="Print debit note (Purchase Return template)">
+                              <IconButton size="small" onClick={() => printPurchaseReturn(r)}><PrintIcon fontSize="small" /></IconButton>
+                            </Tooltip>
+                          </TableCell>
                         </TableRow>
                       ))
                     )}

@@ -4,7 +4,7 @@ import uuid
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from django.db import IntegrityError, transaction
-from django.db.models import DecimalField as ModelDecimalField, Prefetch
+from django.db.models import DecimalField as ModelDecimalField, Prefetch, Q
 from django.utils import timezone
 from rest_framework import viewsets, permissions, serializers
 from rest_framework.decorators import action
@@ -544,6 +544,10 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
         doc_type = self.request.query_params.get('document_type')
         if doc_type and doc_type.lower() != 'all':
             qs = qs.filter(document_type=doc_type.upper())
+        # ?search= — bill number or customer name (the bill designer's "preview a real bill" picker).
+        search = (self.request.query_params.get('search') or '').strip()
+        if search:
+            qs = qs.filter(Q(invoice_number__icontains=search) | Q(customer_name__icontains=search))
         return qs
 
     # QUOTATION -> QTN, ORDER -> ORD, INVOICE (and anything else) -> INV, so an auto-generated

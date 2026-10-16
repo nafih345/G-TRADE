@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Box, Card, Typography, Button, Stack, TextField, Grid, Alert, Avatar,
+  Box, Card, Typography, Button, Stack, TextField, Grid, Alert, Avatar, Chip,
 } from '@mui/material';
 import { CloudUpload as UploadIcon, Delete as DeleteIcon, Save as SaveIcon } from '@mui/icons-material';
 
@@ -27,18 +27,21 @@ function fileToDataUrl(file, maxDim = 320) {
   });
 }
 
-export default function BrandingPanel({ settings, onSave, saving }) {
+export default function BrandingPanel({ settings, onSave, saving, canDesign = true }) {
   const [logo, setLogo] = useState('');
   const [primary, setPrimary] = useState('#2563eb');
   const [accent, setAccent] = useState('#0f172a');
-  const [info, setInfo] = useState({ tagline: '', website: '', pan: '' });
+  const [info, setInfo] = useState({ tagline: '', website: '', pan: '', bankDetails: '', upiId: '' });
+  const [themes, setThemes] = useState([]);
+  const [error, setError] = useState('');
   const [savedMsg, setSavedMsg] = useState(false);
 
   useEffect(() => {
     setLogo(settings.logo_data_url || '');
     setPrimary(settings.primary_color || '#2563eb');
     setAccent(settings.accent_color || '#0f172a');
-    setInfo({ tagline: '', website: '', pan: '', ...(settings.business_info || {}) });
+    setInfo({ tagline: '', website: '', pan: '', bankDetails: '', upiId: '', ...(settings.business_info || {}) });
+    setThemes(settings.themes || []);
   }, [settings]);
 
   const handleFile = async (e) => {
@@ -53,12 +56,19 @@ export default function BrandingPanel({ settings, onSave, saving }) {
   };
 
   const handleSave = async () => {
-    await onSave({
-      logo_data_url: logo,
-      primary_color: primary,
-      accent_color: accent,
-      business_info: info,
-    });
+    setError('');
+    try {
+      await onSave({
+        logo_data_url: logo,
+        primary_color: primary,
+        accent_color: accent,
+        business_info: info,
+        themes,
+      });
+    } catch (e) {
+      setError(e?.response?.data ? Object.values(e.response.data).flat().join(' ') : 'Could not save branding.');
+      return;
+    }
     setSavedMsg(true);
     setTimeout(() => setSavedMsg(false), 3500);
   };
@@ -72,12 +82,13 @@ export default function BrandingPanel({ settings, onSave, saving }) {
             The uploaded logo and these details are automatically available to every bill template.
           </Typography>
         </Box>
-        <Button variant="contained" startIcon={<SaveIcon />} disabled={saving} onClick={handleSave} sx={{ fontWeight: 800 }}>
+        <Button variant="contained" startIcon={<SaveIcon />} disabled={saving || !canDesign} onClick={handleSave} sx={{ fontWeight: 800 }}>
           {saving ? 'Saving…' : 'Save Branding'}
         </Button>
       </Stack>
 
       {savedMsg && <Alert severity="success" sx={{ mb: 2, borderRadius: 2 }}>Branding saved.</Alert>}
+      {error && <Alert severity="error" sx={{ mb: 2, borderRadius: 2 }}>{error}</Alert>}
 
       <Grid container spacing={3} sx={{ mt: 0.5 }}>
         <Grid item xs={12} sm={4}>
@@ -115,6 +126,24 @@ export default function BrandingPanel({ settings, onSave, saving }) {
             <Grid item xs={6}>
               <TextField label="PAN" fullWidth size="small" value={info.pan}
                 onChange={(e) => setInfo((i) => ({ ...i, pan: e.target.value }))} />
+            </Grid>
+            <Grid item xs={12} sm={6}>
+              <TextField label="Bank details (printed by “Payment details”)" fullWidth size="small" multiline minRows={2} value={info.bankDetails}
+                placeholder="Bank · A/C no · IFSC" onChange={(e) => setInfo((i) => ({ ...i, bankDetails: e.target.value }))} />
+            </Grid>
+            <Grid item xs={12} sm={6}>
+              <TextField label="UPI ID (for UPI QR codes)" fullWidth size="small" value={info.upiId}
+                placeholder="store@bank" onChange={(e) => setInfo((i) => ({ ...i, upiId: e.target.value.trim() }))} />
+            </Grid>
+            <Grid item xs={12}>
+              <Typography variant="caption" color="text.secondary">Saved colour themes (created in the designer):</Typography>
+              <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap sx={{ mt: 0.5 }}>
+                {!themes.length && <Typography variant="caption" color="text.disabled">None yet</Typography>}
+                {themes.map((t) => (
+                  <Chip key={t.name} size="small" label={t.name} onDelete={canDesign ? () => setThemes((all) => all.filter((x) => x.name !== t.name)) : undefined}
+                    avatar={<Box sx={{ width: 14, height: 14, borderRadius: '50%', bgcolor: t.primary, ml: '6px !important' }} />} />
+                ))}
+              </Stack>
             </Grid>
           </Grid>
         </Grid>

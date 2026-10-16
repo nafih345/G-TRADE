@@ -6,16 +6,18 @@
 // the document type in Settings → Bill & Invoice Designer.
 import { printBill } from '../billing/printBill';
 
-// paperSize: 'A4' | 'A5' | 'Thermal'  (legacy toggle from PrintInvoiceModal)
-export const printSalesInvoiceReceipt = (invoice, paperSize = 'A4', documentType = 'SALES_INVOICE') => {
+// paperSize: omitted / 'AUTO' = the template assigned to the document type in the designer;
+// 'A4' | 'A5' | 'Thermal' = an explicit paper choice (PrintInvoiceModal's toggle).
+export const printSalesInvoiceReceipt = (invoice, paperSize, documentType = 'SALES_INVOICE') => {
   if (!invoice) return;
   printBill({ doc: invoice, documentType, paperOverride: paperSize });
 };
 
 export const downloadPdfInvoice = (invoice, documentType = 'SALES_INVOICE') => {
   if (!invoice) return;
-  // Same flow — the browser's print dialog offers "Save as PDF".
-  printBill({ doc: invoice, documentType, paperOverride: 'A4' });
+  // Same flow with the assigned template — the browser's print dialog offers "Save as PDF"
+  // and suggests the document number as the file name (the print window's <title>).
+  printBill({ doc: invoice, documentType });
 };
 
 export default printSalesInvoiceReceipt;

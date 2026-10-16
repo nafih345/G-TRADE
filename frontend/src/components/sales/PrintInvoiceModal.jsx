@@ -13,7 +13,8 @@ import BillPreview from '../../billing/BillPreview';
 // When `showWhatsappPreview` is set, it also renders the exact WhatsApp receipt text that the
 // "Send WhatsApp Receipt" button / the Alt+W shortcut will share.
 export default function PrintInvoiceModal({ open, onClose, invoice, documentType = 'SALES_INVOICE', showWhatsappPreview = false }) {
-  const [paperSize, setPaperSize] = useState('A4');
+  // 'AUTO' = the template assigned to this document type in Settings → Bill & Invoice Designer.
+  const [paperSize, setPaperSize] = useState('AUTO');
 
   // Alt + W shares the currently-previewed invoice on WhatsApp, matching the shortcut wired up
   // on the New Sale screen so it keeps working while this dialog is focused.
@@ -44,6 +45,7 @@ export default function PrintInvoiceModal({ open, onClose, invoice, documentType
             onChange={(e, val) => val && setPaperSize(val)}
             sx={{ bgcolor: '#fff', borderRadius: 1.5, mr: 0.5 }}
           >
+            <ToggleButton value="AUTO" sx={{ textTransform: 'none', fontWeight: 800, px: 1.5, py: 0.3 }}>Assigned</ToggleButton>
             <ToggleButton value="A4" sx={{ textTransform: 'none', fontWeight: 800, px: 1.5, py: 0.3 }}>A4</ToggleButton>
             <ToggleButton value="A5" sx={{ textTransform: 'none', fontWeight: 800, px: 1.5, py: 0.3 }}>A5</ToggleButton>
             <ToggleButton value="Thermal" sx={{ textTransform: 'none', fontWeight: 800, px: 1.5, py: 0.3 }}>Thermal</ToggleButton>
@@ -55,7 +57,7 @@ export default function PrintInvoiceModal({ open, onClose, invoice, documentType
             WhatsApp Rx
           </Button>
           <Button variant="contained" color="primary" startIcon={<PrintIcon />} onClick={handleTriggerPrint} sx={{ fontWeight: 800 }}>
-            Print {paperSize}
+            Print{paperSize === 'AUTO' ? '' : ` ${paperSize}`}
           </Button>
           <Button color="inherit" onClick={onClose}><CloseIcon /></Button>
         </Stack>
@@ -104,7 +106,7 @@ export default function PrintInvoiceModal({ open, onClose, invoice, documentType
           Send WhatsApp Receipt
         </Button>
         <Button variant="contained" color="primary" startIcon={<PrintIcon />} onClick={handleTriggerPrint} sx={{ fontWeight: 800, px: 4 }}>
-          Print {paperSize}
+          Print{paperSize === 'AUTO' ? '' : ` ${paperSize}`}
         </Button>
       </DialogActions>
     </Dialog>

@@ -1,3 +1,5 @@
+import uuid
+
 from django.db import models, transaction
 
 from apps.common.models import BaseUUIDModel
@@ -9,23 +11,32 @@ from apps.common.models import BaseUUIDModel
 DOCUMENT_TYPES = [
     ('SALES_INVOICE', 'Sales Invoice / Bill'),
     ('WHOLESALE_BILL', 'Wholesale Bill'),
-    ('ORDER_BILL', 'Order Bill / Job Slip'),
     ('PURCHASE_BILL', 'Purchase Bill'),
-    ('RETURN_BILL', 'Return Bill'),
+    ('ORDER_BILL', 'Order Bill / Job Slip'),
     ('QUOTATION', 'Quotation'),
     ('PAYMENT_RECEIPT', 'Payment Receipt'),
+    ('SALES_RETURN', 'Sales Return'),
+    ('PURCHASE_RETURN', 'Purchase Return'),
 ]
 DOCUMENT_TYPE_KEYS = [k for k, _ in DOCUMENT_TYPES]
+# Older slugs still sent by callers -> the type they now mean. RETURN_BILL became
+# SALES_RETURN when purchase returns got their own document type (migration 0002).
+DOCUMENT_TYPE_ALIASES = {'RETURN_BILL': 'SALES_RETURN'}
 
 
 class BillTemplate(BaseUUIDModel):
     """A reusable bill/invoice layout.
 
-    `config` (JSON) holds the entire *presentation* definition — sections, their order,
-    visibility and per-section settings, item-table columns, totals toggles,
-    header/footer/barcode/QR config and global styles. The frontend Bill Rendering Engine
-    (frontend/src/billing/renderBillHtml.js) is the only consumer of this shape. Nothing
-    in this app touches invoice calculations, numbering, stock or accounting.
+    `config` (JSON) holds the entire *presentation* definition. Two shapes exist:
+      * schema 2 (visual designer): theme, formatting, page options and bands of positioned
+        elements bound to data-field ids — validated by bill_fields.validate_config and drawn
+        by frontend/src/billing/renderBillLayout.js;
+      * legacy (no `schema` key): section toggles drawn by renderBillHtml.js.
+    Nothing in this app touches invoice calculations, numbering, stock or accounting.
+
+    `version` increments on every update; the previous state is kept as a
+    BillTemplateVersion row and updates may send `expected_version` (optimistic lock) so two
+    people can't silently overwrite each other's design.
     """
 
     name = models.CharField(max_length=120)
@@ -48,6 +59,10 @@ class BillTemplate(BaseUUIDModel):
     # so the UI can warn before deleting the last usable layout.
     is_preset = models.BooleanField(default=False)
     thumbnail = models.TextField(blank=True, default='')  # optional cached preview data-URL
+    version = models.PositiveIntegerField(default=1)
+    # Starter preset this template was created from — "Restore Default" resets to it.
+    preset_key = models.CharField(max_length=60, blank=True, default='')
+    updated_by_name = models.CharField(max_length=150, blank=True, default='')
 
     class Meta:
         ordering = ['-is_default', 'name']
@@ -61,6 +76,28 @@ class BillTemplate(BaseUUIDModel):
             if self.is_default:
                 BillTemplate.all_objects.filter(is_default=True).exclude(pk=self.pk).update(is_default=False)
             super().save(*args, **kwargs)
+
+
+class BillTemplateVersion(models.Model):
+    """Snapshot of a BillTemplate as it was *before* an update (kept for restore)."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    template = models.ForeignKey(BillTemplate, on_delete=models.CASCADE, related_name='versions')
+    version = models.PositiveIntegerField()
+    name = models.CharField(max_length=120)
+    paper_size = models.CharField(max_length=10, default='A4')
+    orientation = models.CharField(max_length=10, default='portrait')
+    custom_width_mm = models.DecimalField(max_digits=6, decimal_places=1, null=True, blank=True)
+    custom_height_mm = models.DecimalField(max_digits=6, decimal_places=1, null=True, blank=True)
+    margins = models.JSONField(default=dict, blank=True)
+    config = models.JSONField(default=dict, blank=True)
+    saved_at = models.DateTimeField(auto_now_add=True)
+    saved_by = models.CharField(max_length=150, blank=True, default='')
+
+    class Meta:
+        ordering = ['-version']
+        constraints = [
+            models.UniqueConstraint(fields=['template', 'version'], name='uniq_bill_template_version'),
+        ]
 
 
 class DocumentTemplateAssignment(BaseUUIDModel):
@@ -94,8 +131,14 @@ class BillingSettings(BaseUUIDModel):
     logo_data_url = models.TextField(blank=True, default='')
     primary_color = models.CharField(max_length=20, blank=True, default='#2563eb')
     accent_color = models.CharField(max_length=20, blank=True, default='#0f172a')
-    # Extra header lines not on the Company model: tagline, website, PAN, custom text.
+    # Extra header lines not on the Company model: tagline, website, PAN, bank details, UPI id.
     business_info = models.JSONField(default=dict, blank=True)
+    # Saved colour themes the designer offers next to the built-in ones:
+    # [{"name": "...", "primary": "#..", "accent": .., "text": .., "muted": .., "border": ..,
+    #   "headerBg": .., "headerText": ..}]
+    themes = models.JSONField(default=list, blank=True)
+    # Which generation of starter presets this install has received (bill_presets.PRESET_GENERATION).
+    presets_generation = models.PositiveIntegerField(default=0)
 
     class Meta:
         verbose_name = 'Billing Settings'

@@ -251,6 +251,8 @@ export const DEFAULT_ASSIGNMENTS = {
   ORDER_BILL: 'Standard Invoice',
   PURCHASE_BILL: 'Standard Invoice',
   RETURN_BILL: 'Compact Invoice',
+  SALES_RETURN: 'Compact Invoice',
+  PURCHASE_RETURN: 'Compact Invoice',
   QUOTATION: 'Standard Invoice',
   PAYMENT_RECEIPT: 'Compact Invoice',
 };

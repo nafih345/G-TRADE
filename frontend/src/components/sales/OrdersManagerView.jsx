@@ -713,7 +713,7 @@ export default function OrdersManagerView({
                           <Tooltip title={docView === 'QUOTATION' ? 'Print Quotation' : docView === 'ORDER' ? 'Print Lab Job Work Slip' : 'Print Invoice'}>
                             <IconButton size="small" color="inherit" onClick={() => {
                               if (onPrintInvoice) onPrintInvoice(ord);
-                              printSalesInvoiceReceipt(ord, 'A4', billDocType);
+                              printSalesInvoiceReceipt(ord, undefined, billDocType);
                             }}>
                               <PrintIcon fontSize="small" />
                             </IconButton>
@@ -890,7 +890,7 @@ export default function OrdersManagerView({
                 Edit in New Sale
               </Button>
             )}
-            <Button variant="outlined" onClick={() => printSalesInvoiceReceipt(selectedOrder, 'A4', billDocType)} startIcon={<PrintIcon />}>
+            <Button variant="outlined" onClick={() => printSalesInvoiceReceipt(selectedOrder, undefined, billDocType)} startIcon={<PrintIcon />}>
               Print {docView === 'QUOTATION' ? 'Quotation' : docView === 'ORDER' ? 'Job Slip' : 'Invoice'}
             </Button>
             <Button variant="contained" onClick={() => setDetailModalOpen(false)}>

@@ -23,6 +23,26 @@ import {
   Inbox as EmptyIcon,
   Send as SendIcon
 } from '@mui/icons-material';
+import { printBill } from '../../billing/printBill';
+import { notify } from '../../utils/notify';
+
+// Prints a receipt with the template assigned to PAYMENT_RECEIPT (Settings → Bill & Invoice Designer).
+const printPaymentReceipt = (p) => {
+  printBill({
+    documentType: 'PAYMENT_RECEIPT',
+    doc: {
+      receipt_no: p.receiptNo || p.receipt_no || p.id,
+      payment_date: p.date,
+      customer_name: p.customerName || p.customer,
+      amount: p.amount,
+      method: p.method,
+      reference: p.txnRef,
+      invoice_number: p.invoiceNumber || p.invoice_number || p.orderId || '',
+      status: p.status,
+      notes: p.notes,
+    },
+  }).then((opened) => { if (!opened) notify('Allow pop-ups to print the receipt.', 'warning'); });
+};
 
 export default function PaymentsManagerView({
   payments = [],
@@ -265,7 +285,7 @@ export default function PaymentsManagerView({
                         <TableCell align="right">
                           <Stack direction="row" spacing={0.5} justifyContent="flex-end">
                             <Tooltip title="Print Payment Receipt">
-                              <IconButton size="small" color="primary" onClick={() => window.print()}>
+                              <IconButton size="small" color="primary" onClick={() => printPaymentReceipt(p)}>
                                 <PrintIcon fontSize="small" />
                               </IconButton>
                             </Tooltip>

@@ -1402,24 +1402,8 @@ export default function WholesaleSales() {
       try { await axios.patch(`${WHOLESALE_API}/dealers/${dealer.id}/`, { outstanding_balance: newOutstanding }); } catch (e) {}
     }
 
-    // 3. Post Financial Journal Entry
-    try {
-      const existingJournals = readLS(LS_KEYS.journals, []);
-      const journalNo = `JV-W-${Math.floor(1000 + Math.random() * 9000)}`;
-      const newJournal = {
-        id: journalNo,
-        voucherNo: journalNo,
-        date: invoiceDate,
-        voucherType: 'JOURNAL',
-        narration: `Wholesale POS Invoice #${invoiceNo} - ${dealer.name} (${payMode})`,
-        entries: [
-          { accountCode: payMode === 'Credit Sale' ? '1100' : '1001', accountName: payMode === 'Credit Sale' ? `Accounts Receivable (${dealer.name})` : `Cash/Bank Account (${payMode})`, debit: summary.grandTotal, credit: 0 },
-          { accountCode: '4001', accountName: 'Wholesale Sales Income', debit: 0, credit: summary.subtotal - summary.totalDiscount },
-          { accountCode: '2100', accountName: 'Output GST Payable (18%)', debit: 0, credit: summary.totalGst },
-        ],
-      };
-      writeLS(LS_KEYS.journals, [newJournal, ...existingJournals]);
-    } catch (e) {}
+    // 3. Accounting: nothing to do here. The backend books the saved WholesaleInvoice, the
+    // collection below and the stock adjustments above into the ledger (apps/financial).
 
     // 4. Receipt for the amount collected at the counter (the invoice row itself was saved above).
     if (isUuid(dealer.id) && completedInvoice.amountReceived > 0) {
@@ -1525,6 +1509,18 @@ export default function WholesaleSales() {
       } catch (e) {}
     }
     return record;
+  }
+
+  // Prints the latest return / credit note recorded against this invoice with the template
+  // assigned to SALES_RETURN (Settings → Bill & Invoice Designer). Uses the record as stored.
+  function printLastReturn() {
+    if (!printableInvoice) return;
+    const rec = readLS(LS_KEYS.returns, []).find((r) => r.invoiceNo === printableInvoice.invoiceNo);
+    if (!rec) { showToast(`No return or credit note has been recorded for ${printableInvoice.invoiceNo} on this device.`, 'info'); return; }
+    printBill({
+      documentType: 'SALES_RETURN',
+      doc: { ...rec, invoiceNo: rec.invoiceNo, summary: { grandTotal: rec.amount }, action_taken: rec.reason },
+    }).then((opened) => { if (!opened) showToast('Allow pop-ups to print the credit note.', 'warning'); });
   }
 
   async function handleCancelInvoice() {
@@ -1840,6 +1836,7 @@ export default function WholesaleSales() {
         <MenuItem disabled={!printableInvoice || !canOverride} onClick={() => { setMoreActionsAnchor(null); setReplacementConfirmOpen(true); }}><ReplacementIcon fontSize="small" sx={{ mr: 1 }} /> Replacement{!canOverride ? ' (Manager/Admin)' : ''}</MenuItem>
         <MenuItem disabled={!printableInvoice || !canOverride} onClick={() => { setMoreActionsAnchor(null); setCreditNoteOpen(true); }}><CreditNoteIcon fontSize="small" sx={{ mr: 1 }} /> Create Credit Note{!canOverride ? ' (Manager/Admin)' : ''}</MenuItem>
         <MenuItem disabled={!printableInvoice || !canOverride} onClick={() => { setMoreActionsAnchor(null); setCancelInvoiceConfirmOpen(true); }}><CancelInvoiceIcon fontSize="small" sx={{ mr: 1 }} /> Cancel Invoice{!canOverride ? ' (Manager/Admin)' : ''}</MenuItem>
+        <MenuItem disabled={!printableInvoice} onClick={() => { setMoreActionsAnchor(null); printLastReturn(); }}><PrintIcon fontSize="small" sx={{ mr: 1 }} /> Print Return / Credit Note</MenuItem>
         <Divider />
         <MenuItem disabled={!selectedCustomer} onClick={() => { setMoreActionsAnchor(null); setLedgerOpen(true); }}><LedgerIcon fontSize="small" sx={{ mr: 1 }} /> View Dealer Ledger</MenuItem>
       </Menu>

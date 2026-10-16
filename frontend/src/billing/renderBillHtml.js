@@ -11,6 +11,8 @@ import QRCode from 'qrcode';
 const PAPER = {
   A4: { w: 210, h: 297 },
   A5: { w: 148, h: 210 },
+  A6: { w: 105, h: 148 },
+  LETTER: { w: 215.9, h: 279.4 },
   '80mm': { w: 80, h: null },
   '58mm': { w: 58, h: null },
 };
@@ -30,18 +32,20 @@ export function paperDimensions(template) {
   return { ...base };
 }
 
+// Continuous-roll paper: the page is as long as the document.
 export function isThermalTemplate(template) {
   return ['58mm', '80mm'].includes(template?.paper_size) ||
-    (template?.paper_size === 'CUSTOM' && (parseFloat(template?.custom_width_mm) || 999) <= 100);
+    (template?.paper_size === 'CUSTOM' && !(parseFloat(template?.custom_height_mm) > 0));
 }
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
 ));
 
+// A missing amount prints blank — never as a made-up 0.00.
 function money(v, currency = '₹') {
-  const n = parseFloat(v);
-  if (!Number.isFinite(n)) return `${currency}0.00`;
+  const n = v === null || v === undefined || v === '' ? NaN : parseFloat(v);
+  if (!Number.isFinite(n)) return '';
   const neg = n < 0;
   const s = Math.abs(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   return `${neg ? '-' : ''}${currency}${s}`;
@@ -324,8 +328,8 @@ function renderPayment(model, cfg, thermal, currency, assets) {
   const p = model.payment;
   const rows = [];
   if (cfg.showMethod && p.method) rows.push(['Payment Method', esc(p.method)]);
-  if (cfg.showPaid) rows.push(['Paid', money(p.paid, currency)]);
-  if (cfg.showBalance) rows.push(['Balance', money(p.balance, currency)]);
+  if (cfg.showPaid && money(p.paid, currency)) rows.push(['Paid', money(p.paid, currency)]);
+  if (cfg.showBalance && money(p.balance, currency)) rows.push(['Balance', money(p.balance, currency)]);
   if (cfg.showStatus && p.status) rows.push(['Status', esc(p.status)]);
   if (cfg.showBankDetails && cfg.bankDetails) rows.push(['Bank', esc(cfg.bankDetails)]);
   if (!rows.length && !(cfg.showUpiQr && assets.qrDataUrl)) return '';
