@@ -5,8 +5,8 @@
   "outputDirectory": "frontend/dist",
   "rewrites": [
     {
-      "source": "/api/:path*",
-      "destination": "https://g-trade-backend.onrender.com/api/:path*"
+      "source": "/api/(.*)",
+      "destination": "https://g-trade-backend.onrender.com/api/$1"
     },
     {
       "source": "/((?!api/).*)",

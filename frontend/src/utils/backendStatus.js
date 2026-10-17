@@ -11,7 +11,7 @@ import { clearLocalDataIfReset } from './localDataReset';
 export const API_BASE_OVERRIDE_KEY = 'api_base_url';
 
 // Default target for any deployed (non-localhost) build. Keep this in step with the
-// `/api/:path*` rewrite destination in vercel.json and the service name in render.yaml.
+// `/api/(.*)` rewrite destination in vercel.json and the service name in render.yaml.
 export const DEFAULT_DEPLOYED_API_URL = 'https://g-trade-backend.onrender.com';
 
 const isLocalhost = () =>
@@ -110,6 +110,27 @@ export async function checkBackendHealth() {
 let installed = false;
 let lastProbeAt = 0;
 const REPROBE_INTERVAL_MS = 30000;
+const UNREACHABLE_RETRY_MS = 15000;
+
+// The browser talks to Render directly (see resolveApiBaseUrl), which means *the user's own
+// DNS* has to resolve onrender.com. Home-router resolvers drop lookups intermittently and the
+// browser reports net::ERR_NAME_NOT_RESOLVED — the backend is fine, the PC just couldn't find
+// it. A Vercel-hosted page has a second road to the same backend: vercel.json rewrites
+// same-origin /api/* to Render, and Vercel's servers do the DNS lookup. So when a direct
+// request fails before any server answered, retry it once through that road and stay on it
+// for the rest of the session.
+const canFallBackToSameOrigin = () => {
+  const base = axios.defaults.baseURL;
+  if (!base || !/^https?:$/.test(window.location.protocol) || isLocalhost()) return false;
+  try {
+    return new URL(base).origin !== window.location.origin;
+  } catch {
+    return false;
+  }
+};
+
+const isNetworkFailure = (error) =>
+  !error?.response && error?.code !== 'ECONNABORTED' && !axios.isCancel?.(error);
 
 // A single successful response is not proof the outage is over — with a half-broken
 // database plenty of endpoints still answer 200. So rather than clearing the banner on
@@ -137,6 +158,15 @@ export function installBackendHealthWatch() {
       return response;
     },
     (error) => {
+      const config = error?.config;
+      if (config && !config.__sameOriginRetry && isNetworkFailure(error) && canFallBackToSameOrigin()) {
+        console.warn(
+          `[api] ${axios.defaults.baseURL} unreachable (${error.message}); switching to the same-origin /api proxy`
+        );
+        axios.defaults.baseURL = '';
+        return axios.request({ ...config, baseURL: '', __sameOriginRetry: true });
+      }
+
       // A 4xx is the API working and saying no; only a 5xx or a dead socket is an outage.
       const status = error?.response?.status;
       const keepHealthVerdict = state.source === 'health' && state.status !== 'ok';
@@ -151,7 +181,7 @@ export function installBackendHealthWatch() {
         }
         // Traffic noticed trouble the boot probe may have missed — go ask properly.
         reprobeIfBroken();
-      } else if (!error?.response && error?.code !== 'ECONNABORTED' && !axios.isCancel?.(error)) {
+      } else if (isNetworkFailure(error)) {
         if (!keepHealthVerdict) {
           setState({
             status: 'unreachable',
@@ -167,6 +197,15 @@ export function installBackendHealthWatch() {
 
   checkBackendHealth();
   installKeepAwake();
+
+  // "Unreachable" is usually a blip (DNS hiccup, Wi-Fi drop). Keep asking while it lasts so
+  // the banner clears by itself instead of waiting for the user to press Re-check.
+  setInterval(() => {
+    if (state.status === 'unreachable' && Date.now() - lastProbeAt >= UNREACHABLE_RETRY_MS) {
+      checkBackendHealth();
+    }
+  }, 5000);
+  window.addEventListener('online', () => checkBackendHealth());
 }
 
 // Render's free plan puts the backend to sleep after 15 minutes without a request. Filling in
