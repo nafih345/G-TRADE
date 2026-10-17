@@ -12,6 +12,7 @@ Mirrors apps.products.barcode_utils.reserve_barcodes.
 from django.db import transaction, connection
 
 from .models import PatientCodeSequence, TestNoSequence, EyeExamination, Appointment
+from apps.common.sequences import bump_sequence
 
 DEFAULT_PREFIX = 'P'
 TEST_NO_PREFIX = ''  # Test No is displayed as a bare number (1001, 1002…), unlike patient_code's "P-" prefix
@@ -19,15 +20,7 @@ TEST_NO_PREFIX = ''  # Test No is displayed as a bare number (1001, 1002…), un
 
 def reserve_patient_codes(prefix=DEFAULT_PREFIX, count=1):
     """Atomically reserves `count` sequential patient codes (e.g. P-1001) for `prefix`."""
-    PatientCodeSequence.objects.get_or_create(prefix=prefix, defaults={'last_number': 1000})
-    table = PatientCodeSequence._meta.db_table
-    with transaction.atomic():
-        with connection.cursor() as cursor:
-            cursor.execute(
-                f"UPDATE {table} SET last_number = last_number + %s WHERE prefix = %s RETURNING last_number",
-                [count, prefix]
-            )
-            new_last = cursor.fetchone()[0]
+    new_last = bump_sequence(PatientCodeSequence, {'prefix': prefix}, count, defaults={'last_number': 1000})
     start = new_last - count + 1
     return [f"{prefix}-{start + i}" for i in range(count)]
 
@@ -51,15 +44,7 @@ def reserve_test_numbers(count=1):
     shared by Appointment.test_no and EyeExamination.test_no — same mechanics as
     reserve_patient_codes, see its docstring for why an atomic UPDATE is used."""
     prefix = TEST_NO_PREFIX
-    TestNoSequence.objects.get_or_create(prefix=prefix, defaults={'last_number': 1000})
-    table = TestNoSequence._meta.db_table
-    with transaction.atomic():
-        with connection.cursor() as cursor:
-            cursor.execute(
-                f"UPDATE {table} SET last_number = last_number + %s WHERE prefix = %s RETURNING last_number",
-                [count, prefix]
-            )
-            new_last = cursor.fetchone()[0]
+    new_last = bump_sequence(TestNoSequence, {'prefix': prefix}, count, defaults={'last_number': 1000})
     start = new_last - count + 1
     return [str(start + i) for i in range(count)]
 

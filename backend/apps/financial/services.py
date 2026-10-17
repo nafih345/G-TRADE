@@ -130,18 +130,12 @@ def check_period_open(date):
 def next_entry_number(prefix, date):
     """PREFIX-YYYY-00001, sequential per prefix and calendar year of the entry date. (A posting
     that loses a race to the unique live-entry index burns its number, so gaps are possible.)"""
+    from apps.common.sequences import bump_sequence
+
     prefix = (prefix or 'JV').upper()[:10]
     year = date.year
-    with transaction.atomic():
-        try:
-            with transaction.atomic():
-                JournalSequence.objects.get_or_create(prefix=prefix, year=year)
-        except IntegrityError:
-            pass  # created concurrently — the locked read below sees it
-        seq = JournalSequence.objects.select_for_update().get(prefix=prefix, year=year)
-        seq.last_number += 1
-        seq.save(update_fields=['last_number'])
-        number = f"{prefix}-{year}-{seq.last_number:05d}"
+    # One atomic UPDATE ... RETURNING (the row stays locked until the posting commits).
+    number = f"{prefix}-{year}-{bump_sequence(JournalSequence, {'prefix': prefix, 'year': year}):05d}"
     # Legacy rows used other formats, but guard anyway: never hand out a taken number.
     while JournalEntry.all_objects.filter(entry_number=number).exists():
         return next_entry_number(prefix, date)
@@ -262,7 +256,9 @@ def create_journal(*, lines, date=None, narration='', status='POSTED', voucher_t
     if status == 'POSTED':
         check_period_open(date)
 
-    vtype = get_or_create_voucher_type(code, VOUCHER_TYPE_NAMES.get(code, f'Voucher {code}')) if code else None
+    from .batch import memo
+    vtype = memo(('vtype', code), lambda: get_or_create_voucher_type(
+        code, VOUCHER_TYPE_NAMES.get(code, f'Voucher {code}'))) if code else None
     actor = _actor(user)
     total = sum((l['debit'] for l in parsed), Decimal('0'))
 

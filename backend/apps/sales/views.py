@@ -4,7 +4,7 @@ import uuid
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from django.db import IntegrityError, transaction
-from django.db.models import DecimalField as ModelDecimalField, Prefetch, Q
+from django.db.models import DecimalField as ModelDecimalField, Prefetch, Q, prefetch_related_objects
 from django.utils import timezone
 from rest_framework import viewsets, permissions, serializers
 from rest_framework.decorators import action
@@ -22,7 +22,7 @@ from .patient_utils import (
     reserve_unused_test_numbers, sync_test_no_sequence,
 )
 from apps.inventory.models import StockLedger
-from apps.inventory.stock_utils import adjust_branch_stock
+from apps.inventory.stock_utils import adjust_branch_stock_many
 from apps.common.branch_mixins import BranchScopedViewSetMixin
 from apps.financial.banks import validate_bank_account
 
@@ -557,6 +557,18 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
     # so retail sales never actually reached the database at all.
     permission_classes = [permissions.AllowAny]
 
+    _READ_PREFETCH = (
+        'payments',
+        Prefetch('items', queryset=InvoiceItem.objects.select_related('product__category', 'product__brand')),
+    )
+
+    def _prefetch_for_response(self, invoice):
+        """Load the saved bill's lines (with products) and receipts once for the response —
+        otherwise `items`, frame_name, lens_name, payment_splits and payment_banks each re-read
+        them, a query (a network round trip when hosted) per field and per line."""
+        invoice._prefetched_objects_cache = {}
+        prefetch_related_objects([invoice], *self._READ_PREFETCH)
+
     def get_queryset(self):
         # One table backs Quotations, Orders and Invoices (see Invoice.document_type). Callers
         # that only want real tax invoices — the Sales dashboard, Accounts, patient billing
@@ -564,10 +576,7 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
         # Customer + items + their products/categories are fetched in a few joined queries up
         # front, so the list's customer_name / frame_name / lens_name don't cost a query per row.
         # Newest first — and a stable order, so paging through the list can't skip or repeat bills.
-        qs = super().get_queryset().select_related('customer').prefetch_related(
-            'payments',
-            Prefetch('items', queryset=InvoiceItem.objects.select_related('product__category', 'product__brand')),
-        ).order_by('-invoice_date', '-created_at')
+        qs = super().get_queryset().select_related('customer').prefetch_related(*self._READ_PREFETCH)             .order_by('-invoice_date', '-created_at')
         doc_type = self.request.query_params.get('document_type')
         if doc_type and doc_type.lower() != 'all':
             qs = qs.filter(document_type=doc_type.upper())
@@ -619,6 +628,7 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
             self._update_inventory(invoice)
         if splits is not None:
             self._sync_billing_receipts(invoice, splits, self._payment_banks())
+        self._prefetch_for_response(invoice)
 
     @transaction.atomic
     def perform_update(self, serializer):
@@ -669,6 +679,7 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
             # idempotency, and those aren't written when no Warehouse exists, so each payment/
             # delivery update used to deduct the same invoice's stock again.
             self._update_inventory(invoice)
+        self._prefetch_for_response(invoice)
 
     @action(detail=True, methods=['post'], url_path='convert')
     def convert(self, request, pk=None):
@@ -825,24 +836,22 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
         # request body instead.
         from apps.products.models import Product
 
-        def _resolve_product_id(value):
-            # The product pickers can still surface legacy localStorage-only items whose id is
-            # not a real Product UUID (see the "local vs backend product ids" gotcha). Passing
-            # one straight to product_id raises and 500s the whole sale, so drop the link and
-            # keep the line as a plain description instead of losing the invoice.
-            if not value:
-                return None
-            try:
-                uuid.UUID(str(value))
-            except (ValueError, TypeError, AttributeError):
-                return None
-            return value if Product.objects.filter(pk=value).exists() else None
+        raw_items = self.request.data.get('items') or []
+        # The product pickers can still surface legacy localStorage-only items whose id is not a
+        # real Product UUID (see the "local vs backend product ids" gotcha). Passing one straight
+        # to product_id raises and 500s the whole sale, so drop the link and keep the line as a
+        # plain description instead of losing the invoice. One query checks every line's product
+        # (each lookup is a network round trip on the hosted database).
+        wanted = {str(raw.get('product')) for raw in raw_items if _is_uuid(raw.get('product'))}
+        known = {str(pk) for pk in Product.objects.filter(pk__in=wanted).values_list('pk', flat=True)} \
+            if wanted else set()
 
-        for raw in self.request.data.get('items', []):
-            product_id = _resolve_product_id(raw.get('product'))
-            InvoiceItem.objects.create(
+        # bulk_create skips InvoiceItem's post_save, which only re-queues the invoice's journal —
+        # already queued by the invoice's own save, and booked after commit with these lines.
+        InvoiceItem.objects.bulk_create([
+            InvoiceItem(
                 invoice=invoice,
-                product_id=product_id,
+                product_id=str(raw.get('product')) if str(raw.get('product')) in known else None,
                 service_id=raw.get('service') or None,
                 item_type=raw.get('item_type') or raw.get('itemType') or 'PRODUCT',
                 service_details=raw.get('service_details') or raw.get('serviceDetails') or None,
@@ -854,34 +863,39 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
                 tax_amount=raw.get('tax_amount') or raw.get('tax') or 0,
                 subtotal=raw.get('subtotal') or raw.get('total') or 0,
             )
+            for raw in raw_items
+        ])
 
     def _update_inventory(self, invoice):
         # Deduct stock from the invoice's branch (falls back to the default branch for rows
-        # created before Multi-Branch existed). adjust_branch_stock keeps BranchStock,
-        # Product.stock and the StockLedger audit row consistent.
+        # created before Multi-Branch existed). adjust_branch_stock_many keeps BranchStock,
+        # Product.stock and the StockLedger audit row consistent in a fixed handful of queries
+        # however many lines the bill has.
         from apps.company.models import Branch
+        from apps.products.models import Product
         branch = invoice.branch or Branch.get_default()
 
-        for item in invoice.items.all():
-            # Custom/ad-hoc line items (no matching Product row) have nothing to deduct stock
-            # from — only real catalog items move inventory.
-            if not item.product_id:
-                continue
-            if StockLedger.objects.filter(reference_id=invoice.id, product=item.product).exists():
-                continue
-            adjust_branch_stock(
-                item.product, branch, -item.quantity,
-                ledger={
-                    'transaction_type': 'OUT',
-                    'reference_id': invoice.id,
-                    'notes': f"Sold via Invoice {invoice.invoice_number}",
-                },
-            )
+        # Custom/ad-hoc lines (no matching Product row) have nothing to deduct stock from. A
+        # product on several lines is deducted once for their combined quantity — the same total
+        # _stock_quantities later reconciles an edit against.
+        totals = self._stock_quantities(invoice, force=True)
+        already = set(StockLedger.objects.filter(reference_id=invoice.id, product_id__in=totals)
+                      .values_list('product_id', flat=True)) if totals else set()
+        products = Product.objects.in_bulk([pk for pk in totals if pk not in already])
+        adjust_branch_stock_many(
+            {product: -totals[pk] for pk, product in products.items()},
+            branch,
+            ledger={
+                'transaction_type': 'OUT',
+                'reference_id': invoice.id,
+                'notes': f"Sold via Invoice {invoice.invoice_number}",
+            },
+        )
 
-    def _stock_quantities(self, invoice):
+    def _stock_quantities(self, invoice, force=False):
         """{product_id: total qty} this document currently holds out of stock — empty when it
-        doesn't commit stock (quotation, order, draft, cancelled)."""
-        if not self._commits_stock(invoice):
+        doesn't commit stock (quotation, order, draft, cancelled) unless `force`."""
+        if not force and not self._commits_stock(invoice):
             return {}
         totals = {}
         for item in invoice.items.all():
@@ -898,18 +912,20 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
         from apps.products.models import Product
 
         after = self._stock_quantities(invoice)
+        deltas = {pk: after.get(pk, 0) - before.get(pk, 0) for pk in set(before) | set(after)}
+        deltas = {pk: d for pk, d in deltas.items() if d}
+        if not deltas:
+            return
         branch = invoice.branch or Branch.get_default()
-        for product_id in set(before) | set(after):
-            delta = after.get(product_id, 0) - before.get(product_id, 0)
-            if not delta:
-                continue
-            product = Product.objects.filter(pk=product_id).first()
-            if product is None:
-                continue
-            adjust_branch_stock(
-                product, branch, -delta,
+        products = Product.objects.in_bulk(list(deltas))
+        # Batched per direction: the ledger row's transaction type differs for stock going out
+        # (added / raised lines) and coming back (removed / reduced lines).
+        for direction, keep in (('OUT', lambda d: d > 0), ('IN', lambda d: d < 0)):
+            adjust_branch_stock_many(
+                {product: -deltas[pk] for pk, product in products.items() if keep(deltas[pk])},
+                branch,
                 ledger={
-                    'transaction_type': 'OUT' if delta > 0 else 'IN',
+                    'transaction_type': direction,
                     'reference_id': invoice.id,
                     'notes': f"Invoice {invoice.invoice_number} edited",
                 },

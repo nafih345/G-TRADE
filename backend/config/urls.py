@@ -14,6 +14,9 @@ def favicon_silent_view(request):
 from django.conf import settings
 from django.conf.urls.static import static
 
+_migrations_known_current = False
+
+
 def health_check_view(request):
     from django.db import connection
     db_status = "connected"
@@ -25,18 +28,28 @@ def health_check_view(request):
     # Pending migrations are the usual reason the deployed app breaks after a release
     # (code ahead of schema — e.g. the Multi-Branch columns/tables). Surface them here so
     # the state is checkable without server-log access.
+    # Building the migration graph is the heaviest thing this endpoint does (CPU on a 0.1-vCPU
+    # host, plus queries), and it is hit constantly by Render's health probe and the frontend's
+    # keep-awake ping. Migrations only change when the process is (re)deployed or migrates on
+    # boot, so once this process has seen them up to date that answer stands for its lifetime.
+    global _migrations_known_current
     pending_migrations = []
     migrations_status = "up_to_date"
-    try:
-        from django.db import connections, DEFAULT_DB_ALIAS
-        from django.db.migrations.executor import MigrationExecutor
-        executor = MigrationExecutor(connections[DEFAULT_DB_ALIAS])
-        plan = executor.migration_plan(executor.loader.graph.leaf_nodes())
-        pending_migrations = [f"{m.app_label}.{m.name}" for m, _ in plan]
-        if pending_migrations:
-            migrations_status = "pending"
-    except Exception as e:
-        migrations_status = f"error: {str(e)}"
+    if not _migrations_known_current and db_status == "connected":
+        try:
+            from django.db import connections, DEFAULT_DB_ALIAS
+            from django.db.migrations.executor import MigrationExecutor
+            executor = MigrationExecutor(connections[DEFAULT_DB_ALIAS])
+            plan = executor.migration_plan(executor.loader.graph.leaf_nodes())
+            pending_migrations = [f"{m.app_label}.{m.name}" for m, _ in plan]
+            if pending_migrations:
+                migrations_status = "pending"
+            else:
+                _migrations_known_current = True
+        except Exception as e:
+            migrations_status = f"error: {str(e)}"
+    elif db_status != "connected":
+        migrations_status = "unknown (database unreachable)"
 
     multi_branch = None
     try:

@@ -17,7 +17,10 @@ closing the "just change the id in the request" hole at the API layer: an unauth
 X-Branch-Id makes get_active_branch raise PermissionDenied (403) via BranchScopedViewSetMixin.
 """
 
+from django.utils.functional import SimpleLazyObject
 from rest_framework.exceptions import PermissionDenied
+
+from apps.common import hot_cache
 
 ADMIN_ROLES = {'SUPER_ADMIN', 'ADMINISTRATOR'}
 
@@ -29,37 +32,71 @@ ADMIN_ROLES = {'SUPER_ADMIN', 'ADMINISTRATOR'}
 #   request.branch_denied        : bool              (requested an off-limits branch)
 
 
-def _resolve(request):
-    from apps.company.models import Branch, BusinessSettings, UserBranchAccess
+# Every lookup below runs before the view on every API request, so each goes through
+# hot_cache: on the hosted database a lookup is a network round trip, and these rows almost
+# never change (saving one clears the cache — see apps/common/apps.py).
 
-    try:
+def _branch_settings():
+    """(multi_branch_enabled, default_branch)."""
+    from apps.company.models import Branch, BusinessSettings
+
+    def load():
         settings_obj = BusinessSettings.load()
+        return bool(settings_obj.multi_branch_enabled), settings_obj.default_branch or Branch.get_default()
+    return hot_cache.get_or_load('branch:settings', load)
+
+
+def _user_access(username):
+    """(access_all_branches, allowed branch ids or None, access default branch) for a user's
+    UserBranchAccess row, or None when the user has none."""
+    from apps.company.models import UserBranchAccess
+
+    def load():
+        access = UserBranchAccess.objects.select_related('default_branch') \
+            .filter(username__iexact=username).first()
+        if access is None:
+            return None
+        allowed = frozenset(str(b) for b in access.branches.values_list('id', flat=True))
+        return bool(access.access_all_branches), allowed, access.default_branch
+    return hot_cache.get_or_load(f'branch:access:{username.lower()}', load) if username else None
+
+
+def _branch_by_id(branch_id):
+    from apps.company.models import Branch
+    return hot_cache.get_or_load(f'branch:id:{branch_id}', lambda: Branch.objects.filter(id=branch_id).first())
+
+
+def _resolve(request):
+    try:
+        multi, default_branch = _branch_settings()
     except Exception:
         return
-
-    multi = bool(settings_obj.multi_branch_enabled)
-    default_branch = settings_obj.default_branch or Branch.get_default()
 
     request.multi_branch_enabled = multi
 
     username = request.headers.get('X-User-Name') or getattr(getattr(request, 'user', None), 'username', '') or ''
     role = (request.headers.get('X-User-Role') or getattr(getattr(request, 'user', None), 'role', '') or '').upper()
 
-    access = UserBranchAccess.objects.filter(username__iexact=username).first() if username else None
-    is_admin = role in ADMIN_ROLES or bool(access and access.access_all_branches)
-    request.is_branch_admin = is_admin
+    def is_admin():
+        access = _user_access(username)
+        return role in ADMIN_ROLES or bool(access and access[0])
 
     if not multi:
-        # Single-branch mode: everything silently uses the default branch.
+        # Single-branch mode: everything silently uses the default branch. Only the
+        # branch-context endpoint reads is_branch_admin here, so look the access row up lazily.
         request.active_branch = default_branch
         request.allowed_branch_ids = None
+        request.is_branch_admin = SimpleLazyObject(is_admin)
         return
 
-    if is_admin or access is None:
+    access = _user_access(username)
+    request.is_branch_admin = admin = is_admin()
+
+    if admin or access is None:
         # Admins (and, until access is configured, everyone) may use any active branch.
         request.allowed_branch_ids = None
     else:
-        request.allowed_branch_ids = {str(b) for b in access.branches.values_list('id', flat=True)}
+        request.allowed_branch_ids = set(access[1])
 
     requested_id = request.headers.get('X-Branch-Id') or None
     if requested_id:
@@ -67,11 +104,9 @@ def _resolve(request):
             request.branch_denied = True
             request.active_branch = None
             return
-        branch = Branch.objects.filter(id=requested_id).first()
-        request.active_branch = branch or default_branch
+        request.active_branch = _branch_by_id(requested_id) or default_branch
     else:
-        fallback = (access.default_branch if access and access.default_branch_id else None) or default_branch
-        request.active_branch = fallback
+        request.active_branch = (access[2] if access else None) or default_branch
 
 
 class BranchContextMiddleware:

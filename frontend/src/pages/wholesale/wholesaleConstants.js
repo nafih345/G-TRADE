@@ -9,25 +9,17 @@
 // the database is the source of truth; optical_wholesale_invoices is a cache that also keeps
 // invoices saved while the server was unreachable (pendingSync) until they upload.
 
+import { fetchAllPages as fetchAllPagesShared } from '../../utils/fetchAllPages';
+
 export const WHOLESALE_API = '/api/sales/wholesale';
 
 export const isUuid = (v) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(v || ''));
 
-// Follows DRF's {count,next,previous,results} pagination to fetch every page.
-// Falls back to [] (caller decides the offline fallback) on any network error.
-export async function fetchAllPages(axios, url) {
-  let out = [];
-  let next = url;
-  let guard = 0;
-  while (next && guard < 50) {
-    guard += 1;
-    const res = await axios.get(next);
-    const data = res.data;
-    if (Array.isArray(data)) { out = out.concat(data); break; }
-    out = out.concat(data?.results || []);
-    next = data?.next || null;
-  }
-  return out;
+// Every row of a DRF paginated list, in large pages fetched in parallel (see utils/fetchAllPages).
+// Throws on a network error (the caller decides the offline fallback). The `axios` argument is
+// kept for the existing call sites; they all pass the shared default instance.
+export async function fetchAllPages(_axios, url) {
+  return fetchAllPagesShared(url);
 }
 
 // Dealer <-> backend apps.sales.models.Dealer field mapping.

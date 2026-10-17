@@ -45,29 +45,16 @@ export default function Dashboard() {
         try { return JSON.parse(localStorage.getItem(key) || '[]'); } catch (e) { return []; }
       };
 
-      // 1. Sales Invoices
-      try {
-        setSalesInvoices(await fetchAllPages('/api/sales/invoices/?document_type=INVOICE'));
-      } catch (e) {
-        setSalesInvoices(readLocal('optical_sales_invoices'));
-      }
-
-      // 2. Eye Tests
-      try {
-        setEyeTests(await fetchAllPages('/api/sales/eye-examinations/'));
-      } catch (e) {}
-
-      // 3. Products / Low Stock
-      try {
-        setProducts(await fetchAllPages('/api/products/items/'));
-      } catch (e) {}
-
-      // 4. Purchase Orders
-      try {
-        setPurchaseOrders(await fetchAllPages('/api/purchase/orders/'));
-      } catch (e) {
-        setPurchaseOrders(readLocal('optical_purchase_orders'));
-      }
+      // All four load at once and each card fills in as its list arrives — one after another,
+      // the hosted backend's per-request latency stacked up into a long blank dashboard.
+      await Promise.all([
+        fetchAllPages('/api/sales/invoices/?document_type=INVOICE')
+          .then(setSalesInvoices, () => setSalesInvoices(readLocal('optical_sales_invoices'))),
+        fetchAllPages('/api/sales/eye-examinations/').then(setEyeTests, () => {}),
+        fetchAllPages('/api/products/items/').then(setProducts, () => {}),
+        fetchAllPages('/api/purchase/orders/')
+          .then(setPurchaseOrders, () => setPurchaseOrders(readLocal('optical_purchase_orders'))),
+      ]);
     };
 
     fetchDashboardData();

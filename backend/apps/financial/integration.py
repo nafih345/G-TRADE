@@ -17,7 +17,7 @@ from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
 
-from . import posting_rules as rules
+from . import batch, posting_rules as rules
 from .accounting_catalog import SOURCES
 from .mapping import resolve_role
 from .models import AccountingPolicy, JournalEntry, LedgerEntry, PostingFailure, ChartOfAccount
@@ -97,7 +97,10 @@ def materialize(plan):
     for line in plan['lines']:
         if line['debit'] == 0 and line['credit'] == 0:
             continue
-        account = line.get('account') or resolve_role(line['role'], branch=plan.get('branch'), date=plan['date'])
+        branch = plan.get('branch')
+        account = line.get('account') or batch.memo(
+            ('role', line['role'], getattr(branch, 'pk', branch), plan['date']),
+            lambda: resolve_role(line['role'], branch=branch, date=plan['date']))
         resolved.append({'account': account, 'debit': line['debit'], 'credit': line['credit'],
                          'memo': line.get('memo', ''), 'role': line.get('role')})
     return {**plan, 'lines': resolved}
@@ -133,7 +136,7 @@ def book_source(source_key, pk, user=None, force=False, cascade=True):
     force=True ignores the per-source enable switch and historical cut-off (used by the
     controlled backfill and by an explicit retry)."""
     module, event = split_key(source_key)
-    policy = AccountingPolicy.get()
+    policy = batch.memo('policy', AccountingPolicy.get)
     doc = load_document(source_key, pk)
     if not force:
         if not source_enabled(policy, source_key):
@@ -146,8 +149,12 @@ def book_source(source_key, pk, user=None, force=False, cascade=True):
                                        plan=plan, user=user)
     PostingFailure.objects.filter(source_module=module, source_event=event, reference_id=pk, status='OPEN') \
         .update(status='RESOLVED', resolved_at=timezone.now(), resolved_by=user if getattr(user, 'is_authenticated', False) else None)
+    batch.mark_booked((source_key, str(pk)))
     if cascade:
         for dep_key, dep_pk in _dependents(source_key, doc):
+            # Already booked after this same commit — nothing it depends on has changed since.
+            if batch.already_booked((dep_key, str(dep_pk))):
+                continue
             book_source_safely(dep_key, dep_pk, user=user, force=force, cascade=False)
     return {'outcome': outcome, 'entry': entry.entry_number if entry else None}
 
@@ -195,16 +202,33 @@ def schedule(source_key, pk):
         return
     key = (source_key, str(pk))
     conn = transaction.get_connection()
-    if conn.in_atomic_block and any(getattr(entry[1], '_accounting_key', None) == key
-                                    and not getattr(entry[1], '_accounting_done', False)
-                                    for entry in conn.run_on_commit):
-        return
+    run_batch = None
+    if conn.in_atomic_block:
+        pending = [entry[1] for entry in conn.run_on_commit]
+        if any(getattr(fn, '_accounting_key', None) == key and not getattr(fn, '_accounting_done', False)
+               for fn in pending):
+            return
+        # Every posting this transaction queues shares one Batch (see batch.py): settings read
+        # once, and a document already booked by an earlier posting of the same commit (an
+        # invoice re-books its receipts) is not booked again.
+        # Only a batch none of whose postings has run yet: callbacks that already ran (an earlier
+        # commit's, still listed while a test's outer transaction is open) belong to the past.
+        run_batch = next((fn._accounting_batch for fn in pending
+                          if getattr(fn, '_accounting_batch', None) is not None
+                          and not fn._accounting_batch.started), None) or batch.Batch()
 
     def run():
         run._accounting_done = True
-        book_source_safely(source_key, pk)
+        if run_batch is None:
+            book_source_safely(source_key, pk)
+            return
+        run_batch.started = True
+        with batch.active(run_batch):
+            if not batch.already_booked(key):
+                book_source_safely(source_key, pk)
 
     run._accounting_key = key
+    run._accounting_batch = run_batch
     transaction.on_commit(run)
 
 

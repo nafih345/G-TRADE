@@ -15,21 +15,14 @@ from django.db.models import Q
 from rest_framework.exceptions import APIException
 
 from .models import BarcodeSequence, BarcodeSeriesConfig, Product, ProductBarcode
+from apps.common.sequences import bump_sequence
 
 DEFAULT_PREFIX = 'OPT'
 
 
 def reserve_barcodes(prefix=DEFAULT_PREFIX, count=1):
     """Atomically reserves `count` sequential barcode strings for `prefix`."""
-    BarcodeSequence.objects.get_or_create(prefix=prefix, defaults={'last_number': 100000})
-    table = BarcodeSequence._meta.db_table
-    with transaction.atomic():
-        with connection.cursor() as cursor:
-            cursor.execute(
-                f"UPDATE {table} SET last_number = last_number + %s WHERE prefix = %s RETURNING last_number",
-                [count, prefix]
-            )
-            new_last = cursor.fetchone()[0]
+    new_last = bump_sequence(BarcodeSequence, {'prefix': prefix}, count, defaults={'last_number': 100000})
     start = new_last - count + 1
     return [f"{prefix}{start + i}" for i in range(count)]
 

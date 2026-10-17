@@ -7,24 +7,16 @@ apps.products.barcode_utils.reserve_barcodes: a single atomic UPDATE ... RETURNI
 statement rather than select_for_update() + read-modify-write, since select_for_update()
 is a silent no-op on SQLite (which this app also runs under as a packaged desktop build).
 """
-from django.db import transaction, connection
 
 from .models import SupplierCodeSequence
+from apps.common.sequences import bump_sequence
 
 DEFAULT_PREFIX = 'SUP'
 
 
 def reserve_supplier_codes(prefix=DEFAULT_PREFIX, count=1):
     """Atomically reserves `count` sequential supplier codes (e.g. SUP-1001) for `prefix`."""
-    SupplierCodeSequence.objects.get_or_create(prefix=prefix, defaults={'last_number': 1000})
-    table = SupplierCodeSequence._meta.db_table
-    with transaction.atomic():
-        with connection.cursor() as cursor:
-            cursor.execute(
-                f"UPDATE {table} SET last_number = last_number + %s WHERE prefix = %s RETURNING last_number",
-                [count, prefix]
-            )
-            new_last = cursor.fetchone()[0]
+    new_last = bump_sequence(SupplierCodeSequence, {'prefix': prefix}, count, defaults={'last_number': 1000})
     start = new_last - count + 1
     return [f"{prefix}-{start + i}" for i in range(count)]
 

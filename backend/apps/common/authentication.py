@@ -22,3 +22,18 @@ class LenientJWTAuthentication(JWTAuthentication):
             return super().authenticate(request)
         except (InvalidToken, TokenError):
             return None
+
+    def get_user(self, validated_token):
+        # One user-table round trip per request otherwise — held briefly in-process (see
+        # apps.common.hot_cache; saving the user clears it, so a deactivation applies at once in
+        # this worker and within HOT_CACHE_SECONDS in the others). A refusal raises and is never
+        # cached. Token revocation compares each token against the user row, so it is left
+        # uncached when enabled.
+        from apps.common import hot_cache
+        from rest_framework_simplejwt.settings import api_settings
+
+        user_id = validated_token.get(api_settings.USER_ID_CLAIM)
+        if user_id is None or api_settings.CHECK_REVOKE_TOKEN:
+            return super().get_user(validated_token)
+        return hot_cache.get_or_load(f'auth:user:{user_id}',
+                                     lambda: super(LenientJWTAuthentication, self).get_user(validated_token))

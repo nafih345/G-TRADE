@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import axios from 'axios';
+import { fetchAllPages } from '../utils/fetchAllPages';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { 
   Box, Card, Typography, Grid, TextField, Button, 
@@ -392,11 +393,16 @@ export default function OpticalServices() {
       let docsList = local.docsList;
       let testsFetchOk = false;
 
+      // Requested together — one after another, the hosted backend's per-request latency
+      // stacked up. /api/sales/* lists are paginated, and page 1 alone held only the 20 newest
+      // patients / exams, so every page is read.
+      const custReq = fetchAllPages('/api/sales/customers/');
+      const testsReq = fetchAllPages('/api/sales/eye-examinations/');
+      const usersReq = axios.get('/api/admin/users/');
+      [custReq, testsReq, usersReq].forEach((req) => req.catch(() => {})); // awaited below
+
       try {
-        // /api/sales/* endpoints are paginated (DRF PageNumberPagination) — a successful
-        // response is {count, next, previous, results}, not a bare array.
-        const resCust = await axios.get('/api/sales/customers/');
-        const custData = resCust.data?.results || resCust.data || [];
+        const custData = await custReq;
         if (Array.isArray(custData)) {
           const apiCust = custData.filter(c => c.name && c.name !== 'Mohammed' && c.id !== 'P-7375');
           patientsList = [...patientsList, ...apiCust];
@@ -404,8 +410,7 @@ export default function OpticalServices() {
       } catch (e) {}
 
       try {
-        const resTests = await axios.get('/api/sales/eye-examinations/');
-        const testsData = resTests.data?.results || resTests.data || [];
+        const testsData = await testsReq;
         if (Array.isArray(testsData)) {
           const apiTests = testsData.map(item => ({
             ...(item.raw_data || {
@@ -467,7 +472,7 @@ export default function OpticalServices() {
       } catch (e) {}
 
       try {
-        const resUsers = await axios.get('/api/admin/users/');
+        const resUsers = await usersReq;
         if (resUsers.data && Array.isArray(resUsers.data)) {
           const apiDocNames = resUsers.data
             .filter(u => u.role === 'DOCTOR' || u.role === 'OPTOMETRIST' || (u.designation && u.designation.toLowerCase().includes('doc')))

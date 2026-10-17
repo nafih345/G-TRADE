@@ -50,8 +50,8 @@ class PurchaseOrderSerializer(ModelSerializer):
     def create(self, validated_data):
         items_data = validated_data.pop('items', [])
         order = PurchaseOrder.objects.create(**validated_data)
-        for item_data in items_data:
-            PurchaseOrderItem.objects.create(purchase_order=order, **item_data)
+        PurchaseOrderItem.objects.bulk_create(
+            [PurchaseOrderItem(purchase_order=order, **item_data) for item_data in items_data])
         return order
 
     def update(self, instance, validated_data):
@@ -62,8 +62,9 @@ class PurchaseOrderSerializer(ModelSerializer):
 
         if items_data is not None:
             instance.items.all().delete()
-            for item_data in items_data:
-                PurchaseOrderItem.objects.create(purchase_order=instance, **item_data)
+            PurchaseOrderItem.objects.bulk_create(
+                [PurchaseOrderItem(purchase_order=instance, **item_data) for item_data in items_data])
+            instance._prefetched_objects_cache = {}
 
         return instance
 
@@ -100,7 +101,8 @@ class PurchaseOrderViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
     permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
-        qs = super().get_queryset().order_by('-order_date', '-created_at')
+        # Lines in one query for the whole page, not one per order.
+        qs = super().get_queryset().prefetch_related('items').order_by('-order_date', '-created_at')
         status_param = self.request.query_params.get('status')
         supplier_param = self.request.query_params.get('supplier')
         if status_param:

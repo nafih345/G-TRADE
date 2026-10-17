@@ -306,6 +306,13 @@ if IS_CLOUD and str(DATABASES['default'].get('ENGINE', '')).endswith('sqlite3'):
         "Set DATABASE_URL on the service to the Postgres connection string."
     )
 
+# Pooled connections with health checks: use the backend that skips the per-request `SELECT 1`
+# on a connection that was used moments ago (one round trip saved on every request — see
+# apps/common/db_backends/postgresql/base.py).
+if (DATABASES['default'].get('ENGINE') in ('django.db.backends.postgresql', 'django.db.backends.postgresql_psycopg2')
+        and DATABASES['default'].get('CONN_HEALTH_CHECKS')):
+    DATABASES['default']['ENGINE'] = 'apps.common.db_backends.postgresql'
+
 # File Logging Configuration with Rotation
 LOGGING = {
     'version': 1,
@@ -392,6 +399,12 @@ if IS_CLOUD:
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+# Seconds the per-request rows (branch settings, branch access, the signed-in user) are held
+# in-process — see apps/common/hot_cache.py. Off under the test runner: test transactions roll
+# back silently, so a cached row could outlive the test that created it.
+RUNNING_TESTS = len(sys.argv) > 1 and sys.argv[1] == 'test'
+HOT_CACHE_SECONDS = 0 if RUNNING_TESTS else int(os.environ.get('HOT_CACHE_SECONDS', '30'))
+
 # Custom User Model
 AUTH_USER_MODEL = 'authentication.User'
 AUTHENTICATION_BACKENDS = ['apps.authentication.backends.UsernameOrEmailBackend']
@@ -404,7 +417,7 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
     ),
-    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    'DEFAULT_PAGINATION_CLASS': 'apps.common.pagination.PageSizePagination',
     'PAGE_SIZE': 20,
 }
 

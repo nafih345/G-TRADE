@@ -116,8 +116,9 @@ apply the Blueprint.
 Render's free Postgres deletes itself after 30 days, which is what destroyed the last one.
 The database therefore lives outside Render:
 
-1. [neon.tech](https://neon.tech) → sign up → **Create project** (pick the region nearest
-   Singapore/Mumbai to keep latency to Render low).
+1. [neon.tech](https://neon.tech) → sign up → **Create project**, region **AWS Asia Pacific
+   (Singapore)** — the same region as the Render service (`region: singapore` in
+   `render.yaml`). This is not a nicety: see "Keep the database in the backend's region" below.
 2. Copy the **connection string**. It looks like:
 
    ```
@@ -315,6 +316,46 @@ cd backend; python manage.py wipe_database
 itself for any host with a dot in it — which every Neon host has.
 
 A freshly provisioned database is already empty, so you only need this to re-clear later.
+
+---
+
+## Keep the database in the backend's region
+
+Every SQL query is a network round trip from the backend to Postgres. In the same region that
+is ~1 ms; between Singapore (Render) and us-east-2 (where the first Neon project was created by
+default) it is ~200-250 ms. A single save runs dozens of queries and every API request runs a
+few, so a cross-region database turns "instant" into 3-10 seconds per click and a dashboard
+that stays blank for a long time. Code can reduce the number of round trips (and has — see
+`apps/common/hot_cache.py`, `apps/financial/batch.py`, the batched stock helpers); only
+co-location makes each one cheap.
+
+Check: `/api/health/` → `db_target.host`. `…c-6.us-east-2.aws.neon.tech` is Ohio; a Singapore
+project's host contains `ap-southeast-1`. Render's region is under the service's **Settings**.
+
+**Moving the database to Singapore** (a few minutes; ask staff to stop entering data first):
+
+1. Neon → **New project** → region **AWS Asia Pacific (Singapore)**, same Postgres version.
+   Leave it empty — no tables.
+2. On this machine, with the *direct* (non-`-pooler`) connection strings of both projects:
+
+   ```
+   cd backend
+   set SOURCE_DATABASE_URL=postgresql://…old-project-direct-host…/neondb?sslmode=require
+   set TARGET_DATABASE_URL=postgresql://…new-project-direct-host…/neondb?sslmode=require
+   venv\Scripts\python.exe scripts\copy_database.py
+   ```
+
+   It refuses a target that already holds data, and finishes by comparing the row count of
+   every table. Do not continue unless it prints `OK - all … tables match`.
+3. Render → `g-trade-backend` → **Environment** → `DATABASE_URL` = the new project's
+   **pooled** connection string (`…-pooler.ap-southeast-1.aws.neon.tech…`) → save (Render
+   redeploys).
+4. `/api/health/` should show the new host and `"migrations": "up_to_date"`. Keep the old
+   Neon project for a week as a backup, then delete it.
+
+(The alternative — moving the Render service to Ohio, next to the existing database — needs
+no data copy but means a new Render service and URL, and puts every browser request from India
+on a trans-Pacific hop instead.)
 
 ---
 

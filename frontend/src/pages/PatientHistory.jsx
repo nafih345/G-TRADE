@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
+import { fetchAllPages } from '../utils/fetchAllPages';
 import {
   Box, Card, CardContent, Typography, Button, Grid,
   Paper, Chip, TextField, Stack, IconButton, Avatar,
@@ -329,20 +330,17 @@ export default function PatientHistory() {
       let custPool = [...localCust];
       let examPool = [...localExams];
 
+      // Requested together, every page — page 1 alone held only the 20 newest rows.
+      const custReq = fetchAllPages('/api/sales/customers/');
+      const examsReq = fetchAllPages('/api/sales/eye-examinations/');
+      [custReq, examsReq].forEach((req) => req.catch(() => {})); // awaited below
+
       try {
-        const resCust = await axios.get('/api/sales/customers/');
-        const custData = resCust.data?.results || resCust.data || [];
-        if (Array.isArray(custData)) {
-          custPool = [...custPool, ...custData];
-        }
+        custPool = [...custPool, ...(await custReq)];
       } catch (e) {}
 
       try {
-        const resExams = await axios.get('/api/sales/eye-examinations/');
-        const examData = resExams.data?.results || resExams.data || [];
-        if (Array.isArray(examData)) {
-          examPool = [...examPool, ...examData];
-        }
+        examPool = [...examPool, ...(await examsReq)];
       } catch (e) {}
 
       applyPatientsAndExams(custPool, examPool);

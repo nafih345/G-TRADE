@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
+import { fetchAllPages } from '../utils/fetchAllPages';
 import QuickDatePickerField from '../components/common/QuickDatePickerField';
 import { 
   Box, Card, CardContent, Typography, Button, Grid, 
@@ -235,26 +236,25 @@ export default function Appointments() {
         applyPools(aptList, custPool, docPool);
       }
 
-      // API fetches — /api/sales/* endpoints are paginated (DRF PageNumberPagination), so a
-      // successful response is {count, next, previous, results}, not a bare array.
+      // API fetches, requested together — one after another, the hosted backend's per-request
+      // latency stacked up. /api/sales/* lists are paginated, and page 1 alone held only the 20
+      // newest rows, so every page is read.
+      const aptsReq = fetchAllPages('/api/sales/appointments/');
+      const custReq = fetchAllPages('/api/sales/customers/');
+      const usersReq = axios.get('/api/admin/users/');
+      [aptsReq, custReq, usersReq].forEach((req) => req.catch(() => {})); // awaited below
+
       try {
-        const resApts = await axios.get('/api/sales/appointments/');
-        const aptData = resApts.data?.results || resApts.data || [];
-        if (Array.isArray(aptData)) {
-          aptList = [...aptList, ...aptData.map(mapBackendAppointment)];
-        }
+        const aptData = await aptsReq;
+        aptList = [...aptList, ...aptData.map(mapBackendAppointment)];
       } catch (e) {}
 
       try {
-        const resCust = await axios.get('/api/sales/customers/');
-        const custData = resCust.data?.results || resCust.data || [];
-        if (Array.isArray(custData)) {
-          custPool = [...custPool, ...custData];
-        }
+        custPool = [...custPool, ...(await custReq)];
       } catch (e) {}
 
       try {
-        const resUsers = await axios.get('/api/admin/users/');
+        const resUsers = await usersReq;
         if (resUsers.data && Array.isArray(resUsers.data)) {
           const apiDocNames = resUsers.data
             .filter(u => u.role === 'DOCTOR' || u.role === 'OPTOMETRIST' || (u.designation && u.designation.toLowerCase().includes('doc')))

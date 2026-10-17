@@ -10,18 +10,27 @@ class ProductCategorySerializer(ModelSerializer):
         fields = '__all__'
 
     def get_products_count(self, obj):
+        # Products linked by FK, or whose free-text category_name names/contains this category's
+        # name or code. Counted in Python from one shared read of every product's (category,
+        # category_name) — a COUNT query per category made the list one network round trip per
+        # row on the hosted database. `context` is shared by every row of a list response.
         try:
-            from apps.products.models import Product
-            from django.db.models import Q
-            name_str = (obj.name or '').strip()
-            code_str = (obj.code or '').strip()
-
-            return Product.objects.filter(
-                Q(category=obj) |
-                Q(category_name__iexact=name_str) |
-                Q(category_name__icontains=name_str) |
-                Q(category_name__icontains=code_str)
-            ).count()
+            rows = self.context.get('_product_category_rows')
+            if rows is None:
+                from apps.products.models import Product
+                rows = list(Product.objects.values_list('category_id', 'category_name'))
+                self.context['_product_category_rows'] = rows
+            name_str = (obj.name or '').strip().lower()
+            code_str = (obj.code or '').strip().lower()
+            count = 0
+            for category_id, category_name in rows:
+                if category_id == obj.pk:
+                    count += 1
+                elif category_name is not None:
+                    cname = category_name.lower()
+                    if name_str in cname or code_str in cname:
+                        count += 1
+            return count
         except Exception:
             try:
                 return obj.products.count()
