@@ -269,7 +269,7 @@ def build_purchase_payment(pi, previous=None):
     if not purchase_invoice_is_live(pi) or total <= 0 or pi.payment_method == 'CREDIT':
         return None
     if pi.payment_method == 'CASH' and getattr(pi, 'payment_status', '') == 'UNPAID':
-        return None  # cash still owed to the supplier — the payable stays open
+        return None  # cash still owed to the supplier â€” the payable stays open
     paid = money(pi.paid_amount)
     if pi.purchase_type == 'CASH' and paid <= 0:
         paid = total  # a cash purchase is settled at the counter by definition
