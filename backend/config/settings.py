@@ -96,6 +96,7 @@ INSTALLED_APPS = [
     'apps.sales',
     'apps.accounts',
     'apps.financial',
+    'apps.security',
 ]
 
 MIDDLEWARE = [
@@ -110,6 +111,8 @@ MIDDLEWARE = [
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'apps.common.branch_context.BranchContextMiddleware',
+    # Pauses writes while a database restore runs (apps/security/middleware.py).
+    'apps.security.middleware.RestoreMaintenanceMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -419,7 +422,31 @@ REST_FRAMEWORK = {
     ),
     'DEFAULT_PAGINATION_CLASS': 'apps.common.pagination.PageSizePagination',
     'PAGE_SIZE': 20,
+    # Scoped throttles (per client address) on the sign-in and password re-confirmation views —
+    # a coarse rate limit in front of the per-account lockout in apps/security/login_protection.py.
+    'DEFAULT_THROTTLE_RATES': {
+        'login': os.environ.get('LOGIN_RATE_LIMIT', '20/min'),
+        'reauth': os.environ.get('REAUTH_RATE_LIMIT', '10/min'),
+    },
 }
+
+# ---- System Security & Backup (apps/security) ----------------------------------------------
+# Where backup archives are kept: 'filesystem' (BACKUP_DIR on this machine's disk) or 'database'
+# (chunked rows in the database itself). Cloud hosts default to 'database' because their disk is
+# wiped on every deploy / restart; the desktop build keeps files next to the application.
+BACKUP_STORAGE = os.environ.get('BACKUP_STORAGE', 'database' if IS_CLOUD else 'filesystem').strip().lower()
+BACKUP_DIR = Path(os.environ.get('BACKUP_DIR') or (BASE_DIR / 'backups'))
+BACKUP_TEMP_DIR = os.environ.get('BACKUP_TEMP_DIR') or None  # scratch space while writing / validating
+# The capacity the Backup Health card measures usage against (MB).
+BACKUP_STORAGE_CAPACITY_MB = int(os.environ.get(
+    'BACKUP_STORAGE_CAPACITY_MB', '400' if BACKUP_STORAGE == 'database' else '5120'))
+BACKUP_MAX_UPLOAD_MB = int(os.environ.get('BACKUP_MAX_UPLOAD_MB', '1024'))
+BACKUP_MAX_UNCOMPRESSED_MB = int(os.environ.get('BACKUP_MAX_UNCOMPRESSED_MB', '8192'))
+# The in-process scheduler thread (started from config/wsgi.py). Turn off where an external cron
+# runs `manage.py run_scheduled_backups` instead. Never on under the test runner.
+BACKUP_SCHEDULER_ENABLED = (not RUNNING_TESTS) and os.environ.get('BACKUP_SCHEDULER', 'True').lower() not in ('0', 'false', 'no')
+# Tests run backup / restore jobs synchronously instead of on a background thread.
+BACKUP_RUN_INLINE = RUNNING_TESTS
 
 # Simple JWT Configuration
 SIMPLE_JWT = {

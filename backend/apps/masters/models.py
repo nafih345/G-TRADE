@@ -31,8 +31,25 @@ class Unit(BaseUUIDModel):
 
 
 class Tax(BaseUUIDModel):
+    """Tax master, managed from Settings → Business & Localization → Tax Configuration
+    (apps/company/tax_config.py). Completed documents snapshot their rate on the line
+    (InvoiceItem.tax_rate etc.), so editing a tax never rewrites history."""
+    TAX_TYPES = [('GST', 'GST (CGST + SGST)'), ('IGST', 'IGST'), ('VAT', 'VAT'), ('CESS', 'Cess'),
+                 ('SALES_TAX', 'Sales tax'), ('OTHER', 'Other')]
+    TREATMENTS = [('EXCLUSIVE', 'Exclusive'), ('INCLUSIVE', 'Inclusive')]
+    CATEGORIES = [('STANDARD', 'Standard rated'), ('ZERO_RATED', 'Zero rated'),
+                  ('EXEMPT', 'Exempt'), ('NIL_RATED', 'Nil rated'), ('NON_TAXABLE', 'Non-taxable')]
+
     name = models.CharField(max_length=50)
     rate = models.DecimalField(max_digits=5, decimal_places=2)  # Percentage, e.g. 18.00
+    tax_type = models.CharField(max_length=12, choices=TAX_TYPES, default='GST')
+    treatment = models.CharField(max_length=10, choices=TREATMENTS, default='EXCLUSIVE')
+    category = models.CharField(max_length=12, choices=CATEGORIES, default='STANDARD')
+    applies_to_sales = models.BooleanField(default=True)
+    applies_to_purchases = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=True)
+    is_default = models.BooleanField(default=False)
+    description = models.CharField(max_length=200, blank=True, default='')
 
     def __str__(self):
         return f"{self.name} ({self.rate}%)"

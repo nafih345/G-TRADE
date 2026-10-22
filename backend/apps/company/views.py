@@ -41,10 +41,18 @@ class NotificationSerializer(ModelSerializer):
 
 
 class CompanyViewSet(viewsets.ModelViewSet):
+    """Legacy raw Company CRUD. The Settings screen uses /api/company/store-profile/ (which
+    updates the one store row instead of creating duplicates); writes here need the same role."""
     queryset = Company.objects.all()
     serializer_class = CompanySerializer
-    authentication_classes = []
-    permission_classes = [permissions.AllowAny]
+
+    def get_permissions(self):
+        from .store_profile import StoreSettingsPermission
+        return [StoreSettingsPermission()]
+
+    def perform_authentication(self, request):
+        if request.method not in permissions.SAFE_METHODS:
+            request.user  # noqa: B018 — forces authentication
 
     def get_queryset(self):
         try:

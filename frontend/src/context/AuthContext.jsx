@@ -1,5 +1,6 @@
 import React, { createContext, useState, useContext, useEffect } from 'react';
 import axios from 'axios';
+import { SESSION_ENDED_EVENT } from '../utils/sessionGuard';
 
 const AuthContext = createContext(null);
 
@@ -86,23 +87,26 @@ export const AuthProvider = ({ children }) => {
    *         'staff'       — the regular sign-in page; anyone the backend lets in (today that
    *                         is only Super Admin, typed in directly — e.g. superadmin).
    *
-   * Returns { success: true } or { success: false, reason } where reason is one of
-   * 'invalid_credentials' | 'role_not_enabled' | 'not_super_admin' | 'network' | 'server'.
+   * Returns { success: true } or { success: false, reason, ... } where reason is one of
+   * 'invalid_credentials' | 'role_not_enabled' | 'not_super_admin' | 'account_locked' | 'network' |
+   * 'server' | 'two_factor' (a second step is needed: { challenge, setup?: {secret, otpauth_uri} }).
    */
-  const login = async (username, password, { portal = 'staff' } = {}) => {
-    let data;
-    try {
-      ({ data } = await axios.post('/api/auth/login/', { username, password }));
-    } catch (error) {
-      const res = error.response;
-      if (!res) return { success: false, reason: 'network' };
-      const code = res.data?.code;
-      if (code === 'role_not_enabled') return { success: false, reason: 'role_not_enabled' };
-      // A 5xx (e.g. the database is unreachable) is not a wrong password — don't say it is.
-      if (res.status >= 500) return { success: false, reason: 'server' };
-      return { success: false, reason: 'invalid_credentials' };
+  const failure = (error) => {
+    const res = error.response;
+    if (!res) return { success: false, reason: 'network' };
+    const code = res.data?.code;
+    if (code === 'role_not_enabled') return { success: false, reason: 'role_not_enabled' };
+    if (res.status === 429) {
+      return { success: false, reason: 'account_locked', message: res.data?.detail || 'Too many attempts. Try again later.' };
     }
+    if (code === 'invalid_code') return { success: false, reason: 'invalid_code', message: res.data.detail };
+    if (code === 'challenge_expired') return { success: false, reason: 'challenge_expired', message: res.data.detail };
+    // A 5xx (e.g. the database is unreachable) is not a wrong password — don't say it is.
+    if (res.status >= 500) return { success: false, reason: 'server' };
+    return { success: false, reason: 'invalid_credentials' };
+  };
 
+  const finishLogin = (data, portal) => {
     const profile = withRoleLabel(data.user || {});
     const isSuperAdmin = profile.role === 'SUPER_ADMIN';
     if (portal === 'super_admin' && !isSuperAdmin) return { success: false, reason: 'not_super_admin' };
@@ -115,14 +119,58 @@ export const AuthProvider = ({ children }) => {
     return { success: true };
   };
 
+  const login = async (username, password, { portal = 'staff' } = {}) => {
+    let data;
+    try {
+      ({ data } = await axios.post('/api/auth/login/', { username, password }));
+    } catch (error) {
+      return failure(error);
+    }
+    if (data.two_factor_required || data.two_factor_setup_required) {
+      return {
+        success: false,
+        reason: 'two_factor',
+        challenge: data.challenge,
+        setup: data.two_factor_setup_required ? { secret: data.secret, otpauth_uri: data.otpauth_uri } : null,
+      };
+    }
+    return finishLogin(data, portal);
+  };
+
+  /** Second sign-in step: the 6-digit authenticator code for a challenge from login(). */
+  const verifyTwoFactor = async (challenge, code, { portal = 'staff' } = {}) => {
+    try {
+      const { data } = await axios.post('/api/auth/two-factor/verify/', { challenge, code });
+      return finishLogin(data, portal);
+    } catch (error) {
+      return failure(error);
+    }
+  };
+
   const logout = () => {
+    // End the server-side session too (best effort — the local sign-out never waits on it).
+    if (axios.defaults.headers.common.Authorization) {
+      axios.post('/api/auth/logout/').catch(() => {});
+    }
     clearSession();
     setToken(null);
     setUser(null);
   };
 
+  // The server ended this session (idle timeout, sign-out elsewhere, a database restore).
+  useEffect(() => {
+    const onEnded = () => {
+      delete axios.defaults.headers.common['Authorization'];
+      clearSession();
+      setToken(null);
+      setUser(null);
+    };
+    window.addEventListener(SESSION_ENDED_EVENT, onEnded);
+    return () => window.removeEventListener(SESSION_ENDED_EVENT, onEnded);
+  }, []);
+
   return (
-    <AuthContext.Provider value={{ user, token, loading, login, logout }}>
+    <AuthContext.Provider value={{ user, token, loading, login, verifyTwoFactor, logout }}>
       {children}
     </AuthContext.Provider>
   );

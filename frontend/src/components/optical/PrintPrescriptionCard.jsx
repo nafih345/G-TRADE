@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useStoreProfile, companyFromProfile } from '../../utils/storeProfile';
 import {
   Box, Card, Typography, Grid, Table, TableBody,
   TableCell, TableContainer, TableHead, TableRow, Paper,
@@ -51,6 +52,8 @@ export default function PrintPrescriptionCard({
   // would otherwise still try to lay out as wide desktop columns, cramming each into a sliver
   // and wrapping their text far more than the same content needs when stacked full-width.
   // Forcing every such row to stack (sm=12) for A5 keeps each box comfortably readable.
+  const store = useStoreProfile();
+  const storeCompany = companyFromProfile(store);
   const smCol = (value) => (paperSize === 'A5' ? 12 : value);
 
   const handleTriggerPrint = () => {
@@ -191,14 +194,23 @@ export default function PrintPrescriptionCard({
         {/* Clinic Branding Header */}
         <Grid container spacing={2} alignItems="center" sx={{ pb: 3, borderBottom: '2px solid #0f172a' }}>
           <Grid item xs={8}>
-            <Typography sx={{ fontSize: '2.4rem', fontWeight: 900, color: '#059669', letterSpacing: '-0.02em', lineHeight: 1.15 }}>
-              GREENSOL OPTICAL & EYE CLINIC
-            </Typography>
-            <Typography variant="subtitle1" fontWeight={600} color="text.secondary">
-              Super-Specialty Refraction & Vision Care Suite • Main Branch Clinic
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+              {store.logo_data_url && (
+                <Box component="img" src={store.logo_data_url} alt="" sx={{ height: 64, maxWidth: 120, objectFit: 'contain' }} />
+              )}
+              <Box>
+                <Typography sx={{ fontSize: '2.4rem', fontWeight: 900, color: '#059669', letterSpacing: '-0.02em', lineHeight: 1.15 }}>
+                  {storeCompany.name}
+                </Typography>
+                {storeCompany.tagline && (
+                  <Typography variant="subtitle1" fontWeight={600} color="text.secondary">{storeCompany.tagline}</Typography>
+                )}
+              </Box>
+            </Box>
             <Typography variant="body2" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
-              100 Eye Hospital Road, Healthcare Tower • Phone: +91 98765-43210 • Reg No: OPT-99482
+              {[storeCompany.address,
+                storeCompany.phone && `Phone: ${storeCompany.phone}`,
+                store.clinical_reg_no && `Reg No: ${store.clinical_reg_no}`].filter(Boolean).join(' • ')}
             </Typography>
           </Grid>
           <Grid item xs={4} sx={{ textAlign: 'right' }}>

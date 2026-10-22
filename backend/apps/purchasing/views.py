@@ -68,6 +68,19 @@ class PurchaseOrderSerializer(ModelSerializer):
 
         return instance
 
+def _sequence_number(doc_type, model, field, client_number=None):
+    """Settings → Numbering Sequences: the system number for a new document, or None to keep the
+    number the screen sent. The screen's own number stays its double-submit guard: a repeat of an
+    entry already saved is refused like the UNIQUE column refused it before. all_objects: a
+    soft-deleted row still holds its number."""
+    from apps.company.numbering import DuplicateSubmission, issue_number
+    manager = getattr(model, 'all_objects', model.objects)
+    try:
+        return issue_number(doc_type, lambda n: manager.filter(**{field: n}).exists(), client_token=client_number)
+    except DuplicateSubmission as dup:
+        raise serializers.ValidationError({field: [f'This entry was already saved as {dup.number}.']})
+
+
 class SupplierViewSet(viewsets.ModelViewSet):
     queryset = Supplier.objects.filter(is_deleted=False).order_by('supplier_code', 'name')
     serializer_class = SupplierSerializer
@@ -111,8 +124,14 @@ class PurchaseOrderViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
             qs = qs.filter(supplier_id=supplier_param)
         return qs
 
+    @transaction.atomic
     def perform_create(self, serializer):
-        po = serializer.save(**self._branch_stamp_kwargs(serializer))
+        extra = self._branch_stamp_kwargs(serializer)
+        number = _sequence_number('PURCHASE_ORDER', PurchaseOrder, 'order_number',
+                                  serializer.validated_data.get('order_number'))
+        if number:
+            extra['order_number'] = number
+        po = serializer.save(**extra)
         if po.status == 'RECEIVED':
             self._update_inventory(po)
 
@@ -134,6 +153,8 @@ class PurchaseOrderViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
                     'transaction_type': 'IN',
                     'reference_id': po.id,
                     'notes': f"Received via PO {po.order_number}",
+                    'reference_number': po.order_number,
+                    'unit_cost': item.unit_price,
                 },
             )
 
@@ -270,7 +291,12 @@ class PurchaseInvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
 
     @transaction.atomic
     def perform_create(self, serializer):
-        invoice = serializer.save(**self._branch_stamp_kwargs(serializer))
+        extra = self._branch_stamp_kwargs(serializer)
+        number = _sequence_number('PURCHASE_BILL', PurchaseInvoice, 'invoice_number',
+                                  serializer.validated_data.get('invoice_number'))
+        if number:
+            extra['invoice_number'] = number
+        invoice = serializer.save(**extra)
         if invoice.status not in ('DRAFT', 'CANCELLED'):
             self._apply_stock_and_payables(invoice)
         self._reload_for_response(serializer)
@@ -347,6 +373,7 @@ class PurchaseInvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
                     'transaction_type': 'IN',
                     'reference_id': invoice.id,
                     'notes': f"Received via Purchase Entry {invoice.invoice_number}",
+                    'reference_number': invoice.invoice_number,
                 },
             )
 

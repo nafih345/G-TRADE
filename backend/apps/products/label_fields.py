@@ -162,7 +162,7 @@ def resolve_store_fields():
     except Exception:
         logo = ''
     return {
-        'store_name': _clean(company.name) if company else '',
+        'store_name': _clean(company.display_name or company.name) if company else '',
         'store_phone': _clean(company.phone) if company else '',
         'logo': logo,
     }

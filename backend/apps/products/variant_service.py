@@ -523,6 +523,7 @@ def save_variants(payload, *, user=None, branch=None, changed_by='Administrator'
                         'transaction_type': 'ADJ_ADD',
                         'reference_id': product.id,
                         'notes': 'Opening stock (Add Multiple Items)',
+                        'reference_number': 'OPENING',
                     })
                     product.refresh_from_db(fields=['stock'])
                 created += is_new

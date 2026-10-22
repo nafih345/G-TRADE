@@ -1,4 +1,6 @@
 // Shared, cached billing context (templates + assignments + settings + company profile).
+// The company identity comes from Settings → Store & Clinic Profile (server); the local cache is
+// only the offline fallback.
 // printBill.js reads this so any module can print without each one wiring up its own
 // fetch; the designer screens refresh it after edits.
 import {
@@ -7,6 +9,7 @@ import {
 import { PRESET_TEMPLATES, presetForDocType } from './templatePresets';
 import { canonicalDocType, compatibleDocTypes } from './billFields.js';
 import { isThermalTemplate } from './renderBillHtml';
+import { fetchStoreProfile, companyFromProfile } from '../utils/storeProfile';
 
 let cache = { templates: null, assignments: null, settings: null, company: null, ts: 0 };
 let inflight = null;
@@ -16,8 +19,8 @@ export function readCompanyFromLocal() {
   try {
     const s = JSON.parse(localStorage.getItem('optical_app_settings') || '{}');
     return {
-      name: s.storeName || '',
-      address: [s.address, s.city, s.state, s.pincode].filter(Boolean).join(', '),
+      name: s.displayName || s.storeName || '',
+      address: s.documentAddress || [s.address, s.city, s.state, s.pincode].filter(Boolean).join(', '),
       phone: s.storePhone || '',
       email: s.storeEmail || '',
       website: s.website || '',
@@ -44,16 +47,17 @@ export async function loadBillingContext({ force = false } = {}) {
   if (inflight) return inflight;
   inflight = (async () => {
     try {
-      const [templates, assignments, settings] = await Promise.all([
+      const [templates, assignments, settings, profile] = await Promise.all([
         fetchTemplates().catch(() => null),
         fetchAssignments().catch(() => null),
         fetchBillingSettings().catch(() => null),
+        fetchStoreProfile().catch(() => null),
       ]);
       cache = {
         templates: templates && templates.length ? templates : null,
         assignments: assignments && assignments.length ? assignments : null,
         settings: settings || null,
-        company: readCompanyFromLocal(),
+        company: profile?.exists ? companyFromProfile(profile) : readCompanyFromLocal(),
         user: readCurrentUser(),
         ts: Date.now(),
       };

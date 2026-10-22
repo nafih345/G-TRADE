@@ -13,6 +13,7 @@ def favicon_silent_view(request):
 
 from django.conf import settings
 from django.conf.urls.static import static
+from apps.security.urls import security_urlpatterns, backup_urlpatterns
 
 _migrations_known_current = False
 
@@ -133,6 +134,8 @@ urlpatterns = [
     path('api/sales/', include('apps.sales.urls')),
     path('api/accounts/', include('apps.accounts.urls')),
     path('api/financial/', include('apps.financial.urls')),
+    path('api/security/', include(security_urlpatterns)),
+    path('api/backups/', include(backup_urlpatterns)),
 ]
 
 if settings.DEBUG:

@@ -7,6 +7,9 @@ import { BranchProvider } from './context/BranchContext';
 import Sidebar from './components/Sidebar';
 import Header from './components/Header';
 import NotificationHost from './components/NotificationHost';
+import ReauthDialogHost from './components/security/ReauthDialogHost';
+import SessionActivityMonitor from './components/security/SessionActivityMonitor';
+import { loadBusinessPrefs } from './utils/businessPrefs';
 import BackendStatusBanner from './components/BackendStatusBanner';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
@@ -22,6 +25,7 @@ const OpticalServices = lazy(() => import('./pages/OpticalServices'));
 const Appointments = lazy(() => import('./pages/Appointments'));
 const PatientHistory = lazy(() => import('./pages/PatientHistory'));
 const Purchases = lazy(() => import('./pages/Purchases'));
+const StockOverview = lazy(() => import('./pages/StockOverview'));
 const Administration = lazy(() => import('./pages/Administration'));
 const Reports = lazy(() => import('./pages/Reports'));
 const Settings = lazy(() => import('./pages/Settings'));
@@ -42,6 +46,10 @@ function MainLayout() {
   useEffect(() => {
     setSidebarOpen(!isMobile);
   }, [isMobile]);
+
+  // Business & Localization preferences: formatting, posting confirmation and number previews
+  // read the cached copy synchronously, so refresh it once per app start.
+  useEffect(() => { loadBusinessPrefs(); }, []);
 
   // 🚀 GLOBAL ENTER KEY SMART HANDLER (Form navigation, modal submission & search execution)
   useEffect(() => {
@@ -237,6 +245,7 @@ function MainLayout() {
                 <Route path="/purchase/receive" element={<Purchases />} />
                 <Route path="/purchase/stock-receive" element={<Purchases />} />
                 <Route path="/purchase/returns" element={<Purchases />} />
+                <Route path="/purchase/stock-overview" element={<StockOverview />} />
 
                 {/* Accounts Sub-Routes */}
                 <Route path="/accounts/receipts" element={<AccountsCOA />} />
@@ -311,6 +320,8 @@ function MainLayout() {
         </Box>
       </Box>
       <NotificationHost />
+      <ReauthDialogHost />
+      <SessionActivityMonitor />
     </ThemeProvider>
   );
 }

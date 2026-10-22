@@ -319,6 +319,79 @@ A freshly provisioned database is already empty, so you only need this to re-cle
 
 ---
 
+## 4. System Security & Backup
+
+Settings → **System Security & Backup** (`apps/security`) is real server-side functionality; it
+needs the following to work as intended on each kind of install.
+
+### What a backup is
+
+A `.zip` with one JSON-lines file per table plus `manifest.json` (format version, database engine,
+applied migrations, per-file row counts and SHA-256 hashes). It is taken through the ORM inside
+one read transaction (REPEATABLE READ on PostgreSQL), so it is a consistent snapshot and works the
+same on SQLite and PostgreSQL. A backup from the desktop can be restored on the hosted stack and vice
+versa. `pg_dump` is **not** used, because neither Render nor the desktop build ships a matching binary.
+
+**Not included:** Django sessions; the `security_*` tables (security policy, sign-in sessions,
+lockout counters, 2FA secrets, the audit log and the backup history itself); uploaded media files
+(product images, logos). A restore therefore never rewinds the audit trail or anyone's
+authenticator.
+
+### Where backups are stored
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `BACKUP_STORAGE` | `database` on Render/Vercel, `filesystem` otherwise | `filesystem` = files in `BACKUP_DIR`; `database` = 1 MB chunks in `security_backupchunk` |
+| `BACKUP_DIR` | `<backend>/backups` | Folder for filesystem storage (git-ignored; never web-served) |
+| `BACKUP_STORAGE_CAPACITY_MB` | `400` (database) / `5120` (filesystem) | The capacity the Backup Health card measures against |
+| `BACKUP_MAX_UPLOAD_MB` | `1024` | Largest backup file accepted for restore |
+| `BACKUP_MAX_UNCOMPRESSED_MB` | `8192` | Zip-bomb guard while validating an archive |
+| `BACKUP_TEMP_DIR` | system temp | Scratch space while writing / validating |
+| `BACKUP_SCHEDULER` | `True` | In-process scheduler thread (see below) |
+| `LOGIN_RATE_LIMIT` / `REAUTH_RATE_LIMIT` | `20/min` / `10/min` | Per-address throttles on sign-in and password re-confirmation |
+
+**Render:** the container disk is wiped on every deploy and restart, so leave `BACKUP_STORAGE`
+at `database`. Backups then live in Neon. That keeps them safe from deploys but **not** from losing
+the Neon database itself, and every backup counts toward Neon's free 0.5 GB. Download a backup
+regularly and keep it off the server, and set retention low (7–15). The Health card warns when
+storage passes 90%. For real off-site storage, an S3-compatible bucket would need to be
+added as a third storage class in `apps/security/backup/storage.py`. That is not implemented.
+
+### Scheduled backups
+
+Every server process starts a scheduler thread (`config/wsgi.py`) that checks once a minute. Each
+run is claimed with a conditional UPDATE, so Render's 2 gunicorn workers never run it twice.
+**Render's free plan sleeps after 15 idle minutes**, and a sleeping service runs nothing. A backup
+missed this way runs once when the service next wakes. If backups must run on time, either keep
+the service awake or call this from any cron (Render Cron Job, GitHub Actions, Windows Task
+Scheduler on the shop PC):
+
+    python manage.py run_scheduled_backups   # runs the backup only if it is due; safe to overlap
+
+Other commands: `python manage.py create_backup` (manual backup now) and
+`python manage.py reset_two_factor <username>` (remove a lost authenticator).
+
+### Restores
+
+A restore validates the archive (structure, every hash, migration compatibility), takes and
+verifies a **safety backup** of the current data, then replaces all tables in **one transaction**.
+Any failure, including the process dying, leaves the data exactly as it was. While a restore runs,
+other writes get `423 Locked`. Afterwards every other session is signed out. A backup made by a
+*newer* version of the app is refused, and an older one is accepted with a warning. Only Super Admin
+can upload, restore or delete backups, and every restore needs the operator's password.
+
+### Sessions, lockout and 2FA
+
+- Every token carries a server-side session id (`sid`). **After deploying this release, everyone is
+  signed out once**, because older tokens have no session.
+- The inactivity timeout is enforced by the API (`401 session_timeout`). The browser's own
+  timer only warns a minute early.
+- "Re-authentication for Sensitive Actions" asks for the password (and the 2FA code, if the user has
+  one) before any DELETE and before changes to security, tax, numbering, financial-mapping,
+  user-permission and restore endpoints (`SENSITIVE_WRITES` in `apps/security/policy.py`).
+- 2FA is TOTP (any authenticator app). It can only be *enforced* once the admin enforcing it has
+  set it up. Users without an authenticator then enrol at their next sign-in.
+
 ## Keep the database in the backend's region
 
 Every SQL query is a network round trip from the backend to Postgres. In the same region that

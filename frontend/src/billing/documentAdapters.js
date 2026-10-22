@@ -74,16 +74,16 @@ function cleanPower(value) {
   return eyes.length ? `${eyes.join(' | ')}${suffix}` : '';
 }
 
-// Fallback company identity — matches what the old hard-coded renderers printed, so an
-// install that has not filled in Settings → Store Profile sees no change.
+// Blank company identity — every value comes from Settings → Store & Clinic Profile (and the
+// Bill Designer branding). Never print made-up business details.
 const FALLBACK_COMPANY = {
-  name: 'GREENSOL OPTICALS',
-  tagline: 'Super Speciality Eye Care & Optical ERP',
-  address: 'Greensol Vision Hospital Complex, Medical College Road',
-  phone: '+91 98470 12345',
-  email: 'sales@greensoloptical.com',
-  website: 'www.greensoloptical.com',
-  gstin: '32AAAAA0000A1Z5',
+  name: '',
+  tagline: '',
+  address: '',
+  phone: '',
+  email: '',
+  website: '',
+  gstin: '',
   pan: '',
   logoDataUrl: '',
   currency: '₹',

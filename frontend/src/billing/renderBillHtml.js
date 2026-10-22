@@ -7,6 +7,8 @@
 // comes pre-computed from documentAdapters.js.
 import JsBarcode from 'jsbarcode';
 import QRCode from 'qrcode';
+import { formatMoney, formatDate } from '../utils/localeFormat.js';
+import { billLabel as L, billLabelText, billHtmlAttrs, BILL_I18N_CSS } from './billI18n.js';
 
 const PAPER = {
   A4: { w: 210, h: 297 },
@@ -42,13 +44,12 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
 ));
 
-// A missing amount prints blank — never as a made-up 0.00.
+// A missing amount prints blank — never as a made-up 0.00. Grouping, decimals and whether the
+// symbol shows follow Settings → Business & Localization.
 function money(v, currency = '₹') {
   const n = v === null || v === undefined || v === '' ? NaN : parseFloat(v);
   if (!Number.isFinite(n)) return '';
-  const neg = n < 0;
-  const s = Math.abs(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return `${neg ? '-' : ''}${currency}${s}`;
+  return formatMoney(n, { symbol: currency });
 }
 
 const wt = (v) => {
@@ -193,8 +194,8 @@ function renderCompany(model, cfg, thermal) {
   const lines = [];
   if (cfg.showAddress && c.address) lines.push(esc(c.address));
   const contact = [];
-  if (cfg.showPhone && c.phone) contact.push(`Phone: ${esc(c.phone)}`);
-  if (cfg.showEmail && c.email) contact.push(`Email: ${esc(c.email)}`);
+  if (cfg.showPhone && c.phone) contact.push(`${L('Phone')}: ${esc(c.phone)}`);
+  if (cfg.showEmail && c.email) contact.push(`${L('Email')}: ${esc(c.email)}`);
   if (cfg.showWebsite && c.website) contact.push(esc(c.website));
   if (contact.length) lines.push(contact.join(' &nbsp;|&nbsp; '));
   const reg = [];
@@ -223,7 +224,7 @@ function renderCompany(model, cfg, thermal) {
     </td>
     <td style="vertical-align:top;text-align:right;">
       ${cfg.showAddress && c.address ? `<div class="co-line">${esc(c.address)}</div>` : ''}
-      ${cfg.showPhone && c.phone ? `<div class="co-line">Phone: ${esc(c.phone)}</div>` : ''}
+      ${cfg.showPhone && c.phone ? `<div class="co-line">${L('Phone')}: ${esc(c.phone)}</div>` : ''}
       ${cfg.showEmail && c.email ? `<div class="co-line">${esc(c.email)}</div>` : ''}
       ${cfg.showWebsite && c.website ? `<div class="co-line">${esc(c.website)}</div>` : ''}
     </td>
@@ -234,9 +235,9 @@ function renderDocTitle(model, cfg, thermal) {
   const text = cfg.text || model.document.title || 'INVOICE';
   const align = cfg.align || 'center';
   if (thermal || cfg.style === 'plain') {
-    return `<div class="sec doc-title plain" style="text-align:${align};">${esc(text)}</div>`;
+    return `<div class="sec doc-title plain" style="text-align:${align};">${L(text)}</div>`;
   }
-  return `<div class="sec doc-title banner" style="text-align:${align};">${esc(text)}</div>`;
+  return `<div class="sec doc-title banner" style="text-align:${align};">${L(text)}</div>`;
 }
 
 const META_LABELS = {
@@ -246,8 +247,8 @@ const META_LABELS = {
 function metaValue(model, key) {
   const d = model.document;
   return ({
-    invoiceNumber: d.number, orderNumber: d.orderNumber, date: d.date, dueDate: d.dueDate,
-    paymentStatus: d.paymentStatus, salesperson: d.salesperson, branch: d.branch,
+    invoiceNumber: d.number, orderNumber: d.orderNumber, date: formatDate(d.date) || d.date,
+    dueDate: formatDate(d.dueDate) || d.dueDate, paymentStatus: d.paymentStatus, salesperson: d.salesperson, branch: d.branch,
   })[key] || '';
 }
 
@@ -256,15 +257,15 @@ function renderMeta(model, cfg, thermal) {
   if (!fields.length) return '';
   if (thermal || cfg.layout === 'rows') {
     return `<div class="sec meta rows">${fields.map((k) =>
-      `<div class="row"><span>${esc(META_LABELS[k] || k)}:</span><span>${esc(metaValue(model, k))}</span></div>`
+      `<div class="row"><span>${L(META_LABELS[k] || k)}:</span><span>${esc(metaValue(model, k))}</span></div>`
     ).join('')}</div>`;
   }
   const cells = [];
   for (let i = 0; i < fields.length; i += 2) {
     const a = fields[i]; const b = fields[i + 1];
     cells.push(`<tr>
-      <td class="k">${esc(META_LABELS[a] || a)}</td><td class="v">${esc(metaValue(model, a))}</td>
-      ${b ? `<td class="k">${esc(META_LABELS[b] || b)}</td><td class="v">${esc(metaValue(model, b))}</td>` : '<td></td><td></td>'}
+      <td class="k">${L(META_LABELS[a] || a)}</td><td class="v">${esc(metaValue(model, a))}</td>
+      ${b ? `<td class="k">${L(META_LABELS[b] || b)}</td><td class="v">${esc(metaValue(model, b))}</td>` : '<td></td><td></td>'}
     </tr>`);
   }
   return `<table class="sec meta grid">${cells.join('')}</table>`;
@@ -280,7 +281,7 @@ function renderCustomer(model, cfg, thermal) {
   if (cfg.showEmail && c.email) lines.push(esc(c.email));
   if (!lines.length) return '';
   return `<div class="sec customer">
-    <div class="cust-title">${esc(cfg.title || 'Bill To')}</div>
+    <div class="cust-title">${L(cfg.title || 'Bill To')}</div>
     ${lines.map((l) => `<div class="cust-line">${l}</div>`).join('')}
   </div>`;
 }
@@ -289,7 +290,7 @@ function renderItems(model, cfg, thermal, currency) {
   const cols = (cfg.columns || []).filter((c) => c.enabled);
   if (!cols.length || !model.items.length) return '';
   const head = `<tr>${cols.map((c) =>
-    `<th style="text-align:${c.align || 'left'};">${esc(c.label)}</th>`).join('')}</tr>`;
+    `<th style="text-align:${c.align || 'left'};">${L(c.label, { stack: true })}</th>`).join('')}</tr>`;
   const body = model.items.map((item, idx) => {
     const tds = cols.map((c) => {
       let val = columnValue(c.key, item, idx, currency);
@@ -319,7 +320,7 @@ function renderTotals(model, cfg, thermal, currency) {
       r.color ? `color:${r.color};` : '',
     ].join('');
     return `<div class="row${r.strong ? ' grand' : ''}" style="${style}">
-      <span>${esc(r.label)}</span><span>${r.value}</span></div>`;
+      <span>${L(r.label)}</span><span>${r.value}</span></div>`;
   }).join('');
   return `<div class="sec totals ${cfg.align === 'left' ? 'left' : 'right'}">${body}</div>`;
 }
@@ -327,14 +328,14 @@ function renderTotals(model, cfg, thermal, currency) {
 function renderPayment(model, cfg, thermal, currency, assets) {
   const p = model.payment;
   const rows = [];
-  if (cfg.showMethod && p.method) rows.push(['Payment Method', esc(p.method)]);
-  if (cfg.showPaid && money(p.paid, currency)) rows.push(['Paid', money(p.paid, currency)]);
-  if (cfg.showBalance && money(p.balance, currency)) rows.push(['Balance', money(p.balance, currency)]);
-  if (cfg.showStatus && p.status) rows.push(['Status', esc(p.status)]);
-  if (cfg.showBankDetails && cfg.bankDetails) rows.push(['Bank', esc(cfg.bankDetails)]);
+  if (cfg.showMethod && p.method) rows.push([L('Payment Method'), esc(p.method)]);
+  if (cfg.showPaid && money(p.paid, currency)) rows.push([L('Paid'), money(p.paid, currency)]);
+  if (cfg.showBalance && money(p.balance, currency)) rows.push([L('Balance'), money(p.balance, currency)]);
+  if (cfg.showStatus && p.status) rows.push([L('Status'), esc(p.status)]);
+  if (cfg.showBankDetails && cfg.bankDetails) rows.push([L('Bank'), esc(cfg.bankDetails)]);
   if (!rows.length && !(cfg.showUpiQr && assets.qrDataUrl)) return '';
   return `<div class="sec payment">
-    <div class="pay-title">Payment</div>
+    <div class="pay-title">${L('Payment')}</div>
     ${rows.map(([k, v]) => `<div class="row"><span>${k}</span><span>${v}</span></div>`).join('')}
     ${cfg.showUpiQr && assets.qrDataUrl ? `<img src="${assets.qrDataUrl}" style="height:90px;margin-top:6px;" />` : ''}
   </div>`;
@@ -356,7 +357,7 @@ function renderFooter(model, cfg, thermal) {
   const blocks = [];
   const add = (label, text) => {
     if (!text) return;
-    blocks.push(`<div class="foot-block">${label ? `<strong>${esc(label)}</strong><br/>` : ''}${esc(text).replace(/\n/g, '<br/>')}</div>`);
+    blocks.push(`<div class="foot-block">${label ? `<strong>${L(label)}</strong><br/>` : ''}${esc(text).replace(/\n/g, '<br/>')}</div>`);
   };
   add('', model.footer?.notes || cfg.notes);
   add('Terms & Conditions', model.footer?.terms || cfg.terms);
@@ -364,9 +365,9 @@ function renderFooter(model, cfg, thermal) {
   add('Warranty', cfg.warranty);
   add('Customer Care', cfg.customerCare);
   const thanks = cfg.thankYou
-    ? `<div class="thank-you">${esc(cfg.thankYou)}</div>` : '';
+    ? `<div class="thank-you">${L(cfg.thankYou)}</div>` : '';
   const sign = cfg.showSignature && !thermal
-    ? `<div class="sign-box">${esc(cfg.signatureLabel || 'Authorized Signatory')}</div>` : '';
+    ? `<div class="sign-box">${L(cfg.signatureLabel || 'Authorized Signatory')}</div>` : '';
   if (!blocks.length && !thanks && !sign) return '';
   return `<div class="sec footer">
     <div class="foot-main">${blocks.join('')}</div>
@@ -492,9 +493,10 @@ export function renderBillHtml(template, model, opts = {}) {
     ? `<script>window.onload=function(){setTimeout(function(){try{window.focus();window.print();}catch(e){}},250);};<\/script>`
     : '';
 
-  return `<!DOCTYPE html><html><head><meta charset="utf-8" />
-    <title>${esc(model.document.title || 'Bill')} ${esc(model.document.number || '')}</title>
+  return `<!DOCTYPE html><html ${billHtmlAttrs()}><head><meta charset="utf-8" />
+    <title>${esc(billLabelText(model.document.title || 'Bill'))} ${esc(model.document.number || '')}</title>
     ${buildStyles(template, thermal, styles)}
+    <style>${BILL_I18N_CSS}</style>
   </head><body>${body}${autoPrint}</body></html>`;
 }
 

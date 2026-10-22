@@ -6,6 +6,7 @@ import App from './App.jsx'
 import { installBranchInterceptor } from './utils/apiClient'
 import { installAlertOverride } from './utils/notify'
 import { resolveApiBaseUrl, installBackendHealthWatch } from './utils/backendStatus'
+import { installSessionGuard } from './utils/sessionGuard'
 import './index.css'
 
 // Every alert(...) in the app shows as an in-page notice at the bottom of the screen
@@ -24,6 +25,10 @@ axios.defaults.baseURL = resolveApiBaseUrl()
 
 // Attach X-Branch-Id / X-User-Name headers to every API request.
 installBranchInterceptor()
+
+// Server-side session policy: an ended/idle session signs out, a sensitive action that needs the
+// password again prompts for it and retries (see utils/sessionGuard.js).
+installSessionGuard()
 
 // Probe /api/health/ at boot and watch every later response, so an unreachable backend or a
 // backend running on a dead database shows as a banner instead of as empty screens that

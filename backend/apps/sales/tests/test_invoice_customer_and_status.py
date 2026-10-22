@@ -100,7 +100,16 @@ class SavePersistenceTests(InvoiceTestMixin, APITestCase):
         self.assertEqual(data['tax_amount'], '269.82')
         self.assertEqual(data['net_amount'], '270.12')
 
+    def _manual_numbers(self):
+        # These cover numbers typed / sent by the screen, which only stand while Settings →
+        # Business & Localization has auto-generated document numbers switched off.
+        from apps.company.models import BusinessSettings
+        bs = BusinessSettings.load()
+        bs.preferences = {**(bs.preferences or {}), 'auto_generate_numbers': False}
+        bs.save()
+
     def test_taken_invoice_number_gets_a_fresh_one(self):
+        self._manual_numbers()
         first = self._create(document_type='INVOICE', invoice_number='INV-2026-1234')
         second = self._create(document_type='INVOICE', invoice_number='INV-2026-1234')
         self.assertEqual(first['invoice_number'], 'INV-2026-1234')
@@ -108,6 +117,7 @@ class SavePersistenceTests(InvoiceTestMixin, APITestCase):
         self.assertTrue(second['invoice_number'].startswith('INV-'))
 
     def test_edit_onto_a_taken_number_gets_a_fresh_one(self):
+        self._manual_numbers()
         self._create(invoice_number='ORD-2026-1111')
         other = self._create(invoice_number='ORD-2026-2222')
         res = self.client.patch(f"{self.url}{other['id']}/", {'invoice_number': 'ORD-2026-1111'}, format='json')

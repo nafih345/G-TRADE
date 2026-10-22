@@ -14,3 +14,11 @@ try:
     run_startup_migrations()
 except Exception:  # never let migration bootstrap break serving
     pass
+
+# Automatic database backups (apps/security/backup/scheduler.py): one daemon thread per server
+# process; overlapping workers are safe because each run is claimed in the database first.
+try:
+    from apps.security.backup.scheduler import start_scheduler
+    start_scheduler()
+except Exception:  # never let the scheduler break serving
+    pass

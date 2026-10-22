@@ -138,8 +138,6 @@ const cellInputSx = (width, align = 'right') => ({
 });
 const ITEM_MODES = [
   { key: 'product', label: '📦 Product', kbd: 'F4' },
-  { key: 'lens', label: '👓 Lens', kbd: 'F5' },
-  { key: 'service', label: '🔧 Services', kbd: 'F6' },
 ];
 const PAY_MODE_BUTTONS = [['Cash', 'Cash'], ['UPI', 'UPI'], ['Card', 'Card'], ['Bank Transfer', 'Bank'], ['Credit Sale', 'Credit'], ['Split Payment', 'Split']];
 const isServiceLine = (item) => item?.itemType === 'SERVICE';
@@ -800,6 +798,8 @@ export default function WholesaleSales() {
   // price, master tax). Qty / price / disc / tax are then edited in the grid cells.
   const modeProducts = useMemo(() => {
     if (itemMode === 'service') return services;
+    // No separate Lens tab on wholesale: the Product search covers every product, lenses included.
+    if (itemMode === 'product') return products;
     return products.filter(p => (itemMode === 'lens' ? isLensProduct(p) : !isLensProduct(p)));
   }, [itemMode, products, services]);
 
@@ -841,14 +841,22 @@ export default function WholesaleSales() {
     return dup;
   };
 
-  // Adds one of the picked item to the bill and leaves the cursor in the search box for the next.
-  const addPickedItem = (item, mode = itemMode, stamp) => {
+  // Adds one of the picked item to the bill. A pick from the search results puts the cursor
+  // straight into that line's Qty cell; an exact barcode scan (toQty=false) stays in the
+  // search box so the next code can be scanned at once.
+  const addPickedItem = (item, mode = itemMode, stamp, toQty = true) => {
     if (!item) return;
     clearSearch();
     if (isDuplicateFire(`pick:${item.id}`, stamp)) return;
+    // Row the item will land on: a product already in the cart gets its qty bumped in place.
+    const existingIdx = mode === 'service' ? -1
+      : cartItems.findIndex(line => !isServiceLine(line) && (line.id === item.id || line.code === item.code) && !line.isFreeGift);
+    const rowIdx = existingIdx !== -1 ? existingIdx : cartItems.length;
     const added = mode === 'service' ? (addServiceToCart(item, 1, {}), true) : handleAddProductToCart(item, 1);
     if (added) showToast(`Added: ${item.name}`, 'success');
-    setTimeout(() => focusSearch(), 20);
+    setTimeout(() => {
+      if (!(added && toQty && focusField(document.querySelector(`input[data-cell-row="${rowIdx}"][data-cell-col="qty"]`)))) focusSearch();
+    }, 50);
   };
 
   const switchItemMode = (mode) => {
@@ -867,7 +875,7 @@ export default function WholesaleSales() {
     const c = q.toLowerCase();
     const exact = itemMode === 'service' ? services.find(p => codeMatches(p, c)) : products.find(p => codeMatches(p, c));
     const pick = exact || searchMatches[Math.min(matchIndex, searchMatches.length - 1)];
-    if (pick) addPickedItem(pick);
+    if (pick) addPickedItem(pick, itemMode, undefined, !exact);
     else { showToast(`No ${modeNoun} matches "${q}".`, 'error'); focusSearch(); }
   };
 
@@ -912,7 +920,7 @@ export default function WholesaleSales() {
     // scanned at once. Checked across every product, not just this tab, so a scan never
     // depends on which tab happens to be open.
     const exact = itemMode === 'service' ? services.find(p => codeMatches(p, c)) : products.find(p => codeMatches(p, c));
-    if (exact) { addPickedItem(exact, itemMode, e.timeStamp); return; }
+    if (exact) { addPickedItem(exact, itemMode, e.timeStamp, false); return; }
     if (searchMatches.length) {
       if (!searchOpen) { setSearchOpen(true); return; } // results were hidden with Esc — show them again first
       addPickedItem(searchMatches[Math.min(matchIndex, searchMatches.length - 1)], itemMode, e.timeStamp);
@@ -1702,8 +1710,6 @@ export default function WholesaleSales() {
       setTimeout(() => document.getElementById('ws-dealer-search')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })), 30);
     },
     tabProduct: () => switchItemMode('product'),
-    tabLens: () => switchItemMode('lens'),
-    tabService: () => switchItemMode('service'),
     productSearch: () => focusSearch(),
     grid: () => focusGrid(),
     bulkAdd: () => setBulkAddOpen(true),
@@ -2012,7 +2018,7 @@ export default function WholesaleSales() {
         </Grid>
       </Paper>
 
-      {/* ============ PRODUCT / LENS / SERVICES ENTRY ============ */}
+      {/* ============ PRODUCT ENTRY ============ */}
       <Paper variant="outlined" data-nav-own sx={{ p: 1.2, mb: 1.5, borderRadius: 2.5, bgcolor: '#eff6ff', borderColor: '#bfdbfe' }}>
         <Box sx={{ display: 'flex', gap: 0.75, mb: 1, flexWrap: 'wrap', alignItems: 'center' }} role="tablist" aria-label="Item type">
           {ITEM_MODES.map(m => (
@@ -2030,7 +2036,7 @@ export default function WholesaleSales() {
             </Button>
           ))}
           <Typography variant="caption" color="text.secondary" fontWeight={700} sx={{ ml: 'auto', display: { xs: 'none', md: 'block' } }}>
-            Scan or type → results list in the grid → <Kbd>↑</Kbd><Kbd>↓</Kbd> choose → <Kbd>Enter</Kbd> adds · <Kbd>F9</Kbd> edit lines
+            Scan or type → results list in the grid → <Kbd>↑</Kbd><Kbd>↓</Kbd> choose → <Kbd>Enter</Kbd> adds &amp; jumps to Qty ·<Kbd>F9</Kbd> edit lines
           </Typography>
         </Box>
 

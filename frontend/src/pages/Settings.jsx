@@ -1,16 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   Box, Card, CardContent, Typography, Button, Tab, Tabs, 
   Grid, TextField, MenuItem, Stack, Switch, FormControlLabel, 
-  Divider, Alert, Paper, Avatar, InputAdornment
+  Alert, Paper
 } from '@mui/material';
 import {
   Storefront as StoreIcon,
-  Receipt as BillingIcon,
-  Visibility as ClinicalIcon,
+  Public as LocalizationIcon,
   Security as SecurityIcon,
   Save as SaveIcon,
-  CloudUpload as UploadIcon,
   CheckCircle as SuccessIcon,
   AccountTree as BranchTreeIcon,
   DesignServices as DesignerIcon,
@@ -24,21 +22,78 @@ import ConfirmActionDialog from '../components/common/ConfirmActionDialog';
 import BillDesignerDashboard from '../components/settings/billing/BillDesignerDashboard';
 import BarcodeLabelSettings from '../components/settings/BarcodeLabelSettings';
 import BankMasterSettings from '../components/settings/BankMasterSettings';
+import StoreProfileSettings from '../components/settings/store/StoreProfileSettings';
+import BusinessLocalizationSettings from '../components/settings/business/BusinessLocalizationSettings';
+import SystemSecuritySettings from '../components/settings/security/SystemSecuritySettings';
+import { GREEN, greenButtonSx } from '../components/settings/store/storeUi';
+import { STORE_PROFILE_EVENT } from '../utils/storeProfile';
 
 // Deep-link ids for /settings?tab=<id> (e.g. the barcode print dialog's
-// "Label Settings" button). Index = tab position.
-const TAB_IDS = ['store', 'billing', 'clinical', 'security', 'business', 'bill-designer', 'barcode-labels', 'banks'];
+// "Label Settings" button). Index = tab position. Business & Localization also takes
+// &section=<general|currency|tax|numbering|other|fields>.
+const TAB_IDS = ['store', 'localization', 'security', 'business', 'bill-designer', 'barcode-labels', 'banks'];
+// Retired ids still linked from elsewhere: the old "Billing & Tax Config", "POS & Barcode Scanner" and
+// "Clinical & Eye Exam Defaults" tabs.
+const TAB_ALIASES = { billing: 'localization', pos: 'barcode-labels', clinical: 'store' };
+const LOCALIZATION_TAB = 1;
+const SECURITY_TAB = 2;
+// Keys of retired tabs (Billing & Tax → Business & Localization; Clinical & Eye Exam Defaults) to drop from the local blob.
+// autoLogoutMinutes: the inactivity timeout is now a server-enforced policy (System Security & Backup).
+const RETIRED_KEYS = ['currency', 'defaultGst', 'invoicePrefix', 'invoiceFooter', 'defaultDoctor', 'examReminderMonths',
+  'autoLogoutMinutes'];
+
+// Keys of the legacy local settings blob that now belong to the store profile (written only by
+// utils/storeProfile's cache) — the other tabs' save must never overwrite them.
+const STORE_KEYS = ['storeName', 'displayName', 'storePhone', 'storeEmail', 'website', 'tagline', 'address',
+  'city', 'state', 'pincode', 'documentAddress', 'gstin'];
+
+// Administration's legacy branch list mirrors the main branch's contact details.
+function syncLegacyMainBranch(p) {
+  try {
+    const saved = JSON.parse(localStorage.getItem('optical_branches') || '[]');
+    const address = [p.address, p.city, p.state, p.pin_code].filter(Boolean).join(', ');
+    const updated = saved.map((b) => (b.id === 'main' || b.name === 'Main Branch'
+      ? { ...b, phone: p.phone || b.phone || '—', email: p.email || b.email || '—', gstin: p.gstin || b.gstin || '—', address: address || b.address || '—' }
+      : b));
+    localStorage.setItem('optical_branches', JSON.stringify(updated));
+    window.dispatchEvent(new Event('optical_branches_updated'));
+  } catch { /* storage unavailable */ }
+}
 
 export default function Settings() {
   const location = useLocation();
-  // 'pos' is the retired POS & Barcode Scanner tab — it now lives inside Barcode Labels.
   const tabFromUrl = () => {
     const id = new URLSearchParams(location.search).get('tab');
-    return Math.max(0, TAB_IDS.indexOf(id === 'pos' ? 'barcode-labels' : id));
+    return Math.max(0, TAB_IDS.indexOf(TAB_ALIASES[id] || id));
   };
+  const sectionFromUrl = new URLSearchParams(location.search).get('section') || 'general';
   const [activeTab, setActiveTab] = useState(tabFromUrl);
+  const storeRef = useRef(null);
+  const [storeState, setStoreState] = useState({ dirty: false, saving: false, canSave: false });
+  const onStoreState = useCallback((st) => setStoreState(st), []);
+  const bizRef = useRef(null);
+  const [bizState, setBizState] = useState({ dirty: false, saving: false, canSave: false });
+  const onBizState = useCallback((st) => setBizState(st), []);
+  const securityRef = useRef(null);
+  const [securityState, setSecurityState] = useState({ dirty: false, saving: false, canSave: false });
+  const onSecurityState = useCallback((st) => setSecurityState(st), []);
+  const [pendingTab, setPendingTab] = useState(null);
+
+  // Tabs holding their own unsaved form (Store & Clinic Profile, Business & Localization, Security).
+  const formTab = activeTab === 0 ? { ref: storeRef, state: storeState, name: 'Store & Clinic Profile' }
+    : activeTab === LOCALIZATION_TAB ? { ref: bizRef, state: bizState, name: 'Business & Localization settings' }
+      : activeTab === SECURITY_TAB ? { ref: securityRef, state: securityState, name: 'security settings' }
+        : null;
+
+  // Leaving such a tab with unsaved edits asks first (never silently discards).
+  const changeTab = (val) => {
+    if (val === activeTab) return;
+    if (formTab?.state.dirty) { setPendingTab(val); return; }
+    setActiveTab(val);
+  };
+  const openTabById = (id) => changeTab(Math.max(0, TAB_IDS.indexOf(TAB_ALIASES[id] || id)));
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { if (location.search) setActiveTab(tabFromUrl()); }, [location.search]);
+  useEffect(() => { if (location.search) changeTab(tabFromUrl()); }, [location.search]);
   const { multiBranchEnabled, refresh: refreshBranchContext } = useBranch();
   const [multiBranch, setMultiBranch] = useState(false);
   const [confirmEnableOpen, setConfirmEnableOpen] = useState(false);
@@ -87,145 +142,81 @@ export default function Settings() {
     try {
       const saved = localStorage.getItem('optical_app_settings');
       return saved ? JSON.parse(saved) : {
-        storeName: '',
-        storePhone: '',
-        storeEmail: '',
-        website: '',
-        address: '',
-        city: '',
-        state: '',
-        pincode: '',
-        gstin: '',
-        currency: '₹',
-        defaultGst: '18%',
-        invoicePrefix: 'INV-2026-',
-        invoiceFooter: '',
         barcodeStandard: 'EAN-13',
         autoPrintReceipt: true,
         enableScannerBeep: true,
-        defaultDoctor: '',
-        examReminderMonths: '12 Months',
-        autoLogoutMinutes: '30'
       };
     } catch (e) {
       return {
-        storeName: '',
-        storePhone: '',
-        storeEmail: '',
-        website: '',
-        address: '',
-        city: '', state: '', pincode: '',
-        gstin: '', currency: '₹', defaultGst: '18%',
-        invoicePrefix: 'INV-2026-',
-        invoiceFooter: '',
         barcodeStandard: 'EAN-13', autoPrintReceipt: true, enableScannerBeep: true,
-        defaultDoctor: '', examReminderMonths: '12 Months', autoLogoutMinutes: '30'
       };
     }
   });
 
-  const [doctorsList, setDoctorsList] = useState([]);
-
   useEffect(() => {
-    const loadDocs = () => {
-      try {
-        const saved = JSON.parse(localStorage.getItem('optical_doctors_db') || '[]');
-        setDoctorsList(saved.filter(d => d.status === 'Active'));
-      } catch (e) {}
+    const onProfile = (e) => {
+      if (e.detail) syncLegacyMainBranch(e.detail);
     };
-    loadDocs();
-    window.addEventListener('optical_doctors_updated', loadDocs);
-    return () => window.removeEventListener('optical_doctors_updated', loadDocs);
-  }, []);
-
-  // Fetch Company Settings from Backend Database API on Mount
-  useEffect(() => {
-    const fetchCompanySettings = async () => {
-      try {
-        const res = await axios.get('/api/company/profile/');
-        if (res.data && Array.isArray(res.data) && res.data.length > 0) {
-          const profile = res.data[0];
-          setSettings(prev => ({
-            ...prev,
-            storeName: profile.name || prev.storeName,
-            storePhone: profile.phone || prev.storePhone,
-            storeEmail: profile.email || prev.storeEmail,
-            address: profile.address || prev.address,
-            gstin: profile.gstin || prev.gstin,
-            currency: profile.currency || prev.currency
-          }));
-        }
-      } catch (e) {}
-    };
-    fetchCompanySettings();
+    window.addEventListener(STORE_PROFILE_EVENT, onProfile);
+    return () => window.removeEventListener(STORE_PROFILE_EVENT, onProfile);
   }, []);
 
   const [savedAlert, setSavedAlert] = useState(false);
+  const [saveError, setSaveError] = useState('');
 
-  // Save Settings Handler (Database API Sync)
-  const handleSaveSettings = async () => {
-    // 1. Save locally
+  // Save for the remaining device-local preference tabs (barcode scanner).
+  const handleSaveSettings = () => {
+    setSaveError('');
     try {
-      localStorage.setItem('optical_app_settings', JSON.stringify(settings));
-    } catch (e) {}
-
-    // 2. Synchronize Main Branch in Administration & Header with updated store details
-    try {
-      const savedBranches = JSON.parse(localStorage.getItem('optical_branches') || '[]');
-      const updatedBranches = savedBranches.map(b => {
-        if (b.id === 'main' || b.name === 'Main Branch') {
-          return {
-            ...b,
-            phone: settings.storePhone || b.phone || '—',
-            email: settings.storeEmail || b.email || '—',
-            gstin: settings.gstin || b.gstin || '—',
-            address: settings.address || b.address || '—'
-          };
-        }
-        return b;
-      });
-      localStorage.setItem('optical_branches', JSON.stringify(updatedBranches));
-      window.dispatchEvent(new Event('optical_branches_updated'));
-    } catch (e) {}
-
-    // 3. Save to Backend Database API
-    try {
-      await axios.post('/api/company/profile/', {
-        name: settings.storeName || 'Main Optical Store',
-        email: settings.storeEmail,
-        phone: settings.storePhone,
-        gstin: settings.gstin,
-        address: settings.address,
-        currency: settings.currency || '₹',
-        fiscal_year_start: '2026-04-01',
-        fiscal_year_end: '2027-03-31'
-      });
-    } catch (e) {}
-
+      const current = JSON.parse(localStorage.getItem('optical_app_settings') || '{}');
+      RETIRED_KEYS.forEach((k) => { delete current[k]; });
+      const rest = Object.fromEntries(Object.entries(settings).filter(([k]) => !STORE_KEYS.includes(k) && !RETIRED_KEYS.includes(k)));
+      localStorage.setItem('optical_app_settings', JSON.stringify({ ...current, ...rest }));
+    } catch (e) {
+      setSaveError('These preferences could not be saved — browser storage is unavailable.');
+      return;
+    }
     setSavedAlert(true);
     setTimeout(() => setSavedAlert(false), 4000);
   };
 
+  const handleHeaderSave = () => (formTab ? formTab.ref.current?.save() : handleSaveSettings());
+  const isLocalization = activeTab === LOCALIZATION_TAB;
 
   return (
-    <Box sx={{ p: 4, pb: 8 }}>
+    <Box sx={{ p: { xs: 2, sm: 3, md: 4 }, pb: 8, maxWidth: '100%', overflowX: 'hidden' }}>
       {/* Header */}
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3, flexWrap: 'wrap', gap: 2 }}>
         <Box>
-          <Typography variant="h4" fontWeight={800}>Application & Store Configuration</Typography>
-          <Typography variant="body2" color="text.secondary">Configure optical store profile, billing taxes, POS barcode rules, clinical defaults, and system preferences</Typography>
+          <Typography variant="h4" component="h1" fontWeight={800} sx={{ fontSize: { xs: '1.5rem', sm: '2.125rem' } }}>
+            {isLocalization ? 'Business & Localization Settings' : 'Application & Store Configuration'}
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            {activeTab === 0
+              ? 'Manage your store identity, contact details and clinic information'
+              : isLocalization
+                ? 'Configure regional settings, currency, language, tax, numbering sequences, and other preferences.'
+                : activeTab === SECURITY_TAB
+                  ? 'Manage security, backups, and recovery settings for your optical business.'
+                  : 'Configure optical store profile, business & localization, POS barcode rules, and system preferences'}
+          </Typography>
         </Box>
-        <Button 
-          variant="contained" 
-          startIcon={<SaveIcon />} 
-          onClick={handleSaveSettings}
-          sx={{ backgroundColor: '#2563EB', fontWeight: 700, px: 3, py: 1 }}
+        <Button
+          variant="contained"
+          startIcon={<SaveIcon />}
+          onClick={handleHeaderSave}
+          disabled={!!formTab && (formTab.state.saving || !formTab.state.canSave || !formTab.state.dirty)}
+          sx={{ ...greenButtonSx, px: 3, py: 1 }}
         >
-          Save All Settings
+          {formTab?.state.saving ? 'Saving…' : 'Save Changes'}
         </Button>
       </Box>
 
-      {savedAlert && (
+      {saveError && !formTab && (
+        <Alert severity="warning" onClose={() => setSaveError('')} sx={{ mb: 3, borderRadius: 3, fontWeight: 600 }}>{saveError}</Alert>
+      )}
+
+      {savedAlert && !formTab && (
         <Alert severity="success" icon={<SuccessIcon />} sx={{ mb: 3, borderRadius: 3, fontWeight: 600 }}>
           Application settings updated and saved to system database!
         </Alert>
@@ -233,10 +224,21 @@ export default function Settings() {
 
       {/* Tabs */}
       <Card sx={{ mb: 3, borderRadius: 3 }}>
-        <Tabs value={activeTab} onChange={(e, val) => setActiveTab(val)} variant="scrollable" scrollButtons="auto" sx={{ px: 2, borderBottom: 1, borderColor: 'divider' }}>
+        <Tabs
+          value={activeTab}
+          onChange={(e, val) => changeTab(val)}
+          variant="scrollable"
+          scrollButtons="auto"
+          allowScrollButtonsMobile
+          aria-label="Configuration sections"
+          sx={{
+            px: 2, borderBottom: 1, borderColor: 'divider',
+            '& .MuiTabs-indicator': { bgcolor: GREEN, height: 3 },
+            '& .MuiTab-root.Mui-selected': { color: GREEN },
+          }}
+        >
           <Tab label="Store & Clinic Profile" icon={<StoreIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
-          <Tab label="Billing & Tax Config" icon={<BillingIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
-          <Tab label="Clinical & Eye Exam Defaults" icon={<ClinicalIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
+          <Tab label="Business & Localization" icon={<LocalizationIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab label="System Security & Backup" icon={<SecurityIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab label="Business Settings" icon={<BranchTreeIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab label="Bill & Invoice Designer" icon={<DesignerIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
@@ -245,11 +247,11 @@ export default function Settings() {
         </Tabs>
       </Card>
 
-      {/* TAB 5: BILL & INVOICE DESIGNER */}
-      {activeTab === 5 && <BillDesignerDashboard />}
+      {/* TAB 4: BILL & INVOICE DESIGNER */}
+      {activeTab === 4 && <BillDesignerDashboard />}
 
-      {/* TAB 6: BARCODE LABELS — scanner/POS preferences + label design (used by every barcode Print dialog) */}
-      {activeTab === 6 && (
+      {/* TAB 5: BARCODE LABELS — scanner/POS preferences + label design (used by every barcode Print dialog) */}
+      {activeTab === 5 && (
         <>
           <Card sx={{ p: 3, mb: 3, borderRadius: 4, border: '1px solid', borderColor: 'divider' }}>
             <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>Barcode Scanner & POS Preferences</Typography>
@@ -302,236 +304,26 @@ export default function Settings() {
         </>
       )}
 
-      {/* TAB 7: BANK MASTER (banks offered on Bank / UPI payments) */}
-      {activeTab === 7 && <BankMasterSettings />}
+      {/* TAB 6: BANK MASTER (banks offered on Bank / UPI payments) */}
+      {activeTab === 6 && <BankMasterSettings />}
 
-      {/* TAB 0: STORE PROFILE */}
+      {/* TAB 0: STORE & CLINIC PROFILE */}
       {activeTab === 0 && (
-        <Card sx={{ p: 3, borderRadius: 4, border: '1px solid', borderColor: 'divider' }}>
-          <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>Optical Store & Clinic Branding</Typography>
-          <Grid container spacing={2}>
-            <Grid item xs={12} sm={6}>
-              <TextField 
-                label="Store / Clinic Name" 
-                fullWidth 
-                required
-                placeholder="e.g. Greensol Opticals & Eye Care"
-                value={settings.storeName}
-                onChange={(e) => setSettings({ ...settings, storeName: e.target.value })}
-              />
-            </Grid>
-            <Grid item xs={12} sm={6}>
-              <TextField 
-                label="GSTIN Registration Number" 
-                fullWidth 
-                placeholder="e.g. 29AAAAA0000A1Z5"
-                value={settings.gstin}
-                onChange={(e) => setSettings({ ...settings, gstin: e.target.value })}
-              />
-            </Grid>
-
-            <Grid item xs={12} sm={6}>
-              <TextField 
-                label="Contact Phone Number" 
-                fullWidth 
-                placeholder="e.g. +91 9876543210"
-                value={settings.storePhone}
-                onChange={(e) => setSettings({ ...settings, storePhone: e.target.value })}
-              />
-            </Grid>
-            <Grid item xs={12} sm={6}>
-              <TextField 
-                label="Store Email Address" 
-                fullWidth 
-                placeholder="e.g. contact@gopticals.com"
-                value={settings.storeEmail}
-                onChange={(e) => setSettings({ ...settings, storeEmail: e.target.value })}
-              />
-            </Grid>
-
-            <Grid item xs={12}>
-              <TextField 
-                label="Physical Street Address" 
-                fullWidth 
-                multiline
-                rows={2}
-                placeholder="Enter street address, building / suite number"
-                value={settings.address}
-                onChange={(e) => setSettings({ ...settings, address: e.target.value })}
-              />
-            </Grid>
-
-            <Grid item xs={12} sm={4}>
-              <TextField 
-                label="City / District" 
-                fullWidth 
-                placeholder="e.g. Bengaluru"
-                value={settings.city}
-                onChange={(e) => setSettings({ ...settings, city: e.target.value })}
-              />
-            </Grid>
-            <Grid item xs={12} sm={4}>
-              <TextField 
-                label="State" 
-                fullWidth 
-                placeholder="e.g. Karnataka"
-                value={settings.state}
-                onChange={(e) => setSettings({ ...settings, state: e.target.value })}
-              />
-            </Grid>
-            <Grid item xs={12} sm={4}>
-              <TextField 
-                label="Pincode" 
-                fullWidth 
-                placeholder="e.g. 560001"
-                value={settings.pincode}
-                onChange={(e) => setSettings({ ...settings, pincode: e.target.value })}
-              />
-            </Grid>
-          </Grid>
-        </Card>
+        <StoreProfileSettings ref={storeRef} onStateChange={onStoreState} onOpenTab={openTabById} />
       )}
 
-      {/* TAB 1: BILLING & TAX */}
-      {activeTab === 1 && (
-        <Card sx={{ p: 3, borderRadius: 4, border: '1px solid', borderColor: 'divider' }}>
-          <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>POS Billing & Tax Configurations</Typography>
-          <Grid container spacing={2}>
-            <Grid item xs={12} sm={4}>
-              <TextField 
-                select 
-                label="System Currency Symbol" 
-                fullWidth 
-                value={settings.currency}
-                onChange={(e) => setSettings({ ...settings, currency: e.target.value })}
-              >
-                <MenuItem value="₹">₹ (Indian Rupee - INR)</MenuItem>
-                <MenuItem value="$">$ (US Dollar - USD)</MenuItem>
-                <MenuItem value="€">€ (Euro - EUR)</MenuItem>
-                <MenuItem value="£">£ (British Pound - GBP)</MenuItem>
-              </TextField>
-            </Grid>
-            <Grid item xs={12} sm={4}>
-              <TextField 
-                select 
-                label="Default GST Tax Rate" 
-                fullWidth 
-                value={settings.defaultGst}
-                onChange={(e) => setSettings({ ...settings, defaultGst: e.target.value })}
-              >
-                <MenuItem value="5%">5% GST (Standard Lenses)</MenuItem>
-                <MenuItem value="12%">12% GST (Spectacle Frames)</MenuItem>
-                <MenuItem value="18%">18% GST (Contact Lenses & Solutions)</MenuItem>
-                <MenuItem value="28%">28% GST (Premium Sunglasses)</MenuItem>
-              </TextField>
-            </Grid>
-            <Grid item xs={12} sm={4}>
-              <TextField 
-                label="Invoice Number Prefix" 
-                fullWidth 
-                value={settings.invoicePrefix}
-                onChange={(e) => setSettings({ ...settings, invoicePrefix: e.target.value })}
-              />
-            </Grid>
-
-            <Grid item xs={12}>
-              <TextField 
-                label="Invoice Footer Note (Appears on Printed Receipts)" 
-                fullWidth 
-                multiline
-                rows={3}
-                value={settings.invoiceFooter}
-                onChange={(e) => setSettings({ ...settings, invoiceFooter: e.target.value })}
-              />
-            </Grid>
-          </Grid>
-        </Card>
+      {/* TAB 1: BUSINESS & LOCALIZATION (regional defaults, currency, tax, numbering, custom fields) */}
+      {activeTab === LOCALIZATION_TAB && (
+        <BusinessLocalizationSettings ref={bizRef} initialSection={sectionFromUrl} onStateChange={onBizState} />
       )}
 
-      {/* TAB 2: CLINICAL DEFAULTS */}
-      {activeTab === 2 && (
-        <Card sx={{ p: 3, borderRadius: 4, border: '1px solid', borderColor: 'divider' }}>
-          <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>Clinical & Eye Exam Defaults</Typography>
-          <Grid container spacing={2}>
-            <Grid item xs={12} sm={6}>
-              <TextField 
-                select 
-                label="Default Attending Optometrist Doctor" 
-                fullWidth 
-                value={settings.defaultDoctor || ''}
-                onChange={(e) => setSettings({ ...settings, defaultDoctor: e.target.value })}
-              >
-                <MenuItem value="">-- Select Default Doctor --</MenuItem>
-                {doctorsList.map(doc => (
-                  <MenuItem key={doc.id || doc.name} value={doc.name}>
-                    {doc.name} ({doc.qualification || 'Optometrist'})
-                  </MenuItem>
-                ))}
-              </TextField>
-            </Grid>
-            <Grid item xs={12} sm={6}>
-              <TextField 
-                select 
-                label="Patient Follow-Up Exam Reminder" 
-                fullWidth 
-                value={settings.examReminderMonths}
-                onChange={(e) => setSettings({ ...settings, examReminderMonths: e.target.value })}
-              >
-                <MenuItem value="6 Months">6 Months</MenuItem>
-                <MenuItem value="12 Months">12 Months (Annual Vision Exam)</MenuItem>
-                <MenuItem value="24 Months">24 Months</MenuItem>
-              </TextField>
-            </Grid>
-          </Grid>
-        </Card>
+      {/* TAB 2: SYSTEM SECURITY & BACKUP — session policy, backup health / schedule / recovery, audit */}
+      {activeTab === SECURITY_TAB && (
+        <SystemSecuritySettings ref={securityRef} onStateChange={onSecurityState} />
       )}
 
-      {/* TAB 3: SECURITY & BACKUP */}
+      {/* TAB 3: BUSINESS SETTINGS — MULTI-BRANCH MANAGEMENT */}
       {activeTab === 3 && (
-        <Card sx={{ p: 3, borderRadius: 4, border: '1px solid', borderColor: 'divider' }}>
-          <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>System Security & Data Backup</Typography>
-          <Grid container spacing={2}>
-            <Grid item xs={12} sm={6}>
-              <TextField 
-                select 
-                label="Automatic Inactivity Session Timeout" 
-                fullWidth 
-                value={settings.autoLogoutMinutes}
-                onChange={(e) => setSettings({ ...settings, autoLogoutMinutes: e.target.value })}
-              >
-                <MenuItem value="15">15 Minutes</MenuItem>
-                <MenuItem value="30">30 Minutes</MenuItem>
-                <MenuItem value="60">60 Minutes</MenuItem>
-                <MenuItem value="Never">Never Auto-Logout</MenuItem>
-              </TextField>
-            </Grid>
-
-            <Grid item xs={12}>
-              <Divider sx={{ my: 1 }} />
-              <Typography variant="subtitle1" fontWeight={700} sx={{ mt: 2, mb: 1 }}>Database Backup & Restoration</Typography>
-              <Stack direction="row" spacing={2}>
-                <Button 
-                  variant="outlined" 
-                  color="primary"
-                  onClick={() => alert("Database Backup JSON created!\nBackup file downloaded to local system.")}
-                >
-                  Download Full Database Backup
-                </Button>
-                <Button 
-                  variant="outlined" 
-                  color="secondary"
-                  onClick={() => alert("Restore database option ready for file upload.")}
-                >
-                  Restore From Backup File
-                </Button>
-              </Stack>
-            </Grid>
-          </Grid>
-        </Card>
-      )}
-
-      {/* TAB 4: BUSINESS SETTINGS — MULTI-BRANCH MANAGEMENT */}
-      {activeTab === 4 && (
         <Card sx={{ p: 3, borderRadius: 4, border: '1px solid', borderColor: 'divider' }}>
           <Typography variant="h6" fontWeight={800} sx={{ mb: 0.5 }}>Multi-Branch Management</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
@@ -589,6 +381,17 @@ export default function Settings() {
           />
         </Card>
       )}
+
+      <ConfirmActionDialog
+        open={pendingTab !== null}
+        type="warning"
+        title="Discard unsaved changes?"
+        message={`You have unsaved changes to the ${formTab?.name || 'settings'}. Discard them and switch sections?`}
+        confirmText="Discard changes"
+        cancelText="Keep editing"
+        onConfirm={() => { formTab?.ref.current?.discard(); setActiveTab(pendingTab); setPendingTab(null); }}
+        onClose={() => setPendingTab(null)}
+      />
     </Box>
   );
 }

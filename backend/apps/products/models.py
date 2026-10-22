@@ -156,6 +156,8 @@ class Product(BaseUUIDModel):
     size = models.CharField(max_length=100, blank=True, null=True)
     frame_type = models.CharField(max_length=150, blank=True, null=True)
     rack_location = models.CharField(max_length=150, blank=True, null=True)
+    # Shelf / bin inside the rack (Stock Overview). Optional; blank for older products.
+    bin_location = models.CharField(max_length=150, blank=True, null=True)
     hsn_code = models.CharField(max_length=15, blank=True, null=True)
 
     cost_price = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.0'))
@@ -190,6 +192,12 @@ class Product(BaseUUIDModel):
                 condition=models.Q(variant_group__isnull=False, variant_key__isnull=False),
                 name='uniq_product_variant_combination',
             ),
+        ]
+        # Stock Overview filters / sorts on these over the whole catalogue.
+        indexes = [
+            models.Index(fields=['name'], name='product_name_idx'),
+            models.Index(fields=['rack_location'], name='product_rack_idx'),
+            models.Index(fields=['is_active', 'stock'], name='product_active_stock_idx'),
         ]
 
     def __str__(self):

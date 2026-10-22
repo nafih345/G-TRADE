@@ -41,3 +41,7 @@ backend_dist/
 Thumbs.db
 
 .vercel
+
+# Database backups written by the desktop / dev server (apps/security)
+backend/backups/
+backups/

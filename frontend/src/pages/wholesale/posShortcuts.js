@@ -27,8 +27,6 @@ export const WHOLESALE_SHORTCUTS = [
   { id: 'changeDealer', keys: ['F3'], group: 'Dealer', label: 'Change dealer (focus dealer search and open the list)' },
   // Product entry
   { id: 'tabProduct', keys: ['F4'], group: 'Product entry', label: 'Select Product tab' },
-  { id: 'tabLens', keys: ['F5'], group: 'Product entry', label: 'Select Lens tab' },
-  { id: 'tabService', keys: ['F6'], group: 'Product entry', label: 'Select Services tab' },
   { id: 'productSearch', keys: ['F7'], group: 'Product entry', label: 'Focus barcode / product search (results list in the billing grid)' },
   { id: 'grid', keys: ['F9'], group: 'Product entry', label: 'Edit bill lines — jump to the Qty cell of the selected (or last) line' },
   { id: 'bulkAdd', keys: ['Ctrl+B'], group: 'Product entry', label: 'Open Bulk Add' },
@@ -111,13 +109,15 @@ const modalOpen = () => Boolean(document.querySelector('.MuiModal-root:not(.MuiM
 // also listens in the capture phase so no component can swallow a shortcut first.
 export const makeShortcutHook = (shortcuts, blockedCombos = [], { pageWide = false } = {}) => {
   const comboIndex = buildComboIndex(shortcuts);
+  // Explicitly blocked chords are suppressed even when no shortcut is mapped to them.
+  const blockedSet = new Set(blockedCombos);
   const blocksBrowserDefault = (combo) => /^F([1-9]|1[0-2])$/.test(combo) || blockedCombos.includes(combo);
   return function useScreenShortcuts(rootRef, handlers) {
-    useShortcutListener(rootRef, handlers, comboIndex, blocksBrowserDefault, pageWide);
+    useShortcutListener(rootRef, handlers, comboIndex, blocksBrowserDefault, pageWide, blockedSet);
   };
 };
 
-function useShortcutListener(rootRef, handlers, comboIndex, blocksBrowserDefault, pageWide) {
+function useShortcutListener(rootRef, handlers, comboIndex, blocksBrowserDefault, pageWide, blockedSet) {
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
 
@@ -126,7 +126,7 @@ function useShortcutListener(rootRef, handlers, comboIndex, blocksBrowserDefault
       if (e.isComposing) return;
       const combo = comboFromEvent(e);
       const def = comboIndex.get(combo);
-      if (!def) return;
+      if (!def && !blockedSet.has(combo)) return;
 
       const root = rootRef.current;
       const target = e.target;
@@ -135,7 +135,7 @@ function useShortcutListener(rootRef, handlers, comboIndex, blocksBrowserDefault
       const dialogOpen = modalOpen();
 
       if (blocksBrowserDefault(combo) && (inside || dialogOpen)) e.preventDefault();
-      if (!inside || dialogOpen) return;
+      if (!def || !inside || dialogOpen) return;
       if (e.defaultPrevented && !blocksBrowserDefault(combo)) return; // a field already handled it
       if (e.repeat) return;
       if (def.whileTyping === false && isTextEditable(target)) return;
@@ -148,9 +148,10 @@ function useShortcutListener(rootRef, handlers, comboIndex, blocksBrowserDefault
     };
     window.addEventListener('keydown', onKeyDown, pageWide);
     return () => window.removeEventListener('keydown', onKeyDown, pageWide);
-  }, [rootRef, comboIndex, blocksBrowserDefault, pageWide]);
+  }, [rootRef, comboIndex, blocksBrowserDefault, pageWide, blockedSet]);
 }
 
 export const useWholesaleShortcuts = makeShortcutHook(WHOLESALE_SHORTCUTS, [
+  'F5', // unmapped since the Lens tab went, but a reload would still wipe the cart
   'Ctrl+B', 'Ctrl+I', 'Ctrl+D', 'Ctrl+U', 'Ctrl+M', 'Ctrl+P', 'Alt+D', 'Alt+P', 'Alt+N', 'Alt+S', 'Alt+H', 'Alt+R', 'Alt+L', 'Ctrl+/',
 ]);

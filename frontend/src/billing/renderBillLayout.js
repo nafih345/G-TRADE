@@ -14,6 +14,7 @@
 // the transaction; a missing figure prints blank, never a computed substitute.
 import QRCode from 'qrcode';
 import { encodeBarcode } from '../labels/renderLabel.js';
+import { billLabel, billLabelText, billHtmlAttrs, billLanguage, BILL_I18N_CSS } from './billI18n.js';
 import {
   FIELD_BY_ID, COLUMN_BY_KEY, TOTALS_ROW_BY_KEY, fieldText, rawField, formatMoney, formatNumber,
   formatDate, fmtWithCurrency, tokensIn,
@@ -104,6 +105,10 @@ const VALIGN = { top: 'flex-start', middle: 'center', bottom: 'flex-end' };
 // Element renderers -> inner HTML
 // ---------------------------------------------------------------------------
 
+// Fixed bill wording in the configured bill language (Settings → Business & Localization). The
+// designer canvas keeps the labels as typed so they stay editable.
+const lbl = (ctx, text, opts) => (ctx.editor ? esc(text) : billLabel(text, opts));
+
 function placeholder(ctx, text) {
   return ctx.editor ? `<span class="bd-ph">${esc(text)}</span>` : '';
 }
@@ -129,18 +134,18 @@ function textWithTokens(ctx, text) {
 
 function kvRow(label, valueHtml, el, ctx, labelCss) {
   if (el.labelPosition === 'top') {
-    return `<div class="bd-k bd-lbl-top" style="${labelCss}">${esc(label)}</div><div class="bd-v">${valueHtml}</div>`;
+    return `<div class="bd-k bd-lbl-top" style="${labelCss}">${lbl(ctx, label)}</div><div class="bd-v">${valueHtml}</div>`;
   }
   if (el.labelPosition === 'left') {
     const w = num(el.labelWidth) > 0 ? `width:${mm(el.labelWidth)};flex:0 0 ${mm(el.labelWidth)};` : 'margin-right:1.5mm;';
-    return `<div class="bd-kv"><span class="bd-k" style="${w}${labelCss}">${esc(label)}</span><span class="bd-v">${valueHtml}</span></div>`;
+    return `<div class="bd-kv"><span class="bd-k" style="${w}${labelCss}">${lbl(ctx, label)}</span><span class="bd-v">${valueHtml}</span></div>`;
   }
   return valueHtml;
 }
 
 const RENDER = {
   text(el, ctx) {
-    const title = el.title ? `<div class="bd-title">${esc(el.title)}</div>` : '';
+    const title = el.title ? `<div class="bd-title">${lbl(ctx, el.title)}</div>` : '';
     return `${title}<div>${textWithTokens(ctx, el.text)}</div>`;
   },
 
@@ -160,7 +165,8 @@ const RENDER = {
       }
     } else {
       value = `${el.prefix || ''}${value}${el.suffix || ''}`;
-      valueHtml = def?.kind === 'multiline' ? nl2br(value) : esc(value);
+      valueHtml = def?.kind === 'multiline' ? nl2br(value)
+        : el.field === 'document.title' ? lbl(ctx, value) : esc(value);
     }
     if (!el.label || el.labelPosition === 'none') return `<div class="bd-v">${valueHtml}</div>`;
     return kvRow(el.label, valueHtml, el, ctx, styleCss(el.labelStyle, ctx));
@@ -178,10 +184,10 @@ const RENDER = {
     if (!rows.length) return '';
     const sep = esc(el.separator ?? ':');
     if (el.layout === 'inline') {
-      return rows.map((r) => `<span class="bd-k" style="${labelCss}">${esc(r.label)}${sep}</span> <span class="bd-v">${r.vHtml}</span>`).join('<span class="bd-dot"> · </span>');
+      return rows.map((r) => `<span class="bd-k" style="${labelCss}">${lbl(ctx, r.label)}${sep}</span> <span class="bd-v">${r.vHtml}</span>`).join('<span class="bd-dot"> · </span>');
     }
     const lw = num(el.labelWidth, 24);
-    const cell = (r) => `<td class="bd-k" style="${lw > 0 ? `width:${mm(lw)};` : 'white-space:nowrap;padding-right:1mm;'}${labelCss}">${esc(r.label)}</td><td class="bd-sep" style="${labelCss}">${sep}</td><td class="bd-v">${r.vHtml}</td>`;
+    const cell = (r) => `<td class="bd-k" style="${lw > 0 ? `width:${mm(lw)};` : 'white-space:nowrap;padding-right:1mm;'}${labelCss}">${lbl(ctx, r.label)}</td><td class="bd-sep" style="${labelCss}">${sep}</td><td class="bd-v">${r.vHtml}</td>`;
     if (el.layout === 'grid') {
       const trs = [];
       for (let i = 0; i < rows.length; i += 2) {
@@ -201,7 +207,7 @@ const RENDER = {
     }
     if (s.tagline && c.tagline) lines.push(`<div class="bd-muted bd-co-tag">${esc(c.tagline)}</div>`);
     if (s.address && c.address) lines.push(`<div>${nl2br(c.address)}</div>`);
-    const contact = [s.phone && c.phone && `Ph: ${esc(c.phone)}`, s.email && c.email && esc(c.email)].filter(Boolean);
+    const contact = [s.phone && c.phone && `${lbl(ctx, 'Ph')}: ${esc(c.phone)}`, s.email && c.email && esc(c.email)].filter(Boolean);
     if (contact.length) lines.push(`<div>${contact.join(' &nbsp;·&nbsp; ')}</div>`);
     if (s.website && c.website) lines.push(`<div>${esc(c.website)}</div>`);
     const reg = [s.gstin && c.gstin && `GSTIN: <b>${esc(c.gstin)}</b>`, s.pan && c.pan && `PAN: ${esc(c.pan)}`].filter(Boolean);
@@ -215,10 +221,10 @@ const RENDER = {
     const shipping = el.variant === 'shipping';
     const lines = [];
     const title = el.title || p.label || 'Bill To';
-    if (s.title !== false) lines.push(`<div class="bd-party-title">${esc(title)}</div>`);
+    if (s.title !== false) lines.push(`<div class="bd-party-title">${lbl(ctx, title)}</div>`);
     if (s.name !== false && p.name) lines.push(`<div class="bd-party-name">${esc(p.name)}</div>`);
     if (s.code && p.code) lines.push(`<div class="bd-muted">ID: ${esc(p.code)}</div>`);
-    if (s.phone && p.phone) lines.push(`<div>Ph: ${esc(p.phone)}</div>`);
+    if (s.phone && p.phone) lines.push(`<div>${lbl(ctx, 'Ph')}: ${esc(p.phone)}</div>`);
     if (s.email && p.email) lines.push(`<div>${esc(p.email)}</div>`);
     const addr = shipping ? p.shippingAddress : p.address;
     if (s.address !== false) {
@@ -261,8 +267,8 @@ const RENDER = {
     if (!rows.length) return placeholder(ctx, '[No totals on this document]');
     const gs = styleCss({ fontWeight: 800, ...(el.grandStyle || {}) }, ctx, { scale: ctx.scale });
     return `<table class="bd-totals">${rows.map((r) => (r.grand
-      ? `<tr class="bd-grand"${el.divider !== false ? ` style="border-top:0.8pt solid ${ctx.theme.primary}"` : ''}><td style="${gs}">${esc(r.label)}</td><td class="bd-r" style="${gs}">${esc(r.value)}</td></tr>`
-      : `<tr data-k="${r.key}"><td>${esc(r.label)}</td><td class="bd-r">${esc(r.value)}</td></tr>`)).join('')}</table>`;
+      ? `<tr class="bd-grand"${el.divider !== false ? ` style="border-top:0.8pt solid ${ctx.theme.primary}"` : ''}><td style="${gs}">${lbl(ctx, r.label)}</td><td class="bd-r" style="${gs}">${esc(r.value)}</td></tr>`
+      : `<tr data-k="${r.key}"><td>${lbl(ctx, r.label)}</td><td class="bd-r">${esc(r.value)}</td></tr>`)).join('')}</table>`;
   },
 
   taxSummary(el, ctx) {
@@ -307,8 +313,8 @@ const RENDER = {
     if (s.bank && m.company?.bankDetails) rows.push(['Bank', nl2br(m.company.bankDetails)]);
     if (s.upi && m.company?.upiId) rows.push(['UPI', esc(m.company.upiId)]);
     if (!rows.length) return placeholder(ctx, '[No payment details on this document]');
-    const title = el.title ? `<div class="bd-title">${esc(el.title)}</div>` : '';
-    return `${title}<table class="bd-fl">${rows.map(([k, v]) => `<tr><td class="bd-k" style="width:17mm">${k}</td><td class="bd-v">${v}</td></tr>`).join('')}</table>`;
+    const title = el.title ? `<div class="bd-title">${lbl(ctx, el.title)}</div>` : '';
+    return `${title}<table class="bd-fl">${rows.map(([k, v]) => `<tr><td class="bd-k" style="width:17mm">${lbl(ctx, k)}</td><td class="bd-v">${v}</td></tr>`).join('')}</table>`;
   },
 
   barcode(el, ctx) {
@@ -361,7 +367,7 @@ const RENDER = {
   signature(el, ctx) {
     const co = el.showCompany !== false && ctx.model.company?.name ? `<div class="bd-sign-co">For ${esc(ctx.model.company.name)}</div>` : '<div></div>';
     const img = el.src ? `<img src="${esc(el.src)}" alt="" style="max-height:55%;max-width:100%;object-fit:contain;align-self:center"/>` : '';
-    const line = `<div class="bd-sign-label"${el.showLine !== false ? ` style="border-top:0.6pt solid ${ctx.theme.text}"` : ''}>${esc(el.label || '')}</div>`;
+    const line = `<div class="bd-sign-label"${el.showLine !== false ? ` style="border-top:0.6pt solid ${ctx.theme.text}"` : ''}>${lbl(ctx, el.label || '')}</div>`;
     return `<div class="bd-sign">${co}${img}${line}</div>`;
   },
 
@@ -458,10 +464,10 @@ export function tableHtml(model, rows, startIndex, table, ctx, { header = true, 
   const colgroup = `<colgroup>${cols.map((c) => `<col style="width:${r2((num(c.width, 10) / totalW) * 100)}%"/>`).join('')}</colgroup>`;
   const hs = table.headerStyle || {};
   const thCss = styleCss({ ...hs, bg: hs.bg || ctx.theme.headerBg, color: hs.color || ctx.theme.headerText }, ctx);
-  const thead = header ? `<thead><tr>${cols.map((c) => `<th style="text-align:${c.align || 'left'};${thCss}">${esc(c.label ?? COLUMN_BY_KEY[c.key].label)}</th>`).join('')}</tr></thead>` : '';
+  const thead = header ? `<thead><tr>${cols.map((c) => `<th style="text-align:${c.align || 'left'};${thCss}">${lbl(ctx, c.label ?? COLUMN_BY_KEY[c.key].label, { stack: true })}</th>`).join('')}</tr></thead>` : '';
   let body;
   if (!rows.length && startIndex === 0) {
-    body = `<tr class="bd-row"><td colspan="${cols.length}" class="bd-empty">${esc(table.emptyText || 'No items')}</td></tr>`;
+    body = `<tr class="bd-row"><td colspan="${cols.length}" class="bd-empty">${lbl(ctx, table.emptyText || 'No items')}</td></tr>`;
   } else {
     body = rows.map((item, i) => {
       const idx = startIndex + i;
@@ -513,6 +519,7 @@ function tableCss(table, theme) {
 export function billCss(cfg, theme) {
   const t = theme;
   return `
+${BILL_I18N_CSS}
 .bd-root{color:${t.text};font-family:${t.fontFamily};font-size:${t.fontSize}pt;line-height:${t.lineHeight};-webkit-print-color-adjust:exact;print-color-adjust:exact;text-align:left}
 .bd-root *,.bd-root *::before,.bd-root *::after{box-sizing:border-box;margin:0;padding:0}
 .bd-root .bd-page{position:relative;background:${cfg.page?.background || '#ffffff'};overflow:hidden}
@@ -625,7 +632,7 @@ export function createEstimateMeasurer(theme, table, contentW) {
       const nameW = nameCol ? (num(nameCol.width, 10) / totalW) * contentW - 2.6 : contentW;
       const charsPerLine = Math.max(4, nameW / (bs * PT_TO_MM * 0.52));
       return {
-        thead: lineMm(hs, 1.3) + pad,
+        thead: lineMm(hs, 1.3) * (billLanguage().mode === 'BILINGUAL' ? 2.1 : 1) + pad,
         rows: rows.map((it) => {
           let lines = Math.ceil(String(it.name || '').length / charsPerLine) || 1;
           if (table.showPower !== false && it.power) lines += Math.ceil(it.power.length / charsPerLine) * 0.9;
@@ -751,7 +758,9 @@ export function layoutBill(template, model, opts = {}) {
     BANDS.forEach((b) => {
       (bands[b].elements || []).forEach((el) => {
         if (!elementVisible(el, model) || ['line', 'box', 'logo', 'image', 'qr', 'barcode'].includes(el.type)) return;
-        const shrink = !!el.style?.shrinkToFit;
+        // Translated / bilingual wording is longer than the English the box was sized for: let it
+        // shrink to fit rather than clip (the designer's own setting still applies in English).
+        const shrink = !!el.style?.shrinkToFit || (!opts.editor && billLanguage().mode !== 'EN');
         const res = measurer.fit((s) => elementBox(el, { ...ctx, editor: false, warn: null }, s), { shrink });
         if (res.scale !== 1) scales[el.id] = res.scale;
         if (!res.fits) {
@@ -840,8 +849,8 @@ export function renderVisualBillHtml(template, model, opts = {}) {
   const autoPrint = opts.autoPrint
     ? '<script>window.addEventListener("load",function(){setTimeout(function(){try{window.focus();window.print();}catch(e){}},300);});<\/script>'
     : '';
-  const title = [model.document?.title, model.document?.number].filter(Boolean).join(' ') || 'Bill';
-  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>${esc(title)}</title>
+  const title = [model.document?.title && billLabelText(model.document.title), model.document?.number].filter(Boolean).join(' ') || 'Bill';
+  const html = `<!DOCTYPE html><html ${billHtmlAttrs({ flip: false })}><head><meta charset="utf-8"/><title>${esc(title)}</title>
 <style>
 @page{size:${r2(g.pageW)}mm ${r2(g.pageH)}mm;margin:0}
 html,body{margin:0;padding:0;background:#ffffff}

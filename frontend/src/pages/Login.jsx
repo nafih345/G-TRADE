@@ -16,6 +16,8 @@ import KeyboardCapslockRoundedIcon from '@mui/icons-material/KeyboardCapslockRou
 import AdminPanelSettingsOutlinedIcon from '@mui/icons-material/AdminPanelSettingsOutlined';
 import { Link as RouterLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import TwoFactorLoginStep from '../components/security/TwoFactorLoginStep';
+import { AUTH_NOTICE_KEY } from '../utils/sessionGuard';
 
 const DEMO_ROLES = ['admin', 'manager', 'accountant', 'cashier'];
 
@@ -71,7 +73,7 @@ const ERRORS = {
  */
 export default function Login({ variant = 'staff' }) {
   const isSuperAdminPage = variant === 'superAdmin';
-  const { login } = useAuth();
+  const { login, verifyTwoFactor } = useAuth();
   const navigate = useNavigate();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -79,6 +81,19 @@ export default function Login({ variant = 'staff' }) {
   const [capsLock, setCapsLock] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  // Second sign-in step ({ challenge, setup }) when the account uses two-factor authentication.
+  const [twoFactor, setTwoFactor] = useState(null);
+  // Why the previous session ended (idle timeout, restore…), left by utils/sessionGuard.
+  const [notice] = useState(() => {
+    try {
+      const text = sessionStorage.getItem(AUTH_NOTICE_KEY) || '';
+      sessionStorage.removeItem(AUTH_NOTICE_KEY);
+      return text;
+    } catch {
+      return '';
+    }
+  });
+  const portal = isSuperAdminPage ? 'super_admin' : 'staff';
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -89,9 +104,15 @@ export default function Login({ variant = 'staff' }) {
     setError('');
     setLoading(true);
     try {
-      const result = await login(username.trim(), password, { portal: isSuperAdminPage ? 'super_admin' : 'staff' });
+      const result = await login(username.trim(), password, { portal });
       if (result.success) {
         navigate('/', { replace: true });
+      } else if (result.reason === 'two_factor') {
+        setTwoFactor({ challenge: result.challenge, setup: result.setup });
+        setPassword('');
+      } else if (result.reason === 'account_locked') {
+        setError(result.message);
+        setPassword('');
       } else {
         // The demo role names have no working accounts yet — say so rather than "invalid".
         const reason = !isSuperAdminPage && result.reason === 'invalid_credentials'
@@ -242,6 +263,22 @@ export default function Login({ variant = 'staff' }) {
               </Alert>
             )}
 
+            {notice && !error && !twoFactor && (
+              <Alert severity="info" sx={{ mb: 3, borderRadius: 2.5 }}>{notice}</Alert>
+            )}
+
+            {twoFactor ? (
+              <TwoFactorLoginStep
+                challenge={twoFactor.challenge}
+                setup={twoFactor.setup}
+                onVerify={async (code) => {
+                  const result = await verifyTwoFactor(twoFactor.challenge, code, { portal });
+                  if (result.success) navigate('/', { replace: true });
+                  return result;
+                }}
+                onCancel={() => { setTwoFactor(null); setError(''); }}
+              />
+            ) : (
             <form onSubmit={handleSubmit} noValidate autoComplete="off">
               <Stack spacing={2.5}>
                 <Box>
@@ -344,8 +381,9 @@ export default function Login({ variant = 'staff' }) {
                 </Button>
               </Stack>
             </form>
+            )}
 
-            {!isSuperAdminPage && <Box sx={{ mt: 4.5 }}>
+            {!isSuperAdminPage && !twoFactor && <Box sx={{ mt: 4.5 }}>
               <Stack direction="row" alignItems="center" spacing={1.5} sx={{ mb: 1.75 }}>
                 <Box sx={{ flex: 1, height: '1px', backgroundColor: 'divider' }} />
                 <Typography sx={{ fontSize: '0.72rem', fontWeight: 700, letterSpacing: '0.08em', color: 'text.secondary' }}>

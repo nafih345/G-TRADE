@@ -239,3 +239,44 @@ test('designer helpers', () => {
   assert.ok(s.guides.length);
   assert.ok(createEstimateMeasurer({ fontSize: 9, lineHeight: 1.3 }, blankConfig().bands.items.table, 190).table('', [{ name: 'x' }], [{ key: 'name', width: 40 }]).rows[0] > 0);
 });
+
+// ---------------------------------------------------------------------------
+// Bill language (Settings → Business & Localization → "Bills & Documents Print In")
+// ---------------------------------------------------------------------------
+
+test('bills print in English, Arabic, or English + Arabic', async () => {
+  const { publishBusinessPrefs } = await import('../../utils/localeFormat.js');
+  const { renderBillHtml } = await import('../renderBillHtml.js');
+  const { billLabel } = await import('../billI18n.js');
+  const model = sampleBillModel('SALES_INVOICE', { itemCount: 2 });
+  const legacy = PRESET_TEMPLATES[0];
+  const visual = A4(convertLegacyTemplate(PRESET_TEMPLATES[0], 190));
+  const setMode = (language, mode) => publishBusinessPrefs({ preferences: { language, bill_language_mode: mode } });
+  try {
+    setMode('ar', 'EN');
+    let html = renderBillHtml(legacy, model);
+    assert.ok(html.includes('Grand Total') && !html.includes('الإجمالي الكلي'));
+
+    setMode('ar', 'LOCAL');
+    html = renderBillHtml(legacy, model);
+    assert.ok(html.includes('الإجمالي الكلي'), 'Arabic grand total');
+    assert.ok(!/>Grand Total</.test(html), 'no English label in Arabic-only mode');
+    assert.ok(html.includes('dir="rtl"'), 'Arabic-only bill reads right to left');
+    assert.ok(html.includes(model.items[0].name), 'item names print as entered');
+
+    setMode('ar', 'BILINGUAL');
+    html = renderBillHtml(legacy, model);
+    assert.ok(html.includes('Grand Total / <span class="bl-loc" lang="ar" dir="rtl">الإجمالي الكلي</span>'));
+    const v = renderVisualBillHtml(visual, model, opts).html;
+    assert.ok(v.includes('الإجمالي الكلي') && v.includes('Grand Total'), 'visual templates are bilingual too');
+
+    assert.equal(billLabel('Date:', { lang: { mode: 'BILINGUAL', lang: 'ml' } }),
+      'Date / <span class="bl-loc" lang="ml" dir="ltr">തീയതി</span>:');
+    assert.equal(billLabel('My own label', { lang: { mode: 'LOCAL', lang: 'ar' } }), 'My own label');
+
+    setMode('fr', 'LOCAL'); // no bill wording for French → English
+    assert.ok(renderBillHtml(legacy, model).includes('Grand Total'));
+  } finally {
+    setMode('en', 'EN');
+  }
+});

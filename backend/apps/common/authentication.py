@@ -19,9 +19,16 @@ class LenientJWTAuthentication(JWTAuthentication):
 
     def authenticate(self, request):
         try:
-            return super().authenticate(request)
+            result = super().authenticate(request)
         except (InvalidToken, TokenError):
             return None
+        if result is not None:
+            # A genuine token must also belong to an open, non-idle sign-in session, and sensitive
+            # actions may need a fresh password confirmation (apps/security/policy.py). These
+            # raise a real 401 / 403 — unlike a junk token, an expired session is not anonymous.
+            from apps.security.policy import check_request
+            check_request(request, *result)
+        return result
 
     def get_user(self, validated_token):
         # One user-table round trip per request otherwise — held briefly in-process (see

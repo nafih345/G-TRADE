@@ -26,6 +26,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { useBranch } from '../context/BranchContext';
 import GreensolLogo from './GreensolLogo';
+import { confirmLeave } from '../utils/navigationGuard';
 
 const DRAWER_WIDTH = 280;
 
@@ -84,6 +85,7 @@ const menuItems = [
     subItems: [
       { text: 'Purchase Entry', path: '/purchase/entry' },
       { text: 'Suppliers', path: '/purchase/suppliers' },
+      { text: 'Stock Overview', path: '/purchase/stock-overview' },
       { text: 'Purchase Orders', path: '/purchase/orders' },
       { text: 'Stock Receive', path: '/purchase/receive' },
       { text: 'Purchase Return', path: '/purchase/returns' }
@@ -172,6 +174,7 @@ export default function Sidebar({ open, toggleSidebar, isMobile = false }) {
   // On mobile the drawer is a full-screen overlay, so a nav click should dismiss it as well as
   // navigate — otherwise the menu would still be covering the page after selecting a route.
   const goTo = (path) => {
+    if (!confirmLeave()) return; // a screen with unsaved edits asked to confirm first
     navigate(path);
     if (isMobile) toggleSidebar();
   };

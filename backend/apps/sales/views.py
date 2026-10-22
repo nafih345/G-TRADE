@@ -610,7 +610,9 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
             'paid_amount': paid,
             'status': settle_payment_status(data.get('status') or 'UNPAID', data.get('net_amount'), paid),
         }
-        invoice_number = self._free_invoice_number(data.get('invoice_number'), doc_type)
+        # Settings → Numbering Sequences: with auto-generation on, the system numbers new
+        # documents itself (the number New Sale showed was only a preview).
+        invoice_number = self._sequence_number(doc_type)             or self._free_invoice_number(data.get('invoice_number'), doc_type)
         # The free-number check above can still race another till onto the same number; the
         # UNIQUE column then refuses one of them — take a fresh number and retry rather than
         # losing the sale.
@@ -763,10 +765,21 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
                 raise serializers.ValidationError({'payment_banks': exc.detail})
         return banks
 
+    _SEQUENCE_TYPE = {'INVOICE': 'SALES_INVOICE', 'ORDER': 'SALES_ORDER', 'QUOTATION': 'QUOTATION'}
+
+    def _sequence_number(self, doc_type):
+        """The configured sequence's next number, or None when the type isn't system-numbered."""
+        from apps.company.numbering import issue_number
+        return issue_number(self._SEQUENCE_TYPE.get((doc_type or 'INVOICE').upper(), 'SALES_INVOICE'),
+                            lambda n: Invoice.all_objects.filter(invoice_number=n).exists())
+
     def _mint_invoice_number(self, doc_type):
-        """A free PREFIX-YYYY-NNNN number (the shape New Sale shows), widening the random part if
-        the year's 4-digit space is getting crowded. all_objects: a soft-deleted document still
-        holds its number in the UNIQUE column."""
+        """The configured sequence's next number; without one, a free PREFIX-YYYY-NNNN number (the
+        shape New Sale shows), widening the random part if the year's 4-digit space is getting
+        crowded. all_objects: a soft-deleted document still holds its number in the UNIQUE column."""
+        seq = self._sequence_number(doc_type)
+        if seq:
+            return seq
         prefix = self._doc_prefix(doc_type)
         year = time.localtime().tm_year
         for digits in (4, 4, 4, 5, 5, 6, 6, 6):
@@ -885,12 +898,23 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
         adjust_branch_stock_many(
             {product: -totals[pk] for pk, product in products.items()},
             branch,
+            enforce_stock=self._enforce_stock(),
             ledger={
                 'transaction_type': 'OUT',
                 'reference_id': invoice.id,
                 'notes': f"Sold via Invoice {invoice.invoice_number}",
+                'reference_number': invoice.invoice_number,
             },
         )
+
+    def _enforce_stock(self):
+        """Refuse a sale that would take stock below zero (when Settings disallows negative
+        stock) — unless a Super Admin / Administrator explicitly overrides it for this request."""
+        from apps.billing.views import user_role
+        from apps.company.store_profile import STORE_SETTINGS_ROLES
+        data = self.request.data if isinstance(self.request.data, dict) else {}
+        return not (data.get('override_negative_stock') is True
+                    and user_role(self.request.user) in STORE_SETTINGS_ROLES)
 
     def _stock_quantities(self, invoice, force=False):
         """{product_id: total qty} this document currently holds out of stock — empty when it
@@ -924,10 +948,12 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
             adjust_branch_stock_many(
                 {product: -deltas[pk] for pk, product in products.items() if keep(deltas[pk])},
                 branch,
+                enforce_stock=direction == 'OUT' and self._enforce_stock(),
                 ledger={
                     'transaction_type': direction,
                     'reference_id': invoice.id,
                     'notes': f"Invoice {invoice.invoice_number} edited",
+                    'reference_number': invoice.invoice_number,
                 },
             )
 

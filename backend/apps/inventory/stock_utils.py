@@ -18,14 +18,39 @@ def _default_branch():
     return Branch.get_default()
 
 
+def negative_stock_blocked():
+    """True when Settings → Business & Localization has "Allow Negative Stock" switched off."""
+    from apps.company.localization import get_preference
+    return not get_preference('allow_negative_stock')
+
+
+def _refuse_shortfalls(shortfalls):
+    """shortfalls: [(product, on_hand_before, requested)] → one 400 naming every short line."""
+    from rest_framework.exceptions import ValidationError
+    lines = [f"{getattr(p, 'name', '') or p.pk}: {max(on_hand, 0)} in stock, {req} needed"
+             for p, on_hand, req in shortfalls]
+    raise ValidationError({
+        'detail': 'Not enough stock — negative stock is not allowed (Settings → Business & Localization). '
+                  + '; '.join(lines),
+        'code': 'insufficient_stock',
+        'items': [{'product': str(p.pk), 'name': getattr(p, 'name', ''), 'on_hand': on_hand, 'requested': req}
+                  for p, on_hand, req in shortfalls],
+    })
+
+
 @transaction.atomic
-def adjust_branch_stock(product, branch, delta, *, ledger=None):
+def adjust_branch_stock(product, branch, delta, *, ledger=None, enforce_stock=False):
     """Apply `delta` (may be negative) to BranchStock for (product, branch).
 
     ledger: optional dict of StockLedger kwargs (transaction_type, reference_id, notes,
     warehouse). When given, a StockLedger row is written with the branch attached.
     Returns the updated BranchStock row (or None when the fallback path adjusted
     Product.stock directly because no branch could be resolved).
+
+    enforce_stock: refuse (400, nothing saved) a reduction that would take the quantity below
+    zero while negative stock is switched off. Callers set it for real outflows (sales, stock
+    adjustments) — not for the reverse-then-reapply steps of an edit, whose intermediate dip
+    below zero is not a real shortfall.
     """
     from apps.company.models import BranchStock
     from apps.inventory.models import StockLedger
@@ -43,6 +68,8 @@ def adjust_branch_stock(product, branch, delta, *, ledger=None):
         # BranchStock to move, so keep the scalar Product.stock correct directly.
         # Without this the whole call used to no-op and a sale/purchase never changed
         # inventory at all.
+        if enforce_stock and delta < 0 and (product.stock or 0) + delta < 0 and negative_stock_blocked():
+            _refuse_shortfalls([(product, int(product.stock or 0), -delta)])
         _apply_scalar_stock(product, delta)
         _write_ledger(None, product, delta, ledger)
         return None
@@ -66,6 +93,8 @@ def adjust_branch_stock(product, branch, delta, *, ledger=None):
     if only_row and (row.quantity or 0) != int(product.stock or 0):
         row.quantity = int(product.stock or 0)
 
+    if enforce_stock and delta < 0 and (row.quantity or 0) + delta < 0 and negative_stock_blocked():
+        _refuse_shortfalls([(product, row.quantity or 0, -delta)])
     row.quantity = (row.quantity or 0) + delta
     row.save(update_fields=['quantity', 'updated_at'] + (['is_deleted'] if revived else []))
 
@@ -76,7 +105,7 @@ def adjust_branch_stock(product, branch, delta, *, ledger=None):
 
 
 @transaction.atomic
-def adjust_branch_stock_many(deltas, branch, *, ledger=None):
+def adjust_branch_stock_many(deltas, branch, *, ledger=None, enforce_stock=False):
     """Batched adjust_branch_stock for one document touching many products.
 
     deltas: {Product instance: delta}. Same rules as adjust_branch_stock — revive soft-deleted
@@ -96,7 +125,8 @@ def adjust_branch_stock_many(deltas, branch, *, ledger=None):
         branch = _default_branch()
     if branch is None:
         for product, delta in deltas.items():
-            adjust_branch_stock(product, None, delta, ledger=dict(ledger) if ledger else None)
+            adjust_branch_stock(product, None, delta, ledger=dict(ledger) if ledger else None,
+                                enforce_stock=enforce_stock)
         return
 
     products = {p.pk: p for p in deltas}
@@ -112,13 +142,19 @@ def adjust_branch_stock_many(deltas, branch, *, ledger=None):
     with_other_rows = set(BranchStock.objects.filter(product_id__in=products)
                           .exclude(pk__in=[r.pk for r in rows])
                           .values_list('product_id', flat=True))
+    check = enforce_stock and any(d < 0 for d in deltas.values()) and negative_stock_blocked()
+    shortfalls = []
     for row in rows:
         product = products[row.product_id]
         row.is_deleted = False
         if row.product_id not in with_other_rows and (row.quantity or 0) != int(product.stock or 0):
             row.quantity = int(product.stock or 0)
+        if check and deltas[product] < 0 and (row.quantity or 0) + deltas[product] < 0:
+            shortfalls.append((product, row.quantity or 0, -deltas[product]))
         row.quantity = (row.quantity or 0) + deltas[product]
         row.updated_at = now
+    if shortfalls:
+        _refuse_shortfalls(shortfalls)
     BranchStock.all_objects.bulk_update(rows, ['quantity', 'is_deleted', 'updated_at'])
 
     totals = dict(BranchStock.objects.filter(product_id__in=products)
@@ -148,6 +184,7 @@ def adjust_branch_stock_many(deltas, branch, *, ledger=None):
             product=product, warehouse=warehouse, branch=branch, quantity=delta,
             transaction_type=ledger.get('transaction_type', 'ADJ_ADD' if delta >= 0 else 'ADJ_SUB'),
             reference_id=ref, notes=ledger.get('notes', ''),
+            **_audit_fields(product, ledger),
         )
         for product, delta in deltas.items() if product.pk not in already
     ])
@@ -186,7 +223,21 @@ def _write_ledger(branch, product, delta, ledger):
         transaction_type=ledger.get('transaction_type', 'ADJ_ADD' if delta >= 0 else 'ADJ_SUB'),
         reference_id=ref,
         notes=ledger.get('notes', ''),
+        **_audit_fields(product, ledger),
     )
+
+
+def _audit_fields(product, ledger):
+    """Stock Overview history columns: the product's on-hand total right after the movement
+    (callers have already brought product.stock up to date), who did it, the document number
+    and, where the caller knows it, the unit cost."""
+    from apps.common.request_actor import get_actor
+    return {
+        'balance_after': int(product.stock or 0),
+        'performed_by': (ledger.get('performed_by') or get_actor() or '')[:150],
+        'reference_number': (ledger.get('reference_number') or '')[:100],
+        'unit_cost': ledger.get('unit_cost'),
+    }
 
 
 def _sync_product_total(product):

@@ -13,6 +13,36 @@ class Company(BaseUUIDModel):
     email = models.EmailField(blank=True, null=True)
     phone = models.CharField(max_length=20, blank=True, null=True)
 
+    # --- Store & Clinic Profile (Settings → Store & Clinic Profile) -------------------------
+    # The oldest Company row is the store profile every document prints (see
+    # apps.company.store_profile). Logo, tagline and website live on billing.BillingSettings
+    # (shared with the Bill Designer's Branding panel) so they are never stored twice.
+    STORE_TYPES = (
+        ('OPTICAL_STORE', 'Optical Store'),
+        ('EYE_CLINIC', 'Eye Clinic'),
+        ('OPTICAL_AND_CLINIC', 'Optical Store & Eye Clinic'),
+    )
+    display_name = models.CharField(max_length=150, blank=True, default='')
+    store_type = models.CharField(max_length=30, choices=STORE_TYPES, blank=True, default='')
+    business_reg_no = models.CharField(max_length=60, blank=True, default='')
+    whatsapp = models.CharField(max_length=20, blank=True, default='')
+    city = models.CharField(max_length=100, blank=True, default='')
+    state = models.CharField(max_length=100, blank=True, default='')
+    pin_code = models.CharField(max_length=10, blank=True, default='')
+    country = models.CharField(max_length=100, blank=True, default='')
+    # {"registered"|"billing"|"shipping": {"same_as_store": bool, "street", "city", "state",
+    #   "pin_code", "country"}}
+    extra_addresses = models.JSONField(default=dict, blank=True)
+    contact_person = models.CharField(max_length=120, blank=True, default='')
+    clinical_reg_no = models.CharField(max_length=60, blank=True, default='')
+    opening_time = models.CharField(max_length=5, blank=True, default='')  # "HH:MM"
+    closing_time = models.CharField(max_length=5, blank=True, default='')
+    working_days = models.JSONField(default=list, blank=True)  # ["MON", "TUE", ...]
+    holidays = models.JSONField(default=list, blank=True)  # [{"date": "YYYY-MM-DD", "name": ""}]
+    provides_eye_exams = models.BooleanField(default=False)
+    # {"exam_start", "exam_end", "slot_minutes", "appointment_required"}
+    clinic_settings = models.JSONField(default=dict, blank=True)
+
     def __str__(self):
         return self.name
 
@@ -95,6 +125,10 @@ class BusinessSettings(BaseUUIDModel):
     default_branch = models.ForeignKey(
         Branch, on_delete=models.SET_NULL, null=True, blank=True, related_name='+'
     )
+    # Business & Localization preferences (regional defaults, transaction toggles, currency /
+    # language options, other operational defaults). Schema, defaults and validation live in
+    # apps/company/localization.py — read them through localization.get_preferences().
+    preferences = models.JSONField(default=dict, blank=True)
 
     class Meta:
         verbose_name = 'Business Settings'
@@ -178,3 +212,103 @@ class StockTransferItem(BaseUUIDModel):
     def __str__(self):
         return f"{self.product_id} x{self.quantity}"
 
+
+
+# ==========================================
+# BUSINESS & LOCALIZATION SETTINGS
+# ==========================================
+
+class DocumentSequence(models.Model):
+    """How one document type is numbered (Settings → Business & Localization → Numbering
+    Sequences). The running counter lives in DocumentSequenceCounter, one row per reset period,
+    so a yearly / monthly reset never rewrites history. See apps/company/numbering.py."""
+    RESET_CHOICES = [
+        ('NEVER', 'Never'), ('MONTHLY', 'Monthly'), ('YEARLY', 'Yearly'), ('FISCAL_YEAR', 'Fiscal year'),
+    ]
+    doc_type = models.CharField(max_length=30, unique=True)
+    prefix = models.CharField(max_length=30, blank=True, default='')
+    suffix = models.CharField(max_length=20, blank=True, default='')
+    padding = models.PositiveSmallIntegerField(default=4)
+    start_number = models.PositiveIntegerField(default=1)
+    reset_frequency = models.CharField(max_length=12, choices=RESET_CHOICES, default='NEVER')
+    is_active = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.CharField(max_length=150, blank=True, default='')
+
+    class Meta:
+        ordering = ['doc_type']
+
+    def __str__(self):
+        return f"{self.doc_type}: {self.prefix}…{self.suffix}"
+
+
+class DocumentSequenceCounter(models.Model):
+    """last_number handed out for (doc_type, period). Bumped with apps.common.sequences."""
+    doc_type = models.CharField(max_length=30)
+    period_key = models.CharField(max_length=20, default='ALL')
+    last_number = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['doc_type', 'period_key'], name='uniq_doc_seq_period')]
+
+    def __str__(self):
+        return f"{self.doc_type}/{self.period_key} = {self.last_number}"
+
+
+class CustomField(models.Model):
+    """A user-defined extra field for a module (Settings → Custom Fields). Definitions only:
+    modules render and store them as they adopt the feature."""
+    FIELD_TYPES = [
+        ('TEXT', 'Text'), ('TEXTAREA', 'Long text'), ('NUMBER', 'Number'), ('DATE', 'Date'),
+        ('DROPDOWN', 'Dropdown'), ('CHECKBOX', 'Checkbox'), ('EMAIL', 'Email'), ('PHONE', 'Phone'),
+    ]
+    MODULES = [
+        ('CUSTOMER', 'Customers / Patients'), ('SUPPLIER', 'Suppliers'), ('PRODUCT', 'Products'),
+        ('SALES', 'Sales documents'), ('PURCHASE', 'Purchase documents'), ('EYE_TEST', 'Eye Test'),
+    ]
+    name = models.CharField(max_length=60)
+    key = models.SlugField(max_length=60)
+    field_type = models.CharField(max_length=12, choices=FIELD_TYPES, default='TEXT')
+    module = models.CharField(max_length=12, choices=MODULES)
+    options = models.JSONField(default=list, blank=True)  # dropdown choices
+    is_required = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+    sort_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['module', 'sort_order', 'name']
+        constraints = [models.UniqueConstraint(fields=['module', 'key'], name='uniq_custom_field_key')]
+
+    def __str__(self):
+        return f"{self.module}.{self.key}"
+
+
+class SettingsAuditLog(models.Model):
+    """Who changed which business setting, and from what to what."""
+    section = models.CharField(max_length=30)  # LOCALIZATION / TAX / NUMBERING / CUSTOM_FIELD
+    action = models.CharField(max_length=20)   # UPDATE / CREATE / DELETE
+    summary = models.CharField(max_length=255)
+    changes = models.JSONField(default=dict, blank=True)  # {field: [old, new]}
+    performed_by = models.CharField(max_length=150, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.created_at:%Y-%m-%d %H:%M} {self.section} {self.summary}"
+
+
+class DocumentNumberClaim(models.Model):
+    """The number a screen sent with a new document (its double-submit guard) → the system number
+    the document actually got. Written in the document's own transaction, so a repeated POST of
+    the same entry is refused exactly as the UNIQUE number column used to refuse it."""
+    doc_type = models.CharField(max_length=30)
+    client_token = models.CharField(max_length=100)
+    number = models.CharField(max_length=50)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['doc_type', 'client_token'], name='uniq_doc_number_claim')]

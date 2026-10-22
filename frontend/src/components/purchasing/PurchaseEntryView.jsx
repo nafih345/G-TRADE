@@ -33,6 +33,8 @@ import { useDebounce } from '../../hooks/useDebounce';
 import useBarcodeScanner from '../../hooks/useBarcodeScanner';
 import { printPurchaseReceipt } from '../../utils/printPurchase';
 import { barcodeMatchesProduct } from '../../utils/barcodeMatch';
+import { useStoreProfile } from '../../utils/storeProfile';
+import { confirmPosting, peekDocumentNumber } from '../../utils/businessPrefs';
 
 const todayStr = () => new Date().toISOString().split('T')[0];
 const genInvoiceNumber = () => `PINV-${Date.now().toString().slice(-8)}`;
@@ -207,7 +209,17 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
   const [editingId, setEditingId] = useState('');
   const [editingLabel, setEditingLabel] = useState('');
 
+  // invoiceNumber doubles as the entry's double-submit guard. When Settings → Numbering Sequences
+  // numbers purchase bills, the server assigns the real number on save and the field shows a
+  // read-only preview (systemNumber) instead.
   const [invoiceNumber, setInvoiceNumber] = useState(genInvoiceNumber());
+  const [systemNumber, setSystemNumber] = useState(null);
+  useEffect(() => {
+    if (editingId) return undefined;
+    let alive = true;
+    peekDocumentNumber('PURCHASE_BILL').then((n) => { if (alive) setSystemNumber(n); });
+    return () => { alive = false; };
+  }, [invoiceNumber, editingId]); // a fresh entry gets a fresh token → refresh the preview
   const [supplierInvoiceNumber, setSupplierInvoiceNumber] = useState('');
   const [selectedSupplierId, setSelectedSupplierId] = useState('');
   const [purchaseDate, setPurchaseDate] = useState(todayStr());
@@ -336,11 +348,8 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
     setItemsDialogOpen(true);
   };
 
-  const companyGstin = useMemo(() => {
-    try {
-      return JSON.parse(localStorage.getItem('optical_app_settings') || '{}').gstin || '';
-    } catch (e) { return ''; }
-  }, []);
+  // Our GSTIN comes from Settings → Store & Clinic Profile.
+  const companyGstin = useStoreProfile().gstin || '';
   const supplierGstin = selectedSupplier?.gstin || '';
   // Interstate (IGST) vs intra-state (CGST+SGST) is derived from the GSTIN state-code
   // prefix; if either GSTIN is missing we can't tell, so default to intra-state.
@@ -830,6 +839,8 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
     // blocking the save here made it impossible to update ANY field (Purchase Type included)
     // on that invoice ever again.
     if (!editingId && saveStatus !== 'DRAFT' && rows.length === 0) { alert('Please add at least one product line.'); productSearchRef.current?.focus(); return; }
+    // Settings → "Require Confirmation Before Posting": a confirmed entry moves stock and payables.
+    if (saveStatus !== 'DRAFT' && !confirmPosting(`${editingId ? 'the changes to ' : ''}this purchase entry`)) return;
 
     setSaving(true);
     try {
@@ -990,7 +1001,12 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
             />
           </Grid>
           <Grid item xs={6} sm={3} md={1.5}>
-            <TextField fullWidth size="small" label="Invoice No." value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} />
+            {systemNumber && !editingId ? (
+              <TextField fullWidth size="small" label="Invoice No." value={systemNumber}
+                InputProps={{ readOnly: true }} title="Assigned on save from Settings → Numbering Sequences" />
+            ) : (
+              <TextField fullWidth size="small" label="Invoice No." value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} />
+            )}
           </Grid>
           <Grid item xs={6} sm={3} md={1.5}>
             <TextField fullWidth size="small" label="Supplier Inv. No." value={supplierInvoiceNumber}

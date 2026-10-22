@@ -6,6 +6,7 @@ import { barcodeMatchesProduct } from '../../utils/barcodeMatch';
 import { notify } from '../../utils/notify';
 import { isRealCustomerName } from '../../utils/salesDocStatus';
 import { apiErrorMessage } from '../../utils/apiError';
+import { confirmPosting, peekDocumentNumber } from '../../utils/businessPrefs';
 import { CASH_PAID, CASH_UNPAID, needsBank } from '../../utils/paymentModes';
 import PaymentModeDetails from '../common/PaymentModeDetails';
 import { 
@@ -501,6 +502,16 @@ export default function NewSaleWizard({
   // The saved document being edited, or null for a new sale: { id, invoiceNumber, docType,
   // isBackend }. Cleared only by resetSaleForm (i.e. "Add New Details" / leaving edit mode).
   const [editingDoc, setEditingDoc] = useState(null);
+
+  // With Settings → Numbering Sequences in charge, show the number the configured sequence
+  // will issue (a preview — the server assigns the real one on save and the bill prints that).
+  useEffect(() => {
+    if (editingDoc || lastCompletedOrder) return undefined;
+    let alive = true;
+    const seq = { Invoice: 'SALES_INVOICE', Order: 'SALES_ORDER', Quotation: 'QUOTATION' }[docType] || 'SALES_INVOICE';
+    peekDocumentNumber(seq).then((preview) => { if (alive && preview) setBillNo(preview); });
+    return () => { alive = false; };
+  }, [docType, editingDoc, lastCompletedOrder]);
   const [loadingEdit, setLoadingEdit] = useState(false);
   const formLocked = isSaving || loadingEdit || Boolean(lastCompletedOrder);
   // First field of the form — "Add New Details" focuses it so the next sale can be typed at once.
@@ -1773,6 +1784,8 @@ export default function NewSaleWizard({
       );
       if (!ok) return;
     }
+    // Settings → "Require Confirmation Before Posting": an invoice moves stock and the books.
+    if (docType === 'Invoice' && !confirmPosting(`${editingDoc ? 'the changes to ' : ''}this sales invoice`)) return;
     savingRef.current = true;
     setIsSaving(true);
     try {
@@ -1871,9 +1884,26 @@ export default function NewSaleWizard({
         };
         // Editing updates the same record in place (the backend swaps its items and moves stock
         // by the difference). A local-only document has no database row to update.
-        const res = editingDoc
-          ? (editingDoc.isBackend ? await axios.patch(`/api/sales/invoices/${editingDoc.id}/`, payload) : null)
-          : await axios.post('/api/sales/invoices/', payload);
+        const send = (extra = {}) => (editingDoc
+          ? (editingDoc.isBackend ? axios.patch(`/api/sales/invoices/${editingDoc.id}/`, { ...payload, ...extra }) : null)
+          : axios.post('/api/sales/invoices/', { ...payload, ...extra }));
+        let res;
+        try {
+          res = await send();
+        } catch (err) {
+          // Negative stock is switched off and a line is short: say which, and let a Super Admin /
+          // Administrator post it anyway (the server checks the role).
+          if (err?.response?.data?.code !== 'insufficient_stock') throw err;
+          const ok = window.confirm(
+            `${err.response.data.detail}\n\nOK: override and post anyway (Super Admin / Administrator only).\n`
+            + 'Cancel: go back and change the quantities.'
+          );
+          if (!ok) {
+            notify(`The ${docType.toLowerCase()} was NOT saved — not enough stock.`);
+            return;
+          }
+          res = await send({ override_negative_stock: true });
+        }
         if (res) {
           backendInvoiceId = res.data.id;
           backendInvoiceNumber = res.data.invoice_number || billNo;

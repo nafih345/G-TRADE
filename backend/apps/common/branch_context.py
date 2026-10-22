@@ -127,7 +127,13 @@ class BranchContextMiddleware:
             except Exception:
                 pass
 
-        return self.get_response(request)
+        # Audit name for stock-ledger rows written during this request (see request_actor).
+        from apps.common.request_actor import set_actor, reset_actor
+        token = set_actor((request.META.get('HTTP_X_USER_NAME') or '').strip())
+        try:
+            return self.get_response(request)
+        finally:
+            reset_actor(token)
 
 
 def get_active_branch(request):

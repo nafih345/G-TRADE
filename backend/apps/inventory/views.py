@@ -41,6 +41,7 @@ class StockAdjustmentViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
         qty = adj.quantity if adj.adjustment_type == 'ADD' else -adj.quantity
         adjust_branch_stock(
             adj.product, adj.branch or Branch.get_default(), qty,
+            enforce_stock=True,
             ledger={
                 'warehouse': adj.warehouse,
                 'transaction_type': tx_type,
