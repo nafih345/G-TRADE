@@ -1,3 +1,4 @@
+import os
 from django.contrib import admin
 from django.urls import path, include
 from django.http import JsonResponse, HttpResponse
@@ -16,6 +17,7 @@ from django.conf.urls.static import static
 from apps.security.urls import security_urlpatterns, backup_urlpatterns
 
 _migrations_known_current = False
+API_VERSION = 2
 
 
 def health_check_view(request):
@@ -115,7 +117,15 @@ def health_check_view(request):
         # Last wipe_database run; browsers clear their cached records when this changes.
         "data_reset_epoch": data_reset_epoch,
         "app":"Optical ERP Backend",
-        "version": "1.0.0"
+        "version": "1.0.0",
+        # Bumped whenever the frontend starts depending on new endpoints. The frontend compares
+        # it with its own REQUIRED_API_VERSION (utils/backendStatus.js) and says "the backend is
+        # an older release" instead of failing screen by screen with 404s when only one of the
+        # two hosts redeployed. 2 = store profile, localization, stock overview, security/backups.
+        "api_version": API_VERSION,
+        # The commit this process was built from (Render / Vercel set these), so which build is
+        # live can be checked from outside without dashboard access.
+        "commit": (os.environ.get('RENDER_GIT_COMMIT') or os.environ.get('VERCEL_GIT_COMMIT_SHA') or '')[:7] or None,
     })
 
 urlpatterns = [

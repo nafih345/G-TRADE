@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from 'react';
 import { Box, Skeleton, Stack, Typography } from '@mui/material';
-import QRCode from 'qrcode';
 
 /** QR code for an otpauth:// URI, plus the secret for manual entry. Rendered locally — the
  *  secret never leaves the browser for a third-party QR service. */
@@ -8,7 +7,9 @@ export default function OtpQrCode({ uri, secret, size = 180 }) {
   const [src, setSrc] = useState('');
   useEffect(() => {
     let alive = true;
-    QRCode.toDataURL(uri, { width: size, margin: 1, errorCorrectionLevel: 'M' })
+    // Loaded on demand: only the 2FA screens need it, and the sign-in page is on the startup path.
+    import('qrcode')
+      .then(({ default: QRCode }) => QRCode.toDataURL(uri, { width: size, margin: 1, errorCorrectionLevel: 'M' }))
       .then((url) => { if (alive) setSrc(url); })
       .catch(() => { if (alive) setSrc(''); });
     return () => { alive = false; };

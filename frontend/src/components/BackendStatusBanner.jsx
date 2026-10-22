@@ -14,6 +14,7 @@ import { checkBackendHealth, subscribeBackendStatus } from '../utils/backendStat
 const TITLES = {
   unreachable: 'Cannot reach the server',
   degraded: 'The server is running, but its database is not',
+  outdated: 'The server is running an older release than this app',
 };
 
 const EXPLANATIONS = {
@@ -21,6 +22,10 @@ const EXPLANATIONS = {
     'Nothing is answering at the API address, so nothing you enter can be saved. Screens will stay empty.',
   degraded:
     'Requests are reaching the server but failing there. Lists will look empty and anything you save may be lost.',
+  outdated:
+    'The website was updated but the backend was not, so newer screens (Store Profile, Localization, Security & '
+    + 'Backup, Stock Overview) will fail to load. Redeploy the backend: Render → g-trade-backend → Manual Deploy → '
+    + 'Deploy latest commit.',
 };
 
 export default function BackendStatusBanner() {
@@ -33,7 +38,7 @@ export default function BackendStatusBanner() {
   // A new kind of failure un-dismisses: the operator dismissed the old message, not this one.
   useEffect(() => { setDismissed(false); }, [state.status]);
 
-  const broken = state.status === 'unreachable' || state.status === 'degraded';
+  const broken = state.status === 'unreachable' || state.status === 'degraded' || state.status === 'outdated';
 
   const handleRecheck = async () => {
     setRechecking(true);

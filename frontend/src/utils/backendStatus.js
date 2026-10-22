@@ -14,6 +14,11 @@ export const API_BASE_OVERRIDE_KEY = 'api_base_url';
 // `/api/(.*)` rewrite destination in vercel.json and the service name in render.yaml.
 export const DEFAULT_DEPLOYED_API_URL = 'https://g-trade-backend.onrender.com';
 
+// The backend API version this build needs (backend/config/urls.py API_VERSION). Vercel and
+// Render deploy independently; when only the frontend has the new release, every new screen
+// fails with a bare 404. Comparing versions turns that into one clear "redeploy the backend".
+export const REQUIRED_API_VERSION = 2;
+
 const isLocalhost = () =>
   /^(localhost|127\.0\.0\.1|\[::1\])$/.test(window.location.hostname);
 
@@ -45,7 +50,8 @@ export function resolveApiBaseUrl() {
 }
 
 // 'checking' until the first probe answers; 'ok' once it does; 'degraded' when the backend
-// is up but its database/migrations are not; 'unreachable' when nothing answers at all.
+// is up but its database/migrations are not; 'outdated' when it is healthy but an older release
+// than this frontend; 'unreachable' when nothing answers at all.
 //
 // `source` records who decided. /api/health/ says *why* it is broken — "could not translate
 // host name dpg-…" names the deleted database outright — whereas ordinary traffic can only
@@ -82,6 +88,16 @@ export async function checkBackendHealth() {
     const { data } = await axios.get('/api/health/', { timeout: 90000 });
     if (clearLocalDataIfReset(data?.data_reset_epoch)) {
       window.location.reload();
+      return state;
+    }
+    const apiVersion = Number(data?.api_version) || 1;
+    if (data?.status === 'ok' && apiVersion < REQUIRED_API_VERSION) {
+      setState({
+        status: 'outdated',
+        detail: `backend API v${apiVersion}${data?.commit ? ` (build ${data.commit})` : ''}, this app needs v${REQUIRED_API_VERSION}`,
+        baseUrl,
+        source: 'health',
+      });
       return state;
     }
     if (data?.status === 'ok') {

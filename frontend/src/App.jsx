@@ -12,9 +12,11 @@ import SessionActivityMonitor from './components/security/SessionActivityMonitor
 import { loadBusinessPrefs } from './utils/businessPrefs';
 import BackendStatusBanner from './components/BackendStatusBanner';
 import Login from './pages/Login';
-import Dashboard from './pages/Dashboard';
 
-// Lazy loaded page components for maximum performance & fast route loading
+// Lazy loaded page components for maximum performance & fast route loading. Dashboard is lazy
+// too: it is the only startup screen using recharts, and eager import made the sign-in page
+// download the ~420 KB charts bundle before showing anything.
+const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Products = lazy(() => import('./pages/Products'));
 const SalesInvoice = lazy(() => import('./pages/SalesInvoice'));
 const WholesaleSales = lazy(() => import('./pages/WholesaleSales'));
