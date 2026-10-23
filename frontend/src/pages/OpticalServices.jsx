@@ -70,14 +70,28 @@ const examVisitKey = (t) => {
 // join key, so the same visit can land in it two or three times: a locally-cached copy saved
 // before it synced, plus the authoritative backend row, plus an older cache entry keyed by a
 // stale preview number. Collapse them — backend row wins, local-only visits are kept once.
+// Same patient, same name, same day — one test session. A local-only copy sharing this with a
+// synced backend row is a failed earlier save attempt of that visit: its Test No was only a
+// preview (the retry got the next number), so the Patient ID + Test No key alone misses it and
+// it lingered in the cache as an extra "unsynced" visit (e.g. Nafih #1002 beside #1003).
+const examSessionKey = (t) => {
+  const pid = examPatientIdOf(t);
+  const name = String(t?.name ?? t?.patient_name ?? '').trim().toLowerCase();
+  const date = String(t?.date ?? t?.examination_date ?? '').slice(0, 10);
+  return (pid && name && date) ? `${pid}|${name}|${date}` : '';
+};
+
 const dedupeExams = (list) => {
   const backendById = new Map();
   const backendVisitKeys = new Set();
+  const backendSessionKeys = new Set();
   for (const t of list) {
     if (!t?.backendId) continue;
     if (!backendById.has(t.backendId)) backendById.set(t.backendId, t);
     const vk = examVisitKey(t);
     if (vk) backendVisitKeys.add(vk);
+    const sk = examSessionKey(t);
+    if (sk) backendSessionKeys.add(sk);
   }
   const out = [...backendById.values()];
   const localKeys = new Set();
@@ -85,6 +99,8 @@ const dedupeExams = (list) => {
     if (t?.backendId) continue; // already represented by the backend copy above
     const vk = examVisitKey(t);
     if (vk && backendVisitKeys.has(vk)) continue; // same visit as a synced backend row
+    const sk = examSessionKey(t);
+    if (sk && backendSessionKeys.has(sk)) continue; // stale copy of a test session that synced
     const key = vk || t?.id || null;
     if (key) {
       if (localKeys.has(key)) continue;
@@ -689,6 +705,31 @@ export default function OpticalServices() {
     // eye-examinations record — that only happens via "Save Clinical Record".
     if (e.key === 'Enter' && activeEl?.id === 'eyetest-save-patient-btn') return;
 
+    // Lens Options (last checkbox, PG) close the IOP card — Enter goes straight to ACCP (Final
+    // Acceptance Rx, OD SPH), bypassing PGP (Previous Glasses Power), which stays click-reachable.
+    if (e.key === 'Enter' && activeEl?.id === 'eyetest-lens-last') {
+      const accp = document.querySelector('[data-et-field="accp"]');
+      if (accp) {
+        e.preventDefault();
+        accp.focus();
+        if (accp.select) accp.select();
+        return;
+      }
+    }
+
+    // Charges bar: Medicine Charge is the last charge field — Enter goes straight to "Save
+    // Clinical Record" (not on down to the directory search), and Enter there lets the button's
+    // own click open the save confirmation.
+    if (e.key === 'Enter' && activeEl?.getAttribute?.('data-et-action') === 'saveRecord') return;
+    if (e.key === 'Enter' && activeEl?.id === 'eyetest-medicine-charge-input') {
+      const saveBtn = document.querySelector('[data-et-action="saveRecord"]');
+      if (saveBtn && !saveBtn.disabled) {
+        e.preventDefault();
+        saveBtn.focus();
+        return;
+      }
+    }
+
     // MUI selects are focusable <div>s, not inputs. A closed one opens its own menu on
     // Enter/ArrowUp/ArrowDown (MUI has already handled the key) — leave focus on it.
     const isSelectDisplay = (el) => !!el?.classList?.contains('MuiSelect-select');
@@ -723,6 +764,26 @@ export default function OpticalServices() {
         }
       }, 0);
       return;
+    }
+
+    // Medical Aid Name is an MUI Autocomplete (an <input role="combobox">). Up/Down belong to
+    // its option list — spatial navigation here was jumping focus to Optometrist instead of
+    // highlighting an option. Enter while the list is open commits the highlighted option
+    // (MUI's handler); once it has, carry on to the next field (Medical Aid Scheme).
+    if (activeEl?.tagName === 'INPUT' && activeEl.getAttribute('role') === 'combobox') {
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') return;
+      if (e.key === 'Enter' && activeEl.getAttribute('aria-expanded') === 'true') {
+        setTimeout(() => {
+          const list = getFocusables();
+          const idx = list.indexOf(activeEl);
+          const nextEl = idx >= 0 ? list[idx + 1] : null;
+          if (nextEl) {
+            nextEl.focus();
+            if (nextEl.select) nextEl.select();
+          }
+        }, 0);
+        return;
+      }
     }
 
     const focusables = getFocusables();
@@ -1194,6 +1255,15 @@ export default function OpticalServices() {
     } finally {
       savingPatientRef.current = false;
     }
+    // Details are saved (at least locally) — hand off straight to the Clinical Refraction &
+    // Measurement Grid so the optometrist can start entering readings (UCVA OD first).
+    setTimeout(() => {
+      const firstGridField = document.querySelector('[data-et-field="ucva"]');
+      if (firstGridField) {
+        firstGridField.focus();
+        if (firstGridField.select) firstGridField.select();
+      }
+    }, 0);
   };
 
   // "Save Clinical Record" must not create a directory entry for a visit where no actual test
@@ -1405,7 +1475,10 @@ export default function OpticalServices() {
         }
       }
 
-      setPastExaminations(updatedTests);
+      // Merge into what's on screen rather than replacing it with the cache: the cache only
+      // holds visits not yet synced (see the convergence step in fetchDatabaseRecords), so
+      // replacing made every already-synced exam drop out of the directory after a save.
+      setPastExaminations(prev => [examRecord, ...prev.filter(t => !sameVisit(t))]);
       setDbPatients(updatedCust);
     } catch (e) {}
 
@@ -1596,6 +1669,9 @@ export default function OpticalServices() {
     // is still the one on screen, so re-saving (e.g. after adding more details) should update
     // the same record rather than mint a new identity. A new Patient ID is only generated when
     // the user explicitly clicks "New Patient" (see handleResetAll).
+    // Saved (at least locally) — the single-screen confirm dialog uses this to bring the
+    // directory into view; the validation early-returns above leave it undefined.
+    return true;
   };
 
   const handleNavigateToSales = () => {

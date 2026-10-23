@@ -559,6 +559,10 @@ class WholesaleInvoice(BaseUUIDModel):
     # The full POS invoice record (line items, summary, payment, delivery, notes) as built by
     # the Wholesale POS screen — the source of truth for reprints, reports and dealer history.
     details = models.JSONField(default=dict, blank=True)
+    # Stock this invoice currently holds out of inventory: {'branch', 'warehouse', 'items':
+    # {product_id: units}} — kept by sales.wholesale_stock so every save moves only the
+    # difference. Null = saved before the backend moved wholesale stock (see that module).
+    stock_applied = models.JSONField(null=True, blank=True, editable=False)
 
     def __str__(self):
         return f"W-Inv {self.invoice_number} - {self.dealer.business_name}"

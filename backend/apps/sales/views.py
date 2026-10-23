@@ -20,6 +20,7 @@ from .models import (
 from .patient_utils import (
     reserve_patient_codes, peek_next_patient_code, peek_next_test_no,
     reserve_unused_test_numbers, sync_test_no_sequence,
+    find_duplicate_customer, find_duplicate_exam,
 )
 from apps.inventory.models import StockLedger
 from apps.inventory.stock_utils import adjust_branch_stock_many
@@ -425,6 +426,21 @@ class CustomerViewSet(viewsets.ModelViewSet):
     # frontend's save call swallows that error, silently dropped the patient record entirely.
     permission_classes = [permissions.AllowAny]
 
+    def create(self, request, *args, **kwargs):
+        # Duplicate guard: the same patient (same name + same mobile number) registered twice —
+        # a double-clicked Save, a retry after a timed-out request, or the front desk re-typing
+        # a returning patient — answers with the existing record instead of a second Customer
+        # row. 200 (not an error) so every caller just links to that row via res.data.id.
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        existing = find_duplicate_customer(
+            serializer.validated_data.get('name'), serializer.validated_data.get('phone'),
+        )
+        if existing is not None:
+            return Response(self.get_serializer(existing).data, status=200)
+        self.perform_create(serializer)
+        return Response(serializer.data, status=201, headers=self.get_success_headers(serializer.data))
+
     def perform_create(self, serializer):
         # Assign a real, backend-guaranteed-unique "P-xxxx" code if the client didn't send
         # one (or sent a placeholder that collides with someone else's) — this is the single
@@ -466,6 +482,28 @@ class EyeExaminationViewSet(viewsets.ModelViewSet):
     queryset = EyeExamination.objects.all().order_by('-examination_date')
     serializer_class = EyeExaminationSerializer
     permission_classes = [permissions.AllowAny]
+
+    def get_queryset(self):
+        # ?test_no=1003 — exact lookup (New Sale's Test No field), so a single visit can be found
+        # without paging through every exam.
+        qs = super().get_queryset()
+        test_no = (self.request.query_params.get('test_no') or '').strip()
+        if test_no:
+            qs = qs.filter(test_no=test_no)
+        return qs
+
+    def create(self, request, *args, **kwargs):
+        # Duplicate guard for one test session: the same patient's identical exam submitted
+        # again on the same day (a retry after a failed/slow sync, a double submit) returns the
+        # visit already on file instead of persisting a second copy under a new Test No. A real
+        # second visit with different findings is still created — visits are never merged.
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        existing = find_duplicate_exam(serializer.validated_data)
+        if existing is not None:
+            return Response(self.get_serializer(existing).data, status=200)
+        self.perform_create(serializer)
+        return Response(serializer.data, status=201, headers=self.get_success_headers(serializer.data))
 
     def perform_create(self, serializer):
         # Test No is assigned HERE, on the server, at submit time — never taken from the
@@ -1203,6 +1241,36 @@ class WholesaleInvoiceViewSet(viewsets.ModelViewSet):
     queryset = WholesaleInvoice.objects.select_related('dealer').order_by('-invoice_date', '-created_at')
     serializer_class = WholesaleInvoiceSerializer
     permission_classes = [permissions.AllowAny]
+
+    # Every save deducts / restores stock to match the invoice (sales.wholesale_stock), in the
+    # same transaction — a refused shortfall leaves neither the invoice nor the stock changed.
+    def _sync_stock(self, invoice):
+        from .wholesale_stock import sync_wholesale_invoice_stock
+        invoice = WholesaleInvoice.all_objects.select_for_update().get(pk=invoice.pk)
+        sync_wholesale_invoice_stock(invoice, self.request, enforce_stock=self._enforce_stock())
+
+    def _enforce_stock(self):
+        from apps.billing.views import user_role
+        from apps.company.store_profile import STORE_SETTINGS_ROLES
+        data = self.request.data if isinstance(self.request.data, dict) else {}
+        return not (data.get('override_negative_stock') is True
+                    and user_role(self.request.user) in STORE_SETTINGS_ROLES)
+
+    def perform_create(self, serializer):
+        with transaction.atomic():
+            self._sync_stock(serializer.save())
+
+    def perform_update(self, serializer):
+        with transaction.atomic():
+            self._sync_stock(serializer.save())
+
+    def perform_destroy(self, instance):
+        with transaction.atomic():
+            invoice = WholesaleInvoice.all_objects.select_for_update().get(pk=instance.pk)
+            invoice.is_deleted = True   # nothing held any more: restore it all
+            from .wholesale_stock import sync_wholesale_invoice_stock
+            sync_wholesale_invoice_stock(invoice, self.request, enforce_stock=False)
+            invoice.delete()
 
     def get_queryset(self):
         qs = super().get_queryset()

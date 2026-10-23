@@ -4,7 +4,8 @@ import {
   MenuItem, Button, Checkbox, FormControlLabel, Paper, 
   Table, TableBody, TableCell, TableContainer, TableHead,
   TableRow, Stack, Divider, InputAdornment, Tooltip, Chip,
-  Dialog, IconButton, Menu, ListItemIcon, ListItemText, Autocomplete
+  Dialog, DialogTitle, DialogContent, DialogActions,
+  IconButton, Menu, ListItemIcon, ListItemText, Autocomplete
 } from '@mui/material';
 import { 
   Search as SearchIcon, 
@@ -160,6 +161,31 @@ export default function SingleScreenEyeTestForm({
   const [historySearch, setHistorySearch] = useState('');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
+
+  // "Save Clinical Record" asks for confirmation first. Edit closes the prompt and returns to
+  // the charges so the record can be corrected; Confirm (autofocused, so Enter commits) saves
+  // and then brings the directory below into view with the new visit on top.
+  const [saveConfirmOpen, setSaveConfirmOpen] = useState(false);
+  const directoryRef = useRef(null);
+  const directoryTableRef = useRef(null);
+  const handleEditBeforeSave = () => {
+    setSaveConfirmOpen(false);
+    setTimeout(() => {
+      const el = document.querySelector('[data-et-field="charges"]');
+      if (el) { el.focus(); if (el.select) el.select(); }
+    }, 0);
+  };
+  const handleConfirmSave = async () => {
+    setSaveConfirmOpen(false);
+    const saved = await onSaveDraft?.();
+    if (!saved) return;
+    // A leftover search could hide the row just saved — clear it so the new visit shows.
+    setHistorySearch('');
+    setTimeout(() => {
+      directoryRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (directoryTableRef.current) directoryTableRef.current.scrollTop = 0;
+    }, 50);
+  };
 
   // Auto-generate Date and Patient ID (Null-Safe). Test No is intentionally left blank until
   // a real one exists — either an existing exam was selected from history, or one was just
@@ -691,6 +717,7 @@ export default function SingleScreenEyeTestForm({
                         size="small"
                         checked={(prescription?.selectedLenses || []).includes(lens)}
                         onChange={() => handleLensOptionToggle(lens)}
+                        inputProps={lens === 'PG' ? { id: 'eyetest-lens-last' } : undefined}
                         sx={{ py: 0.2 }}
                       />
                     }
@@ -1078,6 +1105,7 @@ export default function SingleScreenEyeTestForm({
               value={diagnosis?.medicineCharge || '0'}
               onChange={(e) => setDiagnosis(prev => ({ ...prev, medicineCharge: e.target.value }))}
               InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
+              inputProps={{ id: 'eyetest-medicine-charge-input' }}
             />
           </Grid>
         </Grid>
@@ -1090,7 +1118,7 @@ export default function SingleScreenEyeTestForm({
           <Button variant="outlined" color="secondary" startIcon={<PrintIcon />} data-et-action="rxPrint" onClick={() => setPrintModalOpen(true)} sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 2 }}>
             Rx Print
           </Button>
-          <Button variant="contained" color="success" disabled={isLocked} startIcon={<SaveIcon />} data-et-action="saveRecord" onClick={onSaveDraft} sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 2, px: 3 }}>
+          <Button variant="contained" color="success" disabled={isLocked} startIcon={<SaveIcon />} data-et-action="saveRecord" onClick={() => setSaveConfirmOpen(true)} sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 2, px: 3 }}>
             Save Clinical Record
           </Button>
           <Button variant="outlined" color="inherit" startIcon={<ClearIcon />} onClick={onClearAll} sx={{ textTransform: 'none', fontWeight: 600, borderRadius: 2 }}>
@@ -1100,7 +1128,7 @@ export default function SingleScreenEyeTestForm({
       </Paper>
 
       {/* 📜 SECTION 6: Saved Examination Directory Search Table */}
-      <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, bgcolor: '#ffffff', borderColor: '#cbd5e1' }}>
+      <Paper ref={directoryRef} variant="outlined" sx={{ p: 2, borderRadius: 3, bgcolor: '#ffffff', borderColor: '#cbd5e1' }}>
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1.5, flexWrap: 'wrap', gap: 1 }}>
           <Typography variant="subtitle2" fontWeight={800} color="primary.main" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
             <SearchIcon /> Recent Examination Directory ({filteredHistory.length})
@@ -1139,7 +1167,7 @@ export default function SingleScreenEyeTestForm({
           </Stack>
         </Box>
 
-        <TableContainer component={Paper} elevation={0} sx={{ border: '1px solid #e2e8f0', borderRadius: 2, maxHeight: 220 }}>
+        <TableContainer ref={directoryTableRef} component={Paper} elevation={0} sx={{ border: '1px solid #e2e8f0', borderRadius: 2, maxHeight: 220 }}>
           <Table size="small" stickyHeader>
             <TableHead>
               <TableRow sx={{ '& th': { fontWeight: 800, bgcolor: '#0f172a', color: '#fff' } }}>
@@ -1256,6 +1284,41 @@ export default function SingleScreenEyeTestForm({
             medicalHistory={medicalHistory}
           />
         </Box>
+      </Dialog>
+
+      {/* Save Clinical Record confirmation — Confirm is autofocused so Enter commits the save;
+          Edit (or Esc) goes back to the form without saving. */}
+      <Dialog open={saveConfirmOpen} onClose={handleEditBeforeSave} maxWidth="xs" fullWidth PaperProps={{ style: { borderRadius: 12 } }}>
+        <DialogTitle sx={{ fontWeight: 800, display: 'flex', alignItems: 'center', gap: 1 }}>
+          <SaveIcon color="success" /> Save Clinical Record?
+        </DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={0.75}>
+            {[
+              ['Patient', `${patientData.name || '—'} (${autoPatientId || '—'})`],
+              ['Test No', testNo || 'Assigned on save'],
+              ['Date', autoDate || '—'],
+              ['Optometrist', patientData.assignedOptometrist || '—'],
+              ['Procedure Charge', `₹${diagnosis?.procedureCharge || 0}`],
+              ['Medical Aid Charge', `₹${diagnosis?.medicalAidCharge || 0}`],
+              ['Customer Paid Amount', `₹${diagnosis?.customerPaidAmount ?? 0}`],
+              ['Medicine Charge', `₹${diagnosis?.medicineCharge || 0}`],
+            ].map(([label, value]) => (
+              <Box key={label} sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}>
+                <Typography variant="body2" color="text.secondary">{label}</Typography>
+                <Typography variant="body2" fontWeight={700}>{value}</Typography>
+              </Box>
+            ))}
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ px: 2, py: 1.5 }}>
+          <Button variant="outlined" startIcon={<EditIcon />} onClick={handleEditBeforeSave} sx={{ textTransform: 'none', fontWeight: 700 }}>
+            Edit
+          </Button>
+          <Button variant="contained" color="success" startIcon={<SaveIcon />} autoFocus onClick={handleConfirmSave} sx={{ textTransform: 'none', fontWeight: 800 }}>
+            Confirm &amp; Save
+          </Button>
+        </DialogActions>
       </Dialog>
     </Box>
   );

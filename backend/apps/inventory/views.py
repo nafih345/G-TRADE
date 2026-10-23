@@ -1,4 +1,5 @@
 from rest_framework import viewsets, permissions
+from rest_framework.exceptions import ValidationError
 from rest_framework.serializers import ModelSerializer
 from .models import StockLedger, StockAdjustment, WarehouseTransfer
 from .stock_utils import adjust_branch_stock
@@ -36,6 +37,10 @@ class StockAdjustmentViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         from apps.company.models import Branch
+        from apps.sales.wholesale_stock import guard_legacy_pos_adjustment
+        refused = guard_legacy_pos_adjustment(serializer.validated_data.get('reason'))
+        if refused:
+            raise ValidationError({'detail': refused, 'code': 'wholesale_stock_handled'})
         adj = serializer.save(**self._branch_stamp_kwargs(serializer))
         tx_type = 'ADJ_ADD' if adj.adjustment_type == 'ADD' else 'ADJ_SUB'
         qty = adj.quantity if adj.adjustment_type == 'ADD' else -adj.quantity

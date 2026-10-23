@@ -403,8 +403,8 @@ export default function WholesaleSales() {
 
       let backend = [];
       try {
-        const res = await axios.get('/api/products/products/');
-        const raw = res.data?.results || res.data || [];
+        // Every page — the first page alone (20) left most products with stale stock here.
+        const raw = await fetchAllPages(axios, '/api/products/products/');
         if (Array.isArray(raw)) backend = raw.map(mapBackendProduct);
       } catch (e) {}
 
@@ -1304,7 +1304,8 @@ export default function WholesaleSales() {
     }
     const dealer = await ensureBackendDealer(selectedCustomer);
     const draft = { ...buildInvoiceObject('Draft'), customer: dealer };
-    const { invoice, synced } = await persistInvoice(draft);
+    const { invoice, synced, refused } = await persistInvoice(draft);
+    if (refused) { showToast(`Draft not saved: ${refused}`, 'error'); return; }
     setInvoiceNo(newInvoiceNo()); // the draft keeps its number; the live cart gets a fresh one
     showToast(synced ? `Draft saved as ${invoice.invoiceNo}.` : `Draft ${invoice.invoiceNo} saved on this device only — the server could not be reached; it will upload automatically.`, synced ? 'success' : 'warning');
   }
@@ -1330,7 +1331,9 @@ export default function WholesaleSales() {
   }
 
   // Saves the invoice to the database (WholesaleInvoice + details) and the local cache. When the
-  // server is unreachable it is cached with pendingSync and uploaded on the next sync.
+  // server is unreachable it is cached with pendingSync and uploaded on the next sync. A save the
+  // server refuses (e.g. not enough stock) comes back as `refused` and is NOT cached — retrying
+  // it offline would only be refused again. The server moves the stock on every save.
   async function persistInvoice(inv) {
     let invoice = inv;
     let synced = false;
@@ -1338,6 +1341,11 @@ export default function WholesaleSales() {
       invoice = await saveInvoiceToBackend(axios, inv);
       synced = true;
     } catch (e) {
+      const status = e?.response?.status;
+      if (status >= 400 && status < 500) {
+        const d = e.response.data;
+        return { invoice: inv, synced: false, refused: (typeof d?.detail === 'string' && d.detail) || 'The server refused this invoice.' };
+      }
       invoice = { ...inv, pendingSync: true };
     }
     cacheInvoice(invoice, inv.invoiceNo);
@@ -1362,15 +1370,22 @@ export default function WholesaleSales() {
   async function runCompleteSale() {
     const dealer = await ensureBackendDealer(selectedCustomer);
     const built = { ...buildInvoiceObject(orderStatus === 'Draft' ? 'Confirmed' : orderStatus), customer: dealer };
+    // A Manager/Admin may knowingly sell past the stock on hand (validateForCompletion).
+    const overStock = cartItems.some(i => !isServiceLine(i) && ((parseFloat(i.qty) || 0) + (parseFloat(i.freeQty) || 0)) > (parseFloat(i.availableStock) || 0));
+    if (overStock && canOverride) built.overrideNegativeStock = true;
 
     // Save the invoice itself first, so its number is final (a clash is renumbered) before the
-    // stock adjustments and receipt below reference it.
-    const { invoice: completedInvoice, synced } = await persistInvoice(built);
+    // receipt below references it. Saving it also deducts the stock on the server.
+    const { invoice: completedInvoice, synced, refused } = await persistInvoice(built);
+    if (refused) {
+      showToast(`Sale not completed: ${refused}`, 'error');
+      return;
+    }
     const invoiceNo = completedInvoice.invoiceNo;
     const invoiceDate = completedInvoice.date;
 
-    // 1. Decrement Inventory Stock — free quantity leaves the warehouse too, even though it
-    // never adds to the billed amount (localStorage view first, for instant feedback).
+    // 1. Inventory: the server deducted qty + free qty when the invoice saved (or will, when an
+    // offline save uploads). Mirror it locally for instant feedback, then reload live stock.
     const stockLines = cartItems.filter(item => !isServiceLine(item));
     const updatedProducts = products.map(p => {
       const matchInCart = stockLines.find(item => item.id === p.id || item.code === p.code);
@@ -1384,25 +1399,7 @@ export default function WholesaleSales() {
     setProducts(updatedProducts);
     writeLS(LS_KEYS.inventory, updatedProducts);
 
-    // Push the same decrement to the backend inventory, attributed to the selected
-    // warehouse, so Inventory > Products and the retail POS all agree.
-    if (selectedWarehouseId) {
-      await Promise.all(stockLines.map(async (item) => {
-        const prod = products.find(p => p.id === item.id || p.code === item.code);
-        const units = computeLineTotals(item).stockUnits;
-        if (!prod || !isUuid(prod.id) || !(units > 0)) return;
-        try {
-          await axios.post('/api/inventory/adjustments/', {
-            product: prod.id,
-            warehouse: selectedWarehouseId,
-            quantity: Math.round(units),
-            adjustment_type: 'SUB',
-            reason: `Wholesale POS sale ${invoiceNo}`,
-          });
-        } catch (e) {}
-      }));
-      window.dispatchEvent(new Event('optical_stock_updated'));
-    }
+    if (synced) window.dispatchEvent(new Event('optical_stock_updated'));
 
     // 2. Update Dealer Ledger — locally for instant UI feedback, and best-effort against the
     // real Dealer record (PATCH outstanding_balance) so it stays correct system-wide.
@@ -1423,7 +1420,7 @@ export default function WholesaleSales() {
     }
 
     // 3. Accounting: nothing to do here. The backend books the saved WholesaleInvoice, the
-    // collection below and the stock adjustments above into the ledger (apps/financial).
+    // collection below and the stock it moved (COGS / Inventory) into the ledger (apps/financial).
 
     // 4. Receipt for the amount collected at the counter (the invoice row itself was saved above).
     // A split is one receipt per mode (each posted to its own Cash / Bank / UPI account; Credit
@@ -1464,40 +1461,32 @@ export default function WholesaleSales() {
   }
 
   // --- More Actions: Cancel / Return / Replacement / Credit Note (operate on the last completed invoice) ---
-  async function restockInvoiceItems(invoice, reason) {
+  // The server restores the stock when the invoice is saved as Cancelled / stockReturned
+  // (apps/sales/wholesale_stock.py); this only mirrors it locally for instant feedback.
+  function restockInvoiceItems(invoice) {
     const stockItems = (invoice.items || []).filter(item => !isServiceLine(item));
     const updatedProducts = products.map(p => {
       const match = stockItems.find(item => item.id === p.id || item.code === p.code);
       if (match) {
-        const newStock = (parseFloat(p.availableStock ?? p.stock ?? 0) + (parseFloat(match.qty) || 0));
+        const newStock = (parseFloat(p.availableStock ?? p.stock ?? 0) + computeLineTotals(match).stockUnits);
         return { ...p, availableStock: newStock, stock: newStock };
       }
       return p;
     });
     setProducts(updatedProducts);
     writeLS(LS_KEYS.inventory, updatedProducts);
-
-    if (selectedWarehouseId) {
-      await Promise.all(stockItems.map(async (item) => {
-        const prod = products.find(p => p.id === item.id || p.code === item.code);
-        if (!prod || !isUuid(prod.id) || !(parseFloat(item.qty) > 0)) return;
-        try {
-          await axios.post('/api/inventory/adjustments/', {
-            product: prod.id, warehouse: selectedWarehouseId, quantity: Math.round(item.qty),
-            adjustment_type: 'ADD', reason: `${reason} ${invoice.invoiceNo}`,
-          });
-        } catch (e) {}
-      }));
-      window.dispatchEvent(new Event('optical_stock_updated'));
-    }
+    window.dispatchEvent(new Event('optical_stock_updated'));
   }
 
+  // Returns false when the server refused the change (the caller should stop).
   async function updateInvoiceInStorage(invoiceNo, patch) {
     const all = readLS(LS_KEYS.invoices, []);
     const current = all.find(inv => inv.invoiceNo === invoiceNo) || (printableInvoice?.invoiceNo === invoiceNo ? printableInvoice : null);
-    if (!current) return;
-    const { synced } = await persistInvoice({ ...current, ...patch });
+    if (!current) return true;
+    const { synced, refused } = await persistInvoice({ ...current, ...patch });
+    if (refused) { showToast(`Invoice ${invoiceNo} was not updated: ${refused}`, 'error'); return false; }
     if (!synced) showToast(`Invoice ${invoiceNo} updated on this device only — it will upload when the server is reachable.`, 'warning');
+    return true;
   }
 
   // Reduces/increases a dealer's outstanding locally (instant UI) and best-effort against
@@ -1554,16 +1543,17 @@ export default function WholesaleSales() {
 
   async function handleCancelInvoice() {
     if (!printableInvoice) return;
-    await restockInvoiceItems(printableInvoice, 'Cancelled wholesale invoice');
-    if (printableInvoice.dueAmount > 0) adjustDealerOutstanding(printableInvoice.customer, -printableInvoice.dueAmount);
-    await updateInvoiceInStorage(printableInvoice.invoiceNo, { orderStatus: 'Cancelled', status: 'Cancelled' });
     setCancelInvoiceConfirmOpen(false);
+    if (!await updateInvoiceInStorage(printableInvoice.invoiceNo, { orderStatus: 'Cancelled', status: 'Cancelled' })) return;
+    restockInvoiceItems(printableInvoice);
+    if (printableInvoice.dueAmount > 0) adjustDealerOutstanding(printableInvoice.customer, -printableInvoice.dueAmount);
     showToast(`Invoice ${printableInvoice.invoiceNo} cancelled and stock restored.`, 'success');
   }
 
   async function handleSalesReturn() {
     if (!printableInvoice) return;
-    await restockInvoiceItems(printableInvoice, 'Sales return for');
+    if (!await updateInvoiceInStorage(printableInvoice.invoiceNo, { stockReturned: 'Returned' })) return;
+    restockInvoiceItems(printableInvoice);
     if (printableInvoice.dueAmount > 0) adjustDealerOutstanding(printableInvoice.customer, -printableInvoice.dueAmount);
     const record = await postWholesaleReturn(printableInvoice, printableInvoice.summary?.grandTotal, '', 'Stock Return');
     setReturnConfirmOpen(false);
@@ -1574,7 +1564,8 @@ export default function WholesaleSales() {
   // a fresh cart for the same dealer so the replacement products can be picked and billed.
   async function handleReplacement() {
     if (!printableInvoice) return;
-    await restockInvoiceItems(printableInvoice, 'Replacement for');
+    if (!await updateInvoiceInStorage(printableInvoice.invoiceNo, { stockReturned: 'Replaced' })) return;
+    restockInvoiceItems(printableInvoice);
     await postWholesaleReturn(printableInvoice, printableInvoice.summary?.grandTotal, 'Replacement requested', 'Replacement Issued');
     setReplacementConfirmOpen(false);
     setSelectedCustomer(printableInvoice.customer);

@@ -278,7 +278,25 @@ export default function PatientHistory() {
 
       const allCust = Array.from(uniqueCustMap.values());
 
-      const uniqueExams = Array.from(new Map(normalizedExams.map(e => [String(e.id || `${e.patientId}-${e.date}`).toLowerCase(), e])).values());
+      // One entry per visit. Key on the backend row UUID first: the display id is the
+      // client-generated visit_number (random VIS-100..999, and carried over on the form between
+      // visits), so two real exams could share it and the later one silently replaced the
+      // earlier — a patient's second eye test vanished from history after a refresh. Local-only
+      // copies fall back to Patient ID + Test No, then the old id.
+      const examKey = (e) => {
+        if (e.backendId) return `b:${e.backendId}`;
+        const tno = String(e.testNo || e.test_no || '').trim();
+        if (e.patientId && tno) return `v:${e.patientId}|${tno}`.toLowerCase();
+        return String(e.id || `${e.patientId}-${e.date}`).toLowerCase();
+      };
+      // A local cache copy of a visit that also came back from the backend (same Patient ID +
+      // Test No) is dropped in favour of the backend row.
+      const backendVisitKeys = new Set(normalizedExams
+        .filter(e => e.backendId && e.patientId && (e.testNo || e.test_no))
+        .map(e => `v:${e.patientId}|${String(e.testNo || e.test_no).trim()}`.toLowerCase()));
+      const uniqueExams = Array.from(new Map(normalizedExams
+        .filter(e => e.backendId || !backendVisitKeys.has(examKey(e)))
+        .map(e => [examKey(e), e])).values());
 
       // This page is specifically an exam-history directory, not a general patient list — a
       // patient who has only booked an appointment (no eye exam completed yet) shouldn't show
@@ -615,14 +633,48 @@ export default function PatientHistory() {
     }
   };
 
-  const handleClearAllPatientData = () => {
-    if (!window.confirm('This will permanently remove all patient records, appointments, and eye exam history stored in this browser. Continue?')) {
+  // Clearing only the browser cache (as this used to) achieved nothing visible: the reload
+  // re-fetched every patient and exam straight back from the database. Delete the backend rows
+  // too — every eye examination, and the Customer row of every patient listed here (the same
+  // soft-delete handleDeletePatient does per patient) — then the local caches, and update the
+  // list in place.
+  const [clearingAll, setClearingAll] = useState(false);
+  const handleClearAllPatientData = async () => {
+    if (!window.confirm(`This will permanently delete ALL ${patients.length} patient record(s) and ${examinations.length} eye examination(s) from the database, plus the copies stored in this browser. This cannot be undone. Continue?`)) {
       return;
     }
-    ['optical_patients', 'optical_appointments', 'optical_sales_customers', 'optical_eye_tests'].forEach(key => {
-      localStorage.removeItem(key);
-    });
-    window.location.reload();
+    setClearingAll(true);
+    let failed = 0;
+    try {
+      // Delete in small parallel batches — one request per row, and the hosted backend is a
+      // few hundred ms per request.
+      const runBatched = async (urls) => {
+        for (let i = 0; i < urls.length; i += 8) {
+          const results = await Promise.allSettled(urls.slice(i, i + 8).map(u => axios.delete(u)));
+          failed += results.filter(r => r.status === 'rejected' && r.reason?.response?.status !== 404).length;
+        }
+      };
+      const examIds = [...new Set(examinations.map(ex => ex.backendId).filter(isBackendId))];
+      await runBatched(examIds.map(id => `/api/sales/eye-examinations/${id}/`));
+      const custIds = [...new Set(patients.map(p => p.customerId).filter(isBackendId))];
+      await runBatched(custIds.map(id => `/api/sales/customers/${id}/`));
+
+      ['optical_patients', 'optical_appointments', 'optical_sales_customers', 'optical_eye_tests'].forEach(key => {
+        localStorage.removeItem(key);
+      });
+
+      if (failed) {
+        alert(`${failed} record(s) could not be deleted from the database — check your connection and try again.`);
+        window.location.reload();
+        return;
+      }
+      setPatients([]);
+      setExaminations([]);
+      setSelectedPatientId(null);
+      alert('All patient data cleared.');
+    } finally {
+      setClearingAll(false);
+    }
   };
 
   return (
@@ -644,9 +696,10 @@ export default function PatientHistory() {
             color="error"
             startIcon={<ClearIcon />}
             onClick={handleClearAllPatientData}
+            disabled={clearingAll}
             sx={{ borderRadius: 2.5, px: 2.5, textTransform: 'none', fontWeight: 700 }}
           >
-            Clear All Patient Data
+            {clearingAll ? 'Clearing…' : 'Clear All Patient Data'}
           </Button>
           {selectedPatient && (
             <Button

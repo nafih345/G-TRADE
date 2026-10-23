@@ -328,13 +328,13 @@ def build_stock_adjustment(adj, previous=None):
     reason = (adj.reason or '').strip()
     meta = {'unit_cost': str(unit_cost), 'valuation': 'LAST_PURCHASE_COST'}
     name = getattr(adj.product, 'name', 'product')
+    # The Wholesale POS takes sold stock out through a SUB adjustment — that is cost of goods
+    # sold, not a loss — and a cancel / return / edit puts it back with an ADD "… reversal".
+    is_sale = reason.lower().startswith(WHOLESALE_SALE_PREFIX)
     if adj.adjustment_type == 'ADD':
         lines = [_line('INVENTORY', debit=value, memo=f"{adj.quantity} × {name} added"),
-                 _line('STOCK_GAIN', credit=value, memo=reason or 'Stock adjustment')]
+                 _line('COGS' if is_sale else 'STOCK_GAIN', credit=value, memo=reason or 'Stock adjustment')]
     else:
-        # The Wholesale POS takes sold stock out through a SUB adjustment — that is cost of
-        # goods sold, not a loss.
-        is_sale = reason.lower().startswith(WHOLESALE_SALE_PREFIX)
         lines = [_line('COGS' if is_sale else 'STOCK_LOSS', debit=value, memo=reason or 'Stock adjustment'),
                  _line('INVENTORY', credit=value, memo=f"{adj.quantity} × {name} removed")]
     return {

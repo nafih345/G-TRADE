@@ -98,3 +98,62 @@ def reserve_unused_test_numbers(count=1):
             continue
         out.append(candidate)
     return out
+
+
+def _phone_key(phone):
+    """Last 10 digits of a phone number, so '+91 99618 76122' and '9961876122' compare equal."""
+    digits = ''.join(ch for ch in str(phone or '') if ch.isdigit())
+    return digits[-10:]
+
+
+def find_duplicate_customer(name, phone):
+    """
+    The active Customer that is the same person as (name, phone): same name (case/space
+    insensitive) AND same mobile number. Both are required — a shared family phone or two
+    patients with the same name are different people. Returns None when there is no match.
+    """
+    from .models import Customer
+
+    name = ' '.join(str(name or '').split())
+    phone = _phone_key(phone)
+    if not name or not phone:
+        return None
+    for cust in Customer.objects.filter(name__iexact=name).order_by('created_at'):
+        if _phone_key(cust.phone) == phone:
+            return cust
+    return None
+
+
+# Fields that make two submissions "the same exam": identical findings, not just the same patient.
+_EXAM_IDENTITY_FIELDS = (
+    'rx_summary', 'primary_diagnosis',
+    'sub_sph_od', 'sub_cyl_od', 'sub_axis_od', 'sub_add_od',
+    'sub_sph_os', 'sub_cyl_os', 'sub_axis_os', 'sub_add_os',
+)
+
+
+def find_duplicate_exam(data):
+    """
+    An existing EyeExamination that `data` (validated create payload) would merely duplicate:
+    same patient (patient_id + name), examined today, with identical findings. That is a
+    re-submit of one test session (retry after a failed sync, double submit) — a real second
+    visit has its own findings and is NOT matched. Returns None when there is no match.
+    """
+    from django.utils import timezone
+
+    patient_id = str(data.get('patient_id') or '').strip()
+    name = ' '.join(str(data.get('patient_name') or '').split())
+    if not patient_id or not name:
+        return None
+
+    norm = lambda v: ' '.join(str(v or '').split()).lower()
+    wanted = {f: norm(data.get(f)) for f in _EXAM_IDENTITY_FIELDS}
+    candidates = EyeExamination.objects.filter(
+        patient_id=patient_id,
+        patient_name__iexact=name,
+        examination_date__date=timezone.localdate(),
+    ).order_by('examination_date')
+    for exam in candidates:
+        if all(norm(getattr(exam, f)) == v for f, v in wanted.items()):
+            return exam
+    return None

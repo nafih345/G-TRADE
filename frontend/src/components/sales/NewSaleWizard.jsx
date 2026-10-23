@@ -4,6 +4,7 @@ import useBarcodeScanner from '../../hooks/useBarcodeScanner';
 import { sendInvoiceWhatsApp } from '../../utils/whatsappInvoice';
 import { barcodeMatchesProduct } from '../../utils/barcodeMatch';
 import { notify } from '../../utils/notify';
+import { fetchAllPages } from '../../utils/fetchAllPages';
 import { isRealCustomerName } from '../../utils/salesDocStatus';
 import { apiErrorMessage } from '../../utils/apiError';
 import { confirmPosting, peekDocumentNumber } from '../../utils/businessPrefs';
@@ -279,6 +280,125 @@ const toWizardDocType = (t) => {
 // Also what a bill needs before it can be saved (see handleCompleteBilling).
 const realCustomerName = (n) => (isRealCustomerName(n) ? String(n).trim().replace(/\s+/g, ' ') : '');
 
+// --- Patient directory (searched by the New Sale patient field) ---
+const phoneKey = (p) => String(p || '').replace(/\D/g, '').slice(-10);
+const isExamRow = (c) => !!(c.test_no || c.testNo || c.patient_name || c.subjectiveRefraction || 'sub_sph_od' in c);
+// The permanent "P-1001" patient code. Local exam cache entries use "P-1001_1003" (code_testNo)
+// as their id, so an id is only taken as a code when it is neither a UUID nor that compound key.
+const patientCodeOf = (c) => String(
+  c.patient_code || c.patient_id || c.patientId || c.patientData?.id
+  || (!isBackendUuid(c.id) && !String(c.id || '').includes('_') ? c.id : '') || ''
+).trim();
+const examTimeOf = (e) => Date.parse(e.examination_date || e.date || '') || 0;
+// Which exam's Rx to auto-fill: a synced backend row beats a cache-only copy, then the newest.
+const examRankOf = (e) => [isBackendUuid(e.id) || isBackendUuid(e.backendId) ? 1 : 0, examTimeOf(e)];
+const outranks = (a, b) => { const [ra, rb] = [examRankOf(a), examRankOf(b)]; return ra[0] !== rb[0] ? ra[0] > rb[0] : ra[1] >= rb[1]; };
+
+// One entry per patient, merged from Customer rows and every eye exam (API + local caches).
+// Previously each exam was its own entry keyed by its exam UUID, so a patient with an exam showed
+// up twice, and picking the exam copy linked the bill to an exam id instead of the Customer.
+// Each entry carries the real Customer UUID as `id` when known, its patient code, every Test No
+// on file (for search) and the latest exam's fields (for the Rx auto-fill).
+const buildPatientDirectory = (pool) => {
+  const byKey = new Map();
+  pool.forEach((c) => {
+    if (!c) return;
+    const name = String(c.name || c.patient_name || c.patientName || '').trim();
+    if (!name) return;
+    const exam = isExamRow(c);
+    const code = patientCodeOf(c);
+    const phone = c.phone || c.mobile || '';
+    const key = (code || phoneKey(phone) || name).toLowerCase();
+    const uuid = exam
+      ? (isBackendUuid(c.customer) ? c.customer : isBackendUuid(c.customerId) ? c.customerId : '')
+      : (isBackendUuid(c.id) ? c.id : isBackendUuid(c.customerId) ? c.customerId : '');
+
+    let entry = byKey.get(key);
+    if (!entry) {
+      entry = { name, phone, age: '', gender: '', address: '', gstin: '', patientCode: code, customerId: '', testNos: [], exam: null, nameFromCustomer: false };
+      byKey.set(key, entry);
+    }
+    if (uuid && !entry.customerId) entry.customerId = uuid;
+    if (code && !entry.patientCode) entry.patientCode = code;
+    // The Customer record's name/phone win over an exam's snapshot of them.
+    if (!exam && !entry.nameFromCustomer) { entry.name = name; entry.nameFromCustomer = true; }
+    if (!entry.phone && phone) entry.phone = phone;
+    ['age', 'gender', 'address', 'gstin'].forEach((f) => { if (!entry[f] && c[f]) entry[f] = c[f]; });
+    if (exam) {
+      const tno = String(c.test_no || c.testNo || '').trim();
+      if (tno && !entry.testNos.includes(tno)) entry.testNos.push(tno);
+      if (!entry.exam || outranks(c, entry.exam)) entry.exam = c;
+    }
+  });
+  return Array.from(byKey.values()).map(({ exam, nameFromCustomer, ...p }) => ({
+    ...(exam || {}),
+    ...p,
+    id: p.customerId || p.patientCode || `${p.name}|${phoneKey(p.phone)}`,
+    gender: p.gender || 'MALE',
+  }));
+};
+
+// Patient search: nothing until something is typed. A number (or "P-1001") is an exact lookup
+// by Test No / Patient ID (or a full mobile number); anything else is a name prefix match.
+const searchPatients = (options, rawQuery) => {
+  const q = String(rawQuery || '').trim().toLowerCase();
+  if (!q) return [];
+  if (/^(p-?)?\d+$/.test(q)) {
+    const digits = q.replace(/\D/g, '');
+    const codeOnly = q.startsWith('p');
+    return options.filter((o) =>
+      String(o.patientCode || '').replace(/\D/g, '') === digits
+      || (!codeOnly && (o.testNos || []).some((t) => String(t).replace(/\D/g, '') === digits))
+      || (!codeOnly && digits.length >= 10 && phoneKey(o.phone) === digits.slice(-10)));
+  }
+  return options
+    .filter((o) => String(o.name || '').trim().toLowerCase().startsWith(q))
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+};
+
+// Search-as-you-type patient picker. Blank by default — the list only opens once the user types.
+function PatientSearchField({ options, value, onSelect, label = 'Search Patient', inputRef, fieldKey, autoFocus }) {
+  const [query, setQuery] = useState('');
+  const [open, setOpen] = useState(false);
+  const selected = value
+    ? options.find((o) => String(o.id) === String(value) || (o.patientCode && String(o.patientCode) === String(value))) || null
+    : null;
+  return (
+    <Autocomplete
+      fullWidth size="small"
+      options={options}
+      value={selected}
+      inputValue={query}
+      onInputChange={(e, v) => setQuery(v)}
+      open={open && !!query.trim()}
+      onOpen={() => setOpen(true)}
+      onClose={() => setOpen(false)}
+      filterOptions={(opts, state) => searchPatients(opts, state.inputValue)}
+      getOptionLabel={(o) => o?.name || ''}
+      isOptionEqualToValue={(a, b) => String(a.id) === String(b.id)}
+      onChange={(e, o) => onSelect(o || null)}
+      noOptionsText="No matching patient"
+      renderOption={(props, o) => (
+        <li {...props} key={o.id}>
+          <Box>
+            <Typography variant="body2" fontWeight={800}>{o.name}</Typography>
+            <Typography variant="caption" color="text.secondary">
+              {[o.patientCode, o.phone, o.testNos?.length ? `Test No ${o.testNos.join(', ')}` : ''].filter(Boolean).join(' · ')}
+            </Typography>
+          </Box>
+        </li>
+      )}
+      renderInput={(params) => (
+        <TextField
+          {...params} label={label} placeholder="Name, Test No or Patient ID" autoFocus={autoFocus}
+          inputRef={inputRef}
+          inputProps={{ ...params.inputProps, ...(fieldKey ? { 'data-ns-field': fieldKey } : {}), style: { fontWeight: 800, color: '#2563eb', fontSize: '0.85rem' } }}
+        />
+      )}
+    />
+  );
+}
+
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
 // --- Split advance (footer pay-mode boxes) ---
@@ -374,45 +494,18 @@ export default function NewSaleWizard({
       pool = [...pool, ...localCust, ...localExams, ...localPats];
     } catch (e) {}
 
-    const buildCustomerMap = (inputPool) => {
-      const uniqueMap = new Map();
-      inputPool.forEach((c, idx) => {
-        if (!c) return;
-        const name = c.name || c.patient_name || c.patientName;
-        if (!name) return;
-        const id = c.id || c.patient_id || c.patientId || `P-${1001 + idx}`;
-        const phone = c.phone || c.mobile || '';
-        const key = String(id || phone || name).toLowerCase().trim();
+    setDbCustomers(buildPatientDirectory(pool));
 
-        if (!uniqueMap.has(key)) {
-          uniqueMap.set(key, {
-            ...c,
-            id: id,
-            name: name,
-            phone: phone,
-            age: c.age || '',
-            gender: c.gender || 'MALE',
-            address: c.address || ''
-          });
-        }
-      });
-      return Array.from(uniqueMap.values());
-    };
-
-    const initialCustList = buildCustomerMap(pool);
-    setDbCustomers(initialCustList);
-
-    // Fetch API records asynchronously in background without blocking UI render
+    // Fetch API records asynchronously in background without blocking UI render. Every page —
+    // /api/sales/* lists are paginated, and page 1 alone missed older patients in the search.
     if (!customers || customers.length === 0) {
       Promise.all([
-        axios.get('/api/sales/customers/').catch(() => null),
-        axios.get('/api/sales/eye-examinations/').catch(() => null)
-      ]).then(([resCust, resEx]) => {
-        const data = resCust?.data?.results || resCust?.data || [];
-        const exData = resEx?.data?.results || resEx?.data || [];
-        if (Array.isArray(data) || Array.isArray(exData)) {
-          const updatedPool = [...pool, ...(Array.isArray(data) ? data : []), ...(Array.isArray(exData) ? exData : [])];
-          setDbCustomers(buildCustomerMap(updatedPool));
+        fetchAllPages('/api/sales/customers/').catch(() => null),
+        fetchAllPages('/api/sales/eye-examinations/').catch(() => null)
+      ]).then(([custData, exData]) => {
+        if (Array.isArray(custData) || Array.isArray(exData)) {
+          const updatedPool = [...pool, ...(Array.isArray(custData) ? custData : []), ...(Array.isArray(exData) ? exData : [])];
+          setDbCustomers(buildPatientDirectory(updatedPool));
         }
       });
     }
@@ -570,8 +663,10 @@ export default function NewSaleWizard({
   };
 
   // 1️⃣ PART 1 HANDLER: Test No Auto-Lookup in PostgreSQL Eye Exams DB & LocalStorage
+  const testNoQueryRef = useRef('');
   const handleTestNoChange = async (val) => {
     setTestNo(val);
+    testNoQueryRef.current = val;
     if (!val.trim()) return;
 
     const q = val.trim().toLowerCase();
@@ -584,39 +679,23 @@ export default function NewSaleWizard({
       allExams = [...localTests, ...localExams];
     } catch (e) {}
 
+    const digitsQ = q.replace(/\D/g, '');
+    if (!digitsQ) return;
     try {
-      const res = await axios.get('/api/sales/eye-examinations/');
+      const res = await axios.get('/api/sales/eye-examinations/', { params: { test_no: digitsQ } });
       const data = res.data?.results || res.data || [];
       if (Array.isArray(data)) {
         allExams = [...allExams, ...data];
       }
     } catch (e) {}
+    // A newer keystroke has changed the field while this lookup was in flight — drop it.
+    if (testNoQueryRef.current !== val) return;
 
-    // 2. Find matching examination record
-    let matched = allExams.find(e => {
-      if (!e) return false;
-      const vNum = String(e.visit_number || e.visitNum || e.testNo || e.test_no || e.id || '').toLowerCase().trim();
-      const pId = String(e.patient_id || e.patientId || '').toLowerCase().trim();
-      const pPhone = String(e.phone || e.mobile || '').toLowerCase().trim();
-      const pName = String(e.patient_name || e.name || '').toLowerCase().trim();
-
-      const digitsOnlyV = vNum.replace(/\D/g, '');
-      const digitsOnlyQ = q.replace(/\D/g, '');
-
-      return vNum === q || 
-             pId === q || 
-             pPhone === q || 
-             pName.includes(q) || 
-             (digitsOnlyQ && digitsOnlyV && digitsOnlyV === digitsOnlyQ);
-    });
-
-    // 3. Fallback: If q is a simple number like "1", match 1st exam in database
-    if (!matched && /^\d+$/.test(q)) {
-      const idx = parseInt(q, 10) - 1;
-      if (idx >= 0 && idx < allExams.length) {
-        matched = allExams[idx];
-      }
-    }
+    // 2. Find the examination with exactly this Test No. No partial / name / "nth exam" matching:
+    // the field updates on every keystroke, so typing "1003" used to load whichever patient
+    // matched "1" first. Several copies of one visit (cache + API) → prefer the backend row.
+    const hits = digitsQ ? allExams.filter(e => e && String(e.test_no || e.testNo || '').replace(/\D/g, '') === digitsQ) : [];
+    const matched = hits.find(e => isBackendUuid(e.customer)) || hits[0];
 
     // 4. Apply matched exam details to Customer Details & Prescription Grid
     if (matched) {
@@ -632,7 +711,8 @@ export default function NewSaleWizard({
       const custAge = matched.age || raw.age || customerInput.age || '';
       const custGender = matched.gender || raw.gender || customerInput.gender || 'MALE';
       const custAddr = matched.address || raw.address || customerInput.address || '';
-      const custId = matched.patient_id || matched.patientId || matched.id || '';
+      // The Customer row this exam belongs to (so the bill links to it), else its patient code.
+      const custId = (isBackendUuid(matched.customer) && matched.customer) || matched.patient_id || matched.patientId || '';
 
       setCustomerInput({
         id: custId,
@@ -740,6 +820,15 @@ export default function NewSaleWizard({
       addOS: nearAdd,
       notes: cust.primary_diagnosis || cust.diagnosis || cust.notes || ''
     });
+  };
+
+  // Patient search field: a pick loads that patient; clearing the field clears the patient
+  // details and Rx it had filled, back to the blank default.
+  const handlePatientPicked = (cust) => {
+    if (cust) { handleSelectCustomer(cust); return; }
+    setSelectedCustomerId('');
+    setCustomerInput({ ...EMPTY_CUSTOMER });
+    setRxData({ ...EMPTY_RX });
   };
 
   // Saves whatever is already typed into the Customer Name/Phone/Age/Gender fields as a new
@@ -1625,10 +1714,9 @@ export default function NewSaleWizard({
     patient: () => {
       const el = posRootRef.current?.querySelector('[data-ns-field="patient"]');
       if (!el) return false;
+      // A search box now — focus it ready to type (the list opens once something is typed).
       el.focus();
-      // MUI Select opens on Space; dispatching it reuses its own open logic (and the
-      // enterOpensSelectProps bookkeeping that moves on once a patient is picked).
-      el.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+      if (el.select) el.select();
       return true;
     },
     testNo: () => focusNsField('testNo'),
@@ -2158,25 +2246,13 @@ export default function NewSaleWizard({
 
               <Grid item xs={12} sm={6} md={5}>
                 <Stack direction="row" spacing={1} alignItems="center">
-                  <TextField 
-                    select fullWidth size="small" label="Select Patient from Optical DB"
-                    value={selectedCustomerId} onChange={(e) => {
-                      const cust = customerOptions.find(c => String(c.id) === String(e.target.value));
-                      handleSelectCustomer(cust);
-                    }}
-                    SelectProps={{
-                      ...enterOpensSelectProps,
-                      SelectDisplayProps: { ...enterOpensSelectProps.SelectDisplayProps, 'data-ns-field': 'patient' },
-                      style: { fontWeight: 800, color: '#2563eb', fontSize: '0.85rem' },
-                    }}
-                  >
-                    <MenuItem value=""><em>-- Select Patient from Database --</em></MenuItem>
-                    {customerOptions.map(c => (
-                      <MenuItem key={c.id || c.phone} value={c.id}>
-                        {c.name} ({c.phone || 'No Phone'}) {c.id ? `[${c.id}]` : ''}
-                      </MenuItem>
-                    ))}
-                  </TextField>
+                  <PatientSearchField
+                    options={customerOptions}
+                    value={selectedCustomerId}
+                    onSelect={handlePatientPicked}
+                    label="Search Patient (Name / Test No / Patient ID)"
+                    fieldKey="patient"
+                  />
                   <Button
                     variant="contained" color="primary" size="small"
                     onClick={handleSavePatient}
@@ -3482,20 +3558,15 @@ export default function NewSaleWizard({
               {activeStep === 0 && (
                 <Card elevation={0} sx={{ p: 3, border: '1px solid', borderColor: 'divider', borderRadius: 3 }}>
                   <Typography variant="h6" fontWeight={800} color="primary.main" gutterBottom>Step 1: Select Patient from Database</Typography>
-                  <TextField 
-                    select fullWidth label="Select Registered Patient"
-                    inputRef={firstFieldRef}
-                    value={selectedCustomerId} onChange={(e) => {
-                      const cust = customers.find(c => c.id === e.target.value);
-                      handleSelectCustomer(cust);
-                    }}
-                    sx={{ mb: 2 }}
-                  >
-                    <MenuItem value=""><em>-- Select Patient from DB --</em></MenuItem>
-                    {customers.map(c => (
-                      <MenuItem key={c.id} value={c.id}>{c.name} ({c.phone || 'No Phone'})</MenuItem>
-                    ))}
-                  </TextField>
+                  <Box sx={{ mb: 2 }}>
+                    <PatientSearchField
+                      options={customerOptions}
+                      value={selectedCustomerId}
+                      onSelect={handlePatientPicked}
+                      label="Search Registered Patient (Name / Test No / Patient ID)"
+                      inputRef={firstFieldRef}
+                    />
+                  </Box>
                   <Button variant="contained" onClick={handleSavePatient}>Save Patient</Button>
                 </Card>
               )}

@@ -302,7 +302,7 @@ export function fmtINR(n) {
 // Attachments are inline base64 (up to 3 MB each) — kept in the local copy for reprint, but
 // only their metadata goes to the database so a row never balloons by megabytes.
 function detailsForApi(inv) {
-  const { backendId, pendingSync, ...rest } = inv;
+  const { backendId, pendingSync, overrideNegativeStock, ...rest } = inv;
   return {
     ...rest,
     attachments: (inv.attachments || []).map(({ dataUrl, ...meta }) => meta),
@@ -321,6 +321,8 @@ export function invoiceToApi(inv) {
     due_amount: Number(inv.dueAmount || 0).toFixed(2),
     status: String(inv.status || 'Unpaid').slice(0, 20),
     details: detailsForApi(inv),
+    // Manager/Admin sale past the stock on hand; the server checks the role (sales/views.py).
+    ...(inv.overrideNegativeStock ? { override_negative_stock: true } : {}),
   };
 }
 
