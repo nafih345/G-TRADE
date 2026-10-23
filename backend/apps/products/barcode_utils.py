@@ -33,14 +33,17 @@ def reserve_barcodes(prefix=DEFAULT_PREFIX, count=1):
 # code = prefix pattern (literal text + {YY} {YYYY} {MM} {DD} date tokens)
 #        + zero-padded running number
 #        + optional GS1 mod-10 check digit
-# padded to exactly `total_length` characters. The defaults ("20", 13 digits,
+# padded to exactly `total_length` characters — or, with total_length 0
+# ("variable"), not padded at all, so the code grows 1001 … 9999, 10000 …
+# (never shorter than MIN_LENGTH). The defaults ("20", 13 digits,
 # mod-10) are the original EAN-13 in-store series: 2000000000015, 2000000000022 …
 # ("20" is the GS1 range 20-29 reserved for restricted in-company circulation).
 # ---------------------------------------------------------------------------
 EAN13_SEQUENCE_PREFIX = 'EAN13'  # legacy BarcodeSequence row; seeds the config counter
 EAN13_INSTORE_PREFIX = '20'
 
-MIN_LENGTH, MAX_LENGTH = 6, 24
+MIN_LENGTH, MAX_LENGTH = 4, 24
+VARIABLE_LENGTH = 0  # total_length value meaning "no fixed length"
 MIN_SEQUENCE_DIGITS = 3
 PREFIX_TOKENS = ('{YYYY}', '{YY}', '{MM}', '{DD}')
 _PREFIX_LITERAL_RE = re.compile(r'^[A-Z0-9-]*$')
@@ -90,42 +93,51 @@ def series_layout(prefix_pattern, total_length, check_digit, today=None):
         total_length = int(total_length)
     except (TypeError, ValueError):
         raise BarcodeConfigError('Total digits must be a number.')
-    if not MIN_LENGTH <= total_length <= MAX_LENGTH:
+    if total_length != VARIABLE_LENGTH and not MIN_LENGTH <= total_length <= MAX_LENGTH:
         raise BarcodeConfigError(f'Total digits must be between {MIN_LENGTH} and {MAX_LENGTH}.')
     if check_digit not in ('MOD10', 'NONE'):
         raise BarcodeConfigError('Check digit must be MOD10 or NONE.')
     prefix = resolve_prefix(pattern, today)
     if check_digit == 'MOD10' and not prefix.isdigit() and prefix:
         raise BarcodeConfigError('A mod-10 check digit needs an all-numeric prefix.')
-    seq_digits = total_length - len(prefix) - (1 if check_digit == 'MOD10' else 0)
+    # Variable length: the running number may grow up to the overall MAX_LENGTH.
+    seq_digits = (total_length or MAX_LENGTH) - len(prefix) - (1 if check_digit == 'MOD10' else 0)
     if seq_digits < MIN_SEQUENCE_DIGITS:
         raise BarcodeConfigError(
             f'Prefix is too long: at least {MIN_SEQUENCE_DIGITS} digits must be left for the running number.')
     return prefix, seq_digits
 
 
-def format_series_code(prefix, seq_digits, check_digit, number):
+def format_series_code(prefix, seq_digits, check_digit, number, variable=False):
     digits = str(int(number))
     if len(digits) > seq_digits:
         raise BarcodeConfigError(
             f'The barcode series is full ({seq_digits}-digit running number exhausted). '
             'Increase the total digits or change the prefix.')
-    body = prefix + digits.zfill(seq_digits)
+    if variable:
+        # Unpadded, but still at least MIN_LENGTH long (number 7 -> "0007"), which
+        # keeps the mapping number -> code one-to-one.
+        check_len = 1 if check_digit == 'MOD10' else 0
+        body = prefix + digits.zfill(max(0, MIN_LENGTH - len(prefix) - check_len))
+    else:
+        body = prefix + digits.zfill(seq_digits)
     return body + gs1_check_digit(body) if check_digit == 'MOD10' else body
 
 
 def preview_series(prefix_pattern, total_length, check_digit, next_number, count=3, today=None):
     prefix, seq_digits = series_layout(prefix_pattern, total_length, check_digit, today)
+    variable = int(total_length) == VARIABLE_LENGTH
     codes = []
     for i in range(count):
         try:
-            codes.append(format_series_code(prefix, seq_digits, check_digit, next_number + i))
+            codes.append(format_series_code(prefix, seq_digits, check_digit, next_number + i, variable))
         except BarcodeConfigError:
             break
     capacity = 10 ** seq_digits - 1
     return {
         'resolved_prefix': prefix,
         'sequence_digits': seq_digits,
+        'variable': variable,
         'samples': codes,
         'remaining': max(0, capacity - next_number + 1),
         'numeric': prefix.isdigit() or not prefix,
@@ -159,6 +171,7 @@ def reserve_product_barcodes(count=1, avoid=None):
         return []
     config = BarcodeSeriesConfig.load()
     prefix, seq_digits = series_layout(config.prefix_pattern, config.total_length, config.check_digit)
+    variable = config.total_length == VARIABLE_LENGTH
     avoid = set(avoid or ())
     table = BarcodeSeriesConfig._meta.db_table
     out = []
@@ -172,7 +185,7 @@ def reserve_product_barcodes(count=1, avoid=None):
                 )
                 new_last = cursor.fetchone()[0]
         start = new_last - need + 1
-        batch = [format_series_code(prefix, seq_digits, config.check_digit, start + i) for i in range(need)]
+        batch = [format_series_code(prefix, seq_digits, config.check_digit, start + i, variable) for i in range(need)]
         taken = _taken(batch) | avoid
         out.extend(c for c in batch if c not in taken and c not in out)
         if len(out) >= count:

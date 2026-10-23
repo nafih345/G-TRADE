@@ -10,6 +10,9 @@ import { notify } from '../../utils/notify';
 export const BARCODE_CONFIG_URL = '/api/products/barcode-config/';
 
 const TOKENS = ['{YY}', '{YYYY}', '{MM}', '{DD}'];
+const MIN_DIGITS = 4;
+// total_length 0 = variable length: no zero padding, 1001 … 9999, 10000 …
+const VARIABLE_LENGTH = 0;
 
 // Short human description of a saved series, e.g. "20 + 10-digit number + check digit".
 export function describeSeries(cfg) {
@@ -17,9 +20,10 @@ export function describeSeries(cfg) {
   if (!pv || pv.error) return '';
   const parts = [];
   if (cfg.prefix_pattern) parts.push(cfg.prefix_pattern);
-  parts.push(`${pv.sequence_digits}-digit number`);
+  parts.push(pv.variable ? 'running number' : `${pv.sequence_digits}-digit number`);
   if (cfg.check_digit === 'MOD10') parts.push('check digit');
-  return `${cfg.total_length} characters: ${parts.join(' + ')}`;
+  const length = pv.variable ? `Variable length (min ${MIN_DIGITS})` : `${cfg.total_length} characters`;
+  return `${length}: ${parts.join(' + ')}`;
 }
 
 // Editor for the shared product barcode series (BarcodeSeriesConfig): prefix
@@ -42,9 +46,11 @@ export default function BarcodeConfigDialog({ open, onClose, onSaved }) {
       .then((res) => {
         setSaved(res.data);
         setPreview(res.data.preview);
+        const variable = res.data.total_length === VARIABLE_LENGTH;
         setForm({
           prefix_pattern: res.data.prefix_pattern,
-          total_length: String(res.data.total_length),
+          variable,
+          total_length: String(variable ? 13 : res.data.total_length),
           check_digit: res.data.check_digit,
           next_number: String(res.data.next_number)
         });
@@ -55,7 +61,7 @@ export default function BarcodeConfigDialog({ open, onClose, onSaved }) {
   const nextChanged = form && saved && form.next_number !== String(saved.next_number);
   const payload = form && {
     prefix_pattern: form.prefix_pattern,
-    total_length: Number(form.total_length),
+    total_length: form.variable ? VARIABLE_LENGTH : Number(form.total_length),
     check_digit: form.check_digit,
     ...(nextChanged ? { next_number: Number(form.next_number) } : {})
   };
@@ -140,13 +146,26 @@ export default function BarcodeConfigDialog({ open, onClose, onSaved }) {
               </Grid>
               <Grid item xs={6} sm={3}>
                 <TextField
-                  fullWidth size="small" type="number" label="Total digits"
-                  value={form.total_length}
-                  onChange={(e) => set({ total_length: e.target.value })}
-                  inputProps={{ min: 6, max: 24 }}
-                  helperText="6 – 24, incl. prefix"
-                />
+                  select fullWidth size="small" label="Length"
+                  value={form.variable ? 'variable' : 'fixed'}
+                  onChange={(e) => set({ variable: e.target.value === 'variable' })}
+                  helperText={form.variable ? `Grows as needed, min ${MIN_DIGITS}` : 'Zero-padded to a set size'}
+                >
+                  <MenuItem value="fixed">Fixed</MenuItem>
+                  <MenuItem value="variable">Variable</MenuItem>
+                </TextField>
               </Grid>
+              {!form.variable && (
+                <Grid item xs={6} sm={3}>
+                  <TextField
+                    fullWidth size="small" type="number" label="Total digits"
+                    value={form.total_length}
+                    onChange={(e) => set({ total_length: e.target.value })}
+                    inputProps={{ min: MIN_DIGITS, max: 24 }}
+                    helperText={`${MIN_DIGITS} – 24, incl. prefix`}
+                  />
+                </Grid>
+              )}
               <Grid item xs={6} sm={3}>
                 <TextField
                   select fullWidth size="small" label="Check digit"
@@ -164,7 +183,7 @@ export default function BarcodeConfigDialog({ open, onClose, onSaved }) {
                   value={form.next_number}
                   onChange={(e) => set({ next_number: e.target.value })}
                   inputProps={{ min: 1 }}
-                  helperText={nextChanged ? `Was ${saved.next_number}` : 'The series continues from here'}
+                  helperText={nextChanged ? `Was ${saved.next_number}` : (form.variable ? 'e.g. 1001 — the series continues from here' : 'The series continues from here')}
                 />
               </Grid>
             </Grid>
@@ -194,7 +213,7 @@ export default function BarcodeConfigDialog({ open, onClose, onSaved }) {
                 </Stack>
                 <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
                   <Box component="span" sx={{ color: 'primary.main', fontWeight: 700 }}>Prefix</Box>
-                  {` ${preview.resolved_prefix.length || 0} + running number ${preview.sequence_digits}`}
+                  {` ${preview.resolved_prefix.length || 0} + running number ${preview.variable ? '(variable)' : preview.sequence_digits}`}
                   {form.check_digit === 'MOD10' && <> + <Box component="span" sx={{ color: 'success.main', fontWeight: 700 }}>check</Box> 1</>}
                   {` · ${Number(preview.remaining).toLocaleString()} codes left in this series`}
                 </Typography>
@@ -203,7 +222,7 @@ export default function BarcodeConfigDialog({ open, onClose, onSaved }) {
                     Letters in the prefix: labels must use Code 128 / Code 39 (not EAN / UPC).
                   </Typography>
                 )}
-                {preview.numeric && Number(form.total_length) !== 13 && (
+                {preview.numeric && (form.variable || Number(form.total_length) !== 13) && (
                   <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
                     Not 13 digits: print labels with Code 128 rather than EAN-13.
                   </Typography>

@@ -29,10 +29,19 @@ class SeriesFormatTests(SimpleTestCase):
         self.assertEqual(p['sequence_digits'], 6)
 
     def test_validation(self):
-        for args in [('AB', 13, 'MOD10'), ('2{XX}', 13, 'MOD10'), ('20', 4, 'MOD10'),
+        for args in [('AB', 13, 'MOD10'), ('2{XX}', 13, 'MOD10'), ('20', 4, 'MOD10'), ('', 3, 'NONE'),
                      ('1234567890', 13, 'MOD10'), ('a b', 13, 'NONE')]:
             with self.assertRaises(BarcodeConfigError, msg=args):
                 series_layout(*args)
+
+    def test_four_digit_fixed_series(self):
+        self.assertEqual(preview_series('', 4, 'NONE', 1001)['samples'], ['1001', '1002', '1003'])
+
+    def test_variable_length_grows_without_padding(self):
+        p = preview_series('', 0, 'NONE', 9999)
+        self.assertTrue(p['variable'])
+        self.assertEqual(p['samples'], ['9999', '10000', '10001'])
+        self.assertEqual(preview_series('', 0, 'NONE', 7)['samples'][0], '0007')   # never under 4
 
     def test_series_full(self):
         p = preview_series('20', 6, 'MOD10', 998)
@@ -72,6 +81,17 @@ class ConfigApiTests(APITestCase):
         self.assertEqual(r.status_code, 200, r.data)
         r = self.client.post('/api/products/items/next_barcode_candidate/')
         self.assertEqual(r.data['barcode'], '8900000502')
+
+        r = self.client.put(URL, {'prefix_pattern': '', 'total_length': 0, 'check_digit': 'NONE',
+                                  'next_number': 5}, format='json')
+        self.assertEqual(r.status_code, 400)                            # under 4 digits
+        r = self.client.put(URL, {'prefix_pattern': '', 'total_length': 0, 'check_digit': 'NONE',
+                                  'next_number': 1001}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(reserve_product_barcodes(2), ['1001', '1002'])
+        r = self.client.put(URL, {'prefix_pattern': '89', 'total_length': 10, 'check_digit': 'MOD10',
+                                  'next_number': 51}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)
 
         prod = Product.objects.create(name='C', sku='C1')
         r = self.client.post(f'/api/products/items/{prod.id}/generate_barcode/')

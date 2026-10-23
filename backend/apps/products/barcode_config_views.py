@@ -8,7 +8,7 @@ from rest_framework import serializers
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .barcode_utils import BarcodeConfigError, preview_series
+from .barcode_utils import MIN_LENGTH, BarcodeConfigError, preview_series
 from .label_views import DesignerWritePermission, _actor
 from .models import BarcodeSeriesConfig
 
@@ -31,6 +31,15 @@ class BarcodeSeriesConfigSerializer(serializers.Serializer):
             merged['preview'] = preview_series(**merged)
         except BarcodeConfigError as e:
             raise serializers.ValidationError({'detail': str(e.detail)})
+        pv = merged['preview']
+        # Variable length: the user's own number must already give a code of at
+        # least MIN_LENGTH digits (1001 yes, 5 -> "0005" no).
+        natural_len = (len(pv['resolved_prefix']) + len(str(merged['next_number']))
+                       + (1 if merged['check_digit'] == 'MOD10' else 0))
+        if pv['variable'] and natural_len < MIN_LENGTH:
+            raise serializers.ValidationError({'detail': (
+                f'The first barcode must be at least {MIN_LENGTH} digits. '
+                f'Start from a {MIN_LENGTH}-digit number such as 1001, or add a prefix.')})
         if not merged['preview']['samples']:
             raise serializers.ValidationError({'detail': (
                 f"Next number {merged['next_number']} doesn't fit in the "
