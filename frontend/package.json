@@ -10,7 +10,9 @@
     "preview": "vite preview",
     "test:labels": "node --test src/labels/__tests__/labels.test.js",
     "test:billing": "node --test src/billing/__tests__/billing.test.js",
-    "test:security": "node --test src/utils/__tests__/securityFormat.test.js"
+    "test:security": "node --test src/utils/__tests__/securityFormat.test.js",
+    "test:lens": "node --test src/utils/__tests__/lensUnits.test.js",
+    "test:lens-po": "node --test src/utils/__tests__/lensPurchaseOrders.test.js"
   },
   "dependencies": {
     "@emotion/react": "^11.11.4",

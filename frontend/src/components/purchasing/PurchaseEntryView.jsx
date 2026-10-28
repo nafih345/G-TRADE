@@ -21,8 +21,19 @@ import {
   ListAlt as ListAltIcon,
   ViewColumn as ViewColumnIcon,
   LibraryAdd as MultiItemsIcon,
-  QrCode2 as LabelIcon
+  QrCode2 as LabelIcon,
+  Visibility as LensIcon,
+  CallSplit as SplitIcon,
+  ArrowDropDown as DropDownIcon,
+  ReceiptLong as LensBillIcon
 } from '@mui/icons-material';
+import { LensPOEditor, useLensProducts, UUID_RE } from './LensPurchaseOrderView';
+import { printLensPO } from '../../utils/printLensPO';
+import { poQtyLabel } from '../../utils/lensPurchaseOrders';
+import { notify } from '../../utils/notify';
+import { PURCHASE_ENTRY_SHORTCUTS } from './lensPoShortcuts';
+import { navScopeProps, navDialogProps, enterOpensSelectProps, focusNextAfterRender } from '../../pages/wholesale/keyboardNav';
+import { ShortcutHelpDialog } from '../../pages/wholesale/WholesaleDialogs';
 import QuickDatePickerField from '../common/QuickDatePickerField';
 import PaymentModeDetails from '../common/PaymentModeDetails';
 import { CASH_PAID, CASH_UNPAID, needsBank } from '../../utils/paymentModes';
@@ -196,7 +207,7 @@ const rowFromInvoiceItem = (it) => {
   };
 };
 
-export default function PurchaseEntryView({ suppliers = [], products = [], initialSupplierId = '', initialPurchaseOrderId = '', editInvoiceId = '', onSaveComplete, onRequestAddSupplier }) {
+export default function PurchaseEntryView({ suppliers = [], products = [], initialSupplierId = '', initialPurchaseOrderId = '', initialLensPoId = '', editInvoiceId = '', onSaveComplete, onRequestAddSupplier }) {
   const supplierInputRef = useRef(null);
   const dateInputRef = useRef(null);
   const productSearchRef = useRef(null);
@@ -245,6 +256,9 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
   // Purchase Order conversion (PO -> goods received -> Purchase Entry)
   const [openPOs, setOpenPOs] = useState([]);
   const [linkedPO, setLinkedPO] = useState(null);
+  // Lens Purchase Order being converted (Purchase → Lens Purchase Order → Convert). Sent as
+  // lens_purchase_order on create; the server links it and refuses a second conversion.
+  const [linkedLensPO, setLinkedLensPO] = useState(null);
 
   // Product search
   const [productSearch, setProductSearch] = useState('');
@@ -268,6 +282,16 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
   const [pendingFocusRow, setPendingFocusRow] = useState(null);
   const [addProductOpen, setAddProductOpen] = useState(false);
   const [multiItemsOpen, setMultiItemsOpen] = useState(false);
+  // Lens Purchase Order from inside the entry: menu anchor, open editor ({startWith}), the PO just
+  // saved (offered for printing as an order form) and received-but-unbilled POs to pull in.
+  const [lensMenuAnchor, setLensMenuAnchor] = useState(null);
+  const [lensEditor, setLensEditor] = useState(null);
+  const [savedLensPO, setSavedLensPO] = useState(null);
+  const [unbilledLensPOs, setUnbilledLensPOs] = useState([]);
+  const { lensProducts, productsLoading: lensProductsLoading } = useLensProducts();
+  const lensBtnRef = useRef(null);
+  const saveBtnRef = useRef(null);
+  const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
 
   const DEFAULT_COLUMN_VISIBILITY = {
     barcode: true, batch: true, hsn: true, expiry: true, free: true,
@@ -416,6 +440,71 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
       axios.get(`/api/purchase/orders/${initialPurchaseOrderId}/`).then(res => applyPurchaseOrder(res.data)).catch(() => {});
     }
   }, [initialPurchaseOrderId]);
+
+  // Lens PO → Purchase Entry: the received lenses, already in each product's stock unit
+  // (pairs or pieces), priced from the PO. Fully editable against the lab's actual bill.
+  // `append`: added to lines already in the grid (lenses bought inside an ongoing entry);
+  // otherwise the grid is replaced (Lens PO dashboard → Convert opens a fresh entry).
+  const applyLensPO = (lensPoId, { append = false } = {}) =>
+    axios.get(`/api/purchase/lens-orders/${lensPoId}/invoice-draft/`).then(res => {
+      const d = res.data || {};
+      if (d.existing) { alert(`This lens order is already billed on Purchase Entry ${d.existing.invoice_number}.`); return; }
+      setLinkedPO(null);
+      setLinkedLensPO({ id: d.id, po_number: d.po_number, pieces_total: d.pieces_total, pieces_received: d.pieces_received });
+      setSelectedSupplierId(d.supplier || '');
+      if (d.branch) setBranchId(d.branch);
+      setPoRef(d.po_number || '');
+      const lensRows = (d.lines || []).map(l => {
+        const product = products.find(p => String(p.id) === String(l.product)) || { id: l.product, name: l.product_name, stock: 0 };
+        return recalcRow(blankRow(product, {
+          quantity: l.quantity, purchaseRate: parseFloat(l.purchase_rate) || 0, gstPercent: parseFloat(l.gst_percent) || 0,
+        }), 'quantity', gstType, isInterstate);
+      });
+      setRows(prev => (append ? [...prev, ...lensRows] : lensRows));
+    }).catch((err) => alert(err.response?.data?.detail || 'Could not load the lens purchase order.'));
+
+  useEffect(() => {
+    if (initialLensPoId) applyLensPO(initialLensPoId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialLensPoId]);
+
+  const openLensMenu = () => {
+    if (editingId || !lensBtnRef.current) return;
+    setLensMenuAnchor(lensBtnRef.current);
+    axios.get('/api/purchase/lens-orders/', { params: { status: 'PARTIALLY_RECEIVED,RECEIVED' } })
+      .then(res => setUnbilledLensPOs((res.data?.results || res.data || []).filter(po => !po.purchase_invoice)))
+      .catch(() => setUnbilledLensPOs([]));
+  };
+  const startLensOrder = (startWith) => {
+    setLensMenuAnchor(null);
+    if (linkedLensPO) { alert(`This entry already bills Lens PO ${linkedLensPO.po_number}. Save it first, then start the next lens order.`); return; }
+    setLensEditor({ startWith });
+  };
+  const billLensPO = (po) => {
+    setLensMenuAnchor(null);
+    if (linkedLensPO) { alert(`This entry already bills Lens PO ${linkedLensPO.po_number}. Save it first.`); return; }
+    if (selectedSupplierId && String(po.supplier) !== String(selectedSupplierId)) {
+      alert(`${po.po_number} is from ${po.supplier_name}, not this entry's supplier.`);
+      return;
+    }
+    applyLensPO(po.id, { append: true }).then(focusSaveButton);
+  };
+  // After lenses join the entry the next step is saving it: Enter on the focused button saves.
+  const focusSaveButton = () => setTimeout(() => saveBtnRef.current?.focus(), 60);
+  // Menu letters: N / S / P / L start that kind of lens order (↑/↓ + Enter work too).
+  const onLensMenuKeys = (e) => {
+    if (e.ctrlKey || e.altKey || e.metaKey) return;
+    const start = { n: null, s: 'SPLIT_PAIR', p: 'SINGLE_PAIR', l: 'SINGLE_PIECE' }[e.key.toLowerCase()];
+    if (start === undefined) return;
+    e.preventDefault();
+    e.stopPropagation();
+    startLensOrder(start);
+  };
+  const onLensPOSaved = async (po, { receivedNow } = {}) => {
+    setLensEditor(null);
+    if (receivedNow) await applyLensPO(po.id, { append: true });
+    setSavedLensPO({ po, receivedNow });
+  };
 
   // "Edit" from Purchase Order Reports: pull the whole saved entry back into the form,
   // header + item grid, byte-for-byte as it was stored.
@@ -655,6 +744,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
     setBankAccount('');
     setCashStatus(CASH_PAID);
     setLinkedPO(null);
+    setLinkedLensPO(null);
     cellRefs.current = {};
   };
 
@@ -854,6 +944,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
         return;
       }
       const payload = buildPayload(saveStatus, itemRows);
+      if (linkedLensPO && !editingId) payload.lens_purchase_order = linkedLensPO.id;
       const res = editingId
         ? await axios.put(`/api/purchase/invoices/${editingId}/`, payload)
         : await axios.post('/api/purchase/invoices/', payload);
@@ -876,6 +967,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
 
       const printable = {
         ...saved,
+        lensPoNumber: !editingId && linkedLensPO ? linkedLensPO.po_number : '',
         wasEdit: Boolean(editingId),
         supplierName: selectedSupplier?.name || selectedSupplier?.company_name,
         items: rows.map(r => ({ ...r, productName: r.productName }))
@@ -885,7 +977,16 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
 
       onSaveComplete?.(printable);
 
-      alert(`Purchase Entry ${saved.invoice_number} ${editingId ? 'updated' : 'saved'} successfully!${saveStatus === 'DRAFT' ? ' (Draft)' : ''}`);
+      // The server reports what the books did with this save (journals post on commit).
+      const books = saved.accounting || {};
+      const journals = (books.posted || []).map(j => j.entry_number).join(', ');
+      if (books.failed?.length) {
+        notify(`Purchase Entry ${saved.invoice_number} was saved, but it was NOT posted to the ledgers: ${books.failed[0].error} `
+          + 'Fix it under Financial → Accounting Integration, then retry the failed posting.', 'error');
+      } else {
+        alert(`Purchase Entry ${saved.invoice_number} ${editingId ? 'updated' : 'saved'} successfully!${saveStatus === 'DRAFT' ? ' (Draft)' : ''}`
+          + (journals ? ` Posted to ledgers: ${journals}.` : ''));
+      }
 
       if (andNew || saveStatus !== 'DRAFT') resetForm();
     } catch (err) {
@@ -904,8 +1005,14 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
   // --- Keyboard shortcuts ---
   useEffect(() => {
     const handleShortcut = (e) => {
-      // The Add Multiple Items dialog has its own shortcut map; nothing here may act behind it.
-      if (multiItemsOpen) return;
+      // The Add Multiple Items dialog and the Lens Purchase Order dialogs / menu have their own
+      // keys; nothing here may act behind them (Esc in a lens dialog must not clear this entry).
+      if (multiItemsOpen || lensEditor || savedLensPO || lensMenuAnchor || shortcutHelpOpen) return;
+      // Esc pressed inside any dialog / menu closes that, never this form. Decided from where the
+      // key was pressed: the closing dialog has already cleared its state by the time this runs.
+      if (e.key === 'Escape' && (e.target?.closest?.('.MuiModal-root') || document.querySelector('.MuiModal-root:not(.MuiModal-hidden)'))) return;
+      if (e.altKey && !e.ctrlKey && (e.key === 'l' || e.key === 'L')) { e.preventDefault(); openLensMenu(); return; }
+      if (e.ctrlKey && e.key === '/') { e.preventDefault(); setShortcutHelpOpen(true); return; }
       if (e.key === 'F2') { e.preventDefault(); dateInputRef.current?.focus(); }
       else if (e.key === 'F3') { e.preventDefault(); supplierInputRef.current?.focus(); }
       else if (e.key === 'F4') { e.preventDefault(); onRequestAddSupplier?.(); }
@@ -977,21 +1084,23 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
         </Alert>
       )}
 
-      {/* 1. Header */}
-      <Card variant="outlined" sx={{ p: 2, mb: 2, borderRadius: 3 }}>
+      {/* 1. Header — one keyboard chain: Enter / ↑ / ↓ walk the fields, Enter in a list picks and
+          moves on, Enter on a dropdown opens it; Enter on Notes goes to the product search. */}
+      <Card variant="outlined" sx={{ p: 2, mb: 2, borderRadius: 3 }} {...navScopeProps}>
         <Grid container spacing={1.5}>
           <Grid item xs={12} sm={6} md={3}>
             <Autocomplete
               options={allSuppliers}
               getOptionLabel={(o) => o.name || o.company_name || ''}
               value={selectedSupplier || null}
-              onChange={(e, val) => setSelectedSupplierId(val ? val.id : '')}
+              autoHighlight
+              onChange={(e, val) => { setSelectedSupplierId(val ? val.id : ''); if (val) focusNextAfterRender(document.activeElement, 60); }}
               renderInput={(params) => (
                 <TextField {...params} label="Supplier" size="small" inputRef={supplierInputRef}
                   InputProps={{ ...params.InputProps, endAdornment: (
                     <>
                       <Tooltip title="Add Supplier (F4)">
-                        <IconButton size="small" onClick={() => onRequestAddSupplier?.()}><AddIcon fontSize="small" /></IconButton>
+                        <IconButton size="small" tabIndex={-1} onClick={() => onRequestAddSupplier?.()}><AddIcon fontSize="small" /></IconButton>
                       </Tooltip>
                       {params.InputProps.endAdornment}
                     </>
@@ -1019,26 +1128,26 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
             <QuickDatePickerField label="Due Date" value={dueDate} onChange={setDueDate} />
           </Grid>
           <Grid item xs={6} sm={3} md={1.5}>
-            <TextField select fullWidth size="small" label="Purchase Type" value={purchaseType} onChange={(e) => setPurchaseType(e.target.value)}>
+            <TextField select fullWidth size="small" label="Purchase Type" value={purchaseType} onChange={(e) => setPurchaseType(e.target.value)} SelectProps={{ ...enterOpensSelectProps }}>
               <MenuItem value="CASH">Cash</MenuItem>
               <MenuItem value="CREDIT">Credit</MenuItem>
             </TextField>
           </Grid>
 
           <Grid item xs={6} sm={3} md={1.5}>
-            <TextField select fullWidth size="small" label="Warehouse" value={warehouseId} onChange={(e) => setWarehouseId(e.target.value)}>
+            <TextField select fullWidth size="small" label="Warehouse" value={warehouseId} onChange={(e) => setWarehouseId(e.target.value)} SelectProps={{ ...enterOpensSelectProps }}>
               <MenuItem value="">Default</MenuItem>
               {warehouses.map(w => <MenuItem key={w.id} value={w.id}>{w.name}</MenuItem>)}
             </TextField>
           </Grid>
           <Grid item xs={6} sm={3} md={1.5}>
-            <TextField select fullWidth size="small" label="Branch" value={branchId} onChange={(e) => setBranchId(e.target.value)}>
+            <TextField select fullWidth size="small" label="Branch" value={branchId} onChange={(e) => setBranchId(e.target.value)} SelectProps={{ ...enterOpensSelectProps }}>
               <MenuItem value="">Default</MenuItem>
               {branches.map(b => <MenuItem key={b.id} value={b.id}>{b.name}</MenuItem>)}
             </TextField>
           </Grid>
           <Grid item xs={6} sm={3} md={1.5}>
-            <TextField select fullWidth size="small" label="GST Type" value={gstType} onChange={(e) => setGstType(e.target.value)}>
+            <TextField select fullWidth size="small" label="GST Type" value={gstType} onChange={(e) => setGstType(e.target.value)} SelectProps={{ ...enterOpensSelectProps }}>
               <MenuItem value="EXCLUSIVE">Exclusive</MenuItem>
               <MenuItem value="INCLUSIVE">Inclusive</MenuItem>
               <MenuItem value="NO_GST">No GST</MenuItem>
@@ -1053,7 +1162,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
             />
           </Grid>
           <Grid item xs={6} sm={3} md={1.5}>
-            <TextField select fullWidth size="small" label="Status" value={status} onChange={(e) => setStatus(e.target.value)}>
+            <TextField select fullWidth size="small" label="Status" value={status} onChange={(e) => setStatus(e.target.value)} SelectProps={{ ...enterOpensSelectProps }}>
               <MenuItem value="CONFIRMED">Confirmed</MenuItem>
               <MenuItem value="DRAFT">Draft</MenuItem>
             </TextField>
@@ -1071,12 +1180,18 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
             {linkedPO && (
               <Chip size="small" label={`Converting ${linkedPO.order_number}`} onDelete={() => setLinkedPO(null)} color="primary" variant="outlined" sx={{ mt: 0.5, fontWeight: 700 }} />
             )}
+            {linkedLensPO && !editingId && (
+              <Tooltip title={`${linkedLensPO.pieces_received} of ${linkedLensPO.pieces_total} lenses received. Saving links this entry to the Lens PO; stock comes in only through this entry.`}>
+                <Chip size="small" label={`Lens PO ${linkedLensPO.po_number}`} onDelete={() => setLinkedLensPO(null)} color="secondary" variant="outlined" sx={{ mt: 0.5, fontWeight: 700 }} />
+              </Tooltip>
+            )}
           </Grid>
           <Grid item xs={6} sm={3} md={1.5}>
             <TextField fullWidth size="small" label="Return Reference" value={returnRef} onChange={(e) => setReturnRef(e.target.value)} />
           </Grid>
           <Grid item xs={12} sm={6} md={3}>
-            <TextField fullWidth size="small" label="Notes" value={notes} onChange={(e) => setNotes(e.target.value)} />
+            <TextField fullWidth size="small" label="Notes" value={notes} onChange={(e) => setNotes(e.target.value)}
+              inputProps={{ 'data-nav-enter': 'input[data-pe-product-search]' }} />
           </Grid>
           <Grid item xs={12} sm={6} md={3}>
             <Button component="label" variant="outlined" size="small" startIcon={<AttachFileIcon />} sx={{ height: 40, textTransform: 'none' }}>
@@ -1182,6 +1297,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
           )}
           renderInput={(params) => (
             <TextField {...params} inputRef={productSearchRef} variant="standard" placeholder="Scan Barcode or Search Product by Name / SKU / Batch (F6)"
+              inputProps={{ ...params.inputProps, 'data-pe-product-search': '' }}
               InputProps={{ ...params.InputProps, disableUnderline: true }} />
           )}
           sx={{ flexGrow: 1 }}
@@ -1208,7 +1324,81 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
             Add Multiple Items
           </Button>
         </Tooltip>
+        <Tooltip title={editingId ? 'Lens orders are added to new entries only' : 'Alt+L — order prescription lenses from a lab (single pair, split pair or single lens), or bill lenses already received'}>
+          <span>
+            <Button
+              ref={lensBtnRef}
+              variant="outlined"
+              color="secondary"
+              size="small"
+              startIcon={<LensIcon />}
+              endIcon={<DropDownIcon />}
+              disabled={Boolean(editingId)}
+              onClick={openLensMenu}
+              sx={{ flexShrink: 0, fontWeight: 800, borderRadius: '24px', px: 2, whiteSpace: 'nowrap' }}
+            >
+              Lens Purchase Order (Alt+L)
+            </Button>
+          </span>
+        </Tooltip>
+        <Menu anchorEl={lensMenuAnchor} open={Boolean(lensMenuAnchor)} onClose={() => setLensMenuAnchor(null)}
+          MenuListProps={{ onKeyDown: onLensMenuKeys }}>
+          {[
+            [null, <AddIcon fontSize="small" sx={{ mr: 1 }} />, 'New Lens Purchase Order', 'N'],
+            ['SPLIT_PAIR', <SplitIcon fontSize="small" sx={{ mr: 1 }} />, '+ Add Split Pair Lens (2 customers)', 'S'],
+            ['SINGLE_PAIR', <AddIcon fontSize="small" sx={{ mr: 1 }} />, 'Single Customer Pair', 'P'],
+            ['SINGLE_PIECE', <AddIcon fontSize="small" sx={{ mr: 1 }} />, 'Single Lens (1 piece)', 'L'],
+          ].map(([start, icon, label, key]) => (
+            <MenuItem key={key} onClick={() => startLensOrder(start)}>
+              {icon}{label}
+              <Typography component="span" variant="caption" sx={{ ml: 'auto', pl: 3, fontWeight: 800, color: 'text.secondary' }}>{key}</Typography>
+            </MenuItem>
+          ))}
+          <Divider />
+          <MenuItem disabled sx={{ fontSize: 12, fontWeight: 700 }}>Bill a received lens order</MenuItem>
+          {unbilledLensPOs.length === 0 && <MenuItem disabled sx={{ fontSize: 13 }}>No received lens orders waiting to be billed</MenuItem>}
+          {unbilledLensPOs.map(po => (
+            <MenuItem key={po.id} onClick={() => billLensPO(po)}>
+              <LensBillIcon fontSize="small" sx={{ mr: 1 }} />
+              {po.po_number} · {po.supplier_name} · {po.summary?.received}/{po.summary?.pieces} lenses
+            </MenuItem>
+          ))}
+        </Menu>
       </Paper>
+      {lensEditor && (
+        <LensPOEditor
+          open
+          entryMode
+          startWith={lensEditor.startWith}
+          seed={{ supplier: UUID_RE.test(String(selectedSupplierId)) ? selectedSupplierId : '' }}
+          lockSupplier={UUID_RE.test(String(selectedSupplierId))}
+          suppliers={suppliers.filter(sp => UUID_RE.test(String(sp.id)))}
+          lensProducts={lensProducts}
+          productsLoading={lensProductsLoading}
+          onClose={() => { setLensEditor(null); setTimeout(() => lensBtnRef.current?.focus(), 60); }}
+          onSaved={onLensPOSaved}
+        />
+      )}
+      <Dialog open={Boolean(savedLensPO)} onClose={() => { setSavedLensPO(null); focusSaveButton(); }} maxWidth="xs" fullWidth {...navDialogProps}>
+        <DialogTitle sx={{ fontWeight: 800 }}>Lens PO {savedLensPO?.po.po_number}</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            {savedLensPO?.po.supplier_name} · {poQtyLabel(savedLensPO?.po.items || [])}
+          </Typography>
+          <Typography variant="body2" sx={{ mt: 1 }} color="text.secondary">
+            {savedLensPO?.receivedNow
+              ? 'All lenses were received and added to this Purchase Entry. Saving the entry brings them into stock and links it to the lens order.'
+              : 'Ordered from the lab — no stock or invoice yet. When the lenses arrive, receive them under Purchase → Lens Purchase Order, then bill them here via Lens Purchase Order → Bill a received lens order.'}
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ flexWrap: 'wrap', gap: 1 }}>
+          <Button onClick={() => { setSavedLensPO(null); focusSaveButton(); }}>Close (Esc)</Button>
+          <Button startIcon={<PrintIcon />} onClick={() => printLensPO(savedLensPO.po, { variant: 'internal' })}>Internal Copy</Button>
+          {/* The cursor starts here: Enter prints, Esc continues with the entry. */}
+          <Button variant="contained" startIcon={<PrintIcon />} onClick={() => printLensPO(savedLensPO.po, { variant: 'vendor' })} data-nav-stop="">Print Order Form (Enter)</Button>
+        </DialogActions>
+      </Dialog>
+      <ShortcutHelpDialog open={shortcutHelpOpen} onClose={() => setShortcutHelpOpen(false)} shortcuts={PURCHASE_ENTRY_SHORTCUTS} title="Purchase Entry" />
 
       {/* 3. Item Grid trigger — the grid itself lives in a popup (see Dialog below) */}
       <Card
@@ -1535,7 +1725,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
         <Button variant="outlined" startIcon={<DraftIcon />} onClick={() => doSave('DRAFT')} disabled={saving}>Draft</Button>
         <Button variant="outlined" color="primary" startIcon={<SaveIcon />} onClick={() => doSave(status, { andNew: true })} disabled={saving}>Save & New</Button>
         <Button variant="outlined" color="primary" startIcon={<PrintIcon />} onClick={() => doSave(status, { print: true })} disabled={saving}>Save & Print (Ctrl+P)</Button>
-        <Button variant="contained" color="primary" startIcon={<SaveIcon />} onClick={() => doSave(status)} disabled={saving} sx={{ fontWeight: 800 }}>{editingId ? 'Update Purchase (Ctrl+S)' : 'Save Purchase (Ctrl+S)'}</Button>
+        <Button ref={saveBtnRef} variant="contained" color="primary" startIcon={<SaveIcon />} onClick={() => doSave(status)} disabled={saving} sx={{ fontWeight: 800 }}>{editingId ? 'Update Purchase (Ctrl+S)' : 'Save Purchase (Ctrl+S)'}</Button>
       </Box>
 
       {/* Inline Product Master — create a brand-new product without leaving Purchase Entry */}

@@ -174,6 +174,63 @@ def general_ledger(account, date_from=None, date_to=None, branch=None, limit=200
             'closing_balance': str(money(running)), 'lines': out, 'truncated': lines.count() > limit}
 
 
+SERVICE_MEMO = 'Service revenue'  # posting_rules.build_sales_invoice's memo on SERVICE_REVENUE lines
+
+
+def ledger_register(date_from=None, date_to=None, branch=None, sources=None, services_only=False,
+                    search='', limit=1000):
+    """Every posted voucher across all accounts, one row per journal: what the Ledger screen
+    lists before an account is chosen. `sources` is a list of source keys ('sales.invoice',
+    ...; 'manual' = vouchers, opening balances and legacy entries). `services_only` keeps
+    invoices that carry service / eye-test revenue."""
+    qs = (JournalEntry.objects.filter(status__in=JournalEntry.LEDGER_STATUSES)
+          .select_related('voucher_type').order_by('-date', '-created_at'))
+    if date_from:
+        qs = qs.filter(date__gte=date_from)
+    if date_to:
+        qs = qs.filter(date__lte=date_to)
+    if branch:
+        qs = qs.filter(branch_id=branch)
+    if sources:
+        cond = Q()
+        for key in sources:
+            if key == 'manual':
+                cond |= Q(source_module='') | Q(source_module='financial')
+            else:
+                module, _, event = key.partition('.')
+                cond |= Q(source_module=module, source_event=event)
+        qs = qs.filter(cond)
+    if services_only:
+        qs = qs.filter(lines__memo=SERVICE_MEMO).distinct()
+    if search:
+        s = search.strip()
+        qs = qs.filter(Q(entry_number__icontains=s) | Q(narration__icontains=s) | Q(source_number__icontains=s))
+
+    total = qs.count()
+    entries = list(qs[:limit])
+    lines_by_entry = {}
+    for l in (LedgerEntry.objects.filter(journal_entry__in=[e.pk for e in entries])
+              .select_related('account').order_by('id')):
+        lines_by_entry.setdefault(l.journal_entry_id, []).append(l)
+    rows, sum_amount = [], Decimal('0')
+    for je in entries:
+        lines = lines_by_entry.get(je.pk, [])
+        dr = list(dict.fromkeys(l.account.name for l in lines if l.debit))
+        cr = list(dict.fromkeys(l.account.name for l in lines if l.credit))
+        sum_amount += je.total_amount
+        rows.append({'entry_id': str(je.pk), 'entry_number': je.entry_number, 'date': je.date.isoformat(),
+                     'voucher_type': je.voucher_type.code if je.voucher_type_id else '',
+                     'narration': je.narration or '', 'status': je.status, 'is_reversal': je.is_reversal,
+                     'source_module': je.source_module, 'source_event': je.source_event,
+                     'source_number': je.source_number,
+                     'reference_id': str(je.reference_id) if je.reference_id else None,
+                     'has_service': any(l.memo == SERVICE_MEMO for l in lines),
+                     'debit_accounts': dr, 'credit_accounts': cr, 'amount': str(money(je.total_amount))})
+    return {'date_from': date_from.isoformat() if date_from else None,
+            'date_to': date_to.isoformat() if date_to else None,
+            'count': total, 'truncated': total > limit, 'total_amount': str(money(sum_amount)), 'rows': rows}
+
+
 def source_breakdown(date_from=None, date_to=None, branch=None):
     from .accounting_catalog import SOURCES
     qs = JournalEntry.objects.filter(status__in=JournalEntry.LEDGER_STATUSES)

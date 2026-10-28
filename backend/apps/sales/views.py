@@ -17,6 +17,9 @@ from .models import (
     WholesaleDeliveryChallan, WholesaleInvoice, WholesalePaymentCollection, WholesaleReturn,
     derive_payment_status, settle_payment_status, is_real_customer_name,
 )
+from .lens_units import (
+    PAIR, SELLING_UNITS, clean_lens_line, incomplete_lens_lines, stock_units_by_product,
+)
 from .patient_utils import (
     reserve_patient_codes, peek_next_patient_code, peek_next_test_no,
     reserve_unused_test_numbers, sync_test_no_sequence,
@@ -735,6 +738,12 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
             return Response(
                 {'detail': 'document_type must be QUOTATION, ORDER or INVOICE'}, status=400
             )
+        if target in ('ORDER', 'INVOICE'):
+            # A lens can't go to the lab or be billed without its prescription.
+            missing = incomplete_lens_lines(invoice)
+            if missing:
+                return Response({'detail': 'Complete the lens prescription in New Sale first. ' + ' '.join(missing)},
+                                status=400)
         invoice.document_type = target
         if request.data.get('renumber'):
             invoice.invoice_number = self._mint_invoice_number(target)
@@ -894,8 +903,22 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
         # plain description instead of losing the invoice. One query checks every line's product
         # (each lookup is a network round trip on the hosted database).
         wanted = {str(raw.get('product')) for raw in raw_items if _is_uuid(raw.get('product'))}
-        known = {str(pk) for pk in Product.objects.filter(pk__in=wanted).values_list('pk', flat=True)} \
-            if wanted else set()
+        known = {str(pk): extra for pk, extra in Product.objects.filter(pk__in=wanted).values_list('pk', 'extra_data')} \
+            if wanted else {}
+
+        # Spectacle-lens lines carry a selling unit (Pair / Piece) and a per-eye prescription. An
+        # Order or Invoice needs the prescription complete; a Quotation only needs what was entered
+        # to be valid. Raising here rolls the whole save back (both callers are atomic).
+        requires_complete = invoice.document_type in ('ORDER', 'INVOICE')
+        lens = []
+        for raw in raw_items:
+            cleaned = clean_lens_line(raw, requires_complete)
+            if cleaned is not None:
+                key = str(raw.get('product'))
+                unit = str((known.get(key) or {}).get('lens_stock_unit') or '').upper()
+                cleaned['lens_details'] = {**cleaned['lens_details'],
+                                           'stock_unit': unit if unit in SELLING_UNITS else PAIR}
+            lens.append(cleaned or {})
 
         # bulk_create skips InvoiceItem's post_save, which only re-queues the invoice's journal —
         # already queued by the invoice's own save, and booked after commit with these lines.
@@ -913,8 +936,9 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
                 tax_rate=raw.get('tax_rate') or raw.get('taxPercent') or 0,
                 tax_amount=raw.get('tax_amount') or raw.get('tax') or 0,
                 subtotal=raw.get('subtotal') or raw.get('total') or 0,
+                **lens_fields,
             )
-            for raw in raw_items
+            for raw, lens_fields in zip(raw_items, lens)
         ])
 
     def _update_inventory(self, invoice):
@@ -959,11 +983,8 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
         doesn't commit stock (quotation, order, draft, cancelled) unless `force`."""
         if not force and not self._commits_stock(invoice):
             return {}
-        totals = {}
-        for item in invoice.items.all():
-            if item.product_id:
-                totals[item.product_id] = totals.get(item.product_id, 0) + int(item.quantity or 0)
-        return totals
+        # Lens lines count in the product's stock unit (pairs or pieces) — see lens_units.
+        return stock_units_by_product(invoice.items.all())
 
     def _reconcile_inventory(self, invoice, before):
         """After an edit, move stock by the difference between what the document held before

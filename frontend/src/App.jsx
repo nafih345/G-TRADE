@@ -247,6 +247,7 @@ function MainLayout() {
                 <Route path="/purchase/receive" element={<Purchases />} />
                 <Route path="/purchase/stock-receive" element={<Purchases />} />
                 <Route path="/purchase/returns" element={<Purchases />} />
+                <Route path="/purchase/lens-orders" element={<Purchases />} />
                 <Route path="/purchase/stock-overview" element={<StockOverview />} />
 
                 {/* Accounts Sub-Routes */}

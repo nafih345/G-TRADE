@@ -8,7 +8,8 @@ import { SectionCard, errText } from './businessUi';
 import { formatDate, formatTime } from '../../../utils/localeFormat.js';
 
 export const OTHER_KEYS = ['rounding_method', 'quantity_decimals', 'default_payment_terms_days', 'default_sale_status',
-  'default_discount_mode', 'max_discount_percent', 'service_charge_percent', 'service_charge_on', 'default_customer_city'];
+  'default_discount_mode', 'max_discount_percent', 'service_charge_percent', 'service_charge_on', 'default_customer_city',
+  'lens_single_piece_percent'];
 
 const ROUNDING = {
   NONE: 'No rounding', NEAREST_0_05: 'Nearest 0.05', NEAREST_0_10: 'Nearest 0.10', NEAREST_0_50: 'Nearest 0.50',
@@ -113,6 +114,13 @@ export default function OtherSettingsTab({ form, set, errors, savedAt }) {
               <TextField fullWidth label="Default City for New Customers" value={form.default_customer_city || ''}
                 onChange={(e) => set('default_customer_city', e.target.value)}
                 inputProps={{ maxLength: 100 }} {...num(errors, 'default_customer_city', 'Pre-filled on new customer records.')} />
+            </Grid>
+            <Grid item xs={12} sm={6}>
+              <TextField fullWidth type="number" label="Single Lens Price" value={form.lens_single_piece_percent}
+                onChange={(e) => set('lens_single_piece_percent', e.target.value === '' ? '' : Number(e.target.value))}
+                inputProps={{ min: 0.01, max: 100, step: 0.01 }}
+                InputProps={{ endAdornment: <InputAdornment position="end">% of pair</InputAdornment> }}
+                {...num(errors, 'lens_single_piece_percent', 'Price of one lens sold singly, for pair-priced lenses with no single-lens price of their own.')} />
             </Grid>
           </Grid>
         </SectionCard>

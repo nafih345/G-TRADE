@@ -551,7 +551,7 @@ export default function PatientHistory() {
 
   // Lab / fulfillment jobs — the subset of invoices that have a lab pipeline stage or dispensed
   // frame/lens items to track.
-  const LAB_STAGES = ['Order Received', 'In Lab Processing', 'Frame Mounting', 'Quality Control', 'Ready for Collection', 'Delivered'];
+  const LAB_STAGES = ['Order Received', 'In Lab Processing', 'Awaiting Remaining Lens', 'Lens Arrived', 'Frame Mounting', 'Quality Control', 'Ready for Collection', 'Delivered'];
   const patientLabOrders = patientInvoices.filter(i => i.labStatus || i.frame || i.lens);
 
   const handleStartExamForPatient = () => {

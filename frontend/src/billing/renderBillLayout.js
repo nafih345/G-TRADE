@@ -20,6 +20,7 @@ import {
   formatDate, fmtWithCurrency, tokensIn,
 } from './billFields.js';
 import { normalizeConfig, effectiveTheme, elementTitle, BANDS } from './billLayout.js';
+import { unitWord } from '../utils/lensUnits.js';
 
 export const PX_PER_MM = 96 / 25.4;
 const PT_TO_MM = 25.4 / 72;
@@ -433,6 +434,10 @@ function cellValue(col, item, index, ctx, table, cols) {
       if (table.showSku && item.sku && !has('sku')) subs.push(`SKU ${esc(item.sku)}`);
       if (subs.length) html += `<div class="bd-sub">${subs.join(' · ')}</div>`;
       if (table.showPower !== false && item.power && !has('power')) html += `<div class="bd-sub bd-power">${esc(item.power)}</div>`;
+      if (item.lensQty) {
+        const each = item.rate !== null && item.rate !== undefined ? ` @ ${esc(formatMoney(item.rate, fmt))} per ${unitWord(item.qtyUnit)}` : '';
+        html += `<div class="bd-sub bd-lens">${esc(item.lensQty)}${each}</div>`;
+      }
       return html;
     }
     case 'qty':
@@ -440,7 +445,14 @@ function cellValue(col, item, index, ctx, table, cols) {
       const v = item[col.key];
       if (v === null || v === undefined || v === '') return '';
       const n = Number(v);
-      return Number.isFinite(n) ? esc(formatNumber(n, { decimals: n % 1 ? 2 : 0, thousands: 'none' })) : esc(v);
+      const shown = Number.isFinite(n) ? esc(formatNumber(n, { decimals: n % 1 ? 2 : 0, thousands: 'none' })) : esc(v);
+      // A lens line's qty names its unit ("1 Pair") unless a Unit column already does.
+      return col.key === 'qty' && item.qtyUnit && !has('unit') ? `${shown} ${esc(unitWord(item.qtyUnit, n))}` : shown;
+    }
+    case 'rate': {
+      if (item.rate === null || item.rate === undefined || item.rate === '') return '';
+      const rate = esc(formatMoney(item.rate, { ...fmt, decimals }));
+      return item.qtyUnit ? `${rate}<div class="bd-sub">per ${esc(unitWord(item.qtyUnit))}</div>` : rate;
     }
     case 'discount': {
       if (item.discount !== null && item.discount !== undefined) return esc(formatMoney(item.discount, { ...fmt, decimals }));
@@ -560,6 +572,7 @@ ${BILL_I18N_CSS}
 .bd-root .bd-bc-text{text-align:center;letter-spacing:0.5pt;line-height:1.1;margin-top:0.3mm}
 .bd-root .bd-sub{font-size:0.86em;color:${t.muted}}
 .bd-root .bd-power{color:${t.primary};font-weight:700}
+.bd-root .bd-lens{font-weight:700}
 .bd-root .bd-more{margin-top:1mm;padding:1mm;border:1px dashed #94a3b8;color:#64748b;font-size:7.5pt;text-align:center;font-style:italic}
 ${tableCss(cfg.bands.items.table, t)}
 `;
@@ -636,6 +649,7 @@ export function createEstimateMeasurer(theme, table, contentW) {
         rows: rows.map((it) => {
           let lines = Math.ceil(String(it.name || '').length / charsPerLine) || 1;
           if (table.showPower !== false && it.power) lines += Math.ceil(it.power.length / charsPerLine) * 0.9;
+          if (it.lensQty) lines += 0.9;
           if ((table.showBrand && it.brand) || (table.showVariant && it.variant)) lines += 0.9;
           return lineMm(bs, theme.lineHeight || 1.3) * lines + pad;
         }),

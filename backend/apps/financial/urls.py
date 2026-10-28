@@ -23,6 +23,7 @@ urlpatterns = [
     path('reports/profit-loss/', views.profit_loss_view),
     path('reports/balance-sheet/', views.balance_sheet_view),
     path('reports/general-ledger/', views.general_ledger_view),
+    path('reports/ledger-register/', views.ledger_register_view),
     path('reports/account-balances/', views.account_balances_view),
     path('reports/source-breakdown/', views.source_breakdown_view),
     path('integration/status/', views.integration_status_view),
@@ -33,5 +34,10 @@ urlpatterns = [
     path('integration/opening-balances/', views.opening_balances_view),
     path('integration/recompute-balances/', views.recompute_balances_view),
     path('integration/policy/', views.policy_view),
+    path('settlements/parties/', views.settlement_parties_view),
+    path('settlements/due-bills/', views.settlement_due_bills_view),
+    path('settlements/receipt/', views.settlement_receipt_view),
+    path('settlements/payment/', views.settlement_payment_view),
+    path('settlements/batch/<str:voucher>/', views.settlement_batch_view),
     path('', include(router.urls)),
 ]

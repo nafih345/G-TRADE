@@ -209,3 +209,115 @@ class PurchaseInvoiceItem(BaseUUIDModel):
 
     def __str__(self):
         return f"{self.product.name} ({self.quantity}pcs) - Inv {self.purchase_invoice.invoice_number}"
+
+
+# ==========================================
+# LENS PURCHASE ORDER (Purchase → Lens Purchase Order)
+# ==========================================
+# A request to a lab for prescription lenses, each physical lens mapped to the customer order it
+# was made for. Creating / receiving one never moves stock or posts accounting: the goods come in
+# through the ordinary Purchase Entry (PurchaseInvoice) the PO is converted into, which links back
+# here through `purchase_invoice` (one-to-one, so a PO can never be billed twice).
+# Workflow and validation live in apps/purchasing/lens_orders.py.
+
+class LensPurchaseOrder(BaseUUIDModel):
+    STATUS_CHOICES = [
+        ('DRAFT', 'Draft'),
+        ('PENDING', 'Pending'),
+        ('ORDERED', 'Ordered'),
+        ('PARTIALLY_RECEIVED', 'Partially Received'),
+        ('RECEIVED', 'Received'),
+        ('CANCELLED', 'Cancelled'),
+    ]
+
+    po_number = models.CharField(max_length=50, unique=True)
+    supplier = models.ForeignKey(Supplier, on_delete=models.PROTECT, related_name='lens_purchase_orders')
+    branch = models.ForeignKey('company.Branch', on_delete=models.SET_NULL, null=True, blank=True, db_index=True, related_name='+')
+    order_date = models.DateField()
+    expected_delivery_date = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='DRAFT', db_index=True)
+    remarks = models.TextField(blank=True, default='')
+    # Who raised it (request actor — same identity the stock ledger records).
+    created_by_name = models.CharField(max_length=150, blank=True, default='')
+    purchase_invoice = models.OneToOneField(
+        PurchaseInvoice, on_delete=models.SET_NULL, null=True, blank=True, related_name='lens_purchase_order')
+    # Append-only audit trail: [{at, by, action, detail}] — creation, submission, vendor /
+    # assignment / prescription changes, receipts, discrepancies, conversion, cancellation and
+    # every sales-order status this PO moved (with the status it moved from).
+    history = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        ordering = ['-order_date', '-created_at']
+
+    def __str__(self):
+        return f"Lens PO: {self.po_number}"
+
+
+class LensPurchaseOrderItem(BaseUUIDModel):
+    """One lens model line: a pair for one customer, a pair split between two customers, or a
+    single lens. Its physical lenses are the `pieces` below."""
+    SINGLE_PAIR, SPLIT_PAIR, SINGLE_PIECE = 'SINGLE_PAIR', 'SPLIT_PAIR', 'SINGLE_PIECE'
+    ORDER_TYPE_CHOICES = [
+        (SINGLE_PAIR, 'Single Customer — 1 Pair'),
+        (SPLIT_PAIR, 'Split Pair — 2 Customers'),
+        (SINGLE_PIECE, 'Single Lens — 1 Piece'),
+    ]
+
+    order = models.ForeignKey(LensPurchaseOrder, on_delete=models.CASCADE, related_name='items')
+    product = models.ForeignKey('products.Product', on_delete=models.PROTECT, related_name='lens_po_items')
+    # Snapshot of the lens as ordered (the product master can be renamed later).
+    lens_model = models.CharField(max_length=255, blank=True, default='')
+    lens_type = models.CharField(max_length=100, blank=True, default='')
+    lens_index = models.CharField(max_length=30, blank=True, default='')
+    lens_coating = models.CharField(max_length=100, blank=True, default='')
+    order_type = models.CharField(max_length=20, choices=ORDER_TYPE_CHOICES)
+    # Commercial (what the lab prices: 1 PAIR / 1 PIECE) vs physical (lenses, always pieces).
+    commercial_quantity = models.PositiveIntegerField(default=1)
+    commercial_unit = models.CharField(max_length=10, default='PAIR')
+    physical_quantity = models.PositiveIntegerField(default=2)
+    physical_unit = models.CharField(max_length=10, default='PIECE')
+    unit_price = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.0'))
+    pricing_unit = models.CharField(max_length=10, default='PAIR')
+    discount_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.0'))
+    tax_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0.0'))
+    line_total = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0.0'))
+    status = models.CharField(max_length=20, default='PENDING')  # PENDING | PARTIALLY_RECEIVED | RECEIVED | CANCELLED
+
+    class Meta:
+        ordering = ['created_at']
+
+
+class LensPurchaseOrderPiece(BaseUUIDModel):
+    """One physical lens and the customer order it is for."""
+    RECEIVING_CHOICES = [
+        ('PENDING', 'Pending'),
+        ('RECEIVED', 'Received'),
+        ('DAMAGED', 'Damaged'),
+        ('MISSING', 'Missing'),
+        ('INCORRECT', 'Incorrect'),
+    ]
+
+    item = models.ForeignKey(LensPurchaseOrderItem, on_delete=models.CASCADE, related_name='pieces')
+    piece_number = models.PositiveSmallIntegerField(default=1)
+    customer = models.ForeignKey('sales.Customer', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    customer_name = models.CharField(max_length=150, blank=True, default='')
+    sales_order = models.ForeignKey('sales.Invoice', on_delete=models.PROTECT, related_name='lens_po_pieces')
+    # New Sale edits recreate the order's lines, so this is a convenience link only; the
+    # requirement a piece fills is identified by (sales_order, product, eye).
+    sales_order_item = models.ForeignKey('sales.InvoiceItem', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    eye = models.CharField(max_length=2)  # RE (OD) | LE (OS)
+    # {sph, cyl, axis, add, prism, base} sent to the lab, and the order's prescription it was
+    # taken from. They differ only with an rx_change_reason; the sales order is never rewritten.
+    rx = models.JSONField(default=dict, blank=True)
+    original_rx = models.JSONField(default=dict, blank=True)
+    rx_change_reason = models.CharField(max_length=255, blank=True, default='')
+    piece_reference = models.CharField(max_length=100, blank=True, default='')
+    receiving_status = models.CharField(max_length=12, choices=RECEIVING_CHOICES, default='PENDING')
+    received_at = models.DateTimeField(null=True, blank=True)
+    received_by = models.CharField(max_length=150, blank=True, default='')
+    discrepancy_notes = models.CharField(max_length=255, blank=True, default='')
+    # Mirrors the linked order's readiness: WAITING until every lens it needs has arrived.
+    fitting_status = models.CharField(max_length=20, default='PENDING')  # PENDING | WAITING | READY_FOR_FITTING
+
+    class Meta:
+        ordering = ['piece_number']

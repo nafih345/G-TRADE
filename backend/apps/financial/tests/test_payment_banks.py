@@ -155,6 +155,26 @@ class BankMasterApiTests(APITestCase):
         self.assertNotIn('SBI Current', picker)
         self.assertIn('SBI Current', [b['name'] for b in self.client.get(self.URL).data])
 
+    def test_default_bank_is_the_bank_role_and_pre_selected_in_pickers(self):
+        # Out of the box the system 1002 account is the default bank.
+        picker = self.client.get('/api/financial/bank-accounts/').data
+        self.assertEqual([b['code'] for b in picker if b['is_default_bank']], ['1002'])
+
+        hdfc = self.client.post(self.URL, {'bank_name': 'HDFC', 'is_default_bank': True}, format='json').data
+        self.assertTrue(hdfc['is_default_bank'])
+        from apps.financial.mapping import resolve_role
+        self.assertEqual(str(resolve_role('BANK').pk), hdfc['id'])  # blank bank posts here too
+        picker = self.client.get('/api/financial/bank-accounts/').data
+        self.assertEqual([b['name'] for b in picker if b['is_default_bank']], ['HDFC'])
+
+        # The default can't be deactivated until another bank takes over (one-click PATCH).
+        self.assertEqual(self.client.delete(f"{self.URL}{hdfc['id']}/").status_code, 400)
+        icici = self.client.post(self.URL, {'bank_name': 'ICICI'}, format='json').data
+        self.assertFalse(icici['is_default_bank'])
+        res = self.client.patch(f"{self.URL}{icici['id']}/", {'is_default_bank': True}, format='json')
+        self.assertTrue(res.data['is_default_bank'])
+        self.assertEqual(self.client.delete(f"{self.URL}{hdfc['id']}/").data['status'], 'Inactive')
+
     def test_system_bank_cannot_be_deactivated_and_staff_cannot_write(self):
         sys_bank = ChartOfAccount.objects.get(code='1002')
         self.assertEqual(self.client.delete(f"{self.URL}{sys_bank.pk}/").status_code, 400)

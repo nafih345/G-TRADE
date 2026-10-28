@@ -1,20 +1,20 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, Divider, MenuItem, Stack, TextField,
-  ToggleButton, ToggleButtonGroup, Typography,
+  Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, IconButton, List, ListItemButton,
+  ListItemText, Stack, TextField, ToggleButton, ToggleButtonGroup, Tooltip, Typography,
 } from '@mui/material';
+import { AccountBalance as BankIcon, Check as CheckIcon, Edit as EditIcon } from '@mui/icons-material';
 import useBankAccounts from '../../hooks/useBankAccounts';
 import { notify } from '../../utils/notify';
 import { CASH_PAID, CASH_UNPAID, isCashMode, paymentKind } from '../../utils/paymentModes';
-
-const ADD_BANK = '__add_bank__';
 
 /**
  * The extra details a pay mode needs, the same on every screen:
  *   CASH -> Paid / Unpaid toggle (only when the screen passes onCashStatusChange)
  *   BANK -> which bank the money went to / came from
  *   UPI  -> the bank linked to the UPI ID
- * Renders nothing for Card / Credit / anything else.
+ * Renders nothing for Card / Credit / anything else. Bank / UPI show the chosen bank (the
+ * Bank Master default unless changed) with an "Add / Change Bank Account" button.
  *
  * `compact` drops the field labels for tight table rows (New Sale / POS pay-mode tables).
  */
@@ -31,13 +31,16 @@ export default function PaymentModeDetails({
 }) {
   const kind = paymentKind(method);
   const { banks, loading, addBank } = useBankAccounts();
+  const [picking, setPicking] = useState(false);
   const [adding, setAdding] = useState(false);
   const wantsBank = (kind === 'bank' || kind === 'upi') && !!onBankAccountChange;
+  const defaultBank = defaultBankFor(banks, kind);
 
-  // Only one bank on the books: pick it, so the common single-bank shop never has to.
+  // Choosing Bank (or UPI) pre-selects the default bank from Settings > Bank Master; the full
+  // list only opens from "Add / Change Bank Account". A blank bank posts to this same ledger.
   useEffect(() => {
-    if (wantsBank && !disabled && !bankAccount && banks.length === 1) onBankAccountChange(banks[0].id);
-  }, [wantsBank, disabled, bankAccount, banks, onBankAccountChange]);
+    if (wantsBank && !disabled && !bankAccount && defaultBank) onBankAccountChange(defaultBank.id);
+  }, [wantsBank, disabled, bankAccount, defaultBank, onBankAccountChange]);
 
   if (isCashMode(method) && onCashStatusChange) {
     return (
@@ -58,41 +61,58 @@ export default function PaymentModeDetails({
   if (!wantsBank) return null;
 
   const label = kind === 'upi' ? 'Linked Bank (UPI)' : 'Bank';
-  const known = !bankAccount || banks.some((b) => b.id === bankAccount);
+  const current = banks.find((b) => b.id === bankAccount) || (!bankAccount ? defaultBank : null);
+  const isDefault = !!current && current.id === defaultBank?.id;
+  const emptyText = loading ? 'Loading banks…' : (bankAccount ? 'Bank no longer active' : 'No bank in Bank Master');
+  const openPicker = () => { if (!disabled) setPicking(true); };
+
   return (
     <Box sx={sx}>
-      <TextField
-        select fullWidth size={size} disabled={disabled}
-        label={compact ? undefined : label}
-        value={known ? (bankAccount || '') : ''}
-        onChange={(e) => {
-          if (e.target.value === ADD_BANK) setAdding(true);
-          else onBankAccountChange(e.target.value || null);
-        }}
-        SelectProps={{
-          displayEmpty: true,
-          renderValue: (v) => {
-            const b = banks.find((x) => x.id === v);
-            if (b) return b.name;
-            return <span style={{ opacity: 0.6 }}>{loading ? 'Loading banks…' : (compact ? `Select ${kind === 'upi' ? 'linked bank' : 'bank'}` : 'Default bank account')}</span>;
-          },
-        }}
-        InputLabelProps={{ shrink: true }}
-        inputProps={{ 'aria-label': label }}
-        sx={compact ? { '& .MuiSelect-select': { py: 0.25, fontSize: '0.68rem', fontWeight: 700 } } : undefined}
-      >
-        <MenuItem value=""><em>Default bank account</em></MenuItem>
-        {banks.map((b) => (
-          <MenuItem key={b.id} value={b.id}>
-            <Box>
-              <Typography variant="body2" fontWeight={700}>{b.name}</Typography>
-              {b.description && <Typography variant="caption" color="text.secondary">{b.description}</Typography>}
+      {compact ? (
+        <Stack direction="row" alignItems="center" spacing={0.25}>
+          <Typography noWrap title={current ? `${current.name}${isDefault ? ' (default)' : ''}` : emptyText}
+            sx={{ flex: 1, minWidth: 0, fontSize: '0.68rem', fontWeight: 700, opacity: current ? 1 : 0.6 }}>
+            {current ? current.name : emptyText}
+          </Typography>
+          <Tooltip title="Add / Change Bank Account">
+            <span>
+              <IconButton size="small" onClick={openPicker} disabled={disabled} aria-label={`Change ${label}`} sx={{ p: 0.25 }}>
+                <EditIcon sx={{ fontSize: 14 }} />
+              </IconButton>
+            </span>
+          </Tooltip>
+        </Stack>
+      ) : (
+        <Box>
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.25 }}>{label}</Typography>
+          <Stack direction="row" alignItems="center" spacing={1}
+            sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 1, px: 1.25, py: size === 'small' ? 0.5 : 1, opacity: disabled ? 0.6 : 1 }}>
+            <BankIcon fontSize="small" color={current ? 'primary' : 'disabled'} />
+            <Box sx={{ flex: 1, minWidth: 0 }}>
+              <Stack direction="row" alignItems="center" spacing={0.75}>
+                <Typography variant="body2" fontWeight={700} noWrap sx={{ opacity: current ? 1 : 0.6 }}>
+                  {current ? current.name : emptyText}
+                </Typography>
+                {isDefault && <Chip size="small" label="Default" color="warning" sx={{ height: 18, fontSize: '0.62rem', fontWeight: 800 }} />}
+              </Stack>
+              {current?.description && <Typography variant="caption" color="text.secondary" noWrap component="div">{current.description}</Typography>}
             </Box>
-          </MenuItem>
-        ))}
-        <Divider />
-        <MenuItem value={ADD_BANK} sx={{ color: 'primary.main', fontWeight: 700 }}>+ Add bank account…</MenuItem>
-      </TextField>
+            <Button size="small" onClick={openPicker} disabled={disabled} sx={{ textTransform: 'none', fontWeight: 800, whiteSpace: 'nowrap' }}>
+              Add / Change Bank Account
+            </Button>
+          </Stack>
+        </Box>
+      )}
+      <BankPickerDialog
+        open={picking}
+        title={kind === 'upi' ? 'Select Linked Bank (UPI)' : 'Select Bank Account'}
+        banks={banks}
+        selectedId={current?.id || ''}
+        defaultId={defaultBank?.id || ''}
+        onClose={() => setPicking(false)}
+        onPick={(id) => { onBankAccountChange(id); setPicking(false); }}
+        onAdd={() => setAdding(true)}
+      />
       <AddBankDialog
         open={adding}
         onClose={() => setAdding(false)}
@@ -101,14 +121,57 @@ export default function PaymentModeDetails({
             const bank = await addBank(details);
             onBankAccountChange(bank.id);
             setAdding(false);
+            setPicking(false);
             notify(`Bank account "${bank.name}" added.`, 'success');
           } catch (err) {
             const d = err?.response?.data || {};
-            notify(d.name || d.detail || 'Could not add the bank account.', 'error');
+            notify(d.name || d.account_name || d.detail || 'Could not add the bank account.', 'error');
           }
         }}
       />
     </Box>
+  );
+}
+
+// UPI prefers the bank mapped for UPI settlements, then the default bank; Bank uses the default.
+// With a single bank on the books that one is the default either way.
+export function defaultBankFor(banks, kind) {
+  return (kind === 'upi' && banks.find((b) => b.is_default_upi))
+    || banks.find((b) => b.is_default_bank)
+    || (banks.length === 1 ? banks[0] : null);
+}
+
+function BankPickerDialog({ open, title, banks, selectedId, defaultId, onClose, onPick, onAdd }) {
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth onClick={(e) => e.stopPropagation()}>
+      <DialogTitle sx={{ fontWeight: 800 }}>{title}</DialogTitle>
+      <DialogContent dividers sx={{ p: 0 }}>
+        <List dense disablePadding>
+          {banks.map((b, i) => (
+            <ListItemButton key={b.id} selected={b.id === selectedId} autoFocus={b.id === selectedId || (!selectedId && i === 0)}
+              onClick={() => onPick(b.id)}>
+              <ListItemText
+                primary={(
+                  <Stack direction="row" alignItems="center" spacing={0.75} component="span">
+                    <Typography variant="body2" fontWeight={700} component="span">{b.name}</Typography>
+                    {b.id === defaultId && <Chip size="small" label="Default" color="warning" sx={{ height: 18, fontSize: '0.62rem', fontWeight: 800 }} />}
+                  </Stack>
+                )}
+                secondary={b.description || null}
+              />
+              {b.id === selectedId && <CheckIcon fontSize="small" color="primary" />}
+            </ListItemButton>
+          ))}
+          {banks.length === 0 && (
+            <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>No banks yet — add one below.</Typography>
+          )}
+        </List>
+      </DialogContent>
+      <DialogActions sx={{ justifyContent: 'space-between' }}>
+        <Button onClick={onAdd} sx={{ fontWeight: 800 }}>+ Add bank account…</Button>
+        <Button onClick={onClose}>Cancel</Button>
+      </DialogActions>
+    </Dialog>
   );
 }
 

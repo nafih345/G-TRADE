@@ -14,6 +14,31 @@ function readLocal(key) {
   try { return JSON.parse(localStorage.getItem(key) || '[]'); } catch { return []; }
 }
 
+// Raw API record -> the shape the matching documentAdapters adapter reads. Shared with the
+// Ledger's "Show Bill", which loads one record by id.
+export function wholesaleInvoiceDoc(w) {
+  const d = w.details && Object.keys(w.details).length ? w.details : {};
+  // The POS record is the source of truth; the row's own columns fill any gap.
+  return {
+    invoiceNo: w.invoice_number, date: w.invoice_date, dueDate: w.due_date, orderRef: w.order_ref,
+    amountReceived: w.paid_amount, dueAmount: w.due_amount, status: w.status,
+    ...d,
+    summary: { grandTotal: w.grand_total, ...(d.summary || {}) },
+  };
+}
+
+export const wholesaleCollectionDoc = (c) => ({ ...c, invoice_number: c.invoice_number });
+
+// The POS keeps the returned lines locally (the database row is header-only).
+export function wholesaleReturnDoc(r, local = readLocal('optical_wholesale_returns')) {
+  const l = local.find((x) => x.returnNo === r.return_number) || {};
+  return {
+    returnNo: r.return_number, invoiceNo: r.invoice_number, date: r.return_date, reason: r.reason,
+    action_taken: r.action_taken, amount: r.return_amount, customer: l.customer, items: l.items || [],
+    summary: { grandTotal: r.return_amount },
+  };
+}
+
 async function salesDocs(documentType, search) {
   const params = new URLSearchParams({ document_type: documentType });
   if (search) params.set('search', search);
@@ -34,23 +59,14 @@ const LOADERS = {
   QUOTATION: (q) => salesDocs('QUOTATION', q),
   WHOLESALE_BILL: async () => {
     const rows = unwrap(await axios.get('/api/sales/wholesale/invoices/'));
-    return rows.map((w) => {
-      const d = w.details && Object.keys(w.details).length ? w.details : {};
-      return {
-        id: w.id,
-        number: w.invoice_number,
-        date: w.invoice_date,
-        party: d.customer?.name || '',
-        amount: amt(w.grand_total),
-        // The POS record is the source of truth; the row's own columns fill any gap.
-        doc: {
-          invoiceNo: w.invoice_number, date: w.invoice_date, dueDate: w.due_date, orderRef: w.order_ref,
-          amountReceived: w.paid_amount, dueAmount: w.due_amount, status: w.status,
-          ...d,
-          summary: { grandTotal: w.grand_total, ...(d.summary || {}) },
-        },
-      };
-    });
+    return rows.map((w) => ({
+      id: w.id,
+      number: w.invoice_number,
+      date: w.invoice_date,
+      party: w.details?.customer?.name || '',
+      amount: amt(w.grand_total),
+      doc: wholesaleInvoiceDoc(w),
+    }));
   },
   PURCHASE_BILL: async (q) => {
     const rows = unwrap(await axios.get(`/api/purchase/invoices/${q ? `?search=${encodeURIComponent(q)}` : ''}`));
@@ -67,28 +83,16 @@ const LOADERS = {
       ...retail.map((p) => ({ id: p.id, number: p.receipt_no || '', date: p.payment_date, party: p.customer_name || '', amount: amt(p.amount), doc: p })),
       ...wholesale.map((c) => ({
         id: c.id, number: c.receipt_number, date: c.payment_date, party: 'Wholesale dealer', amount: amt(c.amount_paid),
-        doc: { ...c, invoice_number: c.invoice_number },
+        doc: wholesaleCollectionDoc(c),
       })),
     ];
   },
   SALES_RETURN: async () => {
     const rows = unwrap(await axios.get('/api/sales/wholesale/returns/'));
-    // The POS keeps the returned lines locally (the database row is header-only).
     const local = readLocal('optical_wholesale_returns');
     return rows.map((r) => {
-      const l = local.find((x) => x.returnNo === r.return_number) || {};
-      return {
-        id: r.id,
-        number: r.return_number,
-        date: r.return_date,
-        party: l.customer?.name || '',
-        amount: amt(r.return_amount),
-        doc: {
-          returnNo: r.return_number, invoiceNo: r.invoice_number, date: r.return_date, reason: r.reason,
-          action_taken: r.action_taken, amount: r.return_amount, customer: l.customer, items: l.items || [],
-          summary: { grandTotal: r.return_amount },
-        },
-      };
+      const doc = wholesaleReturnDoc(r, local);
+      return { id: r.id, number: r.return_number, date: r.return_date, party: doc.customer?.name || '', amount: amt(r.return_amount), doc };
     });
   },
   // Purchase returns are not stored in the database yet (Purchases → Returns keeps them on the

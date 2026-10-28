@@ -22,6 +22,10 @@ from .permissions import FINANCE_ADMIN_ROLES, user_role
 BANK_GROUP_NAME = 'Bank Accounts'
 BANK_CODE_PREFIX = '1002'
 CARD_ROLE = 'PAYMENT_CARD'
+# The default bank is the BANK role's mapping: the ledger a bank payment posts to when no bank
+# was picked, and the one every payment screen pre-selects when the user chooses Bank.
+DEFAULT_ROLE = 'BANK'
+UPI_ROLE = 'PAYMENT_UPI'
 IFSC_RE = re.compile(r'^[A-Z]{4}0[A-Z0-9]{6}$')
 
 DETAIL_FIELDS = ('bank_name', 'branch_name', 'address', 'iban_number', 'vat_reg_number', 'account_number',
@@ -60,11 +64,19 @@ def _detail(acc):
         return None
 
 
-def _card_account_id():
+def _role_account_id(role):
     try:
-        return resolve_role(CARD_ROLE).pk
+        return resolve_role(role).pk
     except MappingError:
         return None
+
+
+def _card_account_id():
+    return _role_account_id(CARD_ROLE)
+
+
+def _defaults():
+    return {'card': _card_account_id(), 'bank': _role_account_id(DEFAULT_ROLE), 'upi': _role_account_id(UPI_ROLE)}
 
 
 def _summary(acc, detail):
@@ -76,14 +88,17 @@ def _summary(acc, detail):
     return ' · '.join(p for p in parts if p)
 
 
-def _row(acc, card_id=None):
+def _row(acc, defaults=None):
     detail = _detail(acc)
+    defaults = defaults or {}
     row = {
         'id': str(acc.pk), 'code': acc.code, 'name': acc.name, 'account_name': acc.name,
         'status': acc.status, 'is_system': acc.is_system,
         'sl_no': detail.sl_no if detail else 0,
         'description': _summary(acc, detail),
-        'is_default_card': card_id is not None and acc.pk == card_id,
+        'is_default_card': defaults.get('card') == acc.pk,
+        'is_default_bank': defaults.get('bank') == acc.pk,
+        'is_default_upi': defaults.get('upi') == acc.pk,
     }
     for f in DETAIL_FIELDS:
         row[f] = getattr(detail, f) if detail else BankDetail._meta.get_field(f).default
@@ -148,9 +163,12 @@ def _bank_group():
     return group or AccountGroup.objects.create(name=BANK_GROUP_NAME, account_type='Asset')
 
 
-def _apply_default_card(acc, wanted, user):
-    if wanted and _card_account_id() != acc.pk:
-        save_mapping(role=CARD_ROLE, account=acc, notes='Set from Bank Master', user=user)
+def _apply_defaults(acc, data, user):
+    # Ticking a default moves the role to this bank; unticking does nothing (some bank must
+    # stay the default, so the user ticks another one instead).
+    for flag, role in (('is_default_card', CARD_ROLE), ('is_default_bank', DEFAULT_ROLE)):
+        if data.get(flag) and _role_account_id(role) != acc.pk:
+            save_mapping(role=role, account=acc, notes='Set from Bank Master', user=user)
 
 
 def create_bank(data, user=None):
@@ -162,7 +180,7 @@ def create_bank(data, user=None):
         )
         clean['sl_no'] = clean['sl_no'] or _next_sl_no()
         BankDetail.objects.create(account=acc, **clean)
-        _apply_default_card(acc, bool(data.get('is_default_card')), user)
+        _apply_defaults(acc, data, user)
     return acc
 
 
@@ -178,7 +196,7 @@ def update_bank(acc, data, user=None):
             setattr(detail, k, v)
         detail.sl_no = detail.sl_no or _next_sl_no()
         detail.save()
-        _apply_default_card(acc, bool(data.get('is_default_card')), user)
+        _apply_defaults(acc, data, user)
     return acc
 
 
@@ -193,7 +211,7 @@ def _error(exc):
     if isinstance(exc, serializers.ValidationError):
         return Response(exc.detail, status=400)
     if isinstance(exc, MappingError):
-        return Response({'is_default_card': str(exc)}, status=400)
+        return Response({'detail': str(exc)}, status=400)
     return Response({'detail': 'Could not save the bank (code or name clash). Try again.'}, status=400)
 
 
@@ -202,8 +220,8 @@ def _error(exc):
 def bank_accounts_view(request):
     """Active banks for the payment pickers; POST = quick-add from a payment screen."""
     if request.method == 'GET':
-        card_id = _card_account_id()
-        return Response(_ordered([_row(a, card_id) for a in bank_accounts()]))
+        defaults = _defaults()
+        return Response(_ordered([_row(a, defaults) for a in bank_accounts()]))
     denied = _forbidden(request)
     if denied:
         return denied
@@ -215,7 +233,7 @@ def bank_accounts_view(request):
         acc = create_bank(data, request.user)
     except (serializers.ValidationError, MappingError, IntegrityError) as exc:
         return _error(exc)
-    return Response(_row(acc, _card_account_id()), status=201)
+    return Response(_row(acc, _defaults()), status=201)
 
 
 @api_view(['GET', 'POST'])
@@ -223,8 +241,8 @@ def bank_accounts_view(request):
 def bank_master_list_view(request):
     """Settings > Bank Master: every bank (inactive too) / create one."""
     if request.method == 'GET':
-        card_id = _card_account_id()
-        return Response(_ordered([_row(a, card_id) for a in bank_accounts(include_inactive=True)]))
+        defaults = _defaults()
+        return Response(_ordered([_row(a, defaults) for a in bank_accounts(include_inactive=True)]))
     denied = _forbidden(request)
     if denied:
         return denied
@@ -232,7 +250,7 @@ def bank_master_list_view(request):
         acc = create_bank(request.data, request.user)
     except (serializers.ValidationError, MappingError, IntegrityError) as exc:
         return _error(exc)
-    return Response(_row(acc, _card_account_id()), status=201)
+    return Response(_row(acc, _defaults()), status=201)
 
 
 @api_view(['GET', 'PUT', 'PATCH', 'DELETE'])
@@ -242,7 +260,7 @@ def bank_master_detail_view(request, pk):
     if acc is None:
         return Response({'detail': 'Bank not found.'}, status=404)
     if request.method == 'GET':
-        return Response(_row(acc, _card_account_id()))
+        return Response(_row(acc, _defaults()))
     denied = _forbidden(request)
     if denied:
         return denied
@@ -255,15 +273,18 @@ def bank_master_detail_view(request, pk):
         if _card_account_id() == acc.pk:
             return Response({'detail': 'This bank takes card payments. Make another bank the card default first.'},
                             status=400)
+        if _role_account_id(DEFAULT_ROLE) == acc.pk:
+            return Response({'detail': 'This is the default bank account. Make another bank the default first.'},
+                            status=400)
         acc.status = 'Inactive'
         acc.save(update_fields=['status', 'updated_at'])
-        return Response(_row(acc, _card_account_id()))
+        return Response(_row(acc, _defaults()))
     data = request.data
     if request.method == 'PATCH':
-        data = {**_row(acc, _card_account_id()), **request.data}
+        data = {**_row(acc, _defaults()), **request.data}
     try:
         update_bank(acc, data, request.user)
     except (serializers.ValidationError, MappingError, IntegrityError) as exc:
         return _error(exc)
     acc.refresh_from_db()
-    return Response(_row(acc, _card_account_id()))
+    return Response(_row(acc, _defaults()))

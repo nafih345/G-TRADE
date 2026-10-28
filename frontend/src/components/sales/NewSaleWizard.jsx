@@ -10,14 +10,20 @@ import { apiErrorMessage } from '../../utils/apiError';
 import { confirmPosting, peekDocumentNumber } from '../../utils/businessPrefs';
 import { CASH_PAID, CASH_UNPAID, needsBank } from '../../utils/paymentModes';
 import PaymentModeDetails from '../common/PaymentModeDetails';
-import { 
-  Box, Card, Typography, Grid, TextField, 
-  Button, MenuItem, Table, TableBody, TableCell, 
-  TableContainer, TableHead, TableRow, Paper, IconButton, 
+import { getBusinessPrefs } from '../../utils/localeFormat';
+import {
+  PAIR, PIECE, BOTH, RE, LE, BASE_OPTIONS, isPairSellable, isSpectacleLensCategory, lensPricing, unitPrice,
+  priceBasis, physicalQty, unitWord, qtyLabel, stockHint, formatDioptre, eyeEntered,
+  formatEyeRx, validateLensLine, lensPowerText, rxFromGrid, lensFromSavedItem, lensToPayload,
+} from '../../utils/lensUnits';
+import {
+  Box, Card, Typography, Grid, TextField,
+  Button, MenuItem, Table, TableBody, TableCell,
+  TableContainer, TableHead, TableRow, Paper, IconButton,
   Stack, Divider, Dialog, DialogTitle, DialogContent, DialogActions,
   Chip, Step, Stepper, StepLabel, Checkbox, FormControlLabel,
   InputAdornment, Avatar, Tooltip, Alert, Switch, RadioGroup, Radio,
-  Autocomplete
+  Autocomplete, ToggleButtonGroup, ToggleButton
 } from '@mui/material';
 import {
   Person as PersonIcon,
@@ -151,6 +157,142 @@ const resolveDiscount = (src, gross) => {
   return { discMode: mode, discValue: pct, disc: (gross * pct) / 100, discPercent: pct };
 };
 
+// gross / disc / tax / total for a billing row from its qty, price, discount and tax % — the same
+// arithmetic handleAddItem and the grid's live edits use.
+const withLineAmounts = (row) => {
+  const qty = parseInt(row.qty) || 0;
+  const price = parseFloat(row.price) || 0;
+  const taxPercent = parseFloat(row.taxPercent) || 0;
+  const gross = qty * price;
+  const { discMode, discValue, disc, discPercent } = resolveDiscount(row, gross);
+  const tax = ((gross - disc) * taxPercent) / 100;
+  return { ...row, qty, price, taxPercent, gross, discMode, discValue, disc, discPercent, tax, total: gross - disc + tax };
+};
+
+const money2 = (n) => `₹${(Number(n) || 0).toFixed(2)}`;
+
+// Compact Pair / Single Lens control + prescription summary shown in a lens row's "Unit · Power"
+// cell. Full labels live in the tooltips and in the row's edit window (Edit Rx).
+const SEG_SX = {
+  '& .MuiToggleButton-root': {
+    py: 0.1, px: 0.8, fontSize: '0.62rem', fontWeight: 900, textTransform: 'none', lineHeight: 1.4, whiteSpace: 'nowrap',
+    borderColor: '#93c5fd', color: '#1e3a8a',
+    '&.Mui-selected': { bgcolor: '#1e3a8a', color: '#facc15', '&:hover': { bgcolor: '#1e40af' } },
+  },
+};
+// Short status for the grid cell; the full message is in the tooltip and the edit window.
+const lensErrorShort = (msg) => {
+  if (/Only one eye/.test(msg)) return 'Only one eye entered';
+  if (/both eyes/.test(msg)) return 'Rx missing for both eyes';
+  if (/select the eye/.test(msg)) return 'Select RE or LE';
+  if (/SPH is required/.test(msg)) return 'SPH missing';
+  return 'Check prescription';
+};
+const RX_COLS = ['sph', 'cyl', 'axis', 'add'];
+const RX_GRID = { display: 'grid', gridTemplateColumns: '24px repeat(4, minmax(38px, 1fr))', columnGap: '4px', alignItems: 'center' };
+
+// The whole card is ONE keyboard stop in the screen's Enter / ↑ / ↓ chain (data-nav-stop
+// "advance": Enter moves on to Qty). While it has focus:
+//   ← / P = Both Eyes (Pair)   → / S = Single Lens (Piece)   Space = switch
+//   R / L = Single Lens for the Right / Left eye   E = Edit Rx (the row's edit window)
+function LensLineCell({ rowId, lens, errors, onUnit, onEye, onEditRx }) {
+  const isPiece = lens.sellingUnit === PIECE;
+  const eyes = isPiece ? (lens.eye === RE || lens.eye === LE ? [lens.eye] : []) : [RE, LE];
+  const shown = (v) => (v === null || v === undefined || String(v).trim() === '' ? '—' : String(v).trim());
+  const onKeyDown = (e) => {
+    if (e.altKey || e.ctrlKey || e.metaKey || e.target !== e.currentTarget) return;
+    const k = e.key.toLowerCase();
+    if (k === 'arrowleft' || k === 'p') onUnit(PAIR);
+    else if (k === 'arrowright' || k === 's') onUnit(PIECE);
+    else if (k === ' ') onUnit(isPiece ? PAIR : PIECE);
+    else if (k === 'r' || k === 'l') {
+      const eye = k === 'r' ? RE : LE;
+      if (isPiece) onEye(eye); else onUnit(PIECE, eye);
+    } else if (k === 'e') onEditRx();
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  return (
+    <Box
+      tabIndex={0}
+      role="group"
+      aria-label="Lens unit and prescription. Left/P pair, Right/S single, R or L eye, E edit prescription"
+      data-nav-stop="advance"
+      data-lens-card={rowId}
+      onKeyDown={onKeyDown}
+      sx={{
+        width: 248, border: '1px solid', borderColor: errors.length ? '#fecaca' : '#dbeafe', borderRadius: 1.5,
+        bgcolor: errors.length ? '#fff7f7' : '#f8fbff', p: 0.6, outline: 'none', cursor: 'default',
+        '&:focus': { borderColor: '#2563eb', boxShadow: '0 0 0 2px rgba(37,99,235,0.35)' },
+        '& .lens-keys': { display: 'none' },
+        '&:focus .lens-keys': { display: 'block' },
+      }}
+    >
+      {/* Selling unit (+ eye for a single lens) */}
+      <Stack direction="row" spacing={0.5} alignItems="center">
+        <ToggleButtonGroup size="small" exclusive fullWidth value={lens.sellingUnit} onChange={(e, v) => v && onUnit(v)} sx={{ ...SEG_SX, width: 182, flex: 'none' }}>
+          <ToggleButton tabIndex={-1} title="Both Eyes – 1 Pair (2 Lenses)" value={PAIR} data-lens-unit={PAIR}>Both Eyes · Pair</ToggleButton>
+          <ToggleButton tabIndex={-1} title="Single Lens – 1 Piece (right or left eye only)" value={PIECE} data-lens-unit={PIECE}>Single · Piece</ToggleButton>
+        </ToggleButtonGroup>
+        {isPiece && (
+          <ToggleButtonGroup size="small" exclusive value={lens.eye || null} onChange={(e, v) => v && onEye(v)} sx={SEG_SX}>
+            <ToggleButton tabIndex={-1} title="Right eye (RE / OD)" value={RE}>RE</ToggleButton>
+            <ToggleButton tabIndex={-1} title="Left eye (LE / OS)" value={LE}>LE</ToggleButton>
+          </ToggleButtonGroup>
+        )}
+      </Stack>
+
+      {/* Prescription: one aligned row per eye on this line */}
+      <Box sx={{ mt: 0.6, fontSize: '0.64rem', fontWeight: 700, lineHeight: 1.5 }}>
+        <Box sx={{ ...RX_GRID, color: 'text.secondary', fontSize: '0.56rem', fontWeight: 900, letterSpacing: 0.3 }}>
+          <span />
+          {RX_COLS.map(c => <Box key={c} sx={{ textAlign: 'center' }}>{c.toUpperCase()}</Box>)}
+        </Box>
+        {eyes.map((k) => {
+          const eye = (k === RE ? lens.rx?.re : lens.rx?.le) || {};
+          const color = k === RE ? '#2563eb' : '#059669';
+          const entered = formatEyeRx(eye) !== '';
+          return (
+            <Box key={k} sx={{ ...RX_GRID, borderTop: '1px dashed #e2e8f0' }}>
+              <Box sx={{ fontWeight: 900, color }}>{k}</Box>
+              {entered
+                ? RX_COLS.map(c => <Box key={c} sx={{ textAlign: 'center', color: shown(eye[c]) === '—' ? '#94a3b8' : '#0f172a' }}>{shown(eye[c])}</Box>)
+                : <Box sx={{ gridColumn: '2 / span 4', color: '#dc2626', textAlign: 'center' }}>not entered</Box>}
+            </Box>
+          );
+        })}
+        {isPiece && !eyes.length && (
+          <Box sx={{ borderTop: '1px dashed #e2e8f0', color: '#dc2626', textAlign: 'center' }}>Choose RE or LE</Box>
+        )}
+      </Box>
+
+      {/* Actions + status */}
+      <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mt: 0.5, pt: 0.4, borderTop: '1px solid #e2e8f0' }}>
+        <Stack direction="row" spacing={0.6} alignItems="center">
+          <Box component="button" type="button" tabIndex={-1} onClick={onEditRx}
+            sx={{ border: 0, p: 0, bgcolor: 'transparent', color: '#2563eb', fontWeight: 900, fontSize: '0.64rem', cursor: 'pointer', textDecoration: 'underline' }}>
+            Edit Rx
+          </Box>
+          {lens.rxLinked && <Box component="span" sx={{ fontSize: '0.56rem', color: 'text.secondary', fontWeight: 700 }}>from Rx grid</Box>}
+        </Stack>
+        {errors.length > 0 ? (
+          <Tooltip title={errors.join(' ')}>
+            <Box component="span" sx={{ fontSize: '0.6rem', fontWeight: 900, color: '#b91c1c', bgcolor: '#fee2e2', px: 0.6, borderRadius: 1, whiteSpace: 'nowrap' }}>
+              ⚠ {lensErrorShort(errors[0])}
+            </Box>
+          </Tooltip>
+        ) : (
+          <Box component="span" sx={{ fontSize: '0.6rem', fontWeight: 900, color: '#15803d', bgcolor: '#dcfce7', px: 0.6, borderRadius: 1 }}>✓ Rx OK</Box>
+        )}
+      </Stack>
+      <Box className="lens-keys" sx={{ mt: 0.4, fontSize: '0.56rem', fontWeight: 800, color: '#1e3a8a', bgcolor: '#e0e7ff', borderRadius: 1, px: 0.6, py: 0.2 }}>
+        ⌨ ←/P Pair · →/S Single · R/L eye · E Edit Rx · Enter next
+      </Box>
+    </Box>
+  );
+}
+
 // The switch that flips a discount field between % and ₹. Sized so it never makes the
 // field it sits in taller than its neighbours — a fixed-height inline square.
 const DiscModeToggle = ({ mode, onChange, size = 'sm' }) => {
@@ -206,10 +348,10 @@ const EMPTY_CUSTOMER = { id: '', name: '', phone: '', age: '', gender: 'MALE', a
 const EMPTY_RX = {
   sphOD: '', cylOD: '', axisOD: '', vaOD: '',
   sphOD_NV: '', cylOD_NV: '', axisOD_NV: '', vaOD_NV: '',
-  ipdOD: '', addOD: '',
+  ipdOD: '', addOD: '', prismOD: '', baseOD: '',
   sphOS: '', cylOS: '', axisOS: '', vaOS: '',
   sphOS_NV: '', cylOS_NV: '', axisOS_NV: '', vaOS_NV: '',
-  ipdOS: '', addOS: '',
+  ipdOS: '', addOS: '', prismOS: '', baseOS: '',
   notes: ''
 };
 // Rx -> the power description carried on a billing line and printed on the bill.
@@ -639,6 +781,8 @@ export default function NewSaleWizard({
     const taxPercent = parseFloat(String(record.gst ?? '').replace('%', '').trim()) || 0;
     handleAddItem({
       productId: record.id || null,
+      // Just created, so not in `products` yet — its lens pricing / stock settings come from here.
+      lensProduct: record,
       itemType: 'PRODUCT',
       barcode: String(record.barcode || record.code || ''),
       item: record.name || 'Lens',
@@ -750,6 +894,8 @@ export default function NewSaleWizard({
         vaOD_NV: matched.sub_nv_va_od || '',
         ipdOD: ipd,
         addOD: nearAdd,
+        prismOD: matched.sub_prism_od || subOd.prism || '',
+        baseOD: '',
         sphOS: sphOS,
         cylOS: cylOS,
         axisOS: axisOS,
@@ -760,6 +906,8 @@ export default function NewSaleWizard({
         vaOS_NV: matched.sub_nv_va_os || '',
         ipdOS: ipd,
         addOS: nearAdd,
+        prismOS: matched.sub_prism_os || subOs.prism || '',
+        baseOS: '',
         notes: matched.primary_diagnosis || matched.diagnosis || raw.diagnosis || ''
       });
     }
@@ -808,6 +956,8 @@ export default function NewSaleWizard({
       vaOD_NV: cust.vaOD_NV || '',
       ipdOD: ipd,
       addOD: nearAdd,
+      prismOD: cust.sub_prism_od || subOd.prism || '',
+      baseOD: '',
       sphOS: sphOS,
       cylOS: cylOS,
       axisOS: axisOS,
@@ -818,6 +968,8 @@ export default function NewSaleWizard({
       vaOS_NV: cust.vaOS_NV || '',
       ipdOS: ipd,
       addOS: nearAdd,
+      prismOS: cust.sub_prism_os || subOs.prism || '',
+      baseOS: '',
       notes: cust.primary_diagnosis || cust.diagnosis || cust.notes || ''
     });
   };
@@ -893,7 +1045,9 @@ export default function NewSaleWizard({
       rack: selectedProd.rack || selectedProd.rack_location || extra.rack || extra.rack_location || '',
       stock: selectedProd.stock ?? selectedProd.qty ?? null,
       category: (selectedProd.type || selectedProd.category || 'FRAME').toUpperCase(),
-      price: selectedProd.price || selectedProd.sellingPrice || 0,
+      ...lensEntryPricing(selectedProd, selectedProd.price || selectedProd.sellingPrice || 0),
+      price: lensEntryPricing(selectedProd, selectedProd.price || selectedProd.sellingPrice || 0).price
+        ?? (selectedProd.price || selectedProd.sellingPrice || 0),
       discMode: entryInput.discMode || 'PCT',
       discValue: 0,
       discPercent: 0,
@@ -922,7 +1076,9 @@ export default function NewSaleWizard({
   // row and handleAddItem can consume a search match the same way they consume a real selection.
   const buildEntryFromProduct = (p) => {
     const extra = p.extra_data || {};
+    const basePrice = p.price || p.sellingPrice || 0;
     return {
+      ...lensEntryPricing(p, basePrice),
       productId: p.id || '',
       barcode: String(p.barcode || p.id || p.code || ''),
       item: p.name || '',
@@ -937,13 +1093,108 @@ export default function NewSaleWizard({
       group: entryInput.group || 'GENERIC',
       power: '',
       qty: 1,
-      price: p.price || p.sellingPrice || 0,
+      price: lensEntryPricing(p, basePrice).price ?? basePrice,
       discMode: 'PCT',
       discValue: 0,
       discPercent: 0,
       taxPercent: 0
     };
   };
+
+  // ---- SPECTACLE LENS UNITS (Both Eyes = 1 Pair / Single Lens = 1 Piece) -------------------
+  // A lens line carries `lens` = {sellingUnit, eye, rx {re, le}, pricing, ...}. qty is the
+  // commercial quantity in that unit and price is per unit; the server works out the lenses and
+  // the stock to move (see utils/lensUnits.js + apps/sales/lens_units.py). Every other line has
+  // no `lens` and behaves exactly as before.
+  const singlePiecePercent = () => getBusinessPrefs()?.lens_single_piece_percent;
+  // A lens picked from the DB is offered as 1 Pair: its entry price is the configured pair price.
+  // `lensBase` keeps the product's own price so the line can price either unit from it.
+  function lensEntryPricing(p, basePrice) {
+    if (!isPairSellable(p)) return {};
+    return { lensBase: basePrice, price: lensPricing(p, basePrice, singlePiecePercent()).pairPrice };
+  }
+  const lensProductFor = (src) =>
+    (src.productId && products.find(x => String(x.id) === String(src.productId))) || src.lensProduct || null;
+  const isLensSource = (src) => {
+    if ((src.itemType === 'SERVICE') || src.category === 'SERVICE') return false;
+    const product = lensProductFor(src);
+    return product ? isPairSellable(product) : isSpectacleLensCategory(src.category);
+  };
+  // New lens line state: defaults to Both Eyes – 1 Pair, prescription taken (and kept in step)
+  // from the prescription grid until it is edited on the line itself.
+  const makeLensState = (product, basePrice) => {
+    const extra = product?.extra_data || {};
+    return {
+      sellingUnit: PAIR,
+      eye: BOTH,
+      rx: rxFromGrid(rxData),
+      rxLinked: true,
+      rxSource: testNo ? `Test No ${testNo}` : (selectedCustomerId ? 'Patient prescription' : 'Prescription grid'),
+      lensIndex: extra.refractive_index || (powerChecked ? lensIndex : ''),
+      specs: { design: extra.lens_design || '', index: extra.refractive_index || '', coating: extra.coating || '' },
+      pricing: lensPricing(product, basePrice, singlePiecePercent()),
+    };
+  };
+  const lensErrorsFor = (row) => (row?.lens
+    ? validateLensLine(row.lens, { requireComplete: docType !== 'Quotation' }).errors
+    : []);
+
+  // Pair ↔ Single Lens on a line: the qty stays, the unit price switches to the product's
+  // configured price for the new unit (never edits the product), and the cashier is told.
+  const setLensUnit = (id, unit, eyeChoice) => {
+    const row = itemsList.find(r => r.id === id);
+    if (!row?.lens || row.lens.sellingUnit === unit) {
+      // Already that unit: R / L on the card still just picks the eye.
+      if (row?.lens && eyeChoice) setLensEye(id, eyeChoice);
+      return;
+    }
+    const { re, le } = row.lens.rx || {};
+    const onlyEye = eyeEntered(re) !== eyeEntered(le) ? (eyeEntered(re) ? RE : LE) : '';
+    const lens = { ...row.lens, sellingUnit: unit, eye: unit === PAIR ? BOTH : (eyeChoice || onlyEye) };
+    const pricing = lens.pricing || lensPricing(null, row.price, singlePiecePercent());
+    const price = unitPrice(pricing, unit);
+    setItemsList(prev => prev.map(r => (r.id === id
+      ? withLineAmounts({ ...r, lens: { ...lens, pricing }, price, power: lensPowerText(lens) })
+      : r)));
+    notify(`${row.item}: ${unit === PAIR ? 'Both Eyes' : 'Single Lens'} — ${qtyLabel(unit, row.qty)} at ${money2(price)} per ${unitWord(unit)} (${priceBasis(pricing, unit)}).`);
+  };
+  const setLensEye = (id, eye) => {
+    setItemsList(prev => prev.map(r => {
+      if (r.id !== id || !r.lens) return r;
+      const lens = { ...r.lens, eye };
+      return { ...r, lens, power: lensPowerText(lens) };
+    }));
+  };
+  // A prescription value typed on the line itself unlinks it from the prescription grid.
+  const setLensRx = (id, eyeKey, field, value) => {
+    setItemsList(prev => prev.map(r => {
+      if (r.id !== id || !r.lens) return r;
+      const rx = { ...r.lens.rx, [eyeKey]: { ...(r.lens.rx?.[eyeKey] || {}), [field]: value } };
+      const lens = { ...r.lens, rx, rxLinked: false, rxSource: 'Entered on the line' };
+      return { ...r, lens, power: lensPowerText(lens) };
+    }));
+  };
+  const relinkLensRx = (id) => {
+    setItemsList(prev => prev.map(r => {
+      if (r.id !== id || !r.lens) return r;
+      const lens = { ...r.lens, rx: rxFromGrid(rxData), rxLinked: true, rxSource: testNo ? `Test No ${testNo}` : 'Prescription grid' };
+      return { ...r, lens, power: lensPowerText(lens) };
+    }));
+  };
+  // Lines still linked to the prescription grid follow it as it is typed / loaded.
+  useEffect(() => {
+    setItemsList(prev => {
+      let changed = false;
+      const rx = rxFromGrid(rxData);
+      const next = prev.map(r => {
+        if (!r.lens?.rxLinked || JSON.stringify(r.lens.rx) === JSON.stringify(rx)) return r;
+        changed = true;
+        const lens = { ...r.lens, rx };
+        return { ...r, lens, power: lensPowerText(lens) };
+      });
+      return changed ? next : prev;
+    });
+  }, [rxData]);
 
   // Maps a Service Master record onto the entryInput shape so a service flows through the exact
   // same computeEntryLine + handleAddItem path as a product — no parallel code, no separate bill.
@@ -1097,14 +1348,22 @@ export default function NewSaleWizard({
       return;
     }
 
-    const { qty, price, discMode, discValue, discPercent, taxPercent, gross, disc, tax, total, power } = computeEntryLine(src);
+    // Spectacle lens → a Both Eyes – 1 Pair line priced at the configured pair price, with the
+    // prescription from the grid. (A typed price on a manual lens entry is taken as the pair price.)
+    const lens = isLensSource(src)
+      ? makeLensState(lensProductFor(src), src.lensBase ?? src.price)
+      : null;
+    const lineSrc = lens ? { ...src, price: lens.pricing.pairPrice } : src;
+    const { qty, price, discMode, discValue, discPercent, taxPercent, gross, disc, tax, total, power: rxPower } = computeEntryLine(lineSrc);
+    const power = lens ? lensPowerText(lens) : rxPower;
 
     const isService = (src.itemType === 'SERVICE') || src.category === 'SERVICE';
     const newItem = {
+      lens,
       id: `ITEM-${Date.now()}`,
       productId: src.productId || null,
       serviceId: src.serviceId || null,
-      itemType: isService ? 'SERVICE' : (src.itemType || 'PRODUCT'),
+      itemType: isService ? 'SERVICE' : (lens ? 'LENS' : (src.itemType || 'PRODUCT')),
       serviceDetails: src.serviceDetails || null,
       barcode: src.barcode || `BC-${Math.floor(1000 + Math.random() * 9000)}`,
       item: src.item,
@@ -1195,6 +1454,14 @@ export default function NewSaleWizard({
       taxPercent: scanTaxPercent,
       total: price + scanTaxVal
     };
+    // A scanned spectacle lens becomes a Both Eyes – 1 Pair line at the configured pair price.
+    if (isPairSellable(found)) {
+      const lens = makeLensState(found, price);
+      setItemsList(prev => [...prev, withLineAmounts({
+        ...newItem, itemType: 'LENS', lens, price: lens.pricing.pairPrice, power: lensPowerText(lens),
+      })]);
+      return;
+    }
     setItemsList(prev => [...prev, newItem]);
   };
 
@@ -1483,7 +1750,14 @@ export default function NewSaleWizard({
     const product = it.product ? products.find(p => String(p.id) === String(it.product)) : null;
     const isService = String(it.item_type || '').toUpperCase() === 'SERVICE';
     const description = it.description || product?.name || li?.item || 'Item';
+    // A lens line comes back with its saved unit, eye and prescription (never re-linked to the
+    // prescription grid, so reopening a bill can't change what was ordered).
+    const lens = lensFromSavedItem(it);
+    if (lens && !lens.pricing) {
+      lens.pricing = lensPricing(product, product ? (product.price || product.sellingPrice || 0) : price, singlePiecePercent());
+    }
     return {
+      lens,
       id: `ITEM-${Date.now()}-${idx}`,
       productId: it.product || null,
       serviceId: it.service || null,
@@ -1709,6 +1983,12 @@ export default function NewSaleWizard({
     if (mode !== 'service') focusNsFieldSoon('search');
   };
   const nsShortcutsActive = viewMode === 'single-page' && !formLocked;
+  // The lens line whose cell has the cursor, else the last lens line on the bill.
+  const targetLensRow = () => {
+    const rowId = document.activeElement?.closest?.('[data-item-row]')?.getAttribute('data-item-row');
+    const focused = rowId ? itemsList.find(r => r.id === rowId && r.lens) : null;
+    return focused || [...itemsList].reverse().find(r => r.lens) || null;
+  };
   const nsShortcuts = {
     customerName: () => focusNsField('customerName'),
     patient: () => {
@@ -1741,6 +2021,26 @@ export default function NewSaleWizard({
       if (!rowEl || !posRootRef.current?.contains(rowEl)) return false;
       handleRemoveItem(rowEl.getAttribute('data-item-row'));
       focusNsFieldSoon('search');
+      return true;
+    },
+    lensUnit: () => {
+      const row = targetLensRow();
+      if (!row) { notify('No lens line on the bill yet.'); return true; }
+      setLensUnit(row.id, row.lens.sellingUnit === PAIR ? PIECE : PAIR);
+      return true;
+    },
+    lensFocus: () => {
+      const row = targetLensRow();
+      const el = row && posRootRef.current?.querySelector(`[data-lens-card="${row.id}"]`);
+      if (!el) { notify('No lens line on the bill yet.'); return true; }
+      el.scrollIntoView({ block: 'nearest' });
+      el.focus();
+      return true;
+    },
+    lensEye: () => {
+      const row = targetLensRow();
+      if (!row || row.lens.sellingUnit !== PIECE) { notify('Alt+E switches the eye of a Single Lens line.'); return true; }
+      setLensEye(row.id, row.lens.eye === RE ? LE : RE);
       return true;
     },
     coupon: () => focusNsField('coupon'),
@@ -1858,6 +2158,38 @@ export default function NewSaleWizard({
       customerNameRef.current?.focus();
       return;
     }
+    // Lens lines: an Order / Invoice can't go out with a missing, one-eyed (on a pair) or invalid
+    // prescription — open the first such line to fix it. A Quotation may be an estimate made before
+    // the prescription is known: invalid values still block it, an incomplete one asks first.
+    const badLens = itemsList.map(r => ({ r, errors: lensErrorsFor(r) })).find(x => x.errors.length);
+    if (badLens) {
+      notify(`${badLens.r.item}: ${badLens.errors[0]}`);
+      setEditDialogId(badLens.r.id);
+      return;
+    }
+    if (docType === 'Quotation') {
+      const incomplete = itemsList.filter(r => r.lens && validateLensLine(r.lens).errors.length);
+      if (incomplete.length && !window.confirm(
+        `${incomplete.map(r => r.item).join(', ')}: the lens prescription is not complete.\n\n`
+        + 'OK: save the quotation as an estimate anyway (it must be completed before it becomes an order or invoice).\n'
+        + 'Cancel: go back and complete the prescription.'
+      )) return;
+    }
+    // A single lens of a lens counted in pairs takes a whole pair out of stock — say so first.
+    if (docType === 'Invoice') {
+      // Counted per product across the bill, as the server does (RE + LE single lenses = 1 pair).
+      const lensesByProduct = {};
+      itemsList.forEach(r => {
+        if (!r.lens || !r.productId || r.lens.pricing?.stockUnit === PIECE) return;
+        lensesByProduct[r.productId] = (lensesByProduct[r.productId] || 0) + physicalQty(r.lens.sellingUnit, r.qty);
+      });
+      const broken = itemsList.filter(r => r.lens && lensesByProduct[r.productId] % 2 === 1);
+      if (broken.length && !window.confirm(
+        `${broken.map(r => `${r.item} (${qtyLabel(r.lens.sellingUnit, r.qty)})`).join(', ')}\n\n`
+        + 'This lens stock is counted in pairs, so selling a single lens takes 1 whole pair out of stock.\n'
+        + "OK: continue.   Cancel: go back (set the product's stock unit to Pieces to count single lenses)."
+      )) return;
+    }
     // More tendered than the bill: go ahead only once the cashier confirms the excess is being
     // handed back as change / refund. The bill then records just what the shop keeps.
     if (changeDue > 0.009) {
@@ -1967,7 +2299,9 @@ export default function NewSaleWizard({
             unit_price: i.price,
             tax_rate: i.taxPercent,
             tax_amount: i.tax,
-            subtotal: i.total
+            subtotal: i.total,
+            // Lens lines: selling unit (Pair / Piece), eye, lens count and the per-eye prescription.
+            ...lensToPayload(i.lens, i.qty)
           }))
         };
         // Editing updates the same record in place (the backend swaps its items and moves stock
@@ -2516,6 +2850,18 @@ export default function NewSaleWizard({
                           InputLabelProps={{ shrink: true, style: { fontWeight: 800, fontSize: '0.8rem', color: '#2563eb' } }}
                           inputProps={{ 'data-rx-cell': '2:2', style: { fontWeight: 900, color: '#2563eb', fontSize: '0.9rem', padding: '6px' } }} 
                         />
+                        <TextField
+                          fullWidth size="small" label="PRISM" placeholder="0.5"
+                          value={rxData.prismOD} onChange={(e) => setRxData({ ...rxData, prismOD: e.target.value })}
+                          InputLabelProps={{ shrink: true, style: { fontWeight: 800, fontSize: '0.8rem' } }}
+                          inputProps={{ 'data-rx-cell': '2:3', style: { fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }}
+                        />
+                        <TextField
+                          fullWidth size="small" label="BASE" placeholder="IN/OUT/UP/DOWN"
+                          value={rxData.baseOD} onChange={(e) => setRxData({ ...rxData, baseOD: e.target.value.toUpperCase() })}
+                          InputLabelProps={{ shrink: true, style: { fontWeight: 800, fontSize: '0.8rem' } }}
+                          inputProps={{ style: { fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }}
+                        />
                       </Box>
                     </Paper>
                   </Grid>
@@ -2564,6 +2910,18 @@ export default function NewSaleWizard({
                           value={rxData.addOS} onChange={(e) => setRxData({ ...rxData, addOS: e.target.value })} 
                           InputLabelProps={{ shrink: true, style: { fontWeight: 800, fontSize: '0.8rem', color: '#059669' } }}
                           inputProps={{ 'data-rx-cell': '2:6', style: { fontWeight: 900, color: '#059669', fontSize: '0.9rem', padding: '6px' } }} 
+                        />
+                        <TextField
+                          fullWidth size="small" label="PRISM" placeholder="0.5"
+                          value={rxData.prismOS} onChange={(e) => setRxData({ ...rxData, prismOS: e.target.value })}
+                          InputLabelProps={{ shrink: true, style: { fontWeight: 800, fontSize: '0.8rem' } }}
+                          inputProps={{ 'data-rx-cell': '2:7', style: { fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }}
+                        />
+                        <TextField
+                          fullWidth size="small" label="BASE" placeholder="IN/OUT/UP/DOWN"
+                          value={rxData.baseOS} onChange={(e) => setRxData({ ...rxData, baseOS: e.target.value.toUpperCase() })}
+                          InputLabelProps={{ shrink: true, style: { fontWeight: 800, fontSize: '0.8rem' } }}
+                          inputProps={{ style: { fontWeight: 900, fontSize: '0.9rem', padding: '6px' } }}
                         />
                       </Box>
                     </Paper>
@@ -2966,7 +3324,7 @@ export default function NewSaleWizard({
                     <TableCell sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Size</TableCell>
                     <TableCell sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Brand</TableCell>
                     <TableCell sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Category</TableCell>
-                    <TableCell sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Power</TableCell>
+                    <TableCell sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem', minWidth: 264 }}>Unit · Power (Rx)</TableCell>
                     <TableCell align="center" sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Qty</TableCell>
                     <TableCell align="right" sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Price</TableCell>
                     <TableCell align="right" sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Disc.</TableCell>
@@ -3039,9 +3397,15 @@ export default function NewSaleWizard({
                         <TableCell sx={{ fontSize: '0.8rem' }}>
                           <Chip label={src.category} size="small" color="primary" variant="outlined" sx={{ fontWeight: 800, height: 20, fontSize: '0.65rem' }} />
                         </TableCell>
-                        <TableCell sx={{ fontSize: '0.8rem', color: '#2563eb', fontWeight: 700 }}>{line.power}</TableCell>
-                        <TableCell align="center" sx={{ fontWeight: 900, fontSize: '0.85rem' }}>{line.qty}</TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>₹{line.price.toFixed(2)}</TableCell>
+                        <TableCell sx={{ fontSize: '0.8rem', color: '#2563eb', fontWeight: 700 }}>
+                          {isLensSource(src) ? <Box component="span" sx={{ fontSize: '0.68rem' }}>Both Eyes · 1 Pair (2 Lenses)</Box> : line.power}
+                        </TableCell>
+                        <TableCell align="center" sx={{ fontWeight: 900, fontSize: '0.85rem' }}>
+                          {line.qty}{isLensSource(src) ? <Box component="span" sx={{ display: 'block', fontSize: '0.6rem', color: 'text.secondary' }}>Pair</Box> : null}
+                        </TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>
+                          ₹{line.price.toFixed(2)}{isLensSource(src) ? <Box component="span" sx={{ display: 'block', fontSize: '0.6rem', color: 'text.secondary' }}>per Pair</Box> : null}
+                        </TableCell>
                         <TableCell align="right" sx={{ color: 'error.main', fontSize: '0.8rem' }}>₹{line.disc.toFixed(2)}</TableCell>
                         <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>₹{line.gross.toFixed(2)}</TableCell>
                         <TableCell align="right" sx={{ fontSize: '0.8rem', color: '#0f766e' }}>₹{line.tax.toFixed(2)} ({line.taxPercent || 0}%)</TableCell>
@@ -3145,9 +3509,15 @@ export default function NewSaleWizard({
                       <TableCell sx={{ fontSize: '0.8rem' }}>
                         <Chip label={previewSource.category} size="small" color="primary" variant="outlined" sx={{ fontWeight: 800, height: 20, fontSize: '0.65rem' }} />
                       </TableCell>
-                      <TableCell sx={{ fontSize: '0.8rem', color: '#2563eb', fontWeight: 700 }}>{previewLine.power}</TableCell>
-                      <TableCell align="center" sx={{ fontWeight: 900, fontSize: '0.85rem' }}>{previewLine.qty}</TableCell>
-                      <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>₹{previewLine.price.toFixed(2)}</TableCell>
+                      <TableCell sx={{ fontSize: '0.8rem', color: '#2563eb', fontWeight: 700 }}>
+                        {isLensSource(previewSource) ? <Box component="span" sx={{ fontSize: '0.68rem' }}>Both Eyes · 1 Pair (2 Lenses)</Box> : previewLine.power}
+                      </TableCell>
+                      <TableCell align="center" sx={{ fontWeight: 900, fontSize: '0.85rem' }}>
+                        {previewLine.qty}{isLensSource(previewSource) ? <Box component="span" sx={{ display: 'block', fontSize: '0.6rem', color: 'text.secondary' }}>Pair</Box> : null}
+                      </TableCell>
+                      <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>
+                        ₹{previewLine.price.toFixed(2)}{isLensSource(previewSource) ? <Box component="span" sx={{ display: 'block', fontSize: '0.6rem', color: 'text.secondary' }}>per Pair</Box> : null}
+                      </TableCell>
                       <TableCell align="right" sx={{ color: 'error.main', fontSize: '0.8rem' }}>
                         ₹{previewLine.disc.toFixed(2)}{previewLine.disc ? ` (${previewLine.discPercent.toFixed(2)}%)` : ''}
                       </TableCell>
@@ -3202,12 +3572,33 @@ export default function NewSaleWizard({
                         <TableCell sx={{ fontSize: '0.8rem' }}>
                           <Chip label={isSvcRow ? 'SERVICE' : row.category} size="small" color={isSvcRow ? 'warning' : 'primary'} variant="outlined" sx={{ fontWeight: 800, height: 20, fontSize: '0.65rem' }} />
                         </TableCell>
-                        <TableCell sx={{ fontSize: '0.8rem', color: '#2563eb', fontWeight: 700 }}>{row.power}</TableCell>
+                        <TableCell sx={{ fontSize: '0.8rem', color: '#2563eb', fontWeight: 700 }}>
+                          {row.lens ? (
+                            <LensLineCell
+                              lens={row.lens}
+                              errors={lensErrorsFor(row)}
+                              onUnit={(u, eye) => setLensUnit(row.id, u, eye)}
+                              onEye={(e) => setLensEye(row.id, e)}
+                              onEditRx={() => setEditDialogId(row.id)}
+                              rowId={row.id}
+                            />
+                          ) : row.power}
+                        </TableCell>
                         <TableCell align="center" sx={{ fontWeight: 900, fontSize: '0.85rem' }}>
                           {cellInput('qty', { type: 'number', width: 44, align: 'center' })}
+                          {row.lens && (
+                            <Box component="span" data-lens-qty={row.id} sx={{ display: 'block', fontSize: '0.6rem', fontWeight: 800, color: '#1e3a8a', whiteSpace: 'nowrap' }}>
+                              {unitWord(row.lens.sellingUnit, row.qty)} · {physicalQty(row.lens.sellingUnit, row.qty)} {physicalQty(row.lens.sellingUnit, row.qty) === 1 ? 'lens' : 'lenses'}
+                            </Box>
+                          )}
                         </TableCell>
                         <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>
                           {cellInput('price', { type: 'number', width: 64, align: 'right' })}
+                          {row.lens && (
+                            <Box component="span" sx={{ display: 'block', fontSize: '0.6rem', fontWeight: 800, color: '#1e3a8a', whiteSpace: 'nowrap' }}>
+                              per {unitWord(row.lens.sellingUnit)}
+                            </Box>
+                          )}
                         </TableCell>
                         <TableCell align="right" sx={{ color: 'error.main', fontSize: '0.8rem' }}>
                           {/* % of gross or a flat ₹ off — the chip switches the mode, the caption
@@ -3247,7 +3638,7 @@ export default function NewSaleWizard({
           </Card>
 
           {/* Popup editor — same live row data as the inline ✏️, just in a window */}
-          <Dialog open={!!editDialogRow} onClose={closeEditDialog} maxWidth="sm" fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
+          <Dialog open={!!editDialogRow} onClose={closeEditDialog} maxWidth={editDialogRow?.lens ? 'md' : 'sm'} fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>
             <DialogTitle sx={{ fontWeight: 800 }}>Edit Item — {editDialogRow?.item}</DialogTitle>
             {editDialogRow && (() => {
               const isSvc = (editDialogRow.itemType === 'SERVICE') || editDialogRow.category === 'SERVICE';
@@ -3279,7 +3670,12 @@ export default function NewSaleWizard({
                         <TextField fullWidth size="small" label="Category" value={editDialogRow.category || ''} onChange={fld('category')} />
                       </Grid>
                       <Grid item xs={6} sm={4}>
-                        <TextField fullWidth size="small" label="Power" value={editDialogRow.power || ''} onChange={fld('power')} />
+                        {editDialogRow.lens ? (
+                          <TextField fullWidth size="small" label="Power (from the prescription below)" value={editDialogRow.power || ''}
+                            InputProps={{ readOnly: true }} />
+                        ) : (
+                          <TextField fullWidth size="small" label="Power" value={editDialogRow.power || ''} onChange={fld('power')} />
+                        )}
                       </Grid>
                       {!isSvc && (
                         <>
@@ -3293,14 +3689,107 @@ export default function NewSaleWizard({
                       )}
                     </Grid>
 
+                    {editDialogRow.lens && (() => {
+                      const lens = editDialogRow.lens;
+                      const isPiece = lens.sellingUnit === PIECE;
+                      const errors = lensErrorsFor(editDialogRow);
+                      const rowId = editDialogRow.id;
+                      const eyeRow = (key, label, color) => {
+                        const eye = lens.rx?.[key] || {};
+                        const off = isPiece && lens.eye !== (key === 're' ? RE : LE);
+                        const cell = (field, ph, width, dioptre) => (
+                          <TableCell sx={{ p: 0.4 }}>
+                            <TextField size="small" value={eye[field] ?? ''} placeholder={ph} disabled={off}
+                              onChange={(e) => setLensRx(rowId, key, field, e.target.value)}
+                              onBlur={dioptre ? (e) => { const f = formatDioptre(e.target.value); if (f !== e.target.value) setLensRx(rowId, key, field, f); } : undefined}
+                              inputProps={{ 'data-lens-rx': `${key}-${field}`, style: { textAlign: 'center', fontWeight: 800, fontSize: '0.82rem', padding: '5px', width } }} />
+                          </TableCell>
+                        );
+                        return (
+                          <TableRow sx={{ opacity: off ? 0.45 : 1 }}>
+                            <TableCell sx={{ fontWeight: 900, color, whiteSpace: 'nowrap', fontSize: '0.78rem' }}>{label}</TableCell>
+                            {cell('sph', '-2.50', 62, true)}
+                            {cell('cyl', '-0.75', 62, true)}
+                            {cell('axis', '90', 44)}
+                            {cell('add', '+2.00', 58, true)}
+                            {cell('prism', '0.5', 44)}
+                            <TableCell sx={{ p: 0.4 }}>
+                              <TextField select size="small" value={eye.base || ''} disabled={off}
+                                onChange={(e) => setLensRx(rowId, key, 'base', e.target.value)}
+                                SelectProps={{ displayEmpty: true, style: { fontSize: '0.78rem', fontWeight: 800, minWidth: 64 } }}>
+                                <MenuItem value="">—</MenuItem>
+                                {BASE_OPTIONS.map(b => <MenuItem key={b} value={b}>{b}</MenuItem>)}
+                              </TextField>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      };
+                      return (
+                        <>
+                          <Divider />
+                          <Typography variant="caption" fontWeight={900} color="text.secondary">LENS TYPE & PRESCRIPTION</Typography>
+                          <RadioGroup row value={lens.sellingUnit} onChange={(e) => setLensUnit(rowId, e.target.value)}>
+                            <FormControlLabel value={PAIR} control={<Radio size="small" />}
+                              label={<Typography variant="body2" fontWeight={800}>Both Eyes – 1 Pair (2 Lenses)</Typography>} />
+                            <FormControlLabel value={PIECE} control={<Radio size="small" />}
+                              label={<Typography variant="body2" fontWeight={800}>Single Lens – 1 Piece</Typography>} />
+                          </RadioGroup>
+                          {isPiece && (
+                            <RadioGroup row value={lens.eye || ''} onChange={(e) => setLensEye(rowId, e.target.value)}>
+                              <Typography variant="body2" fontWeight={800} sx={{ alignSelf: 'center', mr: 1.5 }}>Eye:</Typography>
+                              <FormControlLabel value={RE} control={<Radio size="small" />} label={<Typography variant="body2" fontWeight={800}>Right (RE / OD)</Typography>} />
+                              <FormControlLabel value={LE} control={<Radio size="small" />} label={<Typography variant="body2" fontWeight={800}>Left (LE / OS)</Typography>} />
+                            </RadioGroup>
+                          )}
+                          <TableContainer component={Paper} variant="outlined" sx={{ borderRadius: 2 }}>
+                            <Table size="small">
+                              <TableHead sx={{ bgcolor: '#f1f5f9' }}>
+                                <TableRow>
+                                  {['Eye', 'SPH', 'CYL', 'AXIS', 'ADD', 'PRISM', 'BASE'].map(h => (
+                                    <TableCell key={h} align={h === 'Eye' ? 'left' : 'center'} sx={{ fontWeight: 900, fontSize: '0.72rem', py: 0.5 }}>{h}</TableCell>
+                                  ))}
+                                </TableRow>
+                              </TableHead>
+                              <TableBody>
+                                {eyeRow('re', 'Right (RE / OD)', '#2563eb')}
+                                {eyeRow('le', 'Left (LE / OS)', '#059669')}
+                              </TableBody>
+                            </Table>
+                          </TableContainer>
+                          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                            <Button size="small" variant="outlined" onClick={() => relinkLensRx(rowId)} sx={{ textTransform: 'none', fontWeight: 800 }}>
+                              Use the patient prescription (Rx grid)
+                            </Button>
+                            <Typography variant="caption" color="text.secondary" fontWeight={700}>
+                              {lens.rxLinked ? 'Following the prescription grid.' : `Prescription: ${lens.rxSource || 'entered on this line'}.`}
+                              {' '}Unentered values stay blank — they are never taken as 0.
+                            </Typography>
+                          </Stack>
+                          {errors.length > 0 && (
+                            <Alert severity="warning" sx={{ py: 0.25 }}>
+                              {errors.map((e, i) => <div key={i}>{e}</div>)}
+                            </Alert>
+                          )}
+                          <Alert severity="info" icon={false} sx={{ py: 0.25, fontWeight: 700 }}>
+                            Quantity: <b>{qtyLabel(lens.sellingUnit, editDialogRow.qty)}</b> · Unit price: <b>{money2(editDialogRow.price)} per {unitWord(lens.sellingUnit)}</b>
+                            {lens.pricing && <> (configured: {priceBasis(lens.pricing, lens.sellingUnit)})</>}
+                            {lens.pricing && <> · Stock: {stockHint(lens.sellingUnit, editDialogRow.qty, lens.pricing.stockUnit)}</>}
+                          </Alert>
+                        </>
+                      );
+                    })()}
+
                     <Divider />
                     <Typography variant="caption" fontWeight={900} color="text.secondary">PRICING</Typography>
                     <Grid container spacing={2}>
                       <Grid item xs={6}>
-                        <TextField fullWidth size="small" label="Qty" type="number" value={editDialogRow.qty} onChange={fld('qty')} />
+                        <TextField fullWidth size="small" type="number" value={editDialogRow.qty} onChange={fld('qty')}
+                          label={editDialogRow.lens ? `Qty (${unitWord(editDialogRow.lens.sellingUnit, 2)})` : 'Qty'}
+                          helperText={editDialogRow.lens ? qtyLabel(editDialogRow.lens.sellingUnit, editDialogRow.qty) : undefined} />
                       </Grid>
                       <Grid item xs={6}>
-                        <TextField fullWidth size="small" label="Price (₹)" type="number" value={editDialogRow.price} onChange={fld('price')} />
+                        <TextField fullWidth size="small" type="number" value={editDialogRow.price} onChange={fld('price')}
+                          label={editDialogRow.lens ? `Price per ${unitWord(editDialogRow.lens.sellingUnit)} (₹)` : 'Price (₹)'} />
                       </Grid>
                       <Grid item xs={6}>
                         <TextField

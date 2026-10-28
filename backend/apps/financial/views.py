@@ -9,7 +9,7 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
-from . import integration, reports
+from . import integration, reports, settlements
 from .accounting_catalog import SOURCES, ROLES
 from .mapping import role_status, save_mapping, deactivate_mapping, accounts_in_active_mappings
 from .models import (
@@ -52,6 +52,17 @@ def _date_param(request, name, default=None):
         raise AccountingError(f"'{request.query_params.get(name)}' is not a valid {name} (use YYYY-MM-DD).")
 
 
+def _check_voucher_date(date, user):
+    """Backdating window (Accounting policy) and a sanity cap on future dates for posted vouchers."""
+    policy = AccountingPolicy.get()
+    if (policy.backdate_limit_days
+            and date < timezone.localdate() - datetime.timedelta(days=policy.backdate_limit_days)
+            and user_role(user) not in FINANCE_OVERRIDE_ROLES):
+        raise AccountingError(f"Vouchers dated more than {policy.backdate_limit_days} day(s) back need an Administrator.")
+    if date > timezone.localdate() + datetime.timedelta(days=366):
+        raise AccountingError('Voucher date is too far in the future.')
+
+
 class FinanceViewSetMixin:
     permission_classes = [FinancePermission]
     pagination_class = OptionalPagination
@@ -81,7 +92,8 @@ class ChartOfAccountViewSet(FinanceViewSetMixin, viewsets.ModelViewSet):
         p = self.request.query_params
         if p.get('search'):
             s = p['search'].strip()
-            qs = qs.filter(Q(code__icontains=s) | Q(name__icontains=s) | Q(account_group__name__icontains=s))
+            qs = qs.filter(Q(code__icontains=s) | Q(name__icontains=s) | Q(account_group__name__icontains=s)
+                           | Q(parent_account__name__icontains=s) | Q(description__icontains=s))
         if p.get('account_type'):
             qs = qs.filter(account_group__account_type__iexact=p['account_type'])
         if p.get('status'):
@@ -186,12 +198,9 @@ class JournalEntryViewSet(FinanceViewSetMixin, viewsets.ModelViewSet):
         ser = VoucherInputSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         data = ser.validated_data
-        policy = AccountingPolicy.get()
-        if (data['status'] == 'POSTED' and policy.backdate_limit_days
-                and data['date'] < timezone.localdate() - datetime.timedelta(days=policy.backdate_limit_days)
-                and user_role(request.user) not in FINANCE_OVERRIDE_ROLES):
-            raise AccountingError(f"Vouchers dated more than {policy.backdate_limit_days} day(s) back need an Administrator.")
-        if data['date'] > timezone.localdate() + datetime.timedelta(days=366):
+        if data['status'] == 'POSTED':
+            _check_voucher_date(data['date'], request.user)
+        elif data['date'] > timezone.localdate() + datetime.timedelta(days=366):
             raise AccountingError('Voucher date is too far in the future.')
         return data
 
@@ -260,7 +269,9 @@ class JournalEntryViewSet(FinanceViewSetMixin, viewsets.ModelViewSet):
             return _error(f"{entry.entry_number} was posted automatically from {entry.source_key} {entry.source_number}. "
                           f"Correct or cancel the source document instead; pass confirm_automated to override.")
         try:
-            reversal = reverse_entry(entry, user=request.user, reason=reason)
+            with transaction.atomic():
+                reversal = reverse_entry(entry, user=request.user, reason=reason)
+                settlements.on_voucher_reversed(entry)
         except AccountingError as exc:
             return _error(exc)
         audit('JOURNAL_REVERSED', 'journal', entry.pk, f"{entry.entry_number} reversed by {reversal.entry_number}: {reason}",
@@ -323,6 +334,15 @@ def general_ledger_view(request):
     acc = get_object_or_404(ChartOfAccount.all_objects, pk=request.query_params.get('account'))
     return reports.general_ledger(acc, _date_param(request, 'date_from'), _date_param(request, 'date_to'),
                                   request.query_params.get('branch'))
+
+
+@_report
+def ledger_register_view(request):
+    p = request.query_params
+    sources = [s for s in (p.get('source') or '').split(',') if s.strip()]
+    return reports.ledger_register(_date_param(request, 'date_from'), _date_param(request, 'date_to'),
+                                   p.get('branch'), sources=sources,
+                                   services_only=p.get('services') in ('1', 'true'), search=p.get('search') or '')
 
 
 @_report
@@ -560,3 +580,99 @@ class FinancialAuditLogViewSet(FinanceViewSetMixin, viewsets.ReadOnlyModelViewSe
         if self.request.query_params.get('object_type'):
             qs = qs.filter(object_type=self.request.query_params['object_type'])
         return qs[:1000] if 'page' not in self.request.query_params else qs
+
+
+# ---------------------------------------------------------------------------
+# Bill-to-bill settlement (Receipt / Payment Voucher "Bill to Bill" mode) — see settlements.py
+# ---------------------------------------------------------------------------
+
+@_report
+def settlement_parties_view(request):
+    p = request.query_params
+    voucher = (p.get('voucher') or 'RV').upper()
+    if voucher not in settlements.PARTY_KINDS:
+        raise AccountingError("voucher must be RV or PV.")
+    kind = p.get('kind') or None
+    if kind and kind not in settlements.PARTY_KINDS[voucher]:
+        raise AccountingError(f"'{kind}' is not a party type for {voucher}.")
+    try:
+        limit = int(p.get('limit') or 50)
+    except ValueError:
+        raise AccountingError('limit must be a number.')
+    return settlements.search_parties(voucher, p.get('search') or '', kind=kind,
+                                      only_due=p.get('only_due') in ('1', 'true'), limit=limit,
+                                      date_from=_date_param(request, 'date_from'), date_to=_date_param(request, 'date_to'))
+
+
+@_report
+def settlement_due_bills_view(request):
+    p = request.query_params
+    kind = p.get('party_kind')
+    if kind not in ('customer', 'dealer', 'supplier'):
+        raise AccountingError('party_kind must be customer, dealer or supplier.')
+    try:
+        import uuid
+        party = uuid.UUID(str(p.get('party')))
+    except (ValueError, TypeError):
+        raise AccountingError('party must be a valid id.')
+    bills = settlements.open_bills(kind, party_ids=[party], date_from=_date_param(request, 'date_from'),
+                                   date_to=_date_param(request, 'date_to')).get(party, [])
+    money_fields = ('total', 'paid', 'due')
+    bills = [{k: (str(v) if k in money_fields else v) for k, v in b.items()} for b in bills]
+    return {'party_kind': kind, 'party': str(party), 'bills': bills,
+            'total_due': str(sum((settlements.money(b['due']) for b in bills), settlements.ZERO))}
+
+
+def _settlement_input(request, voucher):
+    ser = settlements.SettlementInputSerializer(data=request.data)
+    ser.is_valid(raise_exception=True)
+    data = ser.validated_data
+    if data['party_kind'] not in settlements.PARTY_KINDS[voucher]:
+        raise AccountingError(f"A {'Receipt' if voucher == 'RV' else 'Payment'} Voucher cannot settle {data['party_kind']} bills.")
+    _check_voucher_date(data['date'], request.user)
+    return data
+
+
+@api_view(['POST'])
+@permission_classes([FinancePermission])
+def settlement_receipt_view(request):
+    try:
+        result, created = settlements.post_bill_receipt(_settlement_input(request, 'RV'), user=request.user)
+    except AccountingError as exc:
+        return _error(exc)
+    return Response(dict(result, duplicate=not created), status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([FinancePermission])
+def settlement_payment_view(request):
+    try:
+        entry, created = settlements.post_bill_payment(_settlement_input(request, 'PV'), user=request.user)
+    except AccountingError as exc:
+        return _error(exc)
+    return Response(dict(JournalEntrySerializer(entry).data, duplicate=not created),
+                    status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([FinancePermission])
+def settlement_batch_view(request, voucher):
+    """Several parties settled together (Bill to Bill with more than one party ticked)."""
+    voucher = voucher.upper()
+    if voucher not in settlements.PARTY_KINDS:
+        return _error('voucher must be RV or PV.')
+    ser = settlements.BatchInputSerializer(data=request.data)
+    ser.is_valid(raise_exception=True)
+    try:
+        items = ser.validated_data['settlements']
+        for data in items:
+            if data['party_kind'] not in settlements.PARTY_KINDS[voucher]:
+                raise AccountingError(f"A {'Receipt' if voucher == 'RV' else 'Payment'} Voucher cannot settle {data['party_kind']} bills.")
+            _check_voucher_date(data['date'], request.user)
+        results, duplicate = settlements.post_bill_batch(voucher, items, user=request.user)
+    except AccountingError as exc:
+        return _error(exc)
+    if voucher == 'PV':
+        results = JournalEntrySerializer(results, many=True).data
+    return Response({'results': results, 'duplicate': duplicate},
+                    status=status.HTTP_200_OK if duplicate else status.HTTP_201_CREATED)

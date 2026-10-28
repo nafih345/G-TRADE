@@ -6,7 +6,7 @@ import {
 } from '@mui/material';
 import {
   Add as NewIcon, Edit as EditIcon, Save as SaveIcon, Close as CancelIcon, Block as DeactivateIcon,
-  Refresh as RefreshIcon, AccountBalance as BankIcon,
+  Refresh as RefreshIcon, AccountBalance as BankIcon, Star as DefaultIcon,
 } from '@mui/icons-material';
 import useBankAccounts from '../../hooks/useBankAccounts';
 import { notify } from '../../utils/notify';
@@ -18,7 +18,7 @@ const API = '/api/financial/banks/';
 const EMPTY = {
   id: null, sl_no: '', code: '', account_name: '', bank_name: '', branch_name: '', address: '',
   iban_number: '', vat_reg_number: '', account_number: '', account_holder: '', ifsc_code: '',
-  country_code: '95', country: 'INDIA', is_default_card: false, status: 'Active', is_system: false,
+  country_code: '95', country: 'INDIA', is_default_card: false, is_default_bank: false, status: 'Active', is_system: false,
 };
 
 const Row = ({ label, children }) => (
@@ -130,6 +130,19 @@ export default function BankMasterSettings() {
     }
   };
 
+  // One click from view mode: the selected bank becomes the one every Bank pay mode pre-selects.
+  const makeDefault = async () => {
+    if (!selected || selected.is_default_bank) return;
+    try {
+      await axios.patch(`${API}${selected.id}/`, { is_default_bank: true });
+      notify(`"${selected.name}" is now the default bank account.`, 'success');
+      await load(selected.id);
+      reloadPickers();
+    } catch (err) {
+      notify(apiErrorMessage(err), 'error');
+    }
+  };
+
   // Ctrl+S saves, Esc cancels while the form is open.
   useEffect(() => {
     if (!editing) return undefined;
@@ -171,10 +184,18 @@ export default function BankMasterSettings() {
             <Button variant="outlined" startIcon={<EditIcon />} onClick={startEdit} disabled={editing || !selected} sx={toolBtn}>Edit</Button>
             <Button variant="contained" color="success" startIcon={<SaveIcon />} onClick={save} disabled={!editing || saving} sx={toolBtn}>Save</Button>
             <Button variant="outlined" color="inherit" startIcon={<CancelIcon />} onClick={cancel} disabled={!editing} sx={toolBtn}>Cancel</Button>
-            <Tooltip title={selected?.is_system ? 'The default bank account cannot be deactivated' : ''}>
+            <Tooltip title={selected?.is_default_bank ? 'Already the default bank account' : 'Pre-select this bank whenever Bank is chosen as the pay mode'}>
+              <span>
+                <Button variant="outlined" color="warning" startIcon={<DefaultIcon />} onClick={makeDefault}
+                  disabled={editing || !selected || selected.status !== 'Active' || selected.is_default_bank} sx={toolBtn}>
+                  Set as Default
+                </Button>
+              </span>
+            </Tooltip>
+            <Tooltip title={selected?.is_system ? 'The system bank account cannot be deactivated' : selected?.is_default_bank ? 'Make another bank the default first' : ''}>
               <span>
                 <Button variant="outlined" color={selected?.status === 'Active' ? 'error' : 'success'} startIcon={<DeactivateIcon />}
-                  onClick={toggleActive} disabled={editing || !selected || selected.is_system} sx={toolBtn}>
+                  onClick={toggleActive} disabled={editing || !selected || selected.is_system || (selected.is_default_bank && selected.status === 'Active')} sx={toolBtn}>
                   {selected && selected.status !== 'Active' ? 'Activate' : 'Deactivate'}
                 </Button>
               </span>
@@ -208,6 +229,17 @@ export default function BankMasterSettings() {
                 {field('country')}
               </Stack>
             </Row>
+            <FormControlLabel
+              disabled={!editing || (mode === 'edit' && !!selected?.is_default_bank)}
+              control={<Checkbox checked={!!form.is_default_bank} onChange={(e) => set({ is_default_bank: e.target.checked })} />}
+              label={(
+                <Box>
+                  <Typography variant="body2" fontWeight={700}>Default Bank Account</Typography>
+                  <Typography variant="caption" color="text.secondary">Pre-selected whenever Bank is chosen as the pay mode</Typography>
+                </Box>
+              )}
+              sx={{ mt: 0.5, px: 1, py: 0.25, borderRadius: 1.5, bgcolor: form.is_default_bank ? 'action.selected' : 'transparent', border: '1px solid', borderColor: 'divider', width: '100%', mx: 0 }}
+            />
             <FormControlLabel
               disabled={!editing}
               control={<Checkbox checked={!!form.is_default_card} onChange={(e) => set({ is_default_card: e.target.checked })} />}
@@ -252,6 +284,7 @@ export default function BankMasterSettings() {
                       <TableCell sx={{ fontFamily: 'monospace' }}>{b.account_number || ''}</TableCell>
                       <TableCell align="right">
                         <Stack direction="row" spacing={0.5} justifyContent="flex-end">
+                          {b.is_default_bank && <Chip size="small" color="warning" icon={<DefaultIcon />} label="Default" sx={{ fontWeight: 700 }} />}
                           {b.is_default_card && <Chip size="small" color="primary" label="Card" sx={{ fontWeight: 700 }} />}
                           {b.status !== 'Active' && <Chip size="small" label="Inactive" />}
                         </Stack>

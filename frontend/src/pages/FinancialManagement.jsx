@@ -42,8 +42,9 @@ import axios from 'axios';
 import ConfirmActionDialog from '../components/common/ConfirmActionDialog';
 import { fetchAllPages } from '../utils/fetchAllPages';
 import { apiError, finGet, finPost, finDelete, newIdempotencyKey } from '../components/financial/financialApi';
-import { GeneralLedgerPanel, TrialBalancePanel, ProfitLossPanel, BalanceSheetPanel, FinancialReportsPanel } from '../components/financial/LedgerReports';
+import { LedgerPanel, TrialBalancePanel, ProfitLossPanel, BalanceSheetPanel, FinancialReportsPanel } from '../components/financial/LedgerReports';
 import VoucherRegister from '../components/financial/VoucherRegister';
+import StandardVoucherForm from '../components/financial/StandardVoucherForm';
 import AccountingIntegrationPanel from '../components/financial/AccountingIntegrationPanel';
 
 // Fixed Sub-Categories per Group (NO COGS!)
@@ -156,533 +157,6 @@ class FinancialErrorBoundary extends Component {
   }
 }
 
-// Reusable Standardized Voucher Form Component for Receipt, Payment & Contra Entries
-function StandardVoucherForm({ voucherType, accounts, cashOrBankAccounts, partiesList, showToast, onSaveVoucher }) {
-  const isReceipt = voucherType === 'RECEIPT';
-  const isPayment = voucherType === 'PAYMENT';
-  const isContra = voucherType === 'CONTRA';
-
-  const voucherTitle = isReceipt ? 'Receipt Voucher' : isPayment ? 'Payment Voucher' : 'Contra Entry';
-  const voucherPrefix = isReceipt ? 'RV' : isPayment ? 'PV' : 'CV';
-  const voucherColorHex = isReceipt ? '#10b981' : isPayment ? '#ef4444' : '#2563eb';
-  const partyLabel = isPayment ? 'Payee / Supplier / Party' : isContra ? 'Transfer Description / Party' : 'Customer / Received From';
-
-  const accountOptions = useMemo(() => {
-    if (isContra) return cashOrBankAccounts;
-    return accounts;
-  }, [isContra, cashOrBankAccounts, accounts]);
-
-  const createBlankVoucherState = () => ({
-    id: null,
-    voucherNo: '',
-    idempotencyKey: newIdempotencyKey(),
-    date: new Date().toISOString().split('T')[0],
-    party: null,
-    mode: 'Normal',
-    narration: '',
-    isSaved: false
-  });
-
-  const [voucherState, setVoucherState] = useState(createBlankVoucherState);
-
-  const [accountLines, setAccountLines] = useState([
-    { id: 1, account: null, accountCode: '', accountName: '', mainAccount: '', narration: '', refNo: '', amount: '' }
-  ]);
-
-  const [paymentLines, setPaymentLines] = useState([
-    { id: 1, amount: '', payMode: 'Cash', refNo: '', refDate: new Date().toISOString().split('T')[0], bankAccount: null }
-  ]);
-
-  const totalAccountAmount = useMemo(() => {
-    return accountLines.reduce((sum, l) => sum + (parseFloat(l.amount) || 0), 0);
-  }, [accountLines]);
-
-  const totalPaidAmount = useMemo(() => {
-    return paymentLines.reduce((sum, l) => sum + (parseFloat(l.amount) || 0), 0);
-  }, [paymentLines]);
-
-  const isBalanced = useMemo(() => {
-    return Math.abs(totalAccountAmount - totalPaidAmount) < 0.01 && totalAccountAmount > 0;
-  }, [totalAccountAmount, totalPaidAmount]);
-
-  const isValid = useMemo(() => {
-    if (!isBalanced) return false;
-    const hasValidAccountLine = accountLines.some(l => l.account && (parseFloat(l.amount) || 0) > 0);
-    const hasValidPaymentLine = paymentLines.some(l => (parseFloat(l.amount) || 0) > 0 && (l.payMode === 'Cash' || l.bankAccount));
-    return hasValidAccountLine && hasValidPaymentLine;
-  }, [isBalanced, accountLines, paymentLines]);
-
-  const handleAddAccountLine = () => {
-    setAccountLines(prev => [
-      ...prev,
-      { id: Date.now() + Math.random(), account: null, accountCode: '', accountName: '', mainAccount: '', narration: '', refNo: '', amount: '' }
-    ]);
-  };
-
-  const handleRemoveAccountLine = (index) => {
-    setAccountLines(prev => prev.filter((_, i) => i !== index));
-  };
-
-  const handleAccountChange = (index, selectedAcc) => {
-    setAccountLines(prev => {
-      const next = [...prev];
-      if (selectedAcc) {
-        next[index] = {
-          ...next[index],
-          account: selectedAcc,
-          accountCode: selectedAcc.code,
-          accountName: selectedAcc.name,
-          mainAccount: selectedAcc.account_type || selectedAcc.account_group || 'General'
-        };
-      } else {
-        next[index] = {
-          ...next[index],
-          account: null,
-          accountCode: '',
-          accountName: '',
-          mainAccount: ''
-        };
-      }
-      return next;
-    });
-  };
-
-  const handleAccountLineFieldChange = (index, field, value) => {
-    setAccountLines(prev => {
-      const next = [...prev];
-      next[index] = { ...next[index], [field]: value };
-      return next;
-    });
-  };
-
-  const handleAddPaymentLine = () => {
-    setPaymentLines(prev => [
-      ...prev,
-      { id: Date.now() + Math.random(), amount: '', payMode: 'Cash', refNo: '', refDate: new Date().toISOString().split('T')[0], bankAccount: null }
-    ]);
-  };
-
-  const handleRemovePaymentLine = (index) => {
-    setPaymentLines(prev => prev.filter((_, i) => i !== index));
-  };
-
-  const handlePaymentLineFieldChange = (index, field, value) => {
-    setPaymentLines(prev => {
-      const next = [...prev];
-      next[index] = { ...next[index], [field]: value };
-      return next;
-    });
-  };
-
-  const handleNew = () => {
-    setVoucherState(createBlankVoucherState());
-    setAccountLines([
-      { id: 1, account: null, accountCode: '', accountName: '', mainAccount: '', narration: '', refNo: '', amount: '' }
-    ]);
-    setPaymentLines([
-      { id: 1, amount: '', payMode: 'Cash', refNo: '', refDate: new Date().toISOString().split('T')[0], bankAccount: null }
-    ]);
-  };
-
-  const handleReset = () => {
-    handleNew();
-    showToast("Form reset to fresh draft.", "info");
-  };
-
-  const [saving, setSaving] = useState(false);
-
-  const handleSave = async () => {
-    if (!isValid || saving || voucherState.isSaved) return;
-    const partyName = typeof voucherState.party === 'object' && voucherState.party ? voucherState.party.name : (voucherState.party || 'General Party');
-
-    const formattedLines = [];
-
-    // Receipt: Dr cash/bank (payment lines) / Cr accounts. Payment and Contra: Dr accounts /
-    // Cr cash/bank — for a contra the account line is the cash/bank account receiving the transfer.
-    accountLines.forEach(l => {
-      const amt = parseFloat(l.amount) || 0;
-      if (l.account && amt > 0) {
-        formattedLines.push({
-          account: l.account.id || l.accountCode,
-          debit: isReceipt ? 0 : amt,
-          credit: isReceipt ? amt : 0,
-          memo: [l.narration, l.refNo && `Ref ${l.refNo}`].filter(Boolean).join(' · ')
-        });
-      }
-    });
-
-    paymentLines.forEach(p => {
-      const amt = parseFloat(p.amount) || 0;
-      if (amt > 0) {
-        const bankCode = p.payMode === 'Cash' ? (cashOrBankAccounts.find(a => a.name.toLowerCase().includes('cash'))?.code || '1001') : (p.bankAccount?.code || '1002');
-        formattedLines.push({
-          account: bankCode,
-          debit: isReceipt ? amt : 0,
-          credit: isReceipt ? 0 : amt,
-          memo: `${p.payMode}${p.refNo ? ` ${p.refNo}` : ''}${p.payMode !== 'Cash' && p.refDate ? ` (${p.refDate})` : ''}`
-        });
-      }
-    });
-
-    setSaving(true);
-    const saved = await onSaveVoucher({
-      voucher_type_code: voucherPrefix,
-      date: voucherState.date,
-      narration: [voucherState.narration || `${voucherTitle} — ${partyName}`, voucherState.mode === 'Bill to Bill' ? '(Bill to Bill)' : '']
-        .filter(Boolean).join(' '),
-      reference_no: partyName,
-      idempotency_key: voucherState.idempotencyKey,
-      lines: formattedLines
-    });
-    setSaving(false);
-    if (saved) setVoucherState(prev => ({ ...prev, isSaved: true, voucherNo: saved.entry_number }));
-  };
-
-  return (
-    <Box>
-      {/* 1. STICKY TOP ACTION TOOLBAR */}
-      <Paper 
-        elevation={0} 
-        variant="outlined" 
-        sx={{ 
-          position: 'sticky', 
-          top: 0, 
-          zIndex: 100, 
-          p: 1.5, 
-          mb: 3, 
-          borderRadius: 3, 
-          bgcolor: '#ffffff',
-          borderColor: '#e2e8f0',
-          boxShadow: '0 2px 8px rgba(0, 0, 0, 0.04)',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          flexWrap: 'wrap',
-          gap: 1.5
-        }}
-      >
-        <Stack direction="row" spacing={1.5} alignItems="center">
-          <Chip 
-            label={`${voucherTitle} (${voucherPrefix})`} 
-            sx={{ backgroundColor: voucherColorHex, color: '#ffffff', fontWeight: 850, fontSize: '0.875rem' }} 
-          />
-          <Typography variant="subtitle2" color="text.secondary" fontWeight={700}>
-            {voucherState.isSaved ? `✅ Posted ${voucherState.voucherNo}` : '📝 Unsaved Draft'}
-          </Typography>
-        </Stack>
-
-        <Stack direction="row" spacing={1} flexWrap="wrap" gap={1}>
-          <Button variant="outlined" size="small" startIcon={<AddIcon />} onClick={handleNew}>
-            New
-          </Button>
- <Button 
-            variant="contained" 
-            size="small" 
-            startIcon={<CheckIcon />} 
-            disabled={!isValid || saving || voucherState.isSaved} 
-            onClick={handleSave}
-            sx={{ backgroundColor: voucherColorHex, fontWeight: 800, '&:hover': { backgroundColor: voucherColorHex } }}
-          >
-            Save
-          </Button>
-          <Button variant="outlined" size="small" startIcon={<PrintIcon />} disabled={!voucherState.isSaved} onClick={() => window.print()}>
-            Print
-          </Button>
-          <Button variant="outlined" size="small" startIcon={<RefreshIcon />} onClick={handleReset}>
-            Refresh
-          </Button>
-        </Stack>
-      </Paper>
-
-      {/* 2. HEADER SECTION BELOW TOOLBAR */}
-      <Card variant="outlined" sx={{ p: 3, mb: 3, borderRadius: 4, bgcolor: '#ffffff' }}>
-        <Typography variant="subtitle1" fontWeight={850} sx={{ mb: 2 }}>
-          Voucher Header Information
-        </Typography>
-        <Grid container spacing={2} alignItems="center">
-          <Grid item xs={12} sm={6} md={3}>
-            <TextField 
-              fullWidth size="small" label="Voucher No (Auto)" 
-              value={voucherState.voucherNo || 'Assigned when posted'} 
-              InputProps={{ readOnly: true }} 
-              sx={{ bgcolor: '#f8fafc' }} 
-            />
-          </Grid>
-          <Grid item xs={12} sm={6} md={3}>
-            <TextField 
-              type="date" fullWidth size="small" label="Date *" 
-              value={voucherState.date} 
-              onChange={(e) => setVoucherState(prev => ({ ...prev, date: e.target.value }))}
-              InputLabelProps={{ shrink: true }} 
-            />
-          </Grid>
-          <Grid item xs={12} sm={6} md={3}>
-            <Autocomplete
-              options={partiesList}
-              getOptionLabel={(option) => typeof option === 'string' ? option : `${option.name || ''} ${option.code ? `(${option.code})` : ''}`}
-              value={voucherState.party}
-              onChange={(e, newVal) => setVoucherState(prev => ({ ...prev, party: newVal }))}
-              renderInput={(params) => (
-                <TextField {...params} label={`${partyLabel} *`} placeholder="Search party..." size="small" />
-              )}
-            />
-          </Grid>
-          <Grid item xs={12} sm={6} md={3}>
-            <Box>
-              <Typography variant="caption" fontWeight={700} color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
-                {voucherPrefix} Mode Toggle
-              </Typography>
-              <ToggleButtonGroup
-                size="small"
-                exclusive
-                value={voucherState.mode}
-                onChange={(e, newMode) => {
-                  if (newMode) setVoucherState(prev => ({ ...prev, mode: newMode }));
-                }}
-                sx={{ width: '100%' }}
-              >
-                <ToggleButton value="Normal" sx={{ flex: 1, fontWeight: 700, py: 0.5 }}>Normal</ToggleButton>
-                <ToggleButton value="Bill to Bill" sx={{ flex: 1, fontWeight: 700, py: 0.5 }}>Bill to Bill</ToggleButton>
-              </ToggleButtonGroup>
-            </Box>
-          </Grid>
-        </Grid>
-      </Card>
-
-      {/* 3. ACCOUNT LINES SECTION (EDITABLE GRID) */}
-      <Card variant="outlined" sx={{ borderRadius: 4, overflow: 'hidden', mb: 3 }}>
-        <Box sx={{ p: 2, px: 3, bgcolor: '#f8fafc', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Typography variant="subtitle1" fontWeight={850}>
-            Account Lines ({isReceipt ? 'Credit Accounts' : isPayment ? 'Debit Accounts' : 'Cash/Bank Accounts'})
-          </Typography>
-          <Button size="small" variant="contained" startIcon={<AddIcon />} onClick={handleAddAccountLine} sx={{ backgroundColor: '#2563eb', fontWeight: 700 }}>
-            + Add Line
-          </Button>
-        </Box>
-        <TableContainer component={Paper} elevation={0} sx={{ overflowX: 'auto' }}>
-          <Table sx={{ minWidth: 850 }}>
-            <TableHead sx={{ bgcolor: '#f1f5f9' }}>
-              <TableRow>
-                <TableCell sx={{ fontWeight: 700, minWidth: 120 }}>Account Code</TableCell>
-                <TableCell sx={{ fontWeight: 700, minWidth: 220 }}>Account Name *</TableCell>
-                <TableCell sx={{ fontWeight: 700, minWidth: 140 }}>Main Account</TableCell>
-                <TableCell sx={{ fontWeight: 700, minWidth: 180 }}>Narration</TableCell>
-                <TableCell sx={{ fontWeight: 700, minWidth: 130 }}>Ref No</TableCell>
-                <TableCell sx={{ fontWeight: 700, minWidth: 140 }} align="right">Amount (₹) *</TableCell>
-                <TableCell sx={{ fontWeight: 700, width: 50 }} align="center">Act</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {accountLines.map((line, idx) => (
-                <TableRow key={line.id}>
-                  <TableCell sx={{ fontFamily: 'monospace', fontWeight: 700, color: 'primary.main' }}>
-                    {line.accountCode || '-'}
-                  </TableCell>
-                  <TableCell>
-                    <Autocomplete
-                      options={accountOptions}
-                      getOptionLabel={(a) => `${a.code} - ${a.name} (${a.account_type || a.account_group})`}
-                      value={line.account}
-                      onChange={(e, selectedAcc) => handleAccountChange(idx, selectedAcc)}
-                      renderInput={(params) => (
-                        <TextField {...params} size="small" placeholder="Search Account..." />
-                      )}
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <Chip label={line.mainAccount || 'General'} size="small" variant="outlined" sx={{ fontWeight: 600 }} />
-                  </TableCell>
-                  <TableCell>
-                    <TextField 
-                      size="small" fullWidth 
-                      placeholder="Line narration..." 
-                      value={line.narration} 
-                      onChange={(e) => handleAccountLineFieldChange(idx, 'narration', e.target.value)} 
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <TextField 
-                      size="small" fullWidth 
-                      placeholder="Bill/Ref #" 
-                      value={line.refNo} 
-                      onChange={(e) => handleAccountLineFieldChange(idx, 'refNo', e.target.value)} 
-                    />
-                  </TableCell>
-                  <TableCell align="right">
-                    <TextField 
-                      type="number" size="small" 
-                      value={line.amount} 
-                      onChange={(e) => handleAccountLineFieldChange(idx, 'amount', e.target.value)}
-                      sx={{ width: 130, '& .MuiInputBase-input': { textAlign: 'right', fontWeight: 700 } }}
-                    />
-                  </TableCell>
-                  <TableCell align="center">
-                    <IconButton size="small" color="error" disabled={accountLines.length <= 1} onClick={() => handleRemoveAccountLine(idx)}>
-                      <DeleteIcon fontSize="small" />
-                    </IconButton>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </TableContainer>
-      </Card>
-
-      {/* 4. PAYMENT MODE SECTION (SPLIT PAYMENT TABLE) */}
-      <Card variant="outlined" sx={{ borderRadius: 4, overflow: 'hidden', mb: 4 }}>
-        <Box sx={{ p: 2, px: 3, bgcolor: '#f8fafc', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Typography variant="subtitle1" fontWeight={850}>
-            Payment Mode & Split Payments ({isReceipt ? 'Inflow Settlement' : isPayment ? 'Outflow Settlement' : 'Transfer Details'})
-          </Typography>
-          <Button size="small" variant="outlined" startIcon={<AddIcon />} onClick={handleAddPaymentLine} sx={{ fontWeight: 700 }}>
-            + Add Payment
-          </Button>
-        </Box>
-        <TableContainer component={Paper} elevation={0} sx={{ overflowX: 'auto' }}>
-          <Table sx={{ minWidth: 850 }}>
-            <TableHead sx={{ bgcolor: '#f1f5f9' }}>
-              <TableRow>
-                <TableCell sx={{ fontWeight: 700, minWidth: 140 }} align="right">Amount (₹) *</TableCell>
-                <TableCell sx={{ fontWeight: 700, minWidth: 150 }}>Pay Mode *</TableCell>
-                <TableCell sx={{ fontWeight: 700, minWidth: 160 }}>Ref / Instrument No</TableCell>
-                <TableCell sx={{ fontWeight: 700, minWidth: 140 }}>Ref Date</TableCell>
-                <TableCell sx={{ fontWeight: 700, minWidth: 220 }}>Bank Account (Non-Cash)</TableCell>
-                <TableCell sx={{ fontWeight: 700, width: 50 }} align="center">Act</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {paymentLines.map((line, idx) => (
-                <TableRow key={line.id}>
-                  <TableCell align="right">
-                    <TextField 
-                      type="number" size="small" 
-                      value={line.amount} 
-                      onChange={(e) => handlePaymentLineFieldChange(idx, 'amount', e.target.value)}
-                      sx={{ width: 130, '& .MuiInputBase-input': { textAlign: 'right', fontWeight: 700 } }}
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <TextField 
-                      select size="small" fullWidth 
-                      value={line.payMode} 
-                      onChange={(e) => handlePaymentLineFieldChange(idx, 'payMode', e.target.value)}
-                    >
-                      <MenuItem value="Cash">Cash</MenuItem>
-                      <MenuItem value="Bank">Bank Transfer</MenuItem>
-                      <MenuItem value="Cheque">Cheque</MenuItem>
-                      <MenuItem value="UPI">UPI / Digital</MenuItem>
-                    </TextField>
-                  </TableCell>
-                  <TableCell>
-                    <TextField 
-                      size="small" fullWidth 
-                      placeholder={line.payMode === 'Cheque' ? 'Cheque No' : line.payMode === 'UPI' ? 'UTR / Ref No' : 'Ref No'} 
-                      value={line.refNo} 
-                      onChange={(e) => handlePaymentLineFieldChange(idx, 'refNo', e.target.value)} 
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <TextField 
-                      type="date" size="small" fullWidth 
-                      value={line.refDate} 
-                      onChange={(e) => handlePaymentLineFieldChange(idx, 'refDate', e.target.value)} 
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <Autocomplete
-                      disabled={line.payMode === 'Cash'}
-                      options={cashOrBankAccounts.filter(a => (a.account_group || '').toLowerCase().includes('bank') || a.name.toLowerCase().includes('bank'))}
-                      getOptionLabel={(a) => `${a.code} - ${a.name}`}
-                      value={line.bankAccount}
-                      onChange={(e, selectedBank) => handlePaymentLineFieldChange(idx, 'bankAccount', selectedBank)}
-                      renderInput={(params) => (
-                        <TextField {...params} size="small" placeholder={line.payMode === 'Cash' ? 'N/A (Cash)' : 'Select Bank...'} />
-                      )}
-                    />
-                  </TableCell>
-                  <TableCell align="center">
-                    <IconButton size="small" color="error" disabled={paymentLines.length <= 1} onClick={() => handleRemovePaymentLine(idx)}>
-                      <DeleteIcon fontSize="small" />
-                    </IconButton>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </TableContainer>
-      </Card>
-
-      {/* 5. STICKY FOOTER WITH RUNNING TOTALS & INLINE VALIDATION */}
-      <Paper 
-        elevation={0} 
-        variant="outlined" 
-        sx={{ 
-          position: 'sticky', 
-          bottom: 16, 
-          zIndex: 100, 
-          p: 2, 
-          px: 3,
-          borderRadius: 3, 
-          bgcolor: '#ffffff',
-          boxShadow: '0 4px 16px rgba(0,0,0,0.1)',
-          border: isBalanced ? '1px solid #10b981' : '1px solid #ef4444',
-          transition: 'all 0.2s ease'
-        }}
-      >
-        <Grid container spacing={2} alignItems="center" justifyContent="space-between">
-          <Grid item xs={12} md={7}>
-            <Stack direction="row" spacing={3} alignItems="center" flexWrap="wrap" gap={1}>
-              <Box>
-                <Typography variant="caption" color="text.secondary" fontWeight={700}>TOTAL ACCOUNT AMOUNT</Typography>
-                <Typography variant="h6" fontWeight={850} color="primary.main">
-                  ₹{totalAccountAmount.toFixed(2)}
-                </Typography>
-              </Box>
-              <Divider orientation="vertical" flexItem />
-              <Box>
-                <Typography variant="caption" color="text.secondary" fontWeight={700}>TOTAL PAID AMOUNT</Typography>
-                <Typography variant="h6" fontWeight={850} color={isBalanced ? 'success.main' : 'error.main'}>
-                  ₹{totalPaidAmount.toFixed(2)}
-                </Typography>
-              </Box>
-              <Divider orientation="vertical" flexItem />
-              <Box>
-                {isBalanced ? (
-                  <Chip 
-                    icon={<CheckIcon />} 
-                    label="Balanced Entry" 
-                    color="success" 
-                    sx={{ fontWeight: 700 }} 
-                  />
-                ) : (
-                  <Chip 
-                    icon={<WarningIcon />} 
-                    label={`Difference: ₹${Math.abs(totalAccountAmount - totalPaidAmount).toFixed(2)}`} 
-                    color="error" 
-                    sx={{ fontWeight: 700 }} 
-                  />
-                )}
-              </Box>
-            </Stack>
-          </Grid>
-
-          <Grid item xs={12} md={5} sx={{ textAlign: { xs: 'left', md: 'right' } }}>
-            <Button 
-              variant="contained" 
-              size="large" 
-              disabled={!isValid || saving || voucherState.isSaved} 
-              onClick={handleSave}
-              sx={{ backgroundColor: voucherColorHex, fontWeight: 850, px: 4, py: 1.2, '&:hover': { backgroundColor: voucherColorHex } }}
-            >
-              Save {voucherTitle}
-            </Button>
-          </Grid>
-        </Grid>
-      </Paper>
-    </Box>
-  );
-}
-
 function FinancialManagementView() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -769,6 +243,11 @@ function FinancialManagementView() {
   };
 
   const handleSaveStandardVoucher = postVoucher;
+  // Bill-to-bill vouchers post through /settlements/ (they toast for themselves); refresh the books.
+  const handleVoucherPosted = () => {
+    setLedgerRefreshKey(k => k + 1);
+    loadAccounts();
+  };
   const [ledgerRefreshKey, setLedgerRefreshKey] = useState(0);
   const [ledgerAccountId, setLedgerAccountId] = useState('');
   const openLedger = (accountId) => {
@@ -1232,7 +711,7 @@ function FinancialManagementView() {
             Financial & Accounting Module
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            Enterprise Chart of Accounts, Double-Entry Journals, General Ledger, Trial Balance, P&L, and Balance Sheet
+            Enterprise Chart of Accounts, Double-Entry Journals, Ledger, Trial Balance, P&L, and Balance Sheet
           </Typography>
         </Box>
         <Stack direction="row" spacing={1.5}>
@@ -1267,7 +746,7 @@ function FinancialManagementView() {
           <Tab icon={<DashboardIcon />} label="Financial Dashboard" iconPosition="start" />
           <Tab icon={<ChartIcon />} label="Chart of Accounts" iconPosition="start" />
           <Tab icon={<JournalIcon />} label="Vouchers" iconPosition="start" />
-          <Tab icon={<LedgerIcon />} label="General Ledger" iconPosition="start" />
+          <Tab icon={<LedgerIcon />} label="Ledger" iconPosition="start" />
           <Tab icon={<TrialIcon />} label="Trial Balance" iconPosition="start" />
           <Tab icon={<ProfitIcon />} label="Profit & Loss (P&L)" iconPosition="start" />
           <Tab icon={<BalanceIcon />} label="Balance Sheet" iconPosition="start" />
@@ -1746,6 +1225,7 @@ function FinancialManagementView() {
           partiesList={partiesList}
           showToast={showToast}
           onSaveVoucher={handleSaveStandardVoucher}
+          onPosted={handleVoucherPosted}
         />
       )}
 
@@ -1758,6 +1238,7 @@ function FinancialManagementView() {
           partiesList={partiesList}
           showToast={showToast}
           onSaveVoucher={handleSaveStandardVoucher}
+          onPosted={handleVoucherPosted}
         />
       )}
 
@@ -1770,6 +1251,7 @@ function FinancialManagementView() {
           partiesList={partiesList}
           showToast={showToast}
           onSaveVoucher={handleSaveStandardVoucher}
+          onPosted={handleVoucherPosted}
         />
       )}
 
@@ -1890,9 +1372,9 @@ function FinancialManagementView() {
         <VoucherRegister showToast={showToast} refreshKey={ledgerRefreshKey} onChanged={loadAccounts} />
       )}
 
-      {/* 7. GENERAL LEDGER VIEW */}
+      {/* 7. LEDGER VIEW */}
       {topTab === 3 && (
-        <GeneralLedgerPanel accounts={accounts} accountId={ledgerAccountId} onAccountChange={setLedgerAccountId} />
+        <LedgerPanel accounts={accounts} accountId={ledgerAccountId} onAccountChange={setLedgerAccountId} />
       )}
 
       {/* 8. TRIAL BALANCE VIEW */}
@@ -2276,7 +1758,7 @@ function FinancialManagementView() {
               <Divider />
               <Typography variant="caption" color="text.secondary">{selectedAccountForView.description || 'No description provided.'}</Typography>
               <Button variant="contained" startIcon={<LedgerIcon />} onClick={() => openLedger(selectedAccountForView.id)}>
-                Open General Ledger
+                Open Ledger
               </Button>
             </Stack>
           </Box>

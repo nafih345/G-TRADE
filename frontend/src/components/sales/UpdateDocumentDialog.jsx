@@ -12,6 +12,8 @@ import { paymentStatusOf, rowNetAmount } from '../../utils/salesDocStatus';
 const PIPELINE_STAGES = [
   'Order Received',
   'In Lab Processing',
+  'Awaiting Remaining Lens', // Lens PO: some of the order's lenses have arrived
+  'Lens Arrived',            // Lens PO: every lens is in — ready for fitting
   'Frame Mounting',
   'Quality Control',
   'Ready for Collection',

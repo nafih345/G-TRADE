@@ -90,15 +90,19 @@ def build_sales_invoice(inv, previous=None):
 
     # Cost of goods sold for stocked lines, at the cost recorded the first time this invoice
     # was booked (so editing an old bill doesn't re-cost it at today's purchase price).
+    # Costed per stock unit actually issued — the same count the stock deduction uses, so a lens
+    # pair sold against pair-counted stock costs one pair, not two lenses' worth.
+    from apps.sales.lens_units import stock_units_by_product
     prior_costs = ((previous.metadata or {}).get('unit_costs') or {}) if previous else {}
+    stocked = [it for it in items
+               if it.product_id and (it.item_type or '').upper() != 'SERVICE' and (it.quantity or 0) > 0]
+    products = {it.product_id: it.product for it in stocked}
     unit_costs, cogs = {}, ZERO
-    for it in items:
-        if not it.product_id or (it.item_type or '').upper() == 'SERVICE' or (it.quantity or 0) <= 0:
-            continue
-        key = str(it.product_id)
-        cost = Decimal(str(prior_costs[key])) if key in prior_costs else money(getattr(it.product, 'cost_price', 0))
+    for pk, units in stock_units_by_product(stocked).items():
+        key = str(pk)
+        cost = Decimal(str(prior_costs[key])) if key in prior_costs else money(getattr(products[pk], 'cost_price', 0))
         unit_costs[key] = str(cost)
-        cogs += money(cost * it.quantity)
+        cogs += money(cost * units)
     if cogs > 0:
         lines.append(_line('COGS', debit=cogs, memo='Cost of goods sold'))
         lines.append(_line('INVENTORY', credit=cogs, memo='Stock issued on sale'))

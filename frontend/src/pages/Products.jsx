@@ -182,7 +182,9 @@ export default function Products() {
             warehouse: p.warehouse || 'Main',
             status: p.is_active === false ? 'Inactive' : 'Active',
             variantGroup: p.variant_group || null,
-            minimumStock: p.minimum_stock ?? null
+            minimumStock: p.minimum_stock ?? null,
+            // Lens selling-unit settings etc. — the edit dialog reads and keeps them.
+            extra_data: p.extra_data || {}
           }));
           itemsList = [...itemsList, ...formatted];
         }

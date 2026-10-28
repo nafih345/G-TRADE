@@ -4,10 +4,14 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   Alert, Autocomplete, Box, Button, Card, Chip, Grid, LinearProgress, Paper, Stack, Table, TableBody, TableCell,
-  TableContainer, TableHead, TableRow, TextField, Typography,
+  TableContainer, TableHead, TableRow, TextField, ToggleButton, ToggleButtonGroup, Typography,
 } from '@mui/material';
-import { Print as PrintIcon, Refresh as RefreshIcon, CheckCircle as CheckIcon, Warning as WarningIcon } from '@mui/icons-material';
+import {
+  Print as PrintIcon, Refresh as RefreshIcon, CheckCircle as CheckIcon, Warning as WarningIcon, ReceiptLong as BillIcon,
+} from '@mui/icons-material';
 import { apiError, finGet, inr, sourceLabel, today } from './financialApi';
+import ShowBillDialog from './ShowBillDialog';
+import { billSourceFor } from './sourceBills';
 
 const head = { fontWeight: 700 };
 const firstOfMonth = () => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().split('T')[0]; };
@@ -17,6 +21,7 @@ function useReport(path, params, deps) {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const load = useCallback(async () => {
+    if (!path) { setData(null); setError(''); return; }  // null path = report not shown
     setLoading(true);
     setError('');
     try { setData(await finGet(path, params)); } catch (e) { setError(apiError(e)); setData(null); }
@@ -58,38 +63,156 @@ const Status = ({ loading, error }) => (<>
 </>);
 
 // ---------------------------------------------------------------------------
-// General Ledger
+// Ledger
 // ---------------------------------------------------------------------------
 
-export function GeneralLedgerPanel({ accounts, accountId, onAccountChange }) {
-  const [dateFrom, setDateFrom] = useState('');
+// Register filters. Services / eye tests ride on retail invoices, so that chip filters on
+// invoices carrying service revenue rather than on a source of its own.
+const REGISTER_FILTERS = [
+  { key: 'all', label: 'All' },
+  { key: 'retail', label: 'Retail sales', source: 'sales.invoice' },
+  { key: 'services', label: 'Optical services & eye tests', services: true },
+  { key: 'wholesale', label: 'Wholesale', source: 'sales.wholesale_invoice,sales.wholesale_collection,sales.wholesale_return' },
+  { key: 'purchases', label: 'Purchases', source: 'purchasing.purchase_invoice,purchasing.purchase_payment,purchasing.purchase_order' },
+  { key: 'receipts', label: 'Receipts', source: 'sales.payment,sales.wholesale_collection' },
+  { key: 'stock', label: 'Stock adjustments', source: 'inventory.stock_adjustment' },
+  { key: 'manual', label: 'Manual vouchers', source: 'manual' },
+];
+
+const ShowBillButton = ({ row, onShow }) => (
+  <Button size="small" variant={billSourceFor(row) ? 'outlined' : 'text'} startIcon={<BillIcon fontSize="small" />}
+    onClick={() => onShow(row)} sx={{ whiteSpace: 'nowrap' }}>
+    {billSourceFor(row) ? 'Show Bill' : 'Voucher'}
+  </Button>
+);
+
+const SourceCell = ({ row }) => (
+  <TableCell>
+    <Typography variant="body2" fontWeight={600}>{sourceLabel(row)}</Typography>
+    {row.source_number && <Typography variant="caption" color="text.secondary">{row.source_number}</Typography>}
+  </TableCell>
+);
+
+export function LedgerPanel({ accounts, accountId, onAccountChange }) {
+  const [mode, setMode] = useState(accountId ? 'account' : 'all');
+  const [dateFrom, setDateFrom] = useState(firstOfMonth());
   const [dateTo, setDateTo] = useState('');
-  const account = accounts.find(a => String(a.id) === String(accountId)) || null;
-  const { data, error, loading, reload } = useReport(
-    'reports/general-ledger/', { account: accountId, date_from: dateFrom, date_to: dateTo },
-    [accountId, dateFrom, dateTo],
+  const [filter, setFilter] = useState('all');
+  const [search, setSearch] = useState('');
+  const [query, setQuery] = useState('');
+  const [billRow, setBillRow] = useState(null);
+
+  // Opening a ledger from the Chart of Accounts / Trial Balance switches to that account.
+  useEffect(() => { if (accountId) setMode('account'); }, [accountId]);
+  useEffect(() => { const t = setTimeout(() => setQuery(search.trim()), 350); return () => clearTimeout(t); }, [search]);
+
+  const f = REGISTER_FILTERS.find(x => x.key === filter) || REGISTER_FILTERS[0];
+  const register = useReport(
+    mode === 'all' ? 'reports/ledger-register/' : null,
+    { date_from: dateFrom, date_to: dateTo, source: f.source, services: f.services ? 1 : '', search: query },
+    [mode, dateFrom, dateTo, filter, query],
   );
+  const statement = useReport(
+    mode === 'account' && accountId ? 'reports/general-ledger/' : null,
+    { account: accountId, date_from: dateFrom, date_to: dateTo },
+    [mode, accountId, dateFrom, dateTo],
+  );
+  const account = accounts.find(a => String(a.id) === String(accountId)) || null;
+  const active = mode === 'all' ? register : statement;
+  const data = statement.data;
 
   return (
     <Card variant="outlined" sx={{ p: { xs: 2, md: 4 }, borderRadius: 4 }}>
-      <Header title="General Ledger Statement" subtitle="Posted journal lines with running balance and source documents."
-        onRefresh={accountId ? reload : null}>
-        <Autocomplete
-          options={accounts}
-          value={account}
-          onChange={(e, v) => onAccountChange(v ? v.id : '')}
-          getOptionLabel={(a) => `${a.code} - ${a.name}`}
-          isOptionEqualToValue={(a, b) => String(a.id) === String(b.id)}
-          renderInput={(params) => <TextField {...params} size="small" label="Account" />}
-          sx={{ width: { xs: '100%', sm: 320 } }}
-        />
+      <Header title="Ledger"
+        subtitle={mode === 'all'
+          ? 'Every posted invoice and voucher (retail, services & eye tests, wholesale, purchases) with the accounts it posted to.'
+          : 'Posted journal lines of one account with running balance and source documents.'}
+        onRefresh={mode === 'all' || accountId ? active.reload : null}>
+        <ToggleButtonGroup size="small" exclusive value={mode} onChange={(e, v) => v && setMode(v)}>
+          <ToggleButton value="all" sx={{ fontWeight: 700 }}>All transactions</ToggleButton>
+          <ToggleButton value="account" sx={{ fontWeight: 700 }}>Account statement</ToggleButton>
+        </ToggleButtonGroup>
+        {mode === 'account' && (
+          <Autocomplete
+            options={accounts}
+            value={account}
+            onChange={(e, v) => onAccountChange(v ? v.id : '')}
+            getOptionLabel={(a) => `${a.code} - ${a.name}`}
+            isOptionEqualToValue={(a, b) => String(a.id) === String(b.id)}
+            renderInput={(params) => <TextField {...params} size="small" label="Account" />}
+            sx={{ width: { xs: '100%', sm: 320 } }}
+          />
+        )}
         <DateField label="From" value={dateFrom} onChange={setDateFrom} />
         <DateField label="To" value={dateTo} onChange={setDateTo} />
       </Header>
-      {!accountId ? (
-        <Alert severity="info">Select an account to see its ledger. You can also open a ledger from the Chart of Accounts or the Trial Balance.</Alert>
-      ) : (<>
-        <Status loading={loading} error={accountId && error} />
+
+      {mode === 'all' && (<>
+        <Stack direction={{ xs: 'column', md: 'row' }} gap={1.5} alignItems={{ md: 'center' }} sx={{ mb: 2 }} className="no-print">
+          <Stack direction="row" gap={1} flexWrap="wrap" sx={{ flex: 1 }}>
+            {REGISTER_FILTERS.map(x => (
+              <Chip key={x.key} label={x.label} clickable color={filter === x.key ? 'primary' : 'default'}
+                variant={filter === x.key ? 'filled' : 'outlined'} onClick={() => setFilter(x.key)} sx={{ fontWeight: 700 }} />
+            ))}
+          </Stack>
+          <TextField size="small" placeholder="Search bill / voucher no, party…" value={search}
+            onChange={(e) => setSearch(e.target.value)} sx={{ width: { xs: '100%', md: 280 } }} />
+        </Stack>
+        <Status loading={register.loading} error={register.error} />
+        {register.data && (<>
+          <Typography variant="caption" color="text.secondary">
+            {register.data.count} posted {register.data.count === 1 ? 'entry' : 'entries'} · total {inr(register.data.total_amount)}.
+            A document missing here has not been posted yet: check Accounting Integration → Reconciliation.
+          </Typography>
+          <TableContainer sx={{ mt: 1, overflowX: 'auto' }}>
+            <Table size="small" sx={{ minWidth: 1000 }}>
+              <TableHead sx={{ bgcolor: '#f8fafc' }}>
+                <TableRow>
+                  <TableCell sx={head}>Date</TableCell>
+                  <TableCell sx={head}>Voucher</TableCell>
+                  <TableCell sx={head}>Type / Bill no</TableCell>
+                  <TableCell sx={head}>Narration</TableCell>
+                  <TableCell sx={head}>Posted to (Dr / Cr)</TableCell>
+                  <TableCell sx={head} align="right">Amount</TableCell>
+                  <TableCell sx={head} align="center" className="no-print">Bill</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {register.data.rows.length === 0 && (
+                  <TableRow><TableCell colSpan={7} align="center" sx={{ py: 5, color: 'text.secondary' }}>No posted entries for this filter and range.</TableCell></TableRow>
+                )}
+                {register.data.rows.map(r => (
+                  <TableRow key={r.entry_id} hover>
+                    <TableCell sx={{ whiteSpace: 'nowrap' }}>{r.date}</TableCell>
+                    <TableCell sx={{ fontFamily: 'monospace', fontWeight: 700, color: r.is_reversal ? 'warning.main' : 'primary.main' }}>
+                      {r.entry_number}
+                      {r.is_reversal && <Typography variant="caption" display="block" color="warning.main">Reversal</Typography>}
+                    </TableCell>
+                    <SourceCell row={r} />
+                    <TableCell sx={{ maxWidth: 300 }}>
+                      <Typography variant="body2">{r.narration}</Typography>
+                      {r.has_service && <Chip size="small" variant="outlined" color="secondary" label="Services" sx={{ mt: 0.5 }} />}
+                    </TableCell>
+                    <TableCell sx={{ maxWidth: 300 }}>
+                      <Typography variant="caption" display="block"><b>Dr</b> {r.debit_accounts.join(', ')}</Typography>
+                      <Typography variant="caption" display="block" color="text.secondary"><b>Cr</b> {r.credit_accounts.join(', ')}</Typography>
+                    </TableCell>
+                    <TableCell align="right" sx={{ fontWeight: 800 }}>{inr(r.amount)}</TableCell>
+                    <TableCell align="center" className="no-print"><ShowBillButton row={r} onShow={setBillRow} /></TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+          {register.data.truncated && <Alert severity="warning" sx={{ mt: 2 }}>Showing the latest 1,000 entries. Narrow the date range or filter to see the rest.</Alert>}
+        </>)}
+      </>)}
+
+      {mode === 'account' && !accountId && (
+        <Alert severity="info">Select an account to see its statement. You can also open one from the Chart of Accounts or the Trial Balance.</Alert>
+      )}
+      {mode === 'account' && accountId && (<>
+        <Status loading={statement.loading} error={statement.error} />
         {data && (<>
           <Grid container spacing={2} sx={{ mb: 2 }}>
             {[['Opening balance', data.opening_balance], ['Total debit', data.total_debit], ['Total credit', data.total_credit], ['Closing balance', data.closing_balance]].map(([label, val]) => (
@@ -102,10 +225,10 @@ export function GeneralLedgerPanel({ accounts, accountId, onAccountChange }) {
             ))}
           </Grid>
           <Typography variant="caption" color="text.secondary">
-            Balances are shown on the account's normal side ({data.account.normal_balance === 'DEBIT' ? 'debit' : 'credit'}).
+            Balances are shown on the account&apos;s normal side ({data.account.normal_balance === 'DEBIT' ? 'debit' : 'credit'}).
           </Typography>
           <TableContainer sx={{ mt: 1, overflowX: 'auto' }}>
-            <Table size="small" sx={{ minWidth: 900 }}>
+            <Table size="small" sx={{ minWidth: 1000 }}>
               <TableHead sx={{ bgcolor: '#f8fafc' }}>
                 <TableRow>
                   <TableCell sx={head}>Date</TableCell>
@@ -115,20 +238,18 @@ export function GeneralLedgerPanel({ accounts, accountId, onAccountChange }) {
                   <TableCell sx={head} align="right">Debit</TableCell>
                   <TableCell sx={head} align="right">Credit</TableCell>
                   <TableCell sx={head} align="right">Balance</TableCell>
+                  <TableCell sx={head} align="center" className="no-print">Bill</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
                 {data.lines.length === 0 && (
-                  <TableRow><TableCell colSpan={7} align="center" sx={{ py: 5, color: 'text.secondary' }}>No posted lines in this range.</TableCell></TableRow>
+                  <TableRow><TableCell colSpan={8} align="center" sx={{ py: 5, color: 'text.secondary' }}>No posted lines in this range.</TableCell></TableRow>
                 )}
                 {data.lines.map(l => (
                   <TableRow key={l.id} hover>
-                    <TableCell>{l.date}</TableCell>
+                    <TableCell sx={{ whiteSpace: 'nowrap' }}>{l.date}</TableCell>
                     <TableCell sx={{ fontFamily: 'monospace', fontWeight: 700, color: l.is_reversal ? 'warning.main' : 'primary.main' }}>{l.entry_number}</TableCell>
-                    <TableCell>
-                      <Typography variant="body2" fontWeight={600}>{sourceLabel(l)}</Typography>
-                      {l.source_number && <Typography variant="caption" color="text.secondary">{l.source_number}</Typography>}
-                    </TableCell>
+                    <SourceCell row={l} />
                     <TableCell sx={{ maxWidth: 320 }}>
                       <Typography variant="body2">{l.narration}</Typography>
                       {l.memo && <Typography variant="caption" color="text.secondary">{l.memo}</Typography>}
@@ -136,14 +257,17 @@ export function GeneralLedgerPanel({ accounts, accountId, onAccountChange }) {
                     <TableCell align="right">{parseFloat(l.debit) ? inr(l.debit) : ''}</TableCell>
                     <TableCell align="right">{parseFloat(l.credit) ? inr(l.credit) : ''}</TableCell>
                     <TableCell align="right" sx={{ fontWeight: 800 }}>{inr(l.balance)}</TableCell>
+                    <TableCell align="center" className="no-print"><ShowBillButton row={l} onShow={setBillRow} /></TableCell>
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
           </TableContainer>
-          {data.truncated && <Alert severity="warning" sx={{ mt: 2 }}>Showing the first 2,000 lines — narrow the date range to see the rest.</Alert>}
+          {data.truncated && <Alert severity="warning" sx={{ mt: 2 }}>Showing the first 2,000 lines. Narrow the date range to see the rest.</Alert>}
         </>)}
       </>)}
+
+      <ShowBillDialog row={billRow} onClose={() => setBillRow(null)} />
     </Card>
   );
 }
@@ -388,7 +512,7 @@ export function FinancialReportsPanel() {
             <TableHead sx={{ bgcolor: '#f8fafc' }}>
               <TableRow>
                 <TableCell sx={head}>Control account</TableCell>
-                <TableCell sx={head} align="right">General Ledger</TableCell>
+                <TableCell sx={head} align="right">Ledger</TableCell>
                 <TableCell sx={head} align="right">Sub-ledger</TableCell>
                 <TableCell sx={head} align="right">Difference</TableCell>
                 <TableCell sx={head}>Sub-ledger basis</TableCell>

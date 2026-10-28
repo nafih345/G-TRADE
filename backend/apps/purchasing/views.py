@@ -270,6 +270,24 @@ def _owes_supplier(invoice):
         invoice.payment_method == 'CASH' and invoice.payment_status == 'UNPAID')
 
 
+def _accounting_status(invoice_id):
+    """What the books did with this entry's save — read after perform_create's transaction has
+    committed, which is when the accounting engine posts (on_commit). `failed` lists open
+    posting failures, so the screen can say so instead of the entry silently missing the ledgers."""
+    if not invoice_id:
+        return None
+    from apps.financial.models import JournalEntry, PostingFailure
+    events = ('purchase_invoice', 'purchase_payment')
+    posted = JournalEntry.objects.filter(source_module='purchasing', source_event__in=events, reference_id=invoice_id,
+                                         status='POSTED', is_reversal=False).order_by('created_at')
+    failed = PostingFailure.objects.filter(source_module='purchasing', source_event__in=events, reference_id=invoice_id,
+                                           status='OPEN')
+    return {
+        'posted': [{'event': e.source_event, 'entry_number': e.entry_number} for e in posted],
+        'failed': [{'event': f.source_event, 'error': f.error} for f in failed],
+    }
+
+
 class PurchaseInvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
     # Joined/prefetched so serializing a list (or the save response) costs a few queries
     # instead of supplier + bank + every line's product, one round trip each.
@@ -279,6 +297,16 @@ class PurchaseInvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
     serializer_class = PurchaseInvoiceSerializer
     authentication_classes = []
     permission_classes = [permissions.AllowAny]
+
+    def create(self, request, *args, **kwargs):
+        response = super().create(request, *args, **kwargs)
+        response.data['accounting'] = _accounting_status(response.data.get('id'))
+        return response
+
+    def update(self, request, *args, **kwargs):
+        response = super().update(request, *args, **kwargs)
+        response.data['accounting'] = _accounting_status(response.data.get('id'))
+        return response
 
     def _reload_for_response(self, serializer):
         """Point the serializer at a prefetched copy so the save response is cheap too."""
@@ -291,6 +319,13 @@ class PurchaseInvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
 
     @transaction.atomic
     def perform_create(self, serializer):
+        # Converting a Lens Purchase Order: lock it first so two saves can't both bill it; the
+        # link commits (or rolls back) together with this entry's stock and payables.
+        lens_po_id = self.request.data.get('lens_purchase_order')
+        lens_po = None
+        if lens_po_id:
+            from .lens_orders import lock_for_conversion
+            lens_po = lock_for_conversion(lens_po_id)
         extra = self._branch_stamp_kwargs(serializer)
         number = _sequence_number('PURCHASE_BILL', PurchaseInvoice, 'invoice_number',
                                   serializer.validated_data.get('invoice_number'))
@@ -299,6 +334,9 @@ class PurchaseInvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
         invoice = serializer.save(**extra)
         if invoice.status not in ('DRAFT', 'CANCELLED'):
             self._apply_stock_and_payables(invoice)
+        if lens_po is not None:
+            from .lens_orders import link_purchase_invoice
+            link_purchase_invoice(lens_po, invoice)
         self._reload_for_response(serializer)
 
     @transaction.atomic

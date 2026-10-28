@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import QuickDatePickerField from '../components/common/QuickDatePickerField';
 import PurchaseEntryView from '../components/purchasing/PurchaseEntryView';
+import LensPurchaseOrderView from '../components/purchasing/LensPurchaseOrderView';
 import { printPurchaseReceipt } from '../utils/printPurchase';
 import { printBill } from '../billing/printBill';
 
@@ -37,7 +38,8 @@ import {
   Warning as WarningIcon,
   CloudUpload as CloudUploadIcon,
   Edit as EditIcon,
-  Print as PrintIcon
+  Print as PrintIcon,
+  Visibility as LensIcon
 } from '@mui/icons-material';
 
 import axios from 'axios';
@@ -55,6 +57,7 @@ export default function Purchases() {
     if (pathname.includes('/purchase/orders')) return 'orders';
     if (pathname.includes('/purchase/receive') || pathname.includes('/purchase/stock-receive')) return 'receive';
     if (pathname.includes('/purchase/returns')) return 'returns';
+    if (pathname.includes('/purchase/lens-orders')) return 'lens';
     return 'entry';
   };
 
@@ -63,6 +66,8 @@ export default function Purchases() {
   const [entryPrefillPoId, setEntryPrefillPoId] = useState('');
   // Non-empty while the Purchase Entry form is re-opened for an existing entry (Reports → Edit).
   const [entryEditId, setEntryEditId] = useState('');
+  // Non-empty while the Purchase Entry form is converting a Lens Purchase Order.
+  const [entryLensPoId, setEntryLensPoId] = useState('');
 
   useEffect(() => {
     setActiveTab(getTabFromPath(location.pathname));
@@ -75,10 +80,12 @@ export default function Purchases() {
     if (newValue === 'orders') navigate('/purchase/orders');
     if (newValue === 'receive') navigate('/purchase/receive');
     if (newValue === 'returns') navigate('/purchase/returns');
+    if (newValue === 'lens') navigate('/purchase/lens-orders');
   };
 
   const goToNewPurchaseEntry = (supplierId, poId) => {
     setEntryEditId('');
+    setEntryLensPoId('');
     setEntryPrefillSupplierId(supplierId || '');
     setEntryPrefillPoId(poId || '');
     setActiveTab('entry');
@@ -89,7 +96,19 @@ export default function Purchases() {
   const goToEditPurchaseEntry = (invoiceId) => {
     setEntryPrefillSupplierId('');
     setEntryPrefillPoId('');
+    setEntryLensPoId('');
     setEntryEditId(invoiceId);
+    setActiveTab('entry');
+    navigate('/purchase/entry');
+  };
+
+  // Lens PO → Convert to Purchase Invoice: the ordinary Purchase Entry, prefilled with the
+  // received lenses; saving it is what brings them into stock and the supplier's payable.
+  const goToConvertLensPO = (lensPoId) => {
+    setEntryPrefillSupplierId('');
+    setEntryPrefillPoId('');
+    setEntryEditId('');
+    setEntryLensPoId(lensPoId);
     setActiveTab('entry');
     navigate('/purchase/entry');
   };
@@ -873,6 +892,7 @@ export default function Purchases() {
           <Tab value="orders" label="Purchase Order Reports" icon={<POIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab value="receive" label="Stock Receive (GRN)" icon={<ReceiveIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab value="returns" label="Purchase Returns (RTV)" icon={<ReturnIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
+          <Tab value="lens" label="Lens Purchase Order" icon={<LensIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
         </Tabs>
       </Card>
 
@@ -883,12 +903,14 @@ export default function Purchases() {
           products={products}
           initialSupplierId={entryPrefillSupplierId}
           initialPurchaseOrderId={entryPrefillPoId}
+          initialLensPoId={entryLensPoId}
           editInvoiceId={entryEditId}
           onRequestAddSupplier={openAddSupplier}
           onSaveComplete={(invoice) => {
             setEntryPrefillSupplierId('');
             setEntryPrefillPoId('');
             setEntryEditId('');
+            setEntryLensPoId('');
             fetchPurchaseOrders();
             fetchPurchaseEntries();
             const supplierName = invoice.supplierName || 'Supplier';
@@ -916,6 +938,15 @@ export default function Purchases() {
               status: invoice.status === 'DRAFT' ? 'Pending' : 'Verified & Stocked'
             }, ...prev]);
           }}
+        />
+      )}
+
+      {/* LENS PURCHASE ORDERS (lab orders mapped to customer sales orders) */}
+      {activeTab === 'lens' && (
+        <LensPurchaseOrderView
+          suppliers={cleanSuppList}
+          onConvertToInvoice={goToConvertLensPO}
+          onOpenInvoice={goToEditPurchaseEntry}
         />
       )}
 
@@ -1633,7 +1664,7 @@ export default function Purchases() {
           </Grid>
 
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1.5 }}>
-            A Chart of Accounts ledger under "Sundry Creditors" is created automatically for this supplier, so their dues track individually in Financial → Chart of Accounts / General Ledger.
+            A Chart of Accounts ledger under "Sundry Creditors" is created automatically for this supplier, so their dues track individually in Financial → Chart of Accounts / Ledger.
           </Typography>
 
           {!editSupplierId && (

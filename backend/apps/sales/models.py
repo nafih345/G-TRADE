@@ -200,6 +200,18 @@ class InvoiceItem(BaseUUIDModel):
     tax_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0.0)  # Percentage
     tax_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
     subtotal = models.DecimalField(max_digits=12, decimal_places=2)
+    # Spectacle-lens lines only (blank / null on every other line and on bills made before lens
+    # units existed). `quantity` stays the COMMERCIAL quantity in `selling_unit`s and
+    # `unit_price` is the price of one of them; `physical_quantity` is the number of lenses
+    # (1 pair = 2). Stock moves by lens_units.stock_units_by_product, never by `quantity` alone.
+    selling_unit = models.CharField(max_length=10, blank=True, default='')   # '' | PAIR | PIECE
+    lens_eye = models.CharField(max_length=5, blank=True, default='')        # '' | BOTH | RE | LE
+    pricing_unit = models.CharField(max_length=10, blank=True, default='')   # '' | PAIR | PIECE
+    physical_quantity = models.PositiveIntegerField(null=True, blank=True)
+    # {rx: {re: {sph, cyl, axis, add, prism, base}, le: {...}}, lens_index, specs, pricing,
+    #  rx_source, stock_unit} — stock_unit is snapshotted from the product when the line is saved
+    # so an edit / return of this line moves stock in the unit it was sold against.
+    lens_details = models.JSONField(blank=True, null=True)
 
     def __str__(self):
         return f"{self.description or (self.product.name if self.product else 'Item')} ({self.quantity}pcs)"

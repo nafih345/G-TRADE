@@ -47,6 +47,12 @@ def _candidates(role, branch=None, date=None):
 
 def resolve_role(role, branch=None, date=None):
     candidates = _candidates(role, branch, date)
+    if not candidates and role in ROLES and not AccountMapping.objects.filter(role=role).exists():
+        # Never mapped (e.g. the financial tables were wiped): restore the seeded default
+        # rather than failing every posting. A deactivated mapping is left alone.
+        from .defaults import ensure_accounting_defaults
+        ensure_accounting_defaults()
+        candidates = _candidates(role, branch, date)
     label = ROLES.get(role, (role,))[0]
     if not candidates:
         raise MappingError(f"No active account mapping for '{label}' ({role}). "

@@ -25,6 +25,7 @@
 //   return   {reason, originalInvoice, action}
 //   footer   {notes, terms}  (legacy renderer)
 import { canonicalDocType } from './billFields.js';
+import { qtyLabel, unitWord } from '../utils/lensUnits.js';
 
 const num = (v) => {
   const n = parseFloat(v);
@@ -163,6 +164,10 @@ function salesLine(it) {
       && it.taxPercent === undefined && it.tax_rate === undefined) {
     total = Math.round(rate * (qty ?? 1) * 100) / 100;
   }
+  // Spectacle lenses sold by the pair or the single lens: the quantity must say which, so a bare
+  // "1" never reads as one lens when it is a pair (saved line: selling_unit; New Sale: lens).
+  const lensUnit = str(it.selling_unit, it.lens && it.lens.sellingUnit).toUpperCase();
+  const qtyUnit = lensUnit === 'PAIR' || lensUnit === 'PIECE' ? lensUnit : '';
   return {
     name: str(it.display_name, it.name, it.item, it.product, it.productName, it.product_name, it.description) || 'Item',
     description: str(it.description) !== str(it.display_name, it.name, it.item) ? str(it.description) : '',
@@ -179,7 +184,10 @@ function salesLine(it) {
     expiry: '',
     qty: qty ?? 1,
     freeQty: null,
-    unit: str(it.unit, it.uom),
+    unit: str(it.unit, it.uom) || (qtyUnit ? unitWord(qtyUnit, qty ?? 1) : ''),
+    // PAIR / PIECE for lens lines ('' otherwise) and the full "1 Pair (2 Lenses)" wording.
+    qtyUnit,
+    lensQty: qtyUnit ? qtyLabel(qtyUnit, qty ?? 1) : '',
     mrp: null,
     rate,
     discount,

@@ -258,6 +258,8 @@ export default function OrdersManagerView({
     switch (status) {
       case 'Order Received': return 0;
       case 'In Lab Processing': return 1;
+      case 'Awaiting Remaining Lens': return 1;
+      case 'Lens Arrived': return 2; // set by Lens PO receiving: lenses in, ready for fitting
       case 'Frame Mounting': return 2;
       case 'Quality Control': return 3;
       case 'Ready for Collection': return 4;
@@ -268,8 +270,10 @@ export default function OrdersManagerView({
 
   const handleAdvanceStatus = (orderId, currentStatus) => {
     const nextStatuses = ['Order Received', 'In Lab Processing', 'Frame Mounting', 'Quality Control', 'Ready for Collection', 'Delivered'];
+    // Stages a Lens Purchase Order sets while the order's lenses arrive from the lab.
+    const lensNext = { 'Awaiting Remaining Lens': 'Lens Arrived', 'Lens Arrived': 'Frame Mounting' };
     const idx = nextStatuses.indexOf(currentStatus);
-    const nextStatus = idx < nextStatuses.length - 1 ? nextStatuses[idx + 1] : 'Delivered';
+    const nextStatus = lensNext[currentStatus] || (idx < nextStatuses.length - 1 ? nextStatuses[idx + 1] : 'Delivered');
     if (selectedOrder && selectedOrder.id === orderId) {
       setSelectedOrder({ ...selectedOrder, status: nextStatus });
     }
@@ -406,6 +410,8 @@ export default function OrdersManagerView({
                 <MenuItem value="All">All Pipeline Statuses</MenuItem>
                 <MenuItem value="Order Received">Order Received</MenuItem>
                 <MenuItem value="In Lab Processing">In Lab Processing</MenuItem>
+                <MenuItem value="Awaiting Remaining Lens">Awaiting Remaining Lens</MenuItem>
+                <MenuItem value="Lens Arrived">Lens Arrived (Ready for Fitting)</MenuItem>
                 <MenuItem value="Frame Mounting">Frame Mounting</MenuItem>
                 <MenuItem value="Quality Control">Quality Control (QC)</MenuItem>
                 <MenuItem value="Ready for Collection">Ready for Collection</MenuItem>
@@ -443,7 +449,7 @@ export default function OrdersManagerView({
               sx={{ minWidth: 210 }}
             >
               <MenuItem value="" disabled>Set pipeline status…</MenuItem>
-              {['Order Received', 'In Lab Processing', 'Frame Mounting', 'Quality Control', 'Ready for Collection', 'Delivered'].map(s => (
+              {['Order Received', 'In Lab Processing', 'Awaiting Remaining Lens', 'Lens Arrived', 'Frame Mounting', 'Quality Control', 'Ready for Collection', 'Delivered'].map(s => (
                 <MenuItem key={s} value={s}>{s}</MenuItem>
               ))}
             </TextField>

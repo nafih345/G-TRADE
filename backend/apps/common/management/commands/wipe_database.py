@@ -118,6 +118,14 @@ class Command(BaseCommand):
             "Schema and migrations are untouched."
         ))
 
+        # A cleared database must still book its first purchase / sale: put back the default
+        # Chart of Accounts heads and posting-role mappings the financial wipe removed.
+        if 'financial' in app_labels:
+            from apps.financial.defaults import ensure_accounting_defaults
+            restored = ensure_accounting_defaults()
+            self.stdout.write(f"Restored {len(restored['accounts'])} default account(s) and "
+                              f"{len(restored['mappings'])} posting-role mapping(s).")
+
     def _row_counts(self, tables):
         counts = {}
         with connection.cursor() as cursor:

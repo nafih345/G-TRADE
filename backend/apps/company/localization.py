@@ -183,6 +183,9 @@ DEFAULTS = {
     'rounding_method': 'NONE', 'quantity_decimals': 0, 'default_payment_terms_days': 0,
     'default_sale_status': 'UNPAID', 'default_discount_mode': 'PERCENT', 'max_discount_percent': 100,
     'service_charge_percent': 0, 'service_charge_on': 'NONE', 'default_customer_city': '',
+    # Spectacle lenses priced per pair: a single lens costs this % of the pair price unless the
+    # product sets its own single-lens price or %.
+    'lens_single_piece_percent': 50,
 }
 BOOL_KEYS = {k for k, v in DEFAULTS.items() if isinstance(v, bool)}
 
@@ -310,6 +313,13 @@ def validate_preferences(data, current):
             raise ValueError('Must be between 0 and 100.')
         return float(d.quantize(Decimal('0.01')))
     put('service_charge_percent', pct)
+
+    def piece_pct(v):
+        d = pct(v)
+        if d <= 0:
+            raise ValueError('Must be more than 0.')
+        return d
+    put('lens_single_piece_percent', piece_pct)
 
     def lang_list(v):
         if not isinstance(v, list):

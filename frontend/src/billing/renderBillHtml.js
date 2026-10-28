@@ -8,6 +8,7 @@
 import JsBarcode from 'jsbarcode';
 import QRCode from 'qrcode';
 import { formatMoney, formatDate } from '../utils/localeFormat.js';
+import { unitWord } from '../utils/lensUnits.js';
 import { billLabel as L, billLabelText, billHtmlAttrs, BILL_I18N_CSS } from './billI18n.js';
 
 const PAPER = {
@@ -128,9 +129,9 @@ function columnValue(key, item, idx, currency) {
     case 'hsn': return esc(item.hsn || '-');
     case 'size': return esc(item.size || '-');
     case 'color': return esc(item.color || '-');
-    case 'qty': return String(item.qty ?? '');
+    case 'qty': return `${item.qty ?? ''}${item.qtyUnit ? ` ${esc(unitWord(item.qtyUnit, item.qty))}` : ''}`;
     case 'unit': return esc(item.unit || '-');
-    case 'rate': return money(item.rate, currency);
+    case 'rate': return `${money(item.rate, currency)}${item.qtyUnit && item.rate != null ? `<div class="lensunit">per ${esc(unitWord(item.qtyUnit))}</div>` : ''}`;
     case 'discount':
       return item.discountPercent != null && item.discountPercent !== ''
         ? `${item.discountPercent}%`
@@ -303,6 +304,10 @@ function renderItems(model, cfg, thermal, currency) {
       if (c.key === 'name' && item.power) {
         val += `<div class="power">${esc(item.power)}</div>`;
       }
+      // Lens sold by the pair / single lens: "1 Pair (2 Lenses) @ ₹2,000.00 per Pair".
+      if (c.key === 'name' && item.lensQty) {
+        val += `<div class="lensunit">${esc(item.lensQty)}${item.rate != null ? ` @ ${money(item.rate, currency)} per ${esc(unitWord(item.qtyUnit))}` : ''}</div>`;
+      }
       return `<td style="text-align:${c.align || 'left'};">${val}</td>`;
     });
     return `<tr>${tds.join('')}</tr>`;
@@ -422,6 +427,7 @@ function buildStyles(template, thermal, styles) {
     .items td { font-size: .9em; vertical-align: top; }
     .items .brand { font-size: .78em; color: #64748b; }
     .items .power { font-size: .78em; color: ${accent}; font-weight: 700; }
+    .items .lensunit { font-size: .78em; font-weight: 700; }
     .totals { margin-left: auto; }
     .totals.left { margin-left: 0; }
     .totals .row { display: flex; justify-content: space-between; gap: 24px; padding: 2px 0; }

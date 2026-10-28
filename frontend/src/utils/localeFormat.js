@@ -13,7 +13,7 @@ export const DEFAULT_PREFS = {
   base_currency: 'INR', currency_decimals: 2, enabled_currencies: [], exchange_rates: {}, enabled_languages: ['en'],
   rounding_method: 'NONE', quantity_decimals: 0, default_payment_terms_days: 0, default_sale_status: 'UNPAID',
   default_discount_mode: 'PERCENT', max_discount_percent: 100, service_charge_percent: 0, service_charge_on: 'NONE',
-  default_customer_city: '',
+  default_customer_city: '', lens_single_piece_percent: 50,
 };
 
 // group separator, decimal separator, Indian lakh grouping — mirrors NUMBER_FORMATS.

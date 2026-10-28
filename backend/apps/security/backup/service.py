@@ -410,6 +410,11 @@ def _after_restore(keep_session=None):
             create_contenttypes(app_config, verbosity=0)
             create_permissions(app_config, verbosity=0)
     hot_cache.clear()
+    # A backup taken before the accounting defaults existed has no role mappings; without them
+    # every new journal would fail.
+    with contextlib.suppress(Exception):
+        from apps.financial.defaults import ensure_accounting_defaults
+        ensure_accounting_defaults()
     end_all_sessions('RESTORE', except_sid=keep_session)
 
 

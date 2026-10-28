@@ -34,6 +34,9 @@ export const NEW_SALE_SHORTCUTS = [
   { id: 'power', keys: ['Alt+P'], group: 'Items', label: 'Tick / untick Power' },
   { id: 'newLens', keys: ['Alt+L'], group: 'Items', label: 'Open + NEW Lens' },
   { id: 'removeRow', keys: ['Ctrl+Delete'], group: 'Items', label: 'Remove the billing line whose cell has the cursor' },
+  { id: 'lensFocus', keys: ['F9'], group: 'Items', label: 'Go to the lens line (the one with the cursor, else the last one) — then ←/P Pair, →/S Single, R/L eye, E Edit Rx, Enter next' },
+  { id: 'lensUnit', keys: ['Alt+U'], group: 'Items', label: 'Lens line: switch Both Eyes (1 Pair) / Single Lens (1 Piece) — the line with the cursor, else the last lens line' },
+  { id: 'lensEye', keys: ['Alt+E'], group: 'Items', label: 'Single lens line: switch Right (RE) / Left (LE) eye' },
   { id: 'searchKeys', keys: ['↑', '↓', 'Enter'], group: 'Items', global: false, label: 'In the search box: walk the matches and add the highlighted one (Enter with nothing highlighted highlights the first)' },
   // Payment & completion
   { id: 'coupon', keys: ['Ctrl+U'], group: 'Payment', label: 'Go to Coupon Code' },
@@ -51,5 +54,5 @@ export const NEW_SALE_SHORTCUTS = [
 ];
 
 export const useNewSaleShortcuts = makeShortcutHook(NEW_SALE_SHORTCUTS, [
-  'Ctrl+U', 'Ctrl+M', 'Ctrl+P', 'Ctrl+/', 'Alt+T', 'Alt+O', 'Alt+I', 'Alt+Q', 'Alt+R', 'Alt+H', 'Alt+G', 'Alt+P', 'Alt+L', 'Alt+A',
+  'Ctrl+U', 'Ctrl+M', 'Ctrl+P', 'Ctrl+/', 'Alt+T', 'Alt+O', 'Alt+I', 'Alt+Q', 'Alt+R', 'Alt+H', 'Alt+G', 'Alt+P', 'Alt+L', 'Alt+A', 'Alt+U', 'Alt+E',
 ], { pageWide: true }); // New Sale is the whole page: F1 etc. must never reach Chrome from the sidebar / toolbar

@@ -22,6 +22,7 @@ import {
 } from '@mui/icons-material';
 import BarcodeSection from './BarcodeSection';
 import { notify } from '../../utils/notify';
+import { getBusinessPrefs } from '../../utils/localeFormat';
 import { navDialogProps, enterOpensSelectProps, focusField, focusRelative, focusNextAfterRender } from '../../pages/wholesale/keyboardNav';
 
 export { opticalCategories, opticalBrands } from './productAttributeOptions';
@@ -44,6 +45,9 @@ const blankProduct = (overrides = {}) => ({
   purchasePrice: '', mrp: '', salePrice: '', gst: '0%',
   barcode: '',
   secondaryBarcode: '',
+  // Spectacle lenses: what the sale price is per, what stock is counted in, and the single-lens
+  // price (explicit, or a % of the pair price — blank % = the Business Settings default).
+  lensPriceUnit: 'PAIR', lensStockUnit: 'PAIR', lensPiecePrice: '', lensPiecePercent: '', lensPairPrice: '',
   ...overrides
 });
 
@@ -341,7 +345,12 @@ const productToForm = (ep) => {
   salePrice: (ep.salePrice ?? ep.sellingPrice ?? '') === '' ? '' : String(ep.salePrice ?? ep.sellingPrice),
   gst: ep.gst || '0%',
   barcode: ep.barcode || '',
-  secondaryBarcode: ep.secondaryBarcode || ep.secondary_barcode || ''
+  secondaryBarcode: ep.secondaryBarcode || ep.secondary_barcode || '',
+  lensPriceUnit: (ep.extra_data || {}).lens_price_unit === 'PIECE' ? 'PIECE' : 'PAIR',
+  lensStockUnit: (ep.extra_data || {}).lens_stock_unit === 'PIECE' ? 'PIECE' : 'PAIR',
+  lensPiecePrice: (ep.extra_data || {}).lens_piece_price ?? '',
+  lensPiecePercent: (ep.extra_data || {}).lens_piece_percent ?? '',
+  lensPairPrice: (ep.extra_data || {}).lens_pair_price ?? ''
   });
 };
 
@@ -507,7 +516,10 @@ export default function ProductMasterDialog({
     const salePrice = parseFloat(p.salePrice) || mrp || 0;
     const stock = parseInt(p.stock) || 0;
 
+    const lensNum = (v) => (parseFloat(v) > 0 ? parseFloat(v) : null);
     const extra_data = {
+      // Keys this form doesn't edit (importer columns etc.) survive an edit.
+      ...(isEdit ? (editProduct.extra_data || {}) : {}),
       mrp,
       sale_price: salePrice,
       model_no: p.modelNo || '',
@@ -519,7 +531,14 @@ export default function ProductMasterDialog({
       gst: p.gst || '',
       lens_design: p.lensType || '',
       refractive_index: p.frameType || '',
-      coating: p.coating || ''
+      coating: p.coating || '',
+      ...(isLens ? {
+        lens_price_unit: p.lensPriceUnit,
+        lens_stock_unit: p.lensStockUnit,
+        lens_piece_price: p.lensPriceUnit === 'PAIR' ? lensNum(p.lensPiecePrice) : null,
+        lens_piece_percent: p.lensPriceUnit === 'PAIR' ? lensNum(p.lensPiecePercent) : null,
+        lens_pair_price: p.lensPriceUnit === 'PIECE' ? lensNum(p.lensPairPrice) : null,
+      } : {})
     };
 
     const payload = {
@@ -590,7 +609,8 @@ export default function ProductMasterDialog({
       warehouse: p.warehouse || 'Main',
       hsnCode: p.hsnCode || '',
       image: imagePreview || '',
-      status: isEdit ? (editProduct.status || 'Active') : 'Active'
+      status: isEdit ? (editProduct.status || 'Active') : 'Active',
+      extra_data
     };
 
     try {
@@ -821,6 +841,51 @@ export default function ProductMasterDialog({
                 </Stack>
               )}
             </Section>
+
+            {isLens && (
+              <Section title="Lens Selling Unit — Pair / Single Lens" icon={<PriceIcon fontSize="small" />}>
+                <Grid container spacing={2}>
+                  <Grid item xs={12} sm={6} md={3}>
+                    <TextField select label="Sale Price Is Per" fullWidth size="small" value={p.lensPriceUnit}
+                      onChange={(e) => set({ lensPriceUnit: e.target.value })} SelectProps={{ ...enterOpensSelectProps }}
+                      helperText={p.lensPriceUnit === 'PAIR' ? 'Sale price = 1 pair (2 lenses)' : 'Sale price = 1 lens'}>
+                      <MenuItem value="PAIR">Pair (2 Lenses)</MenuItem>
+                      <MenuItem value="PIECE">Piece (1 Lens)</MenuItem>
+                    </TextField>
+                  </Grid>
+                  <Grid item xs={12} sm={6} md={3}>
+                    <TextField select label="Stock Counted In" fullWidth size="small" value={p.lensStockUnit}
+                      onChange={(e) => set({ lensStockUnit: e.target.value })} SelectProps={{ ...enterOpensSelectProps }}
+                      helperText={p.lensStockUnit === 'PAIR' ? 'Stock qty = pairs; a single lens sold uses a whole pair' : 'Stock qty = single lenses; a pair uses 2'}>
+                      <MenuItem value="PAIR">Pairs</MenuItem>
+                      <MenuItem value="PIECE">Pieces (single lenses)</MenuItem>
+                    </TextField>
+                  </Grid>
+                  {p.lensPriceUnit === 'PAIR' ? (
+                    <>
+                      <Grid item xs={12} sm={6} md={3}>
+                        <TextField label="Single Lens Price (₹)" fullWidth size="small" type="number" value={p.lensPiecePrice}
+                          onChange={(e) => set({ lensPiecePrice: e.target.value })}
+                          helperText="Optional — overrides the % rule" />
+                      </Grid>
+                      <Grid item xs={12} sm={6} md={3}>
+                        <TextField label="Single Lens % of Pair" fullWidth size="small" type="number" value={p.lensPiecePercent}
+                          onChange={(e) => set({ lensPiecePercent: e.target.value })}
+                          disabled={parseFloat(p.lensPiecePrice) > 0}
+                          helperText={parseFloat(p.lensPiecePrice) > 0 ? 'Not used — single lens price is set'
+                            : `Blank = Business Settings default (${getBusinessPrefs().lens_single_piece_percent ?? 50}%)`} />
+                      </Grid>
+                    </>
+                  ) : (
+                    <Grid item xs={12} sm={6} md={3}>
+                      <TextField label="Pair Price (₹)" fullWidth size="small" type="number" value={p.lensPairPrice}
+                        onChange={(e) => set({ lensPairPrice: e.target.value })}
+                        helperText="Optional — blank = 2 × sale price" />
+                    </Grid>
+                  )}
+                </Grid>
+              </Section>
+            )}
 
             {/* ── Barcode (configurable series — see Barcode settings) ── */}
             <Section title="Barcode" icon={<BarcodeIcon fontSize="small" />}>

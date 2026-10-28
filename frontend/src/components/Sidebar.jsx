@@ -87,6 +87,7 @@ const menuItems = [
       { text: 'Suppliers', path: '/purchase/suppliers' },
       { text: 'Stock Overview', path: '/purchase/stock-overview' },
       { text: 'Purchase Orders', path: '/purchase/orders' },
+      { text: 'Lens Purchase Order', path: '/purchase/lens-orders' },
       { text: 'Stock Receive', path: '/purchase/receive' },
       { text: 'Purchase Return', path: '/purchase/returns' }
     ]
@@ -109,7 +110,7 @@ const menuItems = [
           { text: 'View All Vouchers', path: '/financial/vouchers/all' }
         ]
       },
-      { text: 'General Ledger', path: '/financial/ledger' },
+      { text: 'Ledger', path: '/financial/ledger' },
       { text: 'Trial Balance', path: '/financial/trial-balance' },
       { text: 'Profit & Loss', path: '/financial/profit-loss' },
       { text: 'Balance Sheet', path: '/financial/balance-sheet' },

@@ -47,7 +47,7 @@ function clientErrors(f) {
     const missing = (f.enabled_currencies || []).filter((c) => !(Number(f.exchange_rates?.[c]) > 0));
     if (missing.length) e.exchange_rates = Object.fromEntries(missing.map((c) => [c, 'Enter a rate greater than 0.']));
   }
-  [['default_payment_terms_days', 0, 365], ['max_discount_percent', 0, 100], ['service_charge_percent', 0, 100]].forEach(([k, lo, hi]) => {
+  [['default_payment_terms_days', 0, 365], ['max_discount_percent', 0, 100], ['service_charge_percent', 0, 100], ['lens_single_piece_percent', 0.01, 100]].forEach(([k, lo, hi]) => {
     const n = Number(f[k]);
     if (f[k] === '' || !Number.isFinite(n) || n < lo || n > hi) e[k] = `Must be between ${lo} and ${hi}.`;
   });
