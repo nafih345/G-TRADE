@@ -13,6 +13,7 @@ WATCHED = [
     ('sales.Invoice', ('sales.invoice',), None),
     ('sales.InvoiceItem', ('sales.invoice',), 'invoice_id'),
     ('sales.Payment', ('sales.payment',), None),
+    ('sales.EyeExamination', ('sales.eye_test_fee',), None),
     ('sales.WholesaleInvoice', ('sales.wholesale_invoice',), None),
     ('sales.WholesalePaymentCollection', ('sales.wholesale_collection',), None),
     ('sales.WholesaleReturn', ('sales.wholesale_return',), None),

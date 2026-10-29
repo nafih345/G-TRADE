@@ -150,6 +150,29 @@ def build_sales_payment(pay, previous=None):
     }
 
 
+def build_eye_test_fee(exam, previous=None):
+    """An eye test fee collected at the test (sales.EyeExamination, fee_status PAID): money in
+    via Cash or GPay (UPI), booked straight to service revenue. Free tests take nothing, and a
+    deferred (PENDING / BILLED) fee reaches the books as a service line on the sale bill instead
+    — so only PAID posts here; switching away from PAID (or deleting the exam) reverses it."""
+    amount = money(exam.fee_paid_amount)
+    if exam.is_deleted or (exam.fee_status or '').upper() != 'PAID' or amount <= 0:
+        return None
+    upi = (exam.fee_payment_mode or '').upper() == 'UPI'
+    who = exam.patient_name or 'patient'
+    return {
+        # EyeExamination.branch is a free-text label, not a Branch row.
+        'date': _date(exam.examination_date), 'branch': None, 'voucher_type_code': 'RV',
+        'source_number': f"EYE-{exam.test_no}" if exam.test_no else '', 'reference_type': 'EYE_TEST',
+        'narration': f"Eye test fee — Test No {exam.test_no or '—'} — {who}",
+        'lines': [
+            _line('PAYMENT_UPI' if upi else 'CASH', debit=amount, memo='GPay (UPI)' if upi else 'Cash'),
+            # 'Service revenue' memo = the Ledger's "services & eye tests" flag.
+            _line('SERVICE_REVENUE', credit=amount, memo='Service revenue'),
+        ],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Wholesale (sales.WholesaleInvoice / WholesalePaymentCollection / WholesaleReturn)
 # ---------------------------------------------------------------------------

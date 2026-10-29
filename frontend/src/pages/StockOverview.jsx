@@ -1,12 +1,13 @@
 // Purchase → Stock Overview: live inventory over the whole catalogue.
 //
 // Every figure comes from /api/inventory/stock-overview/ (server-side search, filters, sort and
-// pagination — the catalogue is never loaded into the browser). Prices / minimum stock / rack /
-// bin / UOM are edited in the row ("Quick Update") and saved only after a confirm step; the
-// quantity is never edited as a field — "Edit Stock" records a ledgered stock adjustment.
+// pagination — the catalogue is never loaded into the browser). Every column except Status and
+// Last Purchase (both derived) is edited in the row and saved only after a confirm step. Codes,
+// name, prices, locations… are a field PATCH; a changed Current Stock is never written as a field —
+// it is recorded as a ledgered stock adjustment (with a reason) in the same confirm step.
 //
 // Keyboard: "/" focuses search · Enter in search = exact scan lookup · ↑/↓ move between rows ·
-// Space selects · Enter = Quick Update · A = Adjust stock · H = History · P = Print barcode ·
+// Space selects · Enter = edit row · A = Adjust stock · H = History · P = Print barcode ·
 // in an edited row Enter = save, Esc = cancel. A USB scanner works anywhere on the page.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link as RouterLink, useNavigate } from 'react-router-dom';
@@ -31,8 +32,8 @@ import ExcelImportManager from '../components/admin/import/ExcelImportManager';
 import StockAdjustDialog from '../components/purchasing/stock/StockAdjustDialog';
 import StockHistoryDrawer from '../components/purchasing/stock/StockHistoryDrawer';
 import {
-  fetchStockPage, fetchStockSummary, fetchStockFacets, lookupCode, updateStockFields, downloadStockExport,
-  normalizeBlobError, filterParams, STATUS_META, formatMoney, formatQty, formatDate,
+  fetchStockPage, fetchStockSummary, fetchStockFacets, lookupCode, updateStockFields, adjustStock, newClientToken,
+  downloadStockExport, normalizeBlobError, filterParams, STATUS_META, formatMoney, formatQty, formatDate,
 } from '../components/purchasing/stock/stockApi';
 import useBarcodeScanner from '../hooks/useBarcodeScanner';
 import { useDebounce } from '../hooks/useDebounce';
@@ -49,35 +50,89 @@ const readStored = (key, fallback) => {
 const writeStored = (key, value) => { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* private mode */ } };
 
 const FIELD_LABELS = {
-  cost_price: 'Purchase cost', retail_price: 'Selling price', mrp: 'MRP', minimum_stock: 'Minimum stock',
-  rack_location: 'Rack', bin_location: 'Shelf / Bin', unit: 'UOM',
+  sku: 'Item code', barcode: 'Barcode', secondary_barcode: 'Barcode 2', name: 'Product name', brand: 'Brand',
+  category: 'Category', model_no: 'Frame model', color: 'Colour', size: 'Size', supplier_name: 'Supplier / Vendor',
+  cost_price: 'Purchase cost', retail_price: 'Selling price', mrp: 'MRP', minimum_stock: 'Low stock alert',
+  rack_location: 'Rack', bin_location: 'Shelf', unit: 'UOM', stock: 'Current stock',
 };
 const MONEY_FIELDS = ['cost_price', 'retail_price', 'mrp'];
+const INT_FIELDS = ['stock', 'minimum_stock'];
+const TEXT_MAX = {
+  sku: 150, barcode: 150, secondary_barcode: 150, name: 255, brand: 150, category: 150, model_no: 150,
+  color: 100, size: 100, supplier_name: 150, rack_location: 150, bin_location: 150,
+};
+// Capability (from /facets/ permissions) needed to edit each field.
+const FIELD_PERM = {
+  sku: 'edit_details', barcode: 'edit_details', secondary_barcode: 'edit_details', name: 'edit_details',
+  brand: 'edit_details', category: 'edit_details', model_no: 'edit_details', color: 'edit_details',
+  size: 'edit_details', supplier_name: 'edit_details',
+  rack_location: 'edit_location', bin_location: 'edit_location', minimum_stock: 'edit_location', unit: 'edit_location',
+  cost_price: 'edit_prices', retail_price: 'edit_prices', mrp: 'edit_prices',
+  stock: 'adjust_stock',
+};
+const canEditField = (caps, f) => Boolean(caps[FIELD_PERM[f]]) && (f !== 'cost_price' || Boolean(caps.view_cost));
 
-// Column catalogue. `edit` = the inline editor kind; `perm` = capability needed to edit it.
+// Column catalogue. `edit` = inline editor kind; `w` = relative width (the table is laid out to
+// the screen width, so all columns share one view); `list` = facets key offered as suggestions.
 const COLUMNS = [
-  { key: 'sku', label: 'Item Code / SKU', sort: 'sku', mono: true, always: true },
-  { key: 'barcode', label: 'Barcode 1', sort: 'barcode', mono: true },
-  { key: 'secondary_barcode', label: 'Barcode 2', mono: true },
-  { key: 'name', label: 'Product Name', sort: 'name', always: true, minWidth: 200 },
-  { key: 'brand', label: 'Brand', sort: 'brand' },
-  { key: 'category', label: 'Category', sort: 'category' },
-  { key: 'variant', label: 'Frame / Model / Variant', minWidth: 140 },
-  { key: 'rack_location', label: 'Rack', sort: 'rack', edit: 'text', perm: 'edit_location' },
-  { key: 'bin_location', label: 'Shelf / Bin', sort: 'bin', edit: 'text', perm: 'edit_location' },
-  { key: 'stock', label: 'Current Stock', sort: 'stock', align: 'right', always: true },
-  { key: 'status', label: 'Status' },
-  { key: 'minimum_stock', label: 'Min. Alert', sort: 'minimum_stock', align: 'right', edit: 'int', perm: 'edit_location' },
-  { key: 'uom', label: 'UOM', edit: 'unit', perm: 'edit_location' },
-  { key: 'cost_price', label: 'Purchase Cost', sort: 'cost_price', align: 'right', edit: 'money', perm: 'edit_prices', costOnly: true },
-  { key: 'retail_price', label: 'Selling Price', sort: 'retail_price', align: 'right', edit: 'money', perm: 'edit_prices' },
-  { key: 'mrp', label: 'MRP', sort: 'mrp', align: 'right', edit: 'money', perm: 'edit_prices' },
-  { key: 'supplier_name', label: 'Supplier / Vendor', minWidth: 130 },
-  { key: 'last_purchase_date', label: 'Last Purchase', sort: 'last_purchase_date' },
+  { key: 'sku', label: 'Item Code', sort: 'sku', mono: true, always: true, w: 58, edit: 'text' },
+  { key: 'barcode', label: 'Barcode', sort: 'barcode', mono: true, w: 72, edit: 'text' },
+  { key: 'secondary_barcode', label: 'Barcode 2', mono: true, w: 58, edit: 'text' },
+  { key: 'name', label: 'Product Name', sort: 'name', always: true, w: 96, edit: 'text' },
+  { key: 'brand', label: 'Brand', sort: 'brand', w: 52, edit: 'text', list: 'brands' },
+  { key: 'category', label: 'Category', sort: 'category', w: 56, edit: 'text', list: 'categories' },
+  { key: 'model_no', label: 'Frame Model', w: 50, edit: 'text' },
+  { key: 'variant', label: 'Variant', w: 54, edit: 'variant' },
+  { key: 'rack_location', label: 'Rack', sort: 'rack', w: 36, edit: 'text', list: 'racks' },
+  { key: 'bin_location', label: 'Shelf', sort: 'bin', w: 38, edit: 'text' },
+  { key: 'stock', label: 'Current Stock', sort: 'stock', align: 'right', always: true, w: 50, edit: 'int' },
+  { key: 'status', label: 'Status', w: 46 },
+  { key: 'minimum_stock', label: 'Low Stock Alert', sort: 'minimum_stock', align: 'right', w: 40, edit: 'int' },
+  { key: 'uom', label: 'UOM', w: 40, edit: 'unit' },
+  { key: 'cost_price', label: 'Purchase Cost ₹', sort: 'cost_price', align: 'right', w: 58, edit: 'money', costOnly: true },
+  { key: 'retail_price', label: 'Selling Price ₹', sort: 'retail_price', align: 'right', w: 52, edit: 'money' },
+  { key: 'mrp', label: 'MRP ₹', sort: 'mrp', align: 'right', w: 50, edit: 'money' },
+  { key: 'supplier_name', label: 'Supplier / Vendor', w: 64, edit: 'text', list: 'suppliers' },
+  { key: 'last_purchase_date', label: 'Last Purchase', sort: 'last_purchase_date', w: 58 },
 ];
+// The row fields a column edits.
+const colFields = (c) => (c.key === 'variant' ? ['color', 'size'] : c.key === 'uom' ? ['unit'] : [c.key]);
+const CHECK_W = 28;
+const ACTIONS_W = 54;
 
-const cellSx = { py: 0.5, px: 1, fontSize: 12.5, whiteSpace: 'nowrap', borderColor: 'divider' };
-const headSx = { ...cellSx, py: 0.9, fontWeight: 800, fontSize: 12, bgcolor: 'background.paper', color: 'text.secondary' };
+// Right + bottom lines only (separate borders), so the boxed grid adds no width past 100%.
+const gridLine = {
+  borderBottom: '1px solid', borderRight: '1px solid', borderColor: 'divider', '&:last-of-type': { borderRight: 0 },
+};
+const cellSx = {
+  ...gridLine, py: 0.4, px: 0.5, fontSize: 11.5, lineHeight: 1.25, verticalAlign: 'middle',
+  whiteSpace: 'normal', overflowWrap: 'anywhere',
+};
+const headSx = {
+  ...cellSx, py: 0.6, px: 0.4, fontWeight: 800, fontSize: 10.5, lineHeight: 1.15, color: 'text.secondary',
+  verticalAlign: 'bottom', overflowWrap: 'normal', wordBreak: 'normal',
+  bgcolor: (t) => (t.palette.mode === 'dark' ? t.palette.grey[900] : '#f1f5f9'),
+  '& .MuiTableSortLabel-root': { display: 'inline' },
+  '& .MuiTableSortLabel-icon': { fontSize: 12, ml: 0.1, mr: 0, verticalAlign: 'middle' },
+  '& .MuiTableSortLabel-root:not(.Mui-active) .MuiTableSortLabel-icon': { display: 'none' },
+};
+// Paise only when there are any, so amounts stay on one line in the narrow money columns.
+const amount = (v) => {
+  if (v === null || v === undefined || v === '') return '—';
+  const n = Number(v);
+  return n.toLocaleString('en-IN', { minimumFractionDigits: Number.isInteger(n) ? 0 : 2, maximumFractionDigits: 2 });
+};
+const shortDate = (iso) => {
+  if (!iso) return '—';
+  const d = new Date(iso.length <= 10 ? `${iso}T00:00:00` : iso);
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: '2-digit' });
+};
+const previewStatus = (stock, min) => {
+  const s = Number(stock) || 0;
+  if (s <= 0) return 'out';
+  return s <= (Number(min) || 0) ? 'low' : 'in';
+};
+const OTHER_REASON = 'Other';
 
 function SummaryCard({ icon, label, value, tone = '#6366f1', loading, hint }) {
   return (
@@ -95,24 +150,32 @@ function SummaryCard({ icon, label, value, tone = '#6366f1', loading, hint }) {
   );
 }
 
-function StatusChip({ status }) {
+function StatusChip({ status, preview }) {
   const meta = STATUS_META[status] || STATUS_META.in;
   return (
-    <Chip size="small" label={meta.label}
-      sx={{ height: 20, fontSize: 11, fontWeight: 800, color: meta.color, bgcolor: meta.bg, border: `1px solid ${meta.border}` }} />
+    <Box component="span" title={preview ? 'Updates from the stock and low stock alert you enter' : meta.label}
+      sx={{
+        display: 'inline-block', px: 0.5, py: 0.1, borderRadius: 1, fontSize: 10, fontWeight: 800, lineHeight: 1.2,
+        textAlign: 'center', overflowWrap: 'normal', color: meta.color, bgcolor: meta.bg, border: `1px ${preview ? 'dashed' : 'solid'} ${meta.border}`,
+      }}>
+      {meta.label}
+    </Box>
   );
 }
 
 const rowToEditValues = (row) => ({
+  sku: row.sku || '', barcode: row.barcode || '', secondary_barcode: row.secondary_barcode || '',
+  name: row.name || '', brand: row.brand || '', category: row.category || '', model_no: row.model_no || '',
+  color: row.color || '', size: row.size || '', supplier_name: row.own_supplier_name || '',
   cost_price: row.cost_price ?? '', retail_price: row.retail_price ?? '', mrp: row.mrp ?? '',
-  minimum_stock: String(row.minimum_stock ?? ''), rack_location: row.rack_location || '',
-  bin_location: row.bin_location || '', unit: row.unit || '',
+  stock: String(row.stock ?? 0), minimum_stock: String(row.minimum_stock ?? ''),
+  rack_location: row.rack_location || '', bin_location: row.bin_location || '', unit: row.unit || '',
 });
 
 const sameValue = (field, a, b) => {
   if (MONEY_FIELDS.includes(field)) return (Number(a) || 0) === (Number(b) || 0);
-  if (field === 'minimum_stock') return String(a).trim() === String(b).trim();
-  return (a || '') === (b || '');
+  if (field === 'unit') return (a || '') === (b || '');
+  return String(a ?? '').trim() === String(b ?? '').trim();
 };
 
 function validateEdit(values, editable) {
@@ -121,12 +184,18 @@ function validateEdit(values, editable) {
     const v = String(values[f] ?? '').trim();
     if (MONEY_FIELDS.includes(f)) {
       if (v !== '' && (!/^\d+(\.\d{0,2})?$/.test(v))) errors[f] = 'Number ≥ 0, up to 2 decimals';
-    } else if (f === 'minimum_stock') {
+    } else if (INT_FIELDS.includes(f)) {
       if (!/^\d+$/.test(v)) errors[f] = 'Whole number ≥ 0';
-    } else if ((f === 'rack_location' || f === 'bin_location') && v.length > 150) {
-      errors[f] = 'Max 150 characters';
+    } else if (TEXT_MAX[f] && v.length > TEXT_MAX[f]) {
+      errors[f] = `Max ${TEXT_MAX[f]} characters`;
     }
   });
+  if (editable.includes('sku') && !String(values.sku || '').trim()) errors.sku = 'Required';
+  if (editable.includes('name') && !String(values.name || '').trim()) errors.name = 'Required';
+  const bc = String(values.barcode || '').trim();
+  if (editable.includes('secondary_barcode') && bc && bc === String(values.secondary_barcode || '').trim()) {
+    errors.secondary_barcode = 'Same as Barcode';
+  }
   const sp = Number(values.retail_price) || 0;
   const mrp = Number(values.mrp) || 0;
   if (editable.includes('retail_price') && mrp > 0 && sp > mrp) errors.retail_price = 'More than MRP';
@@ -167,7 +236,8 @@ export default function StockOverview() {
   const [moreMenu, setMoreMenu] = useState({ anchor: null, row: null });
 
   const [editing, setEditing] = useState(null); // { id, values, original, errors, focus }
-  const [confirmEdit, setConfirmEdit] = useState(null); // { row, changes, original }
+  const [confirmEdit, setConfirmEdit] = useState(null); // { row, changes, original, stock: { from, to } | null, token }
+  const [adjReason, setAdjReason] = useState({ reason: '', other: '', reference: '' });
   const [savingEdit, setSavingEdit] = useState(false);
   const [adjust, setAdjust] = useState({ open: false, row: null, qty: undefined });
   const [historyRow, setHistoryRow] = useState(null);
@@ -290,8 +360,8 @@ export default function StockOverview() {
   });
 
   // ---- inline edit -----------------------------------------------------------------------
-  const editableFields = useMemo(() => COLUMNS.filter((c) => c.edit && caps[c.perm] && (!c.costOnly || caps.view_cost))
-    .map((c) => (c.key === 'uom' ? 'unit' : c.key)), [caps]);
+  const editableFields = useMemo(() => COLUMNS.filter((c) => c.edit).flatMap(colFields)
+    .filter((f) => canEditField(caps, f)), [caps]);
   const canQuickEdit = editableFields.length > 0;
 
   const startEdit = (row, focus) => {
@@ -314,15 +384,17 @@ export default function StockOverview() {
     if (Object.keys(errors).length) { setEditing({ ...editing, errors }); return; }
     const changes = {};
     const original = {};
+    let stock = null;
     editableFields.forEach((f) => {
-      if (!sameValue(f, editing.values[f], editing.original[f])) {
-        const v = editing.values[f];
-        changes[f] = f === 'unit' ? (v || null) : (typeof v === 'string' ? v.trim() : v);
-        original[f] = editing.original[f] === '' && f === 'unit' ? null : editing.original[f];
-      }
+      if (sameValue(f, editing.values[f], editing.original[f])) return;
+      if (f === 'stock') { stock = { from: Number(editing.original.stock), to: Number(editing.values.stock) }; return; }
+      const v = editing.values[f];
+      changes[f] = f === 'unit' ? (v || null) : (typeof v === 'string' ? v.trim() : v);
+      original[f] = editing.original[f] === '' && f === 'unit' ? null : editing.original[f];
     });
-    if (!Object.keys(changes).length) { setEditing(null); notify('Nothing changed.', 'info'); return; }
-    setConfirmEdit({ row, changes, original });
+    if (!Object.keys(changes).length && !stock) { setEditing(null); notify('Nothing changed.', 'info'); return; }
+    if (stock) setAdjReason({ reason: facets?.adjustment_reasons?.[0] || 'Physical stock count', other: '', reference: '' });
+    setConfirmEdit({ row, changes, original, stock, token: newClientToken() });
   };
 
   const displayValue = (field, value) => {
@@ -331,30 +403,56 @@ export default function StockOverview() {
     return value === '' || value === null ? '—' : String(value);
   };
 
+  const adjustReasonText = adjReason.reason === OTHER_REASON ? adjReason.other.trim() : adjReason.reason;
+
+  // Field changes go first (PATCH); a stock change is then a ledgered adjustment. If the PATCH
+  // landed but the adjustment didn't, the row keeps editing with the saved values as its base.
   const commitEdit = async () => {
     if (!confirmEdit) return;
+    const { changes, original, stock, token } = confirmEdit;
+    if (stock && !adjustReasonText) { notify('Give a reason for the stock change.', 'warning'); return; }
     setSavingEdit(true);
+    let row = confirmEdit.row;
+    let patched = false;
     try {
-      const row = await updateStockFields(confirmEdit.row.id, confirmEdit.changes, confirmEdit.original);
-      replaceRow(row);
+      if (Object.keys(changes).length) {
+        row = await updateStockFields(row.id, changes, original);
+        patched = true;
+        replaceRow(row);
+      }
+      if (stock) {
+        const res = await adjustStock(row.id, {
+          new_quantity: stock.to, expected_stock: stock.from, reason: adjustReasonText,
+          reference: adjReason.reference.trim(), client_token: token,
+        });
+        row = res.row;
+        replaceRow(row);
+        setHistoryKey((k) => k + 1);
+      }
       setEditing(null);
       setConfirmEdit(null);
       setHighlightId(row.id);
-      notify(`${row.name} updated.`, 'success');
+      notify(stock ? `${row.name} updated — stock ${stock.from} → ${stock.to}.` : `${row.name} updated.`, 'success');
       refresh();
+      if (changes.brand !== undefined || changes.category !== undefined || changes.rack_location !== undefined) loadFacets();
     } catch (err) {
       const d = err?.response?.data;
-      if (err?.response?.status === 409 && d?.row) {
-        replaceRow(d.row);
-        const values = rowToEditValues(d.row);
-        setEditing((ed) => (ed ? { ...ed, original: values, values: { ...ed.values, ...Object.fromEntries(Object.keys(d.conflicts || {}).map((f) => [f, values[f]])) } } : ed));
-        setConfirmEdit(null);
-        notify(d.detail || 'Changed by someone else — the latest values were loaded.', 'error');
-      } else {
-        if (d?.errors) setEditing((ed) => (ed ? { ...ed, errors: d.errors } : ed));
-        setConfirmEdit(null);
-        notify(apiErrorMessage(err, 'The changes were not saved.'), 'error');
+      const base = d?.row || (patched ? row : null);
+      if (base) {
+        replaceRow(base);
+        const latest = rowToEditValues(base);
+        const reset = Object.keys(d?.conflicts || {});
+        setEditing((ed) => (ed ? { ...ed, original: latest, values: { ...ed.values, ...Object.fromEntries(reset.map((f) => [f, latest[f]])) } } : ed));
       }
+      if (d?.errors) {
+        const errors = { ...d.errors };
+        if (errors.new_quantity) { errors.stock = errors.new_quantity; delete errors.new_quantity; }
+        setEditing((ed) => (ed ? { ...ed, errors } : ed));
+      }
+      setConfirmEdit(null);
+      const msg = d?.detail && err?.response?.status === 409 ? d.detail : apiErrorMessage(err, 'The changes were not saved.');
+      notify(patched ? `Details saved, but the stock was not adjusted: ${msg}` : msg, 'error');
+      if (patched) refresh();
     } finally {
       setSavingEdit(false);
     }
@@ -409,6 +507,7 @@ export default function StockOverview() {
   const setSort = (key) => setOrdering((o) => (o === key ? `-${key}` : key));
 
   const visibleColumns = COLUMNS.filter((c) => !hidden.has(c.key) && (!c.costOnly || caps.view_cost !== false));
+  const totalW = CHECK_W + ACTIONS_W + visibleColumns.reduce((sum, c) => sum + c.w, 0);
   const toggleColumn = (key) => setHidden((h) => {
     const next = new Set(h);
     if (next.has(key)) next.delete(key); else next.add(key);
@@ -449,8 +548,7 @@ export default function StockOverview() {
   };
 
   // ---- cell rendering --------------------------------------------------------------------
-  const renderEditor = (col, row) => {
-    const field = col.key === 'uom' ? 'unit' : col.key;
+  const renderInput = (col, field, row) => {
     const value = editing.values[field] ?? '';
     const err = editing.errors?.[field];
     const set = (v) => setEditing((ed) => ({ ...ed, values: { ...ed.values, [field]: v }, errors: { ...ed.errors, [field]: undefined } }));
@@ -458,66 +556,94 @@ export default function StockOverview() {
       if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); requestSave(); }
       if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancelEdit(); }
     };
+    const numeric = col.edit === 'money' || col.edit === 'int';
     const common = {
-      size: 'small', variant: 'outlined', error: Boolean(err), autoFocus: editing.focus === field,
-      inputProps: { 'aria-label': `${FIELD_LABELS[field]} for ${row.name}`, 'data-own-enter': 'true', onKeyDown },
-      sx: { '& .MuiInputBase-input': { py: 0.4, px: 0.75, fontSize: 12.5, textAlign: col.align === 'right' ? 'right' : 'left' } },
+      size: 'small', variant: 'outlined', error: Boolean(err), autoFocus: editing.focus === field, fullWidth: true,
+      sx: {
+        '& .MuiInputBase-root': { fontSize: 11.5, bgcolor: 'background.paper' },
+        '& .MuiInputBase-input': { py: 0.35, px: 0.5, textAlign: numeric ? 'right' : 'left' },
+        '& .MuiNativeSelect-select': { pr: '16px !important' },
+        '& .MuiNativeSelect-icon': { right: 0, fontSize: 16 },
+      },
+    };
+    const inputProps = {
+      'aria-label': `${FIELD_LABELS[field]} for ${row.name}`, 'data-own-enter': 'true', onKeyDown,
+      title: FIELD_LABELS[field],
     };
     let input;
     if (col.edit === 'unit') {
       input = (
         <TextField select {...common} value={value || ''} onChange={(e) => set(e.target.value)}
-          SelectProps={{ native: true }} sx={{ ...common.sx, minWidth: 80 }}>
+          SelectProps={{ native: true }} inputProps={inputProps}>
           <option value="">—</option>
           {(facets?.units || []).map((u) => <option key={u.id} value={u.id}>{u.code}</option>)}
         </TextField>
       );
     } else {
+      const placeholder = field === 'supplier_name' ? (row.last_supplier_name || '') : col.edit === 'variant' ? FIELD_LABELS[field] : '';
       input = (
-        <TextField {...common} value={value} onChange={(e) => set(e.target.value)}
-          inputProps={{ ...common.inputProps, inputMode: col.edit === 'text' ? 'text' : 'decimal', maxLength: col.edit === 'text' ? 150 : 14 }}
-          sx={{ ...common.sx, width: col.edit === 'text' ? 110 : 96 }} />
+        <TextField {...common} value={value} onChange={(e) => set(e.target.value)} placeholder={placeholder}
+          inputProps={{
+            ...inputProps, inputMode: col.edit === 'money' ? 'decimal' : col.edit === 'int' ? 'numeric' : 'text',
+            maxLength: TEXT_MAX[field] || 14, list: col.list ? `stock-dl-${col.list}` : undefined,
+            spellCheck: col.mono ? false : undefined,
+          }} />
       );
     }
     // Always wrapped: adding the Tooltip only on error would remount the input and drop focus.
-    return <Tooltip open={Boolean(err)} title={err || ''} placement="top" arrow disableHoverListener disableFocusListener disableTouchListener>{input}</Tooltip>;
+    return (
+      <Tooltip key={field} open={Boolean(err)} title={err || ''} placement="top" arrow disableHoverListener disableFocusListener disableTouchListener>
+        {input}
+      </Tooltip>
+    );
   };
+
+  const muted = (text = '—') => <Box component="span" sx={{ color: 'text.disabled' }}>{text}</Box>;
 
   const renderCell = (col, row) => {
     const isEditing = editing?.id === row.id;
-    const canEditCol = col.edit && caps[col.perm] && (!col.costOnly || caps.view_cost);
-    if (isEditing && canEditCol) return renderEditor(col, row);
+    const fields = colFields(col).filter((f) => col.edit && canEditField(caps, f));
+    if (isEditing && fields.length) {
+      if (fields.length === 1) return renderInput(col, fields[0], row);
+      return <Stack spacing={0.4}>{fields.map((f) => renderInput(col, f, row))}</Stack>;
+    }
     switch (col.key) {
       case 'stock': {
         const meta = STATUS_META[row.status];
-        return (
-          <Tooltip title={caps.adjust_stock ? 'Click to adjust stock' : ''}>
-            <Box component="span" onClick={(e) => { e.stopPropagation(); if (caps.adjust_stock) openAdjust(row); }}
-              sx={{ fontWeight: 800, color: meta?.color, cursor: caps.adjust_stock ? 'pointer' : 'default', px: 0.5, borderRadius: 1, '&:hover': caps.adjust_stock ? { bgcolor: 'action.hover', textDecoration: 'underline dotted' } : {} }}>
-              {formatQty(row.stock)}
-            </Box>
-          </Tooltip>
-        );
+        return <Box component="span" sx={{ fontWeight: 800, color: meta?.color }}>{formatQty(row.stock)}</Box>;
       }
-      case 'status': return <StatusChip status={row.status} />;
-      case 'cost_price': case 'retail_price': case 'mrp': return formatMoney(row[col.key]);
-      case 'last_purchase_date': return formatDate(row.last_purchase_date);
+      case 'status':
+        return isEditing
+          ? <StatusChip preview status={previewStatus(editing.values.stock, editing.values.minimum_stock)} />
+          : <StatusChip status={row.status} />;
+      case 'cost_price': case 'retail_price': case 'mrp':
+        return <span title={formatMoney(row[col.key])} style={{ whiteSpace: 'nowrap' }}>{amount(row[col.key])}</span>;
+      case 'last_purchase_date': return <span title={formatDate(row.last_purchase_date)}>{shortDate(row.last_purchase_date)}</span>;
       case 'name': return (
-        <Box sx={{ maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', fontWeight: 600 }} title={row.name}>
+        <Box title={row.variant_group_name ? `${row.name}\nGroup: ${row.variant_group_name}` : row.name}
+          sx={{ fontWeight: 600, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
           {row.name}
-          {row.variant_group_name && <Typography component="div" variant="caption" color="text.secondary" noWrap>{row.variant_group_name}</Typography>}
         </Box>
       );
-      case 'variant': return <Box sx={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }} title={row.variant}>{row.variant || '—'}</Box>;
+      case 'variant': {
+        const text = [row.color, row.size].filter(Boolean).join(' / ');
+        return text ? <span title={[row.frame_type, row.color, row.size].filter(Boolean).join(' / ')}>{text}</span> : muted();
+      }
+      case 'supplier_name':
+        if (!row.own_supplier_name && row.last_supplier_name) {
+          return <Box component="span" title="From the last purchase" sx={{ color: 'text.secondary' }}>{row.last_supplier_name}</Box>;
+        }
+        return row.supplier_name || muted();
       case 'minimum_stock': return formatQty(row.minimum_stock);
-      default: return row[col.key] || <Box component="span" sx={{ color: 'text.disabled' }}>—</Box>;
+      default: return row[col.key] || muted();
     }
   };
 
   const onCellDoubleClick = (col, row) => {
     if (editing?.id === row.id) return;
-    if (col.key === 'stock') { openAdjust(row); return; }
-    if (col.edit && caps[col.perm]) startEdit(row, col.key === 'uom' ? 'unit' : col.key);
+    const field = colFields(col).find((f) => col.edit && canEditField(caps, f));
+    if (field) startEdit(row, field);
+    else if (col.key === 'stock') openAdjust(row);
   };
 
   const filterSelect = (key, label, options, width = 150) => (
@@ -532,7 +658,7 @@ export default function StockOverview() {
   const s = summary;
 
   return (
-    <Box sx={{ p: { xs: 2, md: 3 }, pb: 6 }}>
+    <Box sx={{ p: { xs: 1.5, md: 2 }, pb: 6 }}>
       {/* Header */}
       <Breadcrumbs sx={{ mb: 0.5, fontSize: 13 }}>
         <Link component={RouterLink} to="/purchase/entry" underline="hover" color="inherit">Purchase</Link>
@@ -655,7 +781,7 @@ export default function StockOverview() {
         {selected.size > 0 && <Button size="small" onClick={() => setSelected(new Map())}>Clear selection</Button>}
         <Box sx={{ flex: 1 }} />
         <Typography variant="caption" color="text.secondary" sx={{ display: { xs: 'none', lg: 'block' } }}>
-          ↑↓ rows · Space select · Enter quick update · A adjust · H history · P print
+          ↑↓ rows · Space select · Enter / double-click edit row · A adjust · H history · P print
         </Typography>
         <Button size="small" startIcon={<ColumnsIcon />} onClick={(e) => setColsAnchor(e.currentTarget)}>Columns</Button>
       </Box>
@@ -669,18 +795,33 @@ export default function StockOverview() {
 
       {error && <Alert severity="error" sx={{ mb: 1.5 }} action={<Button color="inherit" size="small" onClick={refresh}>Retry</Button>}>{error}</Alert>}
 
-      <Card variant="outlined" sx={{ borderRadius: 3, overflow: 'hidden' }}>
+      {/* Suggestions for the free-text editors (typed values not in the list are allowed). */}
+      <datalist id="stock-dl-brands">{(facets?.brands || []).map((b) => <option key={b} value={b} />)}</datalist>
+      <datalist id="stock-dl-categories">{(facets?.categories || []).map((c) => <option key={c} value={c} />)}</datalist>
+      <datalist id="stock-dl-racks">{(facets?.racks || []).map((r) => <option key={r} value={r} />)}</datalist>
+      <datalist id="stock-dl-suppliers">{(facets?.suppliers || []).map((x) => <option key={x.id} value={x.name} />)}</datalist>
+
+      <Card variant="outlined" sx={{ borderRadius: 2, overflow: 'hidden' }}>
         {loading && <LinearProgress sx={{ height: 2 }} />}
         <TableContainer ref={tableRef} sx={{ maxHeight: 'calc(100vh - 230px)', minHeight: 240 }} data-own-enter="true">
-          <Table size="small" stickyHeader aria-label="Stock overview">
+          {/* Fixed layout + percentage widths: every column shares the screen width instead of
+              pushing the table sideways; long values wrap inside their box. */}
+          <Table size="small" stickyHeader aria-label="Stock overview"
+            sx={{ tableLayout: 'fixed', width: '100%', minWidth: 900, borderCollapse: 'separate', borderSpacing: 0 }}>
+            <colgroup>
+              <col style={{ width: `${(CHECK_W / totalW) * 100}%` }} />
+              {visibleColumns.map((c) => <col key={c.key} style={{ width: `${(c.w / totalW) * 100}%` }} />)}
+              <col style={{ width: `${(ACTIONS_W / totalW) * 100}%` }} />
+            </colgroup>
             <TableHead>
               <TableRow>
-                <TableCell padding="checkbox" sx={{ ...headSx, px: 0.5 }}>
-                  <Checkbox size="small" checked={pageAllSelected} indeterminate={!pageAllSelected && pageSomeSelected}
+                <TableCell padding="none" sx={{ ...headSx, px: 0, textAlign: 'center', overflow: 'hidden' }}>
+                  <Checkbox size="small" sx={{ p: 0.25 }} checked={pageAllSelected} indeterminate={!pageAllSelected && pageSomeSelected}
                     onChange={togglePage} inputProps={{ 'aria-label': 'Select all on this page' }} />
                 </TableCell>
                 {visibleColumns.map((c) => (
-                  <TableCell key={c.key} align={c.align || 'left'} sx={{ ...headSx, minWidth: c.minWidth }}
+                  <TableCell key={c.key} align={c.align || 'left'} sx={headSx}
+                    title={c.edit ? `${c.label} — double-click a cell to edit` : `${c.label} (calculated, not editable)`}
                     sortDirection={ordering.replace('-', '') === c.sort ? (ordering.startsWith('-') ? 'desc' : 'asc') : false}>
                     {c.sort ? (
                       <TableSortLabel active={ordering.replace('-', '') === c.sort}
@@ -690,7 +831,7 @@ export default function StockOverview() {
                     ) : c.label}
                   </TableCell>
                 ))}
-                <TableCell align="right" sx={{ ...headSx, position: 'sticky', right: 0, zIndex: 3 }}>Actions</TableCell>
+                <TableCell align="center" sx={{ ...headSx, px: 0.25, overflow: 'hidden' }}>Actions</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
@@ -708,38 +849,37 @@ export default function StockOverview() {
                       '&:focus-visible': { outline: '2px solid', outlineColor: 'primary.main', outlineOffset: -2 },
                       boxShadow: `inset 3px 0 0 ${STATUS_META[row.status]?.border || 'transparent'}`,
                     }}>
-                    <TableCell padding="checkbox" sx={{ ...cellSx, px: 0.5 }}>
-                      <Checkbox size="small" checked={isSelected} onChange={() => toggleRow(row)}
+                    <TableCell padding="none" sx={{ ...cellSx, px: 0, textAlign: 'center', overflow: 'hidden' }}>
+                      <Checkbox size="small" sx={{ p: 0.25 }} checked={isSelected} onChange={() => toggleRow(row)}
                         inputProps={{ 'aria-label': `Select ${row.name}` }} tabIndex={-1} />
                     </TableCell>
                     {visibleColumns.map((c) => (
                       <TableCell key={c.key} align={c.align || 'left'} onDoubleClick={() => onCellDoubleClick(c, row)}
-                        sx={{ ...cellSx, fontFamily: c.mono ? 'ui-monospace, Consolas, monospace' : undefined, fontSize: c.mono ? 12 : cellSx.fontSize }}>
+                        sx={{
+                          ...cellSx, px: isEditing && c.edit ? 0.25 : cellSx.px,
+                          fontFamily: c.mono ? 'ui-monospace, Consolas, monospace' : undefined, fontSize: c.mono ? 11 : cellSx.fontSize,
+                          cursor: !isEditing && c.edit ? 'cell' : undefined,
+                        }}>
                         {renderCell(c, row)}
                       </TableCell>
                     ))}
-                    <TableCell align="right" sx={{ ...cellSx, position: 'sticky', right: 0, bgcolor: 'background.paper', zIndex: 1, py: 0.25 }}>
+                    <TableCell align="center" sx={{ ...cellSx, px: 0, py: 0.15, overflow: 'hidden' }}>
                       {isEditing ? (
-                        <Stack direction="row" spacing={0.5} justifyContent="flex-end">
-                          <Button size="small" variant="contained" startIcon={<SaveIcon />} onClick={requestSave} sx={{ py: 0.25, fontWeight: 700 }}>Save</Button>
-                          <Button size="small" startIcon={<CancelIcon />} onClick={cancelEdit} sx={{ py: 0.25 }}>Cancel</Button>
+                        <Stack direction="row" spacing={0} justifyContent="center">
+                          <Tooltip title="Save (Enter)">
+                            <IconButton size="small" color="primary" onClick={requestSave} aria-label={`Save ${row.name}`} sx={{ p: 0.4 }}><SaveIcon fontSize="small" /></IconButton>
+                          </Tooltip>
+                          <Tooltip title="Cancel (Esc)">
+                            <IconButton size="small" onClick={cancelEdit} aria-label="Cancel editing" sx={{ p: 0.4 }}><CancelIcon fontSize="small" /></IconButton>
+                          </Tooltip>
                         </Stack>
                       ) : (
-                        <Stack direction="row" spacing={0} justifyContent="flex-end">
-                          <Tooltip title="Edit Stock (A)"><span>
-                            <IconButton size="small" tabIndex={-1} disabled={!caps.adjust_stock} onClick={() => openAdjust(row)} aria-label={`Adjust stock of ${row.name}`}><AdjustIcon fontSize="small" /></IconButton>
+                        <Stack direction="row" spacing={0} justifyContent="center">
+                          <Tooltip title="Edit row (Enter)"><span>
+                            <IconButton size="small" tabIndex={-1} disabled={!canQuickEdit} onClick={() => startEdit(row)} aria-label={`Edit ${row.name}`} sx={{ p: 0.4 }}><QuickIcon fontSize="small" /></IconButton>
                           </span></Tooltip>
-                          <Tooltip title="Quick Update (Enter)"><span>
-                            <IconButton size="small" tabIndex={-1} disabled={!canQuickEdit} onClick={() => startEdit(row)} aria-label={`Quick update ${row.name}`}><QuickIcon fontSize="small" /></IconButton>
-                          </span></Tooltip>
-                          <Tooltip title="View Stock History (H)">
-                            <IconButton size="small" tabIndex={-1} onClick={() => setHistoryRow(row)} aria-label={`Stock history of ${row.name}`}><HistoryIcon fontSize="small" /></IconButton>
-                          </Tooltip>
-                          <Tooltip title="Print Barcode (P)">
-                            <IconButton size="small" tabIndex={-1} onClick={() => setPrintRows([row])} aria-label={`Print barcode for ${row.name}`}><BarcodeIcon fontSize="small" /></IconButton>
-                          </Tooltip>
-                          <Tooltip title="More Actions">
-                            <IconButton size="small" tabIndex={-1} onClick={(e) => setMoreMenu({ anchor: e.currentTarget, row })} aria-label={`More actions for ${row.name}`}><MoreIcon fontSize="small" /></IconButton>
+                          <Tooltip title="Adjust stock, history, print barcode…">
+                            <IconButton size="small" tabIndex={-1} onClick={(e) => setMoreMenu({ anchor: e.currentTarget, row })} aria-label={`More actions for ${row.name}`} sx={{ p: 0.4 }}><MoreIcon fontSize="small" /></IconButton>
                           </Tooltip>
                         </Stack>
                       )}
@@ -777,6 +917,10 @@ export default function StockOverview() {
           if (!row) return null;
           const close = (fn) => () => { setMoreMenu({ anchor: null, row: null }); fn(); };
           return [
+            <MenuItem key="adj" disabled={!caps.adjust_stock} onClick={close(() => openAdjust(row))}><ListItemIcon><AdjustIcon fontSize="small" /></ListItemIcon><ListItemText secondary="A">Adjust stock (with reason)</ListItemText></MenuItem>,
+            <MenuItem key="his" onClick={close(() => setHistoryRow(row))}><ListItemIcon><HistoryIcon fontSize="small" /></ListItemIcon><ListItemText secondary="H">View stock history</ListItemText></MenuItem>,
+            <MenuItem key="prn" onClick={close(() => setPrintRows([row]))}><ListItemIcon><BarcodeIcon fontSize="small" /></ListItemIcon><ListItemText secondary="P">Print barcode</ListItemText></MenuItem>,
+            <Divider key="d0" />,
             <MenuItem key="sel" onClick={close(() => toggleRow(row))}>
               <ListItemIcon><Checkbox size="small" checked={selected.has(row.id)} sx={{ p: 0 }} /></ListItemIcon>
               <ListItemText>{selected.has(row.id) ? 'Remove from selection' : 'Add to selection'}</ListItemText>
@@ -792,7 +936,7 @@ export default function StockOverview() {
       </Menu>
 
       {/* Confirm inline edit */}
-      <Dialog open={Boolean(confirmEdit)} onClose={savingEdit ? undefined : () => setConfirmEdit(null)} maxWidth="xs" fullWidth>
+      <Dialog open={Boolean(confirmEdit)} onClose={savingEdit ? undefined : () => setConfirmEdit(null)} maxWidth="sm" fullWidth>
         <Box component="form" data-nav-scope="stock-confirm" onSubmit={(e) => { e.preventDefault(); commitEdit(); }}>
           <DialogTitle sx={{ fontWeight: 800 }}>Save changes?</DialogTitle>
           <DialogContent>
@@ -807,11 +951,42 @@ export default function StockOverview() {
                     <TableCell sx={{ ...cellSx, fontWeight: 800 }}>{displayValue(f, confirmEdit.changes[f])}</TableCell>
                   </TableRow>
                 ))}
+                {confirmEdit?.stock && (
+                  <TableRow>
+                    <TableCell sx={{ ...cellSx, fontWeight: 700 }}>{FIELD_LABELS.stock}</TableCell>
+                    <TableCell sx={{ ...cellSx, color: 'text.secondary' }}>{formatQty(confirmEdit.stock.from)}</TableCell>
+                    <TableCell sx={cellSx}>→</TableCell>
+                    <TableCell sx={{ ...cellSx, fontWeight: 800 }}>
+                      {formatQty(confirmEdit.stock.to)}{' '}
+                      <Box component="span" sx={{ color: confirmEdit.stock.to > confirmEdit.stock.from ? 'success.main' : 'error.main' }}>
+                        ({confirmEdit.stock.to > confirmEdit.stock.from ? '+' : ''}{confirmEdit.stock.to - confirmEdit.stock.from})
+                      </Box>
+                    </TableCell>
+                  </TableRow>
+                )}
               </TableBody>
             </Table>
-            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1.5 }}>
-              Stock quantity is not affected by these changes.
-            </Typography>
+            {confirmEdit?.stock ? (
+              <Stack spacing={1.25} sx={{ mt: 2 }}>
+                <Typography variant="caption" color="text.secondary">
+                  The stock change is recorded as a stock adjustment in the ledger (with this reason), not overwritten.
+                </Typography>
+                <TextField select size="small" label="Reason for stock change" required value={adjReason.reason}
+                  onChange={(e) => setAdjReason((r) => ({ ...r, reason: e.target.value }))}>
+                  {[...new Set([...(facets?.adjustment_reasons || []), OTHER_REASON])].map((r) => <MenuItem key={r} value={r}>{r}</MenuItem>)}
+                </TextField>
+                {adjReason.reason === OTHER_REASON && (
+                  <TextField size="small" label="Describe the reason" required value={adjReason.other} inputProps={{ maxLength: 500 }}
+                    onChange={(e) => setAdjReason((r) => ({ ...r, other: e.target.value }))} />
+                )}
+                <TextField size="small" label="Reference (optional)" value={adjReason.reference} inputProps={{ maxLength: 100 }}
+                  onChange={(e) => setAdjReason((r) => ({ ...r, reference: e.target.value }))} />
+              </Stack>
+            ) : (
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1.5 }}>
+                Stock quantity is not affected by these changes.
+              </Typography>
+            )}
           </DialogContent>
           <DialogActions sx={{ px: 3, pb: 2 }}>
             <Button onClick={() => setConfirmEdit(null)} disabled={savingEdit}>Back</Button>

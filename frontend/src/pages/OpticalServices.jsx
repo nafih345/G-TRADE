@@ -30,6 +30,7 @@ import {
 // to Eye Test paid for code nobody was using yet. Lazy-load everything but the default form.
 import { stepsList } from '../components/optical/ExaminationStepper';
 import SingleScreenEyeTestForm from '../components/optical/SingleScreenEyeTestForm';
+import { expectedFeeStatus, feePayload, isFreeEyeTest } from '../utils/eyeTestBill';
 import { EYE_TEST_SHORTCUTS, EYE_TEST_LENS_OPTIONS, useEyeTestShortcuts, focusEyeTestField } from '../components/optical/eyeTestShortcuts';
 import { ShortcutHelpDialog } from './wholesale/WholesaleDialogs';
 const ExaminationStepper = lazy(() => import('../components/optical/ExaminationStepper'));
@@ -315,7 +316,13 @@ export default function OpticalServices() {
     procedure: '',
     medicine: '',
     advice: '',
-    nextReview: ''
+    nextReview: '',
+    // Eye test fee — see utils/eyeTestBill.js (payLater = "Pay during frame/lens purchase").
+    payLater: false,
+    paymentMode: 'CASH',
+    // Pay Now / No Payment / Pay After Sale, and whether the Payment Details screen confirmed it.
+    paymentChoice: '',
+    paymentConfirmed: false
   });
 
   const [prescription, setPrescription] = useState({
@@ -468,6 +475,8 @@ export default function OpticalServices() {
             // "Edit" can actually resume editing the same row instead of cloning it.
             backendId: item.id,
             testNo: item.test_no || item.raw_data?.testNo,
+            // Fee status lives on the server (a deferred fee turns BILLED once New Sale bills it).
+            ...(item.fee_status ? { feeStatus: item.fee_status, feeInvoiceNumber: item.fee_invoice_number || '' } : {}),
             // The backend columns are the authoritative identity of the visit — prefer them
             // over a possibly-blank raw_data snapshot so "Edit" always resumes the right row
             // and never regenerates the Patient ID / Test No on save.
@@ -671,6 +680,11 @@ export default function OpticalServices() {
       procedureCharge: '0',
       medicineCharge: '0',
       medicalAidCharge: '0',
+      customerPaidAmount: '0',
+      payLater: false,
+      paymentMode: 'CASH',
+      paymentChoice: '',
+      paymentConfirmed: false,
       testType: 'FREE EYE TEST',
       testNo: ''
     });
@@ -909,7 +923,8 @@ export default function OpticalServices() {
     medicalAid: () => focusEyeTestField('medicalAid'),
     testDate: () => focusEyeTestField('testDate'),
     optometrist: () => focusEyeTestField('optometrist'),
-    savePatient: () => { if (!isRecordLocked) handleSavePatient(); },
+    // Through the form's Save button, so the Payment Details screen follows like a click.
+    savePatient: () => { if (!isRecordLocked) clickEyeTestAction('savePatient'); },
     ucva: () => focusEyeTestField('ucva'),
     phva: () => focusEyeTestField('phva'),
     ar: () => focusEyeTestField('ar'),
@@ -1041,7 +1056,8 @@ export default function OpticalServices() {
       ...prev,
       testNo: visitTestNo || nextTestNoPreview || '',
       primary: '', icdCode: '', remarks: '', procedure: '', medicine: '', advice: '', nextReview: '', nextReviewDate: '',
-      procedureCharge: '0', medicineCharge: '0', medicalAidCharge: '0'
+      procedureCharge: '0', medicineCharge: '0', medicalAidCharge: '0', customerPaidAmount: '0',
+      payLater: false, paymentMode: 'CASH', paymentChoice: '', paymentConfirmed: false
     }));
   };
 
@@ -1154,11 +1170,11 @@ export default function OpticalServices() {
   const handleSavePatient = async () => {
     if (!patientData?.name || patientData.name.trim() === '') {
       alert("Please enter Patient Name before saving.");
-      return;
+      return false;
     }
     // See savingPatientRef's declaration — refuses a second overlapping call instead of racing
     // the first one's still-in-flight patient_code reservation.
-    if (savingPatientRef.current) return;
+    if (savingPatientRef.current) return false;
     savingPatientRef.current = true;
 
     const effectivePatientId = patientData?.id || getNextPatientId();
@@ -1255,15 +1271,9 @@ export default function OpticalServices() {
     } finally {
       savingPatientRef.current = false;
     }
-    // Details are saved (at least locally) — hand off straight to the Clinical Refraction &
-    // Measurement Grid so the optometrist can start entering readings (UCVA OD first).
-    setTimeout(() => {
-      const firstGridField = document.querySelector('[data-et-field="ucva"]');
-      if (firstGridField) {
-        firstGridField.focus();
-        if (firstGridField.select) firstGridField.select();
-      }
-    }, 0);
+    // Details are saved (at least locally). The single-screen form now opens Payment Details,
+    // and moves on to the Clinical Refraction & Measurement Grid once that is confirmed.
+    return true;
   };
 
   // "Save Clinical Record" must not create a directory entry for a visit where no actual test
@@ -1312,16 +1322,23 @@ export default function OpticalServices() {
     );
   };
 
-  const handleSaveDraft = async () => {
+  // The save checks on their own, so the single-screen form can run them before it opens the
+  // payment screen for a paid test.
+  const validateClinicalRecord = () => {
     if (!patientData?.name || patientData.name.trim() === '') {
       alert("Please enter Patient Name before saving clinical record.");
-      return;
+      return false;
     }
 
     if (!hasClinicalData()) {
       alert("Please enter at least one test detail (refraction, acuity, diagnosis, etc.) before saving the clinical record.");
-      return;
+      return false;
     }
+    return true;
+  };
+
+  const handleSaveDraft = async () => {
+    if (!validateClinicalRecord()) return;
 
     // See savingDraftRef's declaration — refuse a second overlapping call so a bounced
     // Enter / double-click can't POST two duplicate exam rows.
@@ -1383,6 +1400,11 @@ export default function OpticalServices() {
       medicineCharge: diagnosis?.medicineCharge || '0',
       medicalAidCharge: diagnosis?.medicalAidCharge || '0',
       medicalAidName: patientData?.medicalAidName || '',
+      // How the fee was settled (Cash / GPay now, free, or deferred to the next New Sale bill).
+      // feeStatus is what the server will derive; the reconcile below replaces it with the real one.
+      customerPaidAmount: diagnosis?.customerPaidAmount ?? '0',
+      isFreeTest: isFreeEyeTest(diagnosis),
+      feeStatus: expectedFeeStatus(diagnosis),
       rx: `OD: ${subjectiveRefraction?.od?.sph || ''} SPH / ${subjectiveRefraction?.od?.cyl || ''} CYL @ ${subjectiveRefraction?.od?.axis || ''}° | OS: ${subjectiveRefraction?.os?.sph || ''} SPH / ${subjectiveRefraction?.os?.cyl || ''} CYL @ ${subjectiveRefraction?.os?.axis || ''}°`,
       // Snapshot patientData with the resolved identity baked in — the raw patientData in state
       // can still carry a blank id (the setPatientData above is async), and loading that blank
@@ -1590,6 +1612,10 @@ export default function OpticalServices() {
         primary_diagnosis: diagnosis?.primary || 'Routine Refraction',
         rx_summary: `OD: ${subjectiveRefraction?.od?.sph || ''} SPH / ${subjectiveRefraction?.od?.cyl || ''} CYL @ ${subjectiveRefraction?.od?.axis || ''}° | OS: ${subjectiveRefraction?.os?.sph || ''} SPH / ${subjectiveRefraction?.os?.cyl || ''} CYL @ ${subjectiveRefraction?.os?.axis || ''}°`,
 
+        // Free test / charges / Cash-GPay / "pay during frame/lens purchase" — the server derives
+        // fee_status (PENDING is what New Sale picks up) and freezes it once a bill carries it.
+        ...feePayload(diagnosis),
+
         raw_data: examRecord
       };
 
@@ -1635,9 +1661,13 @@ export default function OpticalServices() {
         || t.id === reconciledId
         || (realBackendId && t.backendId === realBackendId)
         || (examRecord.backendId && t.backendId === examRecord.backendId);
+      const savedFee = savedExam?.fee_status ? {
+        feeStatus: savedExam.fee_status,
+        feeInvoiceNumber: savedExam.fee_invoice_number || '',
+      } : {};
       const reconcileRow = (t) => ({
         ...t, id: reconciledId, backendId: realBackendId || t.backendId || null,
-        testNo: savedTestNo, patientId: savedPatientId,
+        testNo: savedTestNo, patientId: savedPatientId, ...savedFee,
       });
       setPastExaminations(prev => {
         const hit = prev.some(isThisVisit);
@@ -1821,6 +1851,8 @@ export default function OpticalServices() {
             doctorsList={doctorsList}
             onOpenSearchModal={() => setSearchModalOpen(true)}
             onSaveDraft={handleSaveDraft}
+            onValidateSave={validateClinicalRecord}
+            onGoToSales={(visitTestNo) => navigate('/sales/new', { state: { eyeTestNo: visitTestNo } })}
             onSavePatient={handleSavePatient}
             onPrint={() => setActiveStep(9)}
             onClearAll={handleResetAll}

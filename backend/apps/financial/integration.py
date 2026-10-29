@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 REGISTRY = {
     'sales.invoice': ('sales.Invoice', rules.build_sales_invoice, 'invoice_date', 'invoice_number'),
     'sales.payment': ('sales.Payment', rules.build_sales_payment, 'payment_date', 'receipt_no'),
+    'sales.eye_test_fee': ('sales.EyeExamination', rules.build_eye_test_fee, 'examination_date', 'test_no'),
     'sales.wholesale_invoice': ('sales.WholesaleInvoice', rules.build_wholesale_invoice, 'invoice_date', 'invoice_number'),
     'sales.wholesale_collection': ('sales.WholesalePaymentCollection', rules.build_wholesale_collection, 'payment_date', 'receipt_number'),
     'sales.wholesale_return': ('sales.WholesaleReturn', rules.build_wholesale_return, 'return_date', 'return_number'),

@@ -6,11 +6,13 @@ import {
 } from '@mui/material';
 import {
   Add as AddIcon, CheckCircle as CheckIcon, Delete as DeleteIcon, Print as PrintIcon, Refresh as RefreshIcon,
-  Search as SearchIcon, Warning as WarningIcon, PlaylistAdd as LoadIcon,
+  Search as SearchIcon, Warning as WarningIcon, PlaylistAdd as LoadIcon, ClearAll as ClearIcon,
 } from '@mui/icons-material';
 import { apiError, finGet, finPost, newIdempotencyKey } from './financialApi';
 import VoucherSearchDialog from './VoucherSearchDialog';
 import PaymentModeDetails from '../common/PaymentModeDetails';
+import { DaysLeftChip } from './ChequeDetailsDialog';
+import { CHEQUE_MODE, blankCheque, chequeDaysLeft, chequePayload, validateCheque } from '../../utils/cheques';
 import useBankAccounts from '../../hooks/useBankAccounts';
 import { formatMoney, formatDate } from '../../utils/localeFormat';
 
@@ -30,7 +32,8 @@ const PARTY_KIND_LABEL = { customer: 'Customer', dealer: 'Dealer', supplier: 'Su
 
 // `selected` is the row's tick: only ticked rows are totalled and posted. Typing an amount ticks it.
 const blankAccountLine = () => ({ id: Date.now() + Math.random(), account: null, accountCode: '', accountName: '', mainAccount: '', narration: '', refNo: '', amount: '', selected: false });
-const blankPaymentLine = () => ({ id: Date.now() + Math.random(), amount: '', payMode: 'Cash', refNo: '', refDate: today(), bankAccount: '' });
+// `cheque`: the Cheque pay mode's details (Receipt / Payment Vouchers), entered inline under the row.
+const blankPaymentLine = () => ({ id: Date.now() + Math.random(), amount: '', payMode: 'Cash', refNo: '', refDate: today(), bankAccount: '', cheque: null });
 
 const focusSoon = (selector) => setTimeout(() => {
   const el = document.querySelector(selector);
@@ -113,6 +116,9 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
 
   const isBill = !isContra && voucherState.mode === 'Bill to Bill';
   const locked = voucherState.isSaved;
+  // Receipt / Payment Vouchers record each Cheque line's details in the Cheque Register.
+  const tracksCheques = isReceipt || isPayment;
+  const isChequeLine = (p) => tracksCheques && p.payMode === CHEQUE_MODE;
 
   // ---------------------------------------------------------------------------------------
   // Totals and validation
@@ -157,6 +163,16 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
     paymentLines.forEach((p, i) => {
       if (num(p.amount) < 0) out.push(`Payment ${i + 1}: amount cannot be negative.`);
       if (num(p.amount) > 0 && p.payMode !== 'Cash' && !bankFor(p) && !isBill) out.push(`Payment ${i + 1}: choose the bank account.`);
+      if (num(p.amount) > 0 && isChequeLine(p)) {
+        const issues = validateCheque(p.cheque, p.amount);
+        if (issues.length) out.push(`Payment ${i + 1} (Cheque): ${issues[0]}.`);
+      }
+    });
+    const chequeNos = new Set();
+    paymentLines.filter(p => isChequeLine(p) && p.cheque && num(p.amount) > 0).forEach(p => {
+      const key = `${String(p.cheque.chequeNumber).trim().toLowerCase()}|${String(p.cheque.bankName || '').trim().toLowerCase()}`;
+      if (chequeNos.has(key)) out.push(`Cheque ${p.cheque.chequeNumber} is entered on two payment lines.`);
+      chequeNos.add(key);
     });
     if (!paymentLines.some(p => num(p.amount) > 0)) out.push('Enter the Cash / Bank amount.');
     if (voucherTotal > 0 && !isBalanced) out.push(`Payment modes total ${money(totalPaidAmount)} but the voucher totals ${money(voucherTotal)}.`);
@@ -274,6 +290,34 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
   // Payment lines
   // ---------------------------------------------------------------------------------------
   const setPayment = (id, patch) => setPaymentLines(prev => prev.map(p => (p.id === id ? { ...p, ...patch } : p)));
+  const currentPartyName = isBill
+    ? (billParties.length === 1 ? billParties[0].name : '')
+    : (typeof voucherState.party === 'object' && voucherState.party ? voucherState.party.name : (voucherState.party || ''));
+  // A cheque we issue is drawn on our own bank: default its name from the bank ledger picked.
+  const newCheque = (line) => {
+    const bank = isPayment ? banks.find(b => b.id === bankFor(line)) : null;
+    return blankCheque({ partyName: currentPartyName, bankName: bank ? (bank.bank_name || bank.name) : '' });
+  };
+  const changePayMode = (line, payMode) => {
+    const toCheque = tracksCheques && payMode === CHEQUE_MODE;
+    setPayment(line.id, {
+      payMode, bankAccount: '',
+      ...(toCheque && !line.cheque ? { cheque: newCheque(line) } : {}),
+      ...(toCheque && !num(line.amount) && paymentLines.length === 1 && voucherTotal > 0 ? { amount: String(voucherTotal) } : {}),
+    });
+    if (toCheque) focusSoon(`[data-vf="cheque-no-${line.id}"]`);
+  };
+  // The cheque number / date double as the line's Ref No / Ref Date (printed in the memo).
+  const setCheque = (line, patch) => {
+    const cheque = { ...(line.cheque || newCheque(line)), ...patch };
+    setPayment(line.id, { cheque, refNo: cheque.chequeNumber.trim(), refDate: cheque.chequeDate });
+  };
+  const clearCheque = (line) => {
+    setPayment(line.id, { cheque: blankCheque(), refNo: '', refDate: today() });
+    focusSoon(`[data-vf="cheque-no-${line.id}"]`);
+  };
+  // Delete a payment row; the last row is reset to a blank Cash line instead of removed.
+  const removePaymentLine = (id) => setPaymentLines(prev => (prev.length <= 1 ? [blankPaymentLine()] : prev.filter(p => p.id !== id)));
   const fillBalance = () => {
     // Puts the unpaid remainder on the last payment line.
     setPaymentLines(prev => {
@@ -374,6 +418,7 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
           debit: isReceipt ? amt : 0,
           credit: isReceipt ? 0 : amt,
           memo: `${methodOf(p.payMode)}${p.refNo ? ` ${p.refNo}` : ''}${p.payMode !== 'Cash' && p.refDate ? ` (${p.refDate})` : ''}`,
+          ...(isChequeLine(p) ? { cheque: chequePayload(p.cheque) } : {}),
         });
       }
     });
@@ -394,6 +439,8 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
     bank_account: p.payMode === 'Cash' ? null : (bankFor(p) || null),
     ref_no: p.refNo || '',
     ref_date: p.payMode === 'Cash' ? null : (p.refDate || null),
+    // Same ref on every piece: a cheque spread over several parties is saved as one cheque.
+    ...(isChequeLine(p) ? { cheque: chequePayload(p.cheque, p.id) } : {}),
   });
 
   // One settlement per party, in the order the parties were picked. The pay-mode lines are spread
@@ -506,6 +553,11 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
   const datesText = billDates.from || billDates.to
     ? `Bills ${billDates.from ? `from ${formatDate(billDates.from)}` : ''}${billDates.to ? ` to ${formatDate(billDates.to)}` : ''}` : '';
   const cellInput = { '& .MuiInputBase-input': { py: 0.75 } };
+  // Cheque lines take a Cheque Number / Cheque Date in the Ref columns; Bank / UPI lines keep a Ref No.
+  const hasChequeLine = paymentLines.some(isChequeLine);
+  const hasRefLine = paymentLines.some(p => p.payMode !== 'Cash' && !isChequeLine(p));
+  const refHeader = hasChequeLine ? (hasRefLine ? 'Cheque Number / Ref No' : 'Cheque Number') : 'Ref / Instrument No';
+  const refDateHeader = hasChequeLine ? (hasRefLine ? 'Cheque / Ref Date' : 'Cheque Date') : 'Ref Date';
 
   return (
     <Box ref={rootRef}>
@@ -807,15 +859,16 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
               <TableRow>
                 <TableCell sx={{ fontWeight: 700, minWidth: 140 }} align="right">Amount *</TableCell>
                 <TableCell sx={{ fontWeight: 700, minWidth: 150 }}>Pay Mode *</TableCell>
-                <TableCell sx={{ fontWeight: 700, minWidth: 160 }}>Ref / Instrument No</TableCell>
-                <TableCell sx={{ fontWeight: 700, minWidth: 140 }}>Ref Date</TableCell>
+                <TableCell sx={{ fontWeight: 700, minWidth: 160 }}>{refHeader}</TableCell>
+                <TableCell sx={{ fontWeight: 700, minWidth: 140 }}>{refDateHeader}</TableCell>
                 <TableCell sx={{ fontWeight: 700, minWidth: 220 }}>Bank Account (Non-Cash)</TableCell>
                 <TableCell sx={{ fontWeight: 700, width: 50 }} align="center">Act</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
               {paymentLines.map((line) => (
-                <TableRow key={line.id}>
+                <React.Fragment key={line.id}>
+                <TableRow sx={isChequeLine(line) ? { '& > td': { borderBottom: 'none' } } : undefined}>
                   <TableCell align="right">
                     <TextField type="number" size="small" value={line.amount} disabled={locked} inputProps={{ min: 0, step: '0.01' }}
                       onChange={(e) => setPayment(line.id, { amount: e.target.value })}
@@ -823,18 +876,33 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
                   </TableCell>
                   <TableCell>
                     <TextField select size="small" fullWidth value={line.payMode} disabled={locked}
-                      onChange={(e) => setPayment(line.id, { payMode: e.target.value, bankAccount: '' })}>
+                      sx={{ '& .MuiSelect-select': { py: 0.75 } }}
+                      onChange={(e) => changePayMode(line, e.target.value)}>
                       {PAY_MODES.map(m => <MenuItem key={m.value} value={m.value}>{m.label}</MenuItem>)}
                     </TextField>
                   </TableCell>
                   <TableCell>
-                    <TextField size="small" fullWidth disabled={locked} value={line.refNo} sx={cellInput}
-                      placeholder={line.payMode === 'Cheque' ? 'Cheque No' : line.payMode === 'UPI' ? 'UTR / Ref No' : 'Ref No'}
-                      onChange={(e) => setPayment(line.id, { refNo: e.target.value })} />
+                    {isChequeLine(line) ? (
+                      <TextField size="small" fullWidth required disabled={locked} placeholder="Cheque Number *" value={line.cheque?.chequeNumber || ''}
+                        error={!locked && num(line.amount) > 0 && !String(line.cheque?.chequeNumber || '').trim()} sx={cellInput}
+                        inputProps={{ maxLength: 40, 'data-vf': `cheque-no-${line.id}`, style: { fontFamily: 'monospace', fontWeight: 700 } }}
+                        onChange={(e) => setCheque(line, { chequeNumber: e.target.value })} />
+                    ) : (
+                      <TextField size="small" fullWidth disabled={locked} value={line.refNo} sx={cellInput}
+                        placeholder={line.payMode === 'Cheque' ? 'Cheque No' : line.payMode === 'UPI' ? 'UTR / Ref No' : 'Ref No'}
+                        onChange={(e) => setPayment(line.id, { refNo: e.target.value })} />
+                    )}
                   </TableCell>
                   <TableCell>
-                    <TextField type="date" size="small" fullWidth value={line.refDate} disabled={locked || line.payMode === 'Cash'} sx={cellInput}
-                      onChange={(e) => setPayment(line.id, { refDate: e.target.value })} />
+                    {isChequeLine(line) ? (
+                      <TextField type="date" size="small" fullWidth required disabled={locked} title="Cheque Date (Issue Date)"
+                        value={line.cheque?.chequeDate || ''} sx={cellInput} inputProps={{ 'aria-label': 'Cheque Date (Issue Date)' }}
+                        error={!locked && num(line.amount) > 0 && !line.cheque?.chequeDate}
+                        onChange={(e) => setCheque(line, { chequeDate: e.target.value })} />
+                    ) : (
+                      <TextField type="date" size="small" fullWidth value={line.refDate} disabled={locked || line.payMode === 'Cash' || isChequeLine(line)} sx={cellInput}
+                        onChange={(e) => setPayment(line.id, { refDate: e.target.value })} />
+                    )}
                   </TableCell>
                   <TableCell>
                     {line.payMode === 'Cash' ? (
@@ -845,12 +913,62 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
                     )}
                   </TableCell>
                   <TableCell align="center">
-                    <IconButton size="small" color="error" disabled={locked || paymentLines.length <= 1} aria-label="Remove payment"
-                      onClick={() => setPaymentLines(prev => prev.filter(p => p.id !== line.id))}>
-                      <DeleteIcon fontSize="small" />
-                    </IconButton>
+                    {/* The only row can't be deleted, except a Cheque row: that resets it to a blank Cash line. */}
+                    <Tooltip title={paymentLines.length > 1 ? 'Delete this payment row' : isChequeLine(line) ? 'Remove the cheque and clear this row' : ''}>
+                      <span>
+                        <IconButton size="small" color="error" disabled={locked || (paymentLines.length <= 1 && !isChequeLine(line))} aria-label="Delete payment row"
+                          onClick={() => removePaymentLine(line.id)}>
+                          <DeleteIcon fontSize="small" />
+                        </IconButton>
+                      </span>
+                    </Tooltip>
                   </TableCell>
                 </TableRow>
+                {isChequeLine(line) && (
+                  <TableRow>
+                    <TableCell colSpan={6} sx={{ pt: 1, pb: 1.5, bgcolor: '#f8fafc', borderTop: '1px dashed #e2e8f0' }}>
+                      <Typography variant="caption" fontWeight={800} color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
+                        CHEQUE DETAILS — {isReceipt ? 'received from the party' : 'issued to the party'}
+                      </Typography>
+                      {/* One fixed grid: every field the same height with its label on the border. */}
+                      <Box sx={{
+                        display: 'grid', gap: 1.5, alignItems: 'center',
+                        gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))', lg: '1.3fr 0.9fr 1fr 1.3fr 1.6fr auto' },
+                        '& .MuiTextField-root': { bgcolor: '#fff' }, '& .MuiInputBase-input': { py: 0.75 },
+                      }}>
+                        <TextField size="small" fullWidth disabled={locked} label="Bank Name" value={line.cheque?.bankName || ''}
+                          InputLabelProps={{ shrink: true }} placeholder={isReceipt ? "Party's bank (drawn on)" : 'Your bank'} inputProps={{ maxLength: 150 }}
+                          onChange={(e) => setCheque(line, { bankName: e.target.value })} />
+                        <TextField type="number" size="small" fullWidth required disabled={locked} label="Amount" value={line.amount}
+                          InputLabelProps={{ shrink: true }} inputProps={{ min: 0, step: '0.01', style: { textAlign: 'right', fontWeight: 700 } }}
+                          onChange={(e) => setPayment(line.id, { amount: e.target.value })} />
+                        <TextField type="date" size="small" fullWidth disabled={locked} label="Deposited Date" value={line.cheque?.depositedDate || ''}
+                          InputLabelProps={{ shrink: true }} inputProps={{ min: line.cheque?.chequeDate || undefined }}
+                          error={!!line.cheque?.depositedDate && !!line.cheque?.chequeDate && line.cheque.depositedDate < line.cheque.chequeDate}
+                          onChange={(e) => setCheque(line, { depositedDate: e.target.value })} />
+                        <TextField size="small" fullWidth disabled={locked} label="Company / Party Name" value={line.cheque?.partyName || ''}
+                          InputLabelProps={{ shrink: true }} placeholder={currentPartyName || 'Defaults to the voucher party'} inputProps={{ maxLength: 200 }}
+                          onChange={(e) => setCheque(line, { partyName: e.target.value })} />
+                        <TextField size="small" fullWidth disabled={locked} label="Remarks" value={line.cheque?.remarks || ''}
+                          InputLabelProps={{ shrink: true }} placeholder="Notes (optional)" inputProps={{ maxLength: 500 }}
+                          onChange={(e) => setCheque(line, { remarks: e.target.value })} />
+                        <Stack direction="row" spacing={0.75} alignItems="center" justifyContent="flex-end" sx={{ minWidth: 150 }}>
+                          <Tooltip title={line.cheque?.chequeDate ? `Days left to the ${line.cheque.depositedDate ? 'deposit' : 'cheque'} date` : ''}>
+                            <span><DaysLeftChip days={chequeDaysLeft(line.cheque)} /></span>
+                          </Tooltip>
+                          <Tooltip title="Clear the cheque details">
+                            <span>
+                              <IconButton size="small" color="warning" disabled={locked} aria-label="Clear cheque details" onClick={() => clearCheque(line)}>
+                                <ClearIcon fontSize="small" />
+                              </IconButton>
+                            </span>
+                          </Tooltip>
+                        </Stack>
+                      </Box>
+                    </TableCell>
+                  </TableRow>
+                )}
+                </React.Fragment>
               ))}
             </TableBody>
           </Table>

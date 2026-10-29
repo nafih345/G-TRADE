@@ -25,6 +25,7 @@ from .patient_utils import (
     reserve_unused_test_numbers, sync_test_no_sequence,
     find_duplicate_customer, find_duplicate_exam,
 )
+from .eye_test_fees import derive_fee_fields, fee_exam_ids, sync_invoice_eye_test_fees
 from apps.inventory.models import StockLedger
 from apps.inventory.stock_utils import adjust_branch_stock_many
 from apps.common.branch_mixins import BranchScopedViewSetMixin
@@ -51,10 +52,25 @@ class EyeExaminationSerializer(ModelSerializer):
     # the DB IntegrityError. A 400 from the serializer would just turn that graceful re-roll
     # into a failed save. Drop the auto validator.
     test_no = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=20, validators=[])
+    # "Pay during frame/lens purchase": the fee waits for the patient's next New Sale bill.
+    # Input only — the stored outcome is fee_status (see eye_test_fees.derive_fee_fields).
+    fee_deferred = serializers.BooleanField(write_only=True, required=False)
+    fee_invoice_number = SerializerMethodField()
 
     class Meta:
         model = EyeExamination
         fields = '__all__'
+        read_only_fields = ('fee_amount', 'fee_status', 'fee_invoice')
+
+    def get_fee_invoice_number(self, obj):
+        return obj.fee_invoice.invoice_number if obj.fee_invoice_id and obj.fee_invoice else None
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        fee = derive_fee_fields(attrs, self.instance)
+        attrs.pop('fee_deferred', None)
+        attrs.update(fee)
+        return attrs
 
 class AppointmentSerializer(ModelSerializer):
     # Read-only convenience field so the frontend doesn't have to separately look up the
@@ -489,10 +505,28 @@ class EyeExaminationViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         # ?test_no=1003 — exact lookup (New Sale's Test No field), so a single visit can be found
         # without paging through every exam.
-        qs = super().get_queryset()
-        test_no = (self.request.query_params.get('test_no') or '').strip()
+        qs = super().get_queryset().select_related('fee_invoice')
+        params = self.request.query_params
+        test_no = (params.get('test_no') or '').strip()
         if test_no:
             qs = qs.filter(test_no=test_no)
+        # ?fee_status=PENDING&customer=<uuid>&patient_id=<code> — New Sale's lookup of a
+        # patient's deferred eye test fees. Either identity matches: older exams may only
+        # carry the patient code, not the Customer link.
+        fee_status = (params.get('fee_status') or '').strip().upper()
+        if fee_status:
+            qs = qs.filter(fee_status=fee_status)
+        customer = (params.get('customer') or '').strip()
+        patient_id = (params.get('patient_id') or '').strip()
+        who = Q()
+        if _is_uuid(customer):
+            who |= Q(customer_id=customer)
+        if patient_id:
+            who |= Q(patient_id=patient_id)
+        if who:
+            qs = qs.filter(who)
+        elif customer:
+            qs = qs.none()
         return qs
 
     def create(self, request, *args, **kwargs):
@@ -667,6 +701,8 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
                     raise
                 invoice_number = self._mint_invoice_number(doc_type)
         self._save_items(invoice)
+        if fee_exam_ids(self.request.data.get('items') or []):
+            sync_invoice_eye_test_fees(invoice)
         if self._commits_stock(invoice):
             self._update_inventory(invoice)
         if splits is not None:
@@ -682,6 +718,8 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
         # pre-edit row here).
         was_committed = self._commits_stock(instance)
         stock_before = self._stock_quantities(instance)
+        # Read from the prefetched lines (no query) before they're replaced below.
+        had_eye_fees = bool(fee_exam_ids(instance.items.all()))
         # Items / receipts change from here on — drop get_queryset's prefetched copies so every
         # read below sees the new rows.
         instance._prefetched_objects_cache = {}
@@ -722,7 +760,17 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
             # idempotency, and those aren't written when no Warehouse exists, so each payment/
             # delivery update used to deduct the same invoice's stock again.
             self._update_inventory(invoice)
+        # Lines added / removed, or the bill cancelled or turned into a quotation: claim or
+        # release the deferred eye test fees it carries.
+        if had_eye_fees or fee_exam_ids(self.request.data.get('items') or []):
+            sync_invoice_eye_test_fees(invoice)
         self._prefetch_for_response(invoice)
+
+    @transaction.atomic
+    def perform_destroy(self, instance):
+        # A deleted bill's deferred eye test fees go back to pending for the next sale.
+        sync_invoice_eye_test_fees(instance, released=True)
+        super().perform_destroy(instance)
 
     @action(detail=True, methods=['post'], url_path='convert')
     def convert(self, request, pk=None):
@@ -754,7 +802,11 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
         # commit its stock or reach the books.
         if target != 'QUOTATION' and invoice.status == 'DRAFT':
             invoice.status = derive_payment_status(invoice.net_amount, invoice.paid_amount)
-        invoice.save()
+        with transaction.atomic():
+            invoice.save()
+            # A quotation never holds a deferred eye test fee; converting it claims (or, back to
+            # a quotation, releases) the fees its lines carry.
+            sync_invoice_eye_test_fees(invoice)
         if self._commits_stock(invoice):
             self._update_inventory(invoice)
         return Response(self.get_serializer(invoice).data)

@@ -111,6 +111,8 @@ const menuItems = [
         ]
       },
       { text: 'Ledger', path: '/financial/ledger' },
+      { text: 'Cashbook', path: '/financial/cashbook' },
+      { text: 'Cheque Register', path: '/financial/cheques' },
       { text: 'Trial Balance', path: '/financial/trial-balance' },
       { text: 'Profit & Loss', path: '/financial/profit-loss' },
       { text: 'Balance Sheet', path: '/financial/balance-sheet' },

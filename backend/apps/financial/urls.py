@@ -24,6 +24,8 @@ urlpatterns = [
     path('reports/balance-sheet/', views.balance_sheet_view),
     path('reports/general-ledger/', views.general_ledger_view),
     path('reports/ledger-register/', views.ledger_register_view),
+    path('reports/cashbook/', views.cashbook_view),
+    path('reports/cashbook/accounts/', views.cashbook_accounts_view),
     path('reports/account-balances/', views.account_balances_view),
     path('reports/source-breakdown/', views.source_breakdown_view),
     path('integration/status/', views.integration_status_view),
@@ -39,5 +41,7 @@ urlpatterns = [
     path('settlements/receipt/', views.settlement_receipt_view),
     path('settlements/payment/', views.settlement_payment_view),
     path('settlements/batch/<str:voucher>/', views.settlement_batch_view),
+    path('cheques/', views.cheque_register_view),
+    path('cheques/<uuid:pk>/', views.cheque_detail_view),
     path('', include(router.urls)),
 ]

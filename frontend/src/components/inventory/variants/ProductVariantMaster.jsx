@@ -42,6 +42,8 @@ import {
 import {
   opticalCategories, opticalBrands, LS_KEYS, readList, DEFAULT_SUBCATEGORIES, DEFAULT_GROUPS
 } from '../productAttributeOptions';
+import { loadBackendMaster, backendMaster, localMaster } from '../optionMasters';
+import { AttributeField } from '../ProductMasterDialog';
 import BarcodePrintDialog from '../BarcodePrintDialog';
 import ConfirmActionDialog from '../../common/ConfirmActionDialog';
 import { notify } from '../../../utils/notify';
@@ -56,6 +58,9 @@ import { useDebounce } from '../../../hooks/useDebounce';
 
 const API = '/api/products/variant-groups/';
 const TEMPLATE_API = '/api/products/variant-templates/';
+const CATEGORY_API = '/api/masters/categories/';
+const BRAND_API = '/api/masters/brands/';
+const UNIT_API = '/api/masters/units/';
 const COLVIS_KEY = 'variantMaster_colVis';
 const DRAFT_KEY = (ctx) => `variantMaster_draft_${ctx}`;
 const DRY_RUN_MAX_ROWS = 2000;
@@ -100,17 +105,6 @@ function Section({ title, action, children, sx }) {
   );
 }
 
-function ComboField({ label, value, onChange, options, inputRef, placeholder, helperText }) {
-  return (
-    <Autocomplete
-      freeSolo size="small" options={options} value={value || ''}
-      onChange={(e, v) => onChange(v || '')}
-      onInputChange={(e, v, reason) => reason === 'input' && onChange(v || '')}
-      renderInput={(params) => <TextField {...params} label={label} inputRef={inputRef} placeholder={placeholder} helperText={helperText} />}
-    />
-  );
-}
-
 export default function ProductVariantMaster({
   open, onClose, context = 'inventory', initialGroupId = null, initialProductId = null,
   supplierName = '', purchaseGstType = 'EXCLUSIVE', initialImportGroup = null, onSaved, onAddToPurchase
@@ -147,7 +141,17 @@ export default function ProductVariantMaster({
   const [activeRow, setActiveRow] = useState(-1);
   const [draft, setDraft] = useState(null);
 
-  const [masters, setMasters] = useState({ categories: opticalCategories, brands: opticalBrands, units: [], taxes: TAX_DEFAULTS });
+  const [taxOptions, setTaxOptions] = useState(TAX_DEFAULTS);
+  // Option lists behind the header's "+" masters (add / rename / delete).
+  const [categoryOptions, setCategoryOptions] = useState(opticalCategories);
+  const [categoryRecords, setCategoryRecords] = useState({});
+  const [brandOptions, setBrandOptions] = useState(opticalBrands);
+  const [brandRecords, setBrandRecords] = useState({});
+  const [unitOptions, setUnitOptions] = useState([]);
+  const [unitRecords, setUnitRecords] = useState({});
+  const [subCategoryOptions, setSubCategoryOptions] = useState([]);
+  const [groupOptions, setGroupOptions] = useState([]);
+  const [modelNumberOptions, setModelNumberOptions] = useState([]);
   const [templates, setTemplates] = useState([]);
   const [loadedTemplate, setLoadedTemplate] = useState(null);
   const [templateMenu, setTemplateMenu] = useState(null);
@@ -230,23 +234,16 @@ export default function ProductVariantMaster({
       if (d && (d.rows?.length || d.parent?.name)) setDraft(d);
     }
 
-    const names = (res) => (res?.data?.results || res?.data || []).map(x => x?.name).filter(Boolean);
-    Promise.all([
-      axios.get('/api/masters/categories/').catch(() => null),
-      axios.get('/api/masters/brands/').catch(() => null),
-      axios.get('/api/masters/units/').catch(() => null),
-      axios.get('/api/masters/taxes/').catch(() => null),
-    ]).then(([cat, br, un, tx]) => {
-      const hiddenCats = new Set(readList(LS_KEYS.hiddenCategories, []));
-      const hiddenBrands = new Set(readList(LS_KEYS.hiddenBrands, []));
+    loadBackendMaster(CATEGORY_API, opticalCategories, LS_KEYS.hiddenCategories, setCategoryOptions, setCategoryRecords);
+    loadBackendMaster(BRAND_API, opticalBrands, LS_KEYS.hiddenBrands, setBrandOptions, setBrandRecords);
+    loadBackendMaster(UNIT_API, [], null, setUnitOptions, setUnitRecords);
+    setSubCategoryOptions(readList(LS_KEYS.subCategory, DEFAULT_SUBCATEGORIES));
+    setGroupOptions(readList(LS_KEYS.group, DEFAULT_GROUPS));
+    setModelNumberOptions(readList(LS_KEYS.modelNumber, []));
+    axios.get('/api/masters/taxes/').then(tx => {
       const rates = (tx?.data?.results || tx?.data || []).map(t => Number(t.rate)).filter(Number.isFinite);
-      setMasters({
-        categories: Array.from(new Set([...names(cat), ...opticalCategories.filter(c => !hiddenCats.has(c))])),
-        brands: Array.from(new Set([...names(br), ...opticalBrands.filter(b => !hiddenBrands.has(b))])),
-        units: names(un),
-        taxes: Array.from(new Set([...TAX_DEFAULTS, ...rates])).sort((a, b) => a - b),
-      });
-    });
+      setTaxOptions(Array.from(new Set([...TAX_DEFAULTS, ...rates])).sort((a, b) => a - b));
+    }).catch(() => {});
     axios.get(TEMPLATE_API).then(r => setTemplates(r.data?.results || r.data || [])).catch(() => setTemplates([]));
   }, [open, initialGroupId, initialProductId, context, resetAll, loadGroup]);
 
@@ -372,16 +369,20 @@ export default function ProductVariantMaster({
     setTimeout(() => gridRef.current?.focusRow(rows.length), 60);
   }, [rowDefaults, isPurchase, defaults.opening_stock, rows.length]);
 
-  const duplicateRow = useCallback((rid) => {
-    setRows(prev => {
-      const i = prev.findIndex(r => r._rid === rid);
-      if (i < 0) return prev;
-      const src = prev[i];
-      const copy = { ...src, _rid: newRid(), id: null, sku: '', barcode: '', stock: null, minimum_stock: null, _generated: false, _edited: true };
-      return [...prev.slice(0, i + 1), copy, ...prev.slice(i + 1)];
-    });
+  // Excel-style duplicate: each row is cloned with everything entered in it and inserted right
+  // below its source. Only what must stay unique is cleared — the saved-product link, SKU and
+  // barcode (re-generated on save) and the source's current stock.
+  const focusRidRef = useRef(null);
+  const duplicateRows = useCallback((rids) => {
+    if (!rids.length) return;
+    const copyRid = new Map(rids.map(rid => [rid, newRid()]));
+    setRows(prev => prev.flatMap(src => (copyRid.has(src._rid)
+      ? [src, { ...src, attributes: { ...(src.attributes || {}) }, _rid: copyRid.get(src._rid), id: null, sku: '', barcode: '', stock: null, _generated: false, _edited: true }]
+      : [src])));
+    focusRidRef.current = copyRid.get(rids[0]);
     setDirty(true);
   }, []);
+  const duplicateRow = useCallback((rid) => duplicateRows([rid]), [duplicateRows]);
 
   const removeRows = useCallback(async (rids, { ask = true } = {}) => {
     const targets = rows.filter(r => rids.includes(r._rid));
@@ -412,6 +413,20 @@ export default function ProductVariantMaster({
   }, [rows, viewRows, askConfirm, isPurchase]);
 
   const onDeleteOne = useCallback((rid) => removeRows([rid]), [removeRows]);
+  // Put the cursor on the first new copy once it has rendered.
+  useEffect(() => {
+    const rid = focusRidRef.current;
+    if (!rid) return;
+    focusRidRef.current = null;
+    const i = viewRows.findIndex(r => r._rid === rid);
+    if (i >= 0) setTimeout(() => gridRef.current?.focusRow(i), 30);
+  }, [viewRows]);
+
+  // Duplicate acts on the ticked rows when there are any, else on the row with the cursor.
+  const duplicateTargets = selected.size
+    ? viewRows.filter(r => selected.has(r._rid)).map(r => r._rid)
+    : (viewRows[activeRow] ? [viewRows[activeRow]._rid] : []);
+
   const onToggle = useCallback((rid) => setSelected(prev => { const n = new Set(prev); n.has(rid) ? n.delete(rid) : n.add(rid); return n; }), []);
   const onToggleAll = useCallback((checked) => setSelected(checked ? new Set(viewRows.map(r => r._rid)) : new Set()), [viewRows]);
   const onSort = useCallback((key) => setSort(s => (!s || s.key !== key ? { key, dir: 'asc' } : s.dir === 'asc' ? { key, dir: 'desc' } : null)), []);
@@ -823,7 +838,7 @@ export default function ProductVariantMaster({
     },
     save: () => save(),
     addRow: () => addBlankRows(1),
-    duplicateRow: () => { const r = viewRows[activeRow]; if (r) duplicateRow(r._rid); else return false; return true; },
+    duplicateRow: () => { if (!duplicateTargets.length) return false; duplicateRows(duplicateTargets); return true; },
     selectAll: () => onToggleAll(!(viewRows.length && viewRows.every(r => selected.has(r._rid)))),
     selectAllPlain: (e) => {
       if (!gridRef.current?.container()?.contains(e.target)) return false;
@@ -886,8 +901,13 @@ export default function ProductVariantMaster({
 
   // ------------------------------------------------------------------ render
 
-  const subCategoryOptions = useMemo(() => (open ? readList(LS_KEYS.subCategory, DEFAULT_SUBCATEGORIES) : []), [open]);
-  const groupOptions = useMemo(() => (open ? readList(LS_KEYS.group, DEFAULT_GROUPS) : []), [open]);
+  const categoryMaster = backendMaster(CATEGORY_API, LS_KEYS.hiddenCategories, categoryRecords, setCategoryRecords, setCategoryOptions);
+  const brandMaster = backendMaster(BRAND_API, LS_KEYS.hiddenBrands, brandRecords, setBrandRecords, setBrandOptions);
+  const unitMaster = backendMaster(UNIT_API, null, unitRecords, setUnitRecords, setUnitOptions);
+  const subCategoryMaster = localMaster(LS_KEYS.subCategory, setSubCategoryOptions);
+  const groupMaster = localMaster(LS_KEYS.group, setGroupOptions);
+  const modelNumberMaster = localMaster(LS_KEYS.modelNumber, setModelNumberOptions);
+  const masterProps = (m) => ({ onPersist: m.persist, onRename: m.rename, onRemove: m.remove });
   const hasGenerated = rows.some(r => r._generated && !r.id);
   const savedCount = rows.filter(r => r.id).length;
   const qtyRows = isPurchase ? rows.filter(r => Number(r.quantity) > 0).length : 0;
@@ -981,18 +1001,18 @@ export default function ProductVariantMaster({
                         onChange={(e) => setParentField('base_sku')(e.target.value.toUpperCase())}
                         error={Boolean(groupErrors.base_sku)} helperText={groupErrors.base_sku || 'Variant SKUs = Base-Attribute codes'} />
                     </Grid>
-                    <Grid item xs={6} sm={4} md={2}><ComboField label="Category" value={parent.category} onChange={setCategory} options={masters.categories} /></Grid>
-                    <Grid item xs={6} sm={4} md={2}><ComboField label="Subcategory" value={parent.sub_category} onChange={setParentField('sub_category')} options={subCategoryOptions} /></Grid>
-                    <Grid item xs={6} sm={4} md={2}><ComboField label="Group" value={parent.group} onChange={setParentField('group')} options={groupOptions} /></Grid>
-                    <Grid item xs={6} sm={4} md={2}><ComboField label="Brand" value={parent.brand} onChange={setParentField('brand')} options={masters.brands} /></Grid>
-                    <Grid item xs={6} sm={4} md={2}><TextField fullWidth size="small" label="Model Number" value={parent.model_number} onChange={(e) => setParentField('model_number')(e.target.value)} /></Grid>
-                    <Grid item xs={6} sm={4} md={2}><ComboField label="Unit" value={parent.unit} onChange={setParentField('unit')} options={masters.units} /></Grid>
+                    <Grid item xs={6} sm={4} md={2}><AttributeField label="Category" value={parent.category} onChange={setCategory} options={categoryOptions} {...masterProps(categoryMaster)} /></Grid>
+                    <Grid item xs={6} sm={4} md={2}><AttributeField label="Subcategory" value={parent.sub_category} onChange={setParentField('sub_category')} options={subCategoryOptions} {...masterProps(subCategoryMaster)} /></Grid>
+                    <Grid item xs={6} sm={4} md={2}><AttributeField label="Group" value={parent.group} onChange={setParentField('group')} options={groupOptions} {...masterProps(groupMaster)} /></Grid>
+                    <Grid item xs={6} sm={4} md={2}><AttributeField label="Brand" value={parent.brand} onChange={setParentField('brand')} options={brandOptions} {...masterProps(brandMaster)} /></Grid>
+                    <Grid item xs={6} sm={4} md={2}><AttributeField label="Model Number" value={parent.model_number} onChange={setParentField('model_number')} options={modelNumberOptions} {...masterProps(modelNumberMaster)} /></Grid>
+                    <Grid item xs={6} sm={4} md={2}><AttributeField label="Unit" value={parent.unit} onChange={setParentField('unit')} options={unitOptions} {...masterProps(unitMaster)} /></Grid>
                     <Grid item xs={6} sm={4} md={2}><TextField fullWidth size="small" label="HSN / Tax Code" value={parent.hsn_code} onChange={(e) => setParentField('hsn_code')(e.target.value)} /></Grid>
                     <Grid item xs={6} sm={4} md={2}>
                       <TextField select fullWidth size="small" label="Tax %" value={parent.tax_percent === '' || parent.tax_percent == null ? '' : Number(parent.tax_percent)}
                         onChange={(e) => setParentField('tax_percent')(e.target.value)} error={Boolean(groupErrors.tax_percent)}>
                         <MenuItem value=""><em>Not set</em></MenuItem>
-                        {masters.taxes.map(t => <MenuItem key={t} value={t}>{t}%</MenuItem>)}
+                        {taxOptions.map(t => <MenuItem key={t} value={t}>{t}%</MenuItem>)}
                       </TextField>
                     </Grid>
                     <Grid item xs={12} sm={8} md={6}><TextField fullWidth size="small" label="Product Description" value={parent.description} onChange={(e) => setParentField('description')(e.target.value)} /></Grid>
@@ -1061,8 +1081,8 @@ export default function ProductVariantMaster({
                     />
                     {selected.size > 0 && <Chip size="small" label={`${selected.size} selected`} onDelete={() => setSelected(new Set())} />}
                     <Tooltip title="Add a blank row (Alt+N)"><Button size="small" startIcon={<AddRowIcon />} onClick={() => addBlankRows(1)}>Add row</Button></Tooltip>
-                    <Tooltip title="Duplicate the row with the cursor (Alt+D)">
-                      <span><Button size="small" startIcon={<DuplicateIcon />} disabled={!viewRows[activeRow]} onClick={() => viewRows[activeRow] && duplicateRow(viewRows[activeRow]._rid)}>Duplicate</Button></span>
+                    <Tooltip title="Duplicate the ticked rows, or the row with the cursor, with all their details (Ctrl+D / Alt+D)">
+                      <span><Button size="small" startIcon={<DuplicateIcon />} disabled={!duplicateTargets.length} onClick={() => duplicateRows(duplicateTargets)}>Duplicate{selected.size > 1 ? ` (${selected.size})` : ''}</Button></span>
                     </Tooltip>
                     <Tooltip title="Remove selected rows (Delete)">
                       <span><Button size="small" color="error" startIcon={<DeleteSelectedIcon />} disabled={!selected.size} onClick={() => removeRows(Array.from(selected))}>Remove</Button></span>

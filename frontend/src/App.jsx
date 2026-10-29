@@ -269,6 +269,8 @@ function MainLayout() {
                 <Route path="/financial/vouchers/all" element={<FinancialManagement />} />
                 <Route path="/financial/journal-entries" element={<FinancialManagement />} />
                 <Route path="/financial/ledger" element={<FinancialManagement />} />
+                <Route path="/financial/cashbook" element={<FinancialManagement />} />
+                <Route path="/financial/cheques" element={<FinancialManagement />} />
                 <Route path="/financial/trial-balance" element={<FinancialManagement />} />
                 <Route path="/financial/profit-loss" element={<FinancialManagement />} />
                 <Route path="/financial/balance-sheet" element={<FinancialManagement />} />

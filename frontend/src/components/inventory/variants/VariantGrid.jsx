@@ -69,7 +69,7 @@ const Row = memo(function Row({ row, index, columns, template, errs, selected, t
         );
       })}
       <div className="vg-cell vg-center">
-        <Tooltip title="Duplicate row (Alt+D)"><IconButton size="small" tabIndex={-1} onClick={() => onDuplicate(row._rid)}><DuplicateIcon sx={{ fontSize: 16 }} /></IconButton></Tooltip>
+        <Tooltip title="Duplicate row (Ctrl+D)"><IconButton size="small" tabIndex={-1} onClick={() => onDuplicate(row._rid)}><DuplicateIcon sx={{ fontSize: 16 }} /></IconButton></Tooltip>
         <Tooltip title="Remove row"><IconButton size="small" tabIndex={-1} color="error" onClick={() => onDelete(row._rid)}><DeleteIcon sx={{ fontSize: 16 }} /></IconButton></Tooltip>
       </div>
     </div>

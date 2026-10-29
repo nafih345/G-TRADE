@@ -344,3 +344,55 @@ class FinancialAuditLog(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+
+
+class Cheque(BaseUUIDModel):
+    """A cheque received on a Receipt Voucher or issued on a Payment Voucher (one per Cheque
+    pay-mode line). Tracking only: the voucher already booked the bank side when it was saved,
+    so a status change here never posts anything. A bounced cheque is undone by reversing its
+    voucher; reversing a voucher cancels its cheques."""
+    DIRECTION_CHOICES = [('RECEIVED', 'Received'), ('ISSUED', 'Issued')]
+    STATUS_CHOICES = [
+        ('PENDING', 'Pending'),
+        ('DEPOSITED', 'Deposited'),
+        ('CLEARED', 'Cleared'),
+        ('BOUNCED', 'Bounced'),
+        ('CANCELLED', 'Cancelled'),
+    ]
+    # Statuses still waiting on the bank — the only ones that count down "days left".
+    OPEN_STATUSES = ('PENDING', 'DEPOSITED')
+
+    direction = models.CharField(max_length=10, choices=DIRECTION_CHOICES)
+    voucher_type = models.CharField(max_length=4)                      # RV / PV
+    # Voucher number(s) on screen: the journal number, or the BR- settlement number; a cheque
+    # split over several parties in one bill-to-bill save lists every number.
+    voucher_number = models.CharField(max_length=255, blank=True, default='')
+    journal_entry = models.ForeignKey(JournalEntry, on_delete=models.SET_NULL, null=True, blank=True, related_name='cheques')
+    cheque_number = models.CharField(max_length=40)
+    cheque_date = models.DateField()
+    bank_name = models.CharField(max_length=150, blank=True, default='')
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    deposited_date = models.DateField(null=True, blank=True)
+    cleared_date = models.DateField(null=True, blank=True)
+    party_name = models.CharField(max_length=200, blank=True, default='')
+    party_kind = models.CharField(max_length=20, blank=True, default='')
+    party_id = models.CharField(max_length=64, blank=True, default='')
+    # Our own bank ledger the voucher posted to.
+    bank_account = models.ForeignKey(ChartOfAccount, on_delete=models.SET_NULL, null=True, blank=True, related_name='cheques')
+    remarks = models.CharField(max_length=500, blank=True, default='')
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default='PENDING', db_index=True)
+    status_note = models.CharField(max_length=255, blank=True, default='')
+    status_changed_at = models.DateTimeField(null=True, blank=True)
+    branch = models.ForeignKey(Branch, on_delete=models.SET_NULL, null=True, blank=True, related_name='cheques')
+
+    class Meta:
+        ordering = ['-cheque_date', '-created_at']
+        indexes = [models.Index(fields=['direction', 'cheque_date'], name='fin_cheque_dir_date')]
+
+    def __str__(self):
+        return f"{self.get_direction_display()} cheque {self.cheque_number} ₹{self.amount} [{self.status}]"
+
+    @property
+    def due_date(self):
+        """The date the countdown runs to: the (planned) deposit date, else the cheque date."""
+        return self.deposited_date or self.cheque_date

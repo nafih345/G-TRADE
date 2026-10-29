@@ -19,6 +19,7 @@ export const opticalBrands = [
 export const LS_KEYS = {
   subCategory: 'optical_attr_subcategories',
   group: 'optical_attr_groups',
+  modelNumber: 'optical_attr_model_numbers',
   size: 'optical_attr_sizes',
   color: 'optical_attr_colors',
   material: 'optical_attr_materials',

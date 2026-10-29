@@ -9,6 +9,7 @@ import { isRealCustomerName } from '../../utils/salesDocStatus';
 import { apiErrorMessage } from '../../utils/apiError';
 import { confirmPosting, peekDocumentNumber } from '../../utils/businessPrefs';
 import { CASH_PAID, CASH_UNPAID, needsBank } from '../../utils/paymentModes';
+import { eyeTestFeeLine, isEyeTestFeeLine } from '../../utils/eyeTestBill';
 import PaymentModeDetails from '../common/PaymentModeDetails';
 import { getBusinessPrefs } from '../../utils/localeFormat';
 import {
@@ -616,6 +617,7 @@ export default function NewSaleWizard({
   // Set when Sales > Orders sends a saved Order / Invoice / Quotation here to be edited: the form
   // loads it, and "Complete" then updates that same record instead of creating a new bill.
   editDocumentId = null,
+  prefillTestNo = null,
   onExitEdit,
   onCancelEdit
 }) {
@@ -749,6 +751,40 @@ export default function NewSaleWizard({
   }, [docType, editingDoc, lastCompletedOrder]);
   const [loadingEdit, setLoadingEdit] = useState(false);
   const formLocked = isSaving || loadingEdit || Boolean(lastCompletedOrder);
+
+  // Deferred eye test fees ("Pay during frame / lens purchase" on the Eye Test payment screen):
+  // picking a patient adds each of their pending fees to the bill as an Eye Test Fee service
+  // line, and saving the bill marks them billed (backend apps/sales/eye_test_fees.py). Switching
+  // to another patient drops the previous patient's fee lines; a line removed by hand stays
+  // removed for this patient. Never while editing a saved bill — that would silently grow it.
+  const eyeFeePatientRef = useRef('');
+  useEffect(() => {
+    if (editingDoc || formLocked) return;
+    const id = String(selectedCustomerId || '');
+    if (id === eyeFeePatientRef.current) return;
+    eyeFeePatientRef.current = id;
+    setItemsList(prev => (prev.some(isEyeTestFeeLine) ? prev.filter(i => !isEyeTestFeeLine(i)) : prev));
+    if (!id) return;
+    // Older exams may carry only the patient code, so ask by both identities.
+    const entry = (dbCustomers || []).find(c => String(c.id) === id);
+    const params = { fee_status: 'PENDING', page_size: 100 };
+    if (isBackendUuid(id)) params.customer = id;
+    const code = entry?.patientCode || (isBackendUuid(id) ? '' : id);
+    if (code) params.patient_id = code;
+    axios.get('/api/sales/eye-examinations/', { params }).then(res => {
+      // A different patient was picked while this was in flight.
+      if (eyeFeePatientRef.current !== id) return;
+      const pending = (res.data?.results || res.data || []).filter(e => Number(e.fee_amount) > 0);
+      if (!pending.length) return;
+      setItemsList(prev => {
+        const have = new Set(prev.filter(isEyeTestFeeLine).map(i => String(i.serviceDetails.eye_examination_id)));
+        const add = pending.filter(e => !have.has(String(e.id))).map(eyeTestFeeLine);
+        return add.length ? [...prev, ...add] : prev;
+      });
+      const total = pending.reduce((t, e) => t + (Number(e.fee_amount) || 0), 0);
+      notify(`Pending eye test fee ₹${total.toFixed(2)} (Test No ${pending.map(e => e.test_no).join(', ')}) added to this bill.`);
+    }).catch(() => { /* no pending fee shown — the sale itself is unaffected */ });
+  }, [selectedCustomerId, editingDoc, formLocked]);
   // First field of the form — "Add New Details" focuses it so the next sale can be typed at once.
   const firstFieldRef = useRef(null);
   const [focusRequest, setFocusRequest] = useState(0);
@@ -912,6 +948,15 @@ export default function NewSaleWizard({
       });
     }
   };
+
+  // Arrived from the Eye Test's "Go to Sales" (Pay After Sale): look the visit up by its Test No,
+  // exactly as if it had been typed, once per hand-over.
+  const prefilledTestNoRef = useRef(null);
+  useEffect(() => {
+    if (!prefillTestNo || editDocumentId || prefilledTestNoRef.current === prefillTestNo) return;
+    prefilledTestNoRef.current = prefillTestNo;
+    handleTestNoChange(String(prefillTestNo));
+  }, [prefillTestNo, editDocumentId]);
 
   // 1️⃣ PART 1 HANDLER: Select Customer from Optical DB Dropdown
   const handleSelectCustomer = (cust) => {

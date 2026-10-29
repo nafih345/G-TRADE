@@ -963,6 +963,9 @@ export default function SalesInvoice() {
           // Set by the ✏️ Edit action in Sales > Orders: the wizard loads that document and
           // saves back onto it instead of creating a new bill.
           editDocumentId={location.state?.editDocumentId || null}
+          // Eye Test "Pay After Sale" → Go to Sales: load that visit's patient + Rx by Test No
+          // (its pending eye test fee then joins the bill).
+          prefillTestNo={location.state?.eyeTestNo || null}
           onExitEdit={() => navigate('/sales/new', { replace: true })}
           onCancelEdit={() => navigate('/sales/orders')}
           onNavigateToEyeTest={() => navigate('/optical/eyetest')}

@@ -5,7 +5,8 @@ import {
   Table, TableBody, TableCell, TableContainer, TableHead,
   TableRow, Stack, Divider, InputAdornment, Tooltip, Chip,
   Dialog, DialogTitle, DialogContent, DialogActions,
-  IconButton, Menu, ListItemIcon, ListItemText, Autocomplete
+  IconButton, Menu, ListItemIcon, ListItemText, Autocomplete,
+  ToggleButton, ToggleButtonGroup, Switch, Alert
 } from '@mui/material';
 import { 
   Search as SearchIcon, 
@@ -25,7 +26,11 @@ import {
 import OrthopticsModal from './OrthopticsModal';
 import PrintPrescriptionCard from './PrintPrescriptionCard';
 import QuickDatePickerField from '../common/QuickDatePickerField';
-import { printSalesInvoiceReceipt } from '../../utils/printInvoice';
+import {
+  EYE_TEST_PAY_MODES, FEE_STATUS_LABELS, PAYMENT_CHOICES, PAY_NOW, NO_PAYMENT, PAY_AFTER_SALE,
+  applyPaymentChoice, billRecordFromExam, eyeTestFeeTotal, paymentChoiceOf, payModeLabel,
+} from '../../utils/eyeTestBill';
+import { printEyeTestBill, printEyeTestReceipt } from '../../utils/printEyeTestBill';
 
 // Common medical aid / insurance schemes offered as quick picks on the charges bar. The field
 // is free-solo, so staff can still type any scheme not listed here.
@@ -70,7 +75,12 @@ export default function SingleScreenEyeTestForm({
   // visit ended up silently mutated after the fact. Reactivated by "New Patient" (fresh visit,
   // see onClearAll) or by clicking the history table's Edit icon (see onSelectExamFromHistory),
   // both of which clear this from the parent.
-  isLocked = false
+  isLocked = false,
+  // Runs the parent's save checks (patient name, some test detail) before the payment screen
+  // opens, so nobody fills in a payment for a record that then can't be saved.
+  onValidateSave,
+  // "Pay After Sale": opens New Sale for this visit (Test No), where the pending fee is added.
+  onGoToSales
 }) {
 
   // Handlers for state updates
@@ -125,33 +135,12 @@ export default function SingleScreenEyeTestForm({
   const [orthopticsOpen, setOrthopticsOpen] = useState(false);
   const [printModalOpen, setPrintModalOpen] = useState(false);
 
-  // Prints a billing invoice for a saved visit (procedure + medicine + medical-aid charges
-  // recorded at save time). Medical Aid Charge is the amount claimed from / covered by the
-  // patient's medical aid, shown as a deduction line so the total reflects what the patient pays.
+  // Prints the Clinical Record & Invoice for a saved visit: patient details, the prescription,
+  // the optometrist, the itemised charges (Medical Aid Charge = the medical aid's cover, shown as
+  // a deduction) and how it was settled — paid (Cash / GPay), free, or pending with the
+  // frame/lens purchase.
   const handlePrintInvoice = (row, paperSize = 'A4') => {
-    const procCharge = parseFloat(row.procedureCharge || 0) || 0;
-    const medCharge = parseFloat(row.medicineCharge || 0) || 0;
-    const aidCharge = parseFloat(row.medicalAidCharge || 0) || 0;
-    const paidAmount = parseFloat(row.customerPaidAmount || 0) || 0;
-    const items = [
-      { name: 'Eye Examination / Consultation Fee', qty: 1, price: procCharge },
-      { name: 'Medicine / Pharmacy Charge', qty: 1, price: medCharge }
-    ];
-    if (aidCharge) {
-      items.push({ name: `Medical Aid Cover${row.medicalAidName ? ` (${row.medicalAidName})` : ''}`, qty: 1, price: -aidCharge });
-    }
-    const total = Math.max(0, procCharge + medCharge - aidCharge);
-    printSalesInvoiceReceipt({
-      invoiceNumber: `EYE-${row.testNo || row.id || ''}`,
-      date: row.date,
-      customerName: row.name,
-      phone: row.phone,
-      doctor: row.assignedOptometrist || row.optometrist || row.doctor,
-      items,
-      total,
-      paidAmount,
-      balanceDue: Math.max(0, total - paidAmount)
-    }, paperSize);
+    printEyeTestBill(billRecordFromExam(row), { paperSize });
   };
 
   // Anchors the A4/A5 choice menu for the invoice print icon to whichever row's button was clicked
@@ -162,23 +151,54 @@ export default function SingleScreenEyeTestForm({
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
 
-  // "Save Clinical Record" asks for confirmation first. Edit closes the prompt and returns to
-  // the charges so the record can be corrected; Confirm (autofocused, so Enter commits) saves
-  // and then brings the directory below into view with the new visit on top.
-  const [saveConfirmOpen, setSaveConfirmOpen] = useState(false);
+  // Payment Details screen: charges on top, then Pay Now (Cash / GPay) | No Payment |
+  // Pay After Sale (the fee waits for this patient's New Sale bill). It opens right after the
+  // Patient Details "Save" (paymentOpen = 'patient': confirming carries on to the refraction
+  // grid), and again from "Save Clinical Record" if it was never confirmed ('record':
+  // confirming saves). Once confirmed, Save Clinical Record saves straight away and brings up
+  // the print options; Done there brings the directory below into view with the new visit on top.
+  const paymentChoice = paymentChoiceOf(diagnosis);
+  const [paymentOpen, setPaymentOpen] = useState(false);
+  const [paymentPrintMenu, setPaymentPrintMenu] = useState(null);
+  const [printOptionsOpen, setPrintOptionsOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
   const directoryRef = useRef(null);
   const directoryTableRef = useRef(null);
-  const handleEditBeforeSave = () => {
-    setSaveConfirmOpen(false);
-    setTimeout(() => {
-      const el = document.querySelector('[data-et-field="charges"]');
-      if (el) { el.focus(); if (el.select) el.select(); }
-    }, 0);
-  };
-  const handleConfirmSave = async () => {
-    setSaveConfirmOpen(false);
-    const saved = await onSaveDraft?.();
+  const focusRefractionGrid = () => setTimeout(() => {
+    const el = document.querySelector('[data-et-field="ucva"]');
+    if (el) { el.focus(); if (el.select) el.select(); }
+  }, 50);
+  const saveRecord = async () => {
+    if (saving) return;
+    setSaving(true);
+    let saved = false;
+    try { saved = await onSaveDraft?.(); } finally { setSaving(false); }
     if (!saved) return;
+    setPaymentOpen(false);
+    setPrintOptionsOpen(true);
+  };
+  const openPayment = (mode) => {
+    // Show the choice the screen implies as the selected one, so confirming keeps it.
+    setDiagnosis(prev => ({ ...prev, ...applyPaymentChoice(paymentChoiceOf(prev)) }));
+    setPaymentOpen(mode);
+  };
+  const handlePatientSaveClick = async () => {
+    const saved = await onSavePatient?.();
+    if (saved) openPayment('patient');
+  };
+  const handlePaymentConfirm = () => {
+    setDiagnosis(prev => ({ ...prev, paymentConfirmed: true }));
+    if (paymentOpen === 'record') { saveRecord(); return; }
+    setPaymentOpen(false);
+    focusRefractionGrid();
+  };
+  const handleSaveClick = () => {
+    if (onValidateSave && !onValidateSave()) return;
+    if (diagnosis?.paymentConfirmed) saveRecord();
+    else openPayment('record');
+  };
+  const handlePrintOptionsDone = () => {
+    setPrintOptionsOpen(false);
     // A leftover search could hide the row just saved — clear it so the new visit shows.
     setHistorySearch('');
     setTimeout(() => {
@@ -186,6 +206,13 @@ export default function SingleScreenEyeTestForm({
       if (directoryTableRef.current) directoryTableRef.current.scrollTop = 0;
     }, 50);
   };
+  // The visit on screen, in the directory-row shape billRecordFromExam reads. After a save the
+  // parent has already stamped the real Test No / Patient ID onto these props.
+  const currentVisit = () => ({
+    testNo: autoTestNo, date: autoDate, patientId: autoPatientId,
+    patientData, diagnosisData: diagnosis, subjectiveRefraction,
+    medicalAidName: patientData?.medicalAidName,
+  });
 
   // Auto-generate Date and Patient ID (Null-Safe). Test No is intentionally left blank until
   // a real one exists — either an existing exam was selected from history, or one was just
@@ -201,7 +228,7 @@ export default function SingleScreenEyeTestForm({
   const lockSx = isLocked ? { pointerEvents: 'none', opacity: 0.55, filter: 'grayscale(15%)' } : {};
 
   // Customer Paid Amount defaults to the balance the patient owes after the
-  // medical aid deduction: Procedure Charge − Medical Aid Charge (e.g. 250 − 100
+  // medical aid deduction: Procedure + Medicine − Medical Aid Charge (e.g. 250 + 0 − 100
   // = 150). It stays in sync as those two charges change until the user types
   // their own value in the field, which sets customerPaidTouched and stops the
   // auto-fill. A cleared form (all charge fields blank) drops the override again
@@ -209,11 +236,12 @@ export default function SingleScreenEyeTestForm({
   const [customerPaidTouched, setCustomerPaidTouched] = useState(false);
   const lastAutoPaidRef = useRef(null);
 
-  const autoCustomerBalance = useMemo(() => {
-    const proc = parseFloat(diagnosis?.procedureCharge || 0) || 0;
-    const aid = parseFloat(diagnosis?.medicalAidCharge || 0) || 0;
-    return Math.max(0, proc - aid);
-  }, [diagnosis?.procedureCharge, diagnosis?.medicalAidCharge]);
+  // (Now that Medicine Charge sits on the payment screen with the others, it is part of what
+  // the patient pays here too — the same total the printed invoice shows.)
+  const autoCustomerBalance = useMemo(
+    () => eyeTestFeeTotal(diagnosis),
+    [diagnosis?.procedureCharge, diagnosis?.medicalAidCharge, diagnosis?.medicineCharge]
+  );
 
   useEffect(() => {
     if (isLocked || customerPaidTouched) return;
@@ -508,7 +536,8 @@ export default function SingleScreenEyeTestForm({
                     skipAdornmentsInTabOrder
                   />
                 </Box>
-                <Box sx={{ gridColumn: { md: '3 / 4' } }}>
+                {/* FREE EYE TEST skips the payment screen on save; every other type is billable. */}
+                <Box sx={{ gridColumn: { md: '3 / 4' } }} data-et-field="charges">
                   <TextField
                     fullWidth
                     select
@@ -542,9 +571,10 @@ export default function SingleScreenEyeTestForm({
                 <Box sx={{ gridColumn: { md: '7 / 8' } }}>
                   <Button
                     id="eyetest-save-patient-btn"
+                    data-et-action="savePatient"
                     fullWidth
                     variant="contained" color="success" size="small" startIcon={<SaveIcon fontSize="small" />}
-                    onClick={onSavePatient}
+                    onClick={handlePatientSaveClick}
                     sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 2, whiteSpace: 'nowrap', px: 2 }}
                   >
                     Save
@@ -554,6 +584,28 @@ export default function SingleScreenEyeTestForm({
             </>
           );
         })()}
+        </Box>
+
+        {/* Payment summary for this visit, right under the examination info — set on the
+            Payment Details screen that the Save button above opens. */}
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap', mt: 1.5, pt: 1.5, borderTop: '1px dashed #cbd5e1' }}>
+          <Typography variant="caption" fontWeight={800} color="text.secondary">PAYMENT</Typography>
+          {!diagnosis?.paymentConfirmed ? (
+            <Chip size="small" variant="outlined" label="Not set — opens when you click Save" sx={{ fontWeight: 700 }} />
+          ) : paymentChoice === NO_PAYMENT ? (
+            <Chip color="info" size="small" label="No Payment" sx={{ fontWeight: 800 }} />
+          ) : paymentChoice === PAY_AFTER_SALE ? (
+            <Chip color="warning" size="small" label={`Pay After Sale — ₹${autoCustomerBalance} pending eye test fee`} sx={{ fontWeight: 800 }} />
+          ) : (
+            <Chip color="success" size="small"
+              label={`Pay Now — ₹${diagnosis?.customerPaidAmount ?? 0} of ₹${autoCustomerBalance} · ${payModeLabel(diagnosis?.paymentMode) || 'Cash'}`}
+              sx={{ fontWeight: 800 }} />
+          )}
+          {!isLocked && (
+            <Button size="small" startIcon={<EditIcon fontSize="small" />} onClick={() => openPayment('patient')} sx={{ textTransform: 'none', fontWeight: 700 }}>
+              {diagnosis?.paymentConfirmed ? 'Change payment' : 'Payment details'}
+            </Button>
+          )}
         </Box>
       </Paper>
 
@@ -1051,74 +1103,24 @@ export default function SingleScreenEyeTestForm({
         </Box>
       </Paper>
 
-      {/* 💰 SECTION 5: Charges & Action Buttons Bar — charge fields lock with everything else,
-          but the action buttons stay reachable: Save is simply disabled once already locked
-          (nothing new to save), Rx Print/Clear Form/New Patient must keep working regardless. */}
+      {/* 💰 SECTION 5: Action Buttons Bar — payment is set on the Payment Details screen
+          (see the summary under Patient Details). The buttons stay reachable: Save is simply
+          disabled once already locked (nothing new to save), Rx Print/Clear Form/New Patient
+          must keep working regardless. */}
       <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, bgcolor: '#ffffff', borderColor: '#cbd5e1' }}>
-        {/* Row 1: the four charge / medical-aid fields, evenly spaced across the full width. */}
-        <Grid container spacing={2} alignItems="flex-start">
-          <Grid item xs={6} sm={3} sx={lockSx}>
-            <TextField
-              fullWidth size="small" label="Procedure Charge"
-              value={diagnosis?.procedureCharge || '0'}
-              onChange={(e) => setDiagnosis(prev => ({ ...prev, procedureCharge: e.target.value }))}
-              InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
-              inputProps={{ 'data-et-field': 'charges' }}
-            />
-          </Grid>
-
-          {/* Amount claimed from / covered by the medical aid — deducted from the patient's
-              payable on the printed invoice (see handlePrintInvoice). */}
-          <Grid item xs={6} sm={3} sx={lockSx}>
-            <TextField
-              fullWidth size="small" label="Medical Aid Charge"
-              value={diagnosis?.medicalAidCharge || '0'}
-              onChange={(e) => setDiagnosis(prev => ({ ...prev, medicalAidCharge: e.target.value }))}
-              InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
-            />
-          </Grid>
-
-          {/* Amount the customer actually paid — shown as a Paid line on the printed invoice
-              with any remainder as Balance Due (see handlePrintInvoice). */}
-          <Grid item xs={6} sm={3} sx={lockSx}>
-            <TextField
-              fullWidth size="small" label="Customer Paid Amount"
-              value={diagnosis?.customerPaidAmount ?? '0'}
-              onChange={(e) => {
-                setCustomerPaidTouched(true);
-                setDiagnosis(prev => ({ ...prev, customerPaidAmount: e.target.value }));
-              }}
-              InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
-              helperText={customerPaidTouched
-                ? 'Manual override — clear the form to resume auto-calc'
-                : `Auto: Procedure − Medical Aid = ₹${autoCustomerBalance}`}
-              FormHelperTextProps={{ sx: { position: 'absolute', top: '100%', mt: 0.25, mx: 0, whiteSpace: 'nowrap' } }}
-              sx={{ position: 'relative' }}
-            />
-          </Grid>
-
-          {/* Medicine / pharmacy charge — kept last, and intentionally left off the on-save
-              confirmation. Still flows onto the printed invoice via handlePrintInvoice. */}
-          <Grid item xs={6} sm={3} sx={lockSx}>
-            <TextField
-              fullWidth size="small" label="Medicine Charge"
-              value={diagnosis?.medicineCharge || '0'}
-              onChange={(e) => setDiagnosis(prev => ({ ...prev, medicineCharge: e.target.value }))}
-              InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
-              inputProps={{ id: 'eyetest-medicine-charge-input' }}
-            />
-          </Grid>
-        </Grid>
-
-        {/* Row 2: action buttons on their own line, right-aligned, wrapping cleanly on small screens. */}
-        <Box sx={{ display: 'flex', gap: 1, justifyContent: { xs: 'stretch', sm: 'flex-end' }, flexWrap: 'wrap', mt: 2 }}>
+        <Box sx={{ display: 'flex', gap: 1, justifyContent: { xs: 'stretch', sm: 'flex-end' }, flexWrap: 'wrap' }}>
           <Button variant="outlined" color="primary" disabled={isLocked} startIcon={<MedicalIcon />} data-et-action="orthoptics" onClick={() => setOrthopticsOpen(true)} sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 2 }}>
             Orthoptics Form
           </Button>
           <Button variant="outlined" color="secondary" startIcon={<PrintIcon />} data-et-action="rxPrint" onClick={() => setPrintModalOpen(true)} sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 2 }}>
             Rx Print
           </Button>
-          <Button variant="contained" color="success" disabled={isLocked} startIcon={<SaveIcon />} data-et-action="saveRecord" onClick={() => setSaveConfirmOpen(true)} sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 2, px: 3 }}>
+          {isLocked && (
+            <Button variant="outlined" color="secondary" startIcon={<PrintIcon />} onClick={() => setPrintOptionsOpen(true)} sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 2 }}>
+              Print Record &amp; Invoice
+            </Button>
+          )}
+          <Button variant="contained" color="success" disabled={isLocked || saving} startIcon={<SaveIcon />} data-et-action="saveRecord" onClick={handleSaveClick} sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 2, px: 3 }}>
             Save Clinical Record
           </Button>
           <Button variant="outlined" color="inherit" startIcon={<ClearIcon />} onClick={onClearAll} sx={{ textTransform: 'none', fontWeight: 600, borderRadius: 2 }}>
@@ -1180,13 +1182,14 @@ export default function SingleScreenEyeTestForm({
                 <TableCell>Address</TableCell>
                 <TableCell>Place</TableCell>
                 <TableCell>Optometrist</TableCell>
+                <TableCell>Fee</TableCell>
                 <TableCell align="center">Actions</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
               {filteredHistory.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={10} align="center" sx={{ py: 3, color: 'text.secondary' }}>
+                  <TableCell colSpan={11} align="center" sx={{ py: 3, color: 'text.secondary' }}>
                     No recent examinations saved in database. Click "Save Clinical Record" to log tests.
                   </TableCell>
                 </TableRow>
@@ -1202,6 +1205,17 @@ export default function SingleScreenEyeTestForm({
                     <TableCell>{row.address || row.patientData?.address || '—'}</TableCell>
                     <TableCell>{row.place || row.patientData?.place || row.patientData?.city || '—'}</TableCell>
                     <TableCell>{row.assignedOptometrist || row.optometrist || row.doctor || '—'}</TableCell>
+                    <TableCell>
+                      {(() => {
+                        const bill = billRecordFromExam(row);
+                        const color = { FREE: 'info', PAID: 'success', PENDING: 'warning', BILLED: 'default' }[bill.feeStatus] || 'default';
+                        const amount = bill.isFreeTest ? '' : ` ₹${eyeTestFeeTotal(bill)}`;
+                        const label = bill.feeStatus === 'BILLED' && bill.feeInvoiceNumber
+                          ? `Billed · ${bill.feeInvoiceNumber}`
+                          : `${bill.feeStatus === 'PENDING' ? 'Pending' : (FEE_STATUS_LABELS[bill.feeStatus] || '—')}${amount}`;
+                        return <Chip size="small" color={color} variant={bill.feeStatus === 'PENDING' ? 'filled' : 'outlined'} label={label} sx={{ fontWeight: 700 }} />;
+                      })()}
+                    </TableCell>
                     <TableCell align="center">
                       <Stack direction="row" spacing={0.75} justifyContent="center">
                         <Button size="small" variant="outlined" onClick={(e) => { e.stopPropagation(); onSelectExamFromHistory(row); }}>
@@ -1245,6 +1259,10 @@ export default function SingleScreenEyeTestForm({
           <ListItemIcon><PrintIcon fontSize="small" /></ListItemIcon>
           <ListItemText>Print A5</ListItemText>
         </MenuItem>
+        <MenuItem onClick={() => { printEyeTestReceipt(billRecordFromExam(invoicePrintMenu.row)); setInvoicePrintMenu({ anchorEl: null, row: null }); }}>
+          <ListItemIcon><PrintIcon fontSize="small" /></ListItemIcon>
+          <ListItemText>Payment Receipt (80 mm)</ListItemText>
+        </MenuItem>
       </Menu>
 
       {/* 🏥 Orthoptics Examination Modal */}
@@ -1286,23 +1304,115 @@ export default function SingleScreenEyeTestForm({
         </Box>
       </Dialog>
 
-      {/* Save Clinical Record confirmation — Confirm is autofocused so Enter commits the save;
-          Edit (or Esc) goes back to the form without saving. */}
-      <Dialog open={saveConfirmOpen} onClose={handleEditBeforeSave} maxWidth="xs" fullWidth PaperProps={{ style: { borderRadius: 12 } }}>
-        <DialogTitle sx={{ fontWeight: 800, display: 'flex', alignItems: 'center', gap: 1 }}>
-          <SaveIcon color="success" /> Save Clinical Record?
+      {/* 💳 Payment Details — opened by the Patient Details "Save" (and by Save Clinical Record
+          if never confirmed). Charges on top for immediate entry, then how the visit is settled:
+          Pay Now (Cash / GPay), No Payment, or Pay After Sale — the fee stays pending and is
+          added to this patient's New Sale bill. */}
+      <Dialog open={Boolean(paymentOpen)} onClose={() => !saving && setPaymentOpen(false)} maxWidth="sm" fullWidth PaperProps={{ style: { borderRadius: 12 } }}>
+        <DialogTitle sx={{ fontWeight: 800, display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+          <SaveIcon color="success" /> Payment Details — {patientData.name || 'Patient'}
+          <Typography component="span" variant="body2" color="text.secondary" sx={{ ml: 'auto' }}>
+            Test No {testNo || 'assigned on save'} · {diagnosis.testType || 'FREE EYE TEST'}
+          </Typography>
         </DialogTitle>
         <DialogContent dividers>
-          <Stack spacing={0.75}>
+          <Grid container spacing={2} sx={paymentChoice === NO_PAYMENT ? { opacity: 0.45, pointerEvents: 'none' } : undefined}>
+            <Grid item xs={6}>
+              <TextField
+                fullWidth size="small" label="Procedure Charge" autoFocus={paymentChoice !== NO_PAYMENT}
+                value={diagnosis?.procedureCharge || '0'}
+                onChange={(e) => setDiagnosis(prev => ({ ...prev, procedureCharge: e.target.value }))}
+                onFocus={(e) => e.target.select()}
+                InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
+              />
+            </Grid>
+            {/* Amount claimed from / covered by the medical aid — a deduction on the invoice. */}
+            <Grid item xs={6}>
+              <TextField
+                fullWidth size="small" label="Medical Aid Charge"
+                value={diagnosis?.medicalAidCharge || '0'}
+                onChange={(e) => setDiagnosis(prev => ({ ...prev, medicalAidCharge: e.target.value }))}
+                onFocus={(e) => e.target.select()}
+                InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
+                helperText={patientData?.medicalAidName || ' '}
+              />
+            </Grid>
+            <Grid item xs={6}>
+              <TextField
+                fullWidth size="small" label="Customer Paid Amount"
+                disabled={paymentChoice !== PAY_NOW}
+                value={paymentChoice === PAY_NOW ? (diagnosis?.customerPaidAmount ?? '0') : '0'}
+                onChange={(e) => {
+                  setCustomerPaidTouched(true);
+                  setDiagnosis(prev => ({ ...prev, customerPaidAmount: e.target.value }));
+                }}
+                onFocus={(e) => e.target.select()}
+                InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
+                helperText={paymentChoice === PAY_AFTER_SALE
+                  ? 'Collected with the frame/lens purchase'
+                  : customerPaidTouched
+                    ? 'Manual override — clear the form to resume auto-calc'
+                    : 'Auto: Procedure + Medicine − Medical Aid'}
+              />
+            </Grid>
+            <Grid item xs={6}>
+              <TextField
+                fullWidth size="small" label="Medicine Charge"
+                value={diagnosis?.medicineCharge || '0'}
+                onChange={(e) => setDiagnosis(prev => ({ ...prev, medicineCharge: e.target.value }))}
+                onFocus={(e) => e.target.select()}
+                InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
+                inputProps={{ id: 'eyetest-medicine-charge-input' }}
+              />
+            </Grid>
+          </Grid>
+
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 1, p: 1.25, borderRadius: 2, bgcolor: '#f1f5f9' }}>
+            <Typography variant="body2" fontWeight={700}>Total payable</Typography>
+            <Typography variant="h6" fontWeight={800}>{paymentChoice === NO_PAYMENT ? 'No payment' : `₹${autoCustomerBalance.toFixed(2)}`}</Typography>
+          </Box>
+
+          <Typography variant="caption" color="text.secondary" fontWeight={700} sx={{ display: 'block', mt: 1.5 }}>PAYMENT</Typography>
+          <ToggleButtonGroup
+            exclusive fullWidth size="small" color="primary" sx={{ mt: 0.5 }}
+            value={paymentChoice}
+            onChange={(e, choice) => { if (choice) setDiagnosis(prev => ({ ...prev, ...applyPaymentChoice(choice) })); }}
+          >
+            {PAYMENT_CHOICES.map(c => (
+              <ToggleButton key={c.value} value={c.value} sx={{ fontWeight: 800, textTransform: 'none' }}>{c.label}</ToggleButton>
+            ))}
+          </ToggleButtonGroup>
+
+          {paymentChoice === PAY_NOW && (
+            <Box sx={{ mt: 1.5 }}>
+              <Typography variant="caption" color="text.secondary" fontWeight={700}>PAYMENT MODE</Typography>
+              <ToggleButtonGroup
+                exclusive fullWidth size="small" color="success" sx={{ mt: 0.5 }}
+                value={diagnosis?.paymentMode || 'CASH'}
+                onChange={(e, mode) => { if (mode) setDiagnosis(prev => ({ ...prev, paymentMode: mode })); }}
+              >
+                {EYE_TEST_PAY_MODES.map(m => (
+                  <ToggleButton key={m.value} value={m.value} sx={{ fontWeight: 800, textTransform: 'none' }}>{m.label}</ToggleButton>
+                ))}
+              </ToggleButtonGroup>
+            </Box>
+          )}
+          {paymentChoice === NO_PAYMENT && (
+            <Alert severity="info" sx={{ mt: 1.5 }}>No payment is taken for this visit — it prints as a free test.</Alert>
+          )}
+          {paymentChoice === PAY_AFTER_SALE && (
+            <Alert severity="warning" sx={{ mt: 1.5 }}>
+              ₹{autoCustomerBalance.toFixed(2)} is kept as a <b>Pending Eye Test Fee</b>. After you save the clinical record
+              you go straight to <b>Sales → New Sale</b>, where it is added to this patient's bill.
+            </Alert>
+          )}
+
+          <Divider sx={{ my: 1.5 }} />
+          <Stack spacing={0.5}>
             {[
               ['Patient', `${patientData.name || '—'} (${autoPatientId || '—'})`],
-              ['Test No', testNo || 'Assigned on save'],
-              ['Date', autoDate || '—'],
+              ['Contact', patientData.phone || '—'],
               ['Optometrist', patientData.assignedOptometrist || '—'],
-              ['Procedure Charge', `₹${diagnosis?.procedureCharge || 0}`],
-              ['Medical Aid Charge', `₹${diagnosis?.medicalAidCharge || 0}`],
-              ['Customer Paid Amount', `₹${diagnosis?.customerPaidAmount ?? 0}`],
-              ['Medicine Charge', `₹${diagnosis?.medicineCharge || 0}`],
             ].map(([label, value]) => (
               <Box key={label} sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}>
                 <Typography variant="body2" color="text.secondary">{label}</Typography>
@@ -1312,12 +1422,86 @@ export default function SingleScreenEyeTestForm({
           </Stack>
         </DialogContent>
         <DialogActions sx={{ px: 2, py: 1.5 }}>
-          <Button variant="outlined" startIcon={<EditIcon />} onClick={handleEditBeforeSave} sx={{ textTransform: 'none', fontWeight: 700 }}>
-            Edit
+          {/* Prints the payment receipt, or the Clinical Record & Invoice, as it stands on screen —
+              charges, the chosen payment and whatever examination details are entered so far. */}
+          <Button variant="outlined" color="secondary" startIcon={<PrintIcon />} disabled={saving}
+            onClick={(e) => setPaymentPrintMenu(e.currentTarget)}
+            sx={{ textTransform: 'none', fontWeight: 700, mr: 'auto' }}>
+            Print
           </Button>
-          <Button variant="contained" color="success" startIcon={<SaveIcon />} autoFocus onClick={handleConfirmSave} sx={{ textTransform: 'none', fontWeight: 800 }}>
-            Confirm &amp; Save
+          <Menu anchorEl={paymentPrintMenu} open={Boolean(paymentPrintMenu)} onClose={() => setPaymentPrintMenu(null)}>
+            <MenuItem onClick={() => { setPaymentPrintMenu(null); printEyeTestReceipt(billRecordFromExam(currentVisit())); }}>
+              <ListItemIcon><PrintIcon fontSize="small" /></ListItemIcon>
+              <ListItemText primary="Payment Receipt" secondary="80 mm" />
+            </MenuItem>
+            {['A4', 'A5'].map(size => (
+              <MenuItem key={size} onClick={() => { setPaymentPrintMenu(null); printEyeTestBill(billRecordFromExam(currentVisit()), { paperSize: size }); }}>
+                <ListItemIcon><PrintIcon fontSize="small" /></ListItemIcon>
+                <ListItemText primary={`Report ${size}`} secondary="Clinical record & invoice" />
+              </MenuItem>
+            ))}
+          </Menu>
+          <Button variant="outlined" startIcon={<EditIcon />} disabled={saving} onClick={() => setPaymentOpen(false)} sx={{ textTransform: 'none', fontWeight: 700 }}>
+            Back
           </Button>
+          <Button variant="contained" color="success" startIcon={<SaveIcon />} disabled={saving} autoFocus={paymentChoice === NO_PAYMENT} onClick={handlePaymentConfirm} sx={{ textTransform: 'none', fontWeight: 800 }}>
+            {saving ? 'Saving…' : paymentOpen === 'record' ? 'Save Clinical Record' : 'Confirm & Continue to Test'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* 🖨️ Print options — shown once the record is saved (straight away for a free test). */}
+      <Dialog open={printOptionsOpen} onClose={handlePrintOptionsDone} maxWidth="xs" fullWidth PaperProps={{ style: { borderRadius: 12 } }}>
+        <DialogTitle sx={{ fontWeight: 800, display: 'flex', alignItems: 'center', gap: 1 }}>
+          <ActiveIcon color="success" /> Clinical Record Saved
+        </DialogTitle>
+        <DialogContent dividers>
+          {(() => {
+            const bill = billRecordFromExam(currentVisit());
+            const total = eyeTestFeeTotal(bill);
+            return (
+              <Stack spacing={0.75}>
+                {[
+                  ['Patient', `${bill.name || '—'} (${bill.patientId || '—'})`],
+                  ['Test No', bill.testNo || '—'],
+                  ['Optometrist', bill.optometrist || '—'],
+                  ['Fee', bill.isFreeTest ? 'Free test'
+                    : bill.feeStatus === 'PENDING' ? `₹${total.toFixed(2)} pending — with frame/lens purchase`
+                      : `₹${bill.paidAmount.toFixed(2)} paid of ₹${total.toFixed(2)} (${payModeLabel(bill.paymentMode) || 'Cash'})`],
+                ].map(([label, value]) => (
+                  <Box key={label} sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}>
+                    <Typography variant="body2" color="text.secondary">{label}</Typography>
+                    <Typography variant="body2" fontWeight={700} textAlign="right">{value}</Typography>
+                  </Box>
+                ))}
+              </Stack>
+            );
+          })()}
+          {paymentChoice === PAY_AFTER_SALE && onGoToSales && (
+            <Button fullWidth variant="contained" color="warning" autoFocus sx={{ mt: 2, textTransform: 'none', fontWeight: 800 }}
+              onClick={() => { setPrintOptionsOpen(false); onGoToSales(autoTestNo); }}>
+              Go to Sales — collect ₹{autoCustomerBalance.toFixed(2)} with the frame / lens
+            </Button>
+          )}
+          <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
+            <Button fullWidth variant={paymentChoice === PAY_AFTER_SALE ? 'outlined' : 'contained'} startIcon={<PrintIcon />} autoFocus={paymentChoice !== PAY_AFTER_SALE} onClick={() => printEyeTestBill(billRecordFromExam(currentVisit()), { paperSize: 'A4' })} sx={{ textTransform: 'none', fontWeight: 800 }}>
+              Record &amp; Invoice A4
+            </Button>
+            <Button fullWidth variant="outlined" startIcon={<PrintIcon />} onClick={() => printEyeTestBill(billRecordFromExam(currentVisit()), { paperSize: 'A5' })} sx={{ textTransform: 'none', fontWeight: 800 }}>
+              A5
+            </Button>
+          </Stack>
+          <Button fullWidth variant="outlined" startIcon={<PrintIcon />} sx={{ mt: 1, textTransform: 'none', fontWeight: 800 }}
+            onClick={() => printEyeTestReceipt(billRecordFromExam(currentVisit()))}>
+            Payment Receipt (80 mm)
+          </Button>
+          <Button fullWidth variant="outlined" color="secondary" startIcon={<EyeIcon />} sx={{ mt: 1, textTransform: 'none', fontWeight: 700 }}
+            onClick={() => { setPrintOptionsOpen(false); setPrintModalOpen(true); }}>
+            Rx Print (letterhead prescription)
+          </Button>
+        </DialogContent>
+        <DialogActions sx={{ px: 2, py: 1.5 }}>
+          <Button onClick={handlePrintOptionsDone} sx={{ textTransform: 'none', fontWeight: 700 }}>Done</Button>
         </DialogActions>
       </Dialog>
     </Box>

@@ -402,6 +402,24 @@ class EyeExamination(BaseUUIDModel):
     follow_up_date = models.CharField(max_length=50, blank=True, null=True)
     follow_up_interval = models.CharField(max_length=50, blank=True, null=True)
 
+    # Eye test fee (see apps/sales/eye_test_fees.py). fee_status is derived on save from
+    # is_free_test + the "Pay during frame/lens purchase" toggle — never chosen by the client:
+    #   FREE    — free test, no payment taken
+    #   PAID    — collected at the test (fee_paid_amount via fee_payment_mode)
+    #   PENDING — deferred: New Sale adds it to this patient's next bill
+    #   BILLED  — that bill now carries it (fee_invoice); released back to PENDING if the
+    #             line is removed or the bill deleted
+    # Blank = saved before fees were tracked.
+    is_free_test = models.BooleanField(default=False)
+    procedure_charge = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    medical_aid_charge = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    medicine_charge = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    fee_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    fee_paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    fee_payment_mode = models.CharField(max_length=10, blank=True, default='')
+    fee_status = models.CharField(max_length=10, blank=True, default='', db_index=True)
+    fee_invoice = models.ForeignKey('sales.Invoice', on_delete=models.SET_NULL, null=True, blank=True, related_name='eye_test_fees')
+
     class Meta:
         constraints = [
             # Test No is a single continuous series across every device (see

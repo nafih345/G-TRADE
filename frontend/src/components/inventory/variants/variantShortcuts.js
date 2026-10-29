@@ -16,7 +16,7 @@ export const VARIANT_SHORTCUTS = [
   { id: 'primary', keys: ['Ctrl+Enter'], group: 'Variants', label: 'In the generator: generate variants. Elsewhere: add the rows to the purchase (Purchase Entry) or save (Inventory)' },
   { id: 'save', keys: ['Ctrl+S'], group: 'Save', label: 'Save the items to the Product Master' },
   { id: 'addRow', keys: ['Alt+N', 'Insert'], group: 'Grid', label: 'Add a blank row' },
-  { id: 'duplicateRow', keys: ['Alt+D'], group: 'Grid', label: 'Duplicate the row with the cursor' },
+  { id: 'duplicateRow', keys: ['Ctrl+D', 'Alt+D'], group: 'Grid', label: 'Duplicate the ticked rows (or the row with the cursor) with all their details' },
   { id: 'selectAll', keys: ['Ctrl+Shift+A'], group: 'Grid', label: 'Select / unselect all visible rows (Ctrl+A also works when the cursor is not in a text cell)' },
   { id: 'selectAllPlain', keys: ['Ctrl+A'], group: 'Grid', global: true, whileTyping: false, hidden: true, label: '' },
   { id: 'deleteRows', keys: ['Delete'], group: 'Grid', whileTyping: false, label: 'Remove the selected rows (asks to confirm)' },
@@ -50,6 +50,8 @@ export function useVariantShortcuts(handlers) {
     if (!def) return;
     // A nested popup (dropdown, menu, confirm) owns its keys.
     if (e.target?.closest?.('[role="listbox"], [role="menu"]')) return;
+    // So does a field's "+" option master (AttributeField's own dialog).
+    if (e.target?.closest?.('[data-nav-own]')) return;
     if (def.whileTyping === false && isTextEditable(e.target)) return;
     if (e.repeat && def.id !== 'addRow') { e.preventDefault(); return; }
     const run = ref.current?.[def.id];

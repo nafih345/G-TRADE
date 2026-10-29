@@ -140,6 +140,34 @@ class StockOverviewTests(APITestCase):
         self.frame.refresh_from_db()
         self.assertEqual(self.frame.stock, 10)
 
+    def test_detail_fields_edit(self):
+        from apps.masters.models import Brand
+        from apps.products.models import BarcodeHistory
+        oakley = Brand.objects.create(name='Oakley')
+        res = self.patch(self.frame, {
+            'sku': 'AV-01', 'barcode': '2000000000024', 'secondary_barcode': '', 'name': 'Aviator Gold',
+            'brand': 'oakley', 'category': 'Sunglasses', 'model_no': 'OK100', 'color': 'Black', 'size': '58',
+            'supplier_name': 'Hoya',
+        }, {'sku': 'SKU-Aviator', 'model_no': 'RB3025', 'color': 'Gold', 'supplier_name': ''})
+        self.assertEqual(res.status_code, 200, res.content)
+        row = res.data
+        self.assertEqual((row['sku'], row['barcode'], row['secondary_barcode'], row['name']),
+                         ('AV-01', '2000000000024', '', 'Aviator Gold'))
+        self.assertEqual((row['brand'], row['category'], row['model_no'], row['color'], row['size'], row['supplier_name']),
+                         ('oakley', 'Sunglasses', 'OK100', 'Black', '58', 'Hoya'))
+        self.frame.refresh_from_db()
+        self.assertEqual((self.frame.brand_id, self.frame.stock), (oakley.pk, 10))
+        self.assertEqual(BarcodeHistory.objects.filter(product=self.frame).count(), 2)
+        # Codes stay unique and the name / item code can't be blanked.
+        bad = self.patch(self.low, {'sku': 'av-01', 'barcode': '2000000000024', 'name': ' '})
+        self.assertEqual(bad.status_code, 400)
+        self.assertEqual(set(bad.data['errors']), {'name'})
+        bad = self.patch(self.low, {'sku': 'av-01', 'barcode': '2000000000024'})
+        self.assertEqual(set(bad.data['errors']), {'sku', 'barcode'})
+        self.assertEqual(self.patch(self.low, {'barcode': 'X1', 'secondary_barcode': 'X1'}).status_code, 400)
+        self.client.force_authenticate(self.cashier)
+        self.assertEqual(self.patch(self.low, {'name': 'Renamed'}).status_code, 403)
+
     def test_field_edit_conflict(self):
         res = self.patch(self.frame, {'retail_price': '800'}, {'retail_price': '850.00'})
         self.assertEqual(res.status_code, 409)

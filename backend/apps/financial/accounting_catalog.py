@@ -66,6 +66,7 @@ ROLES = {
 SOURCES = {
     'sales.invoice': ('Retail / optical invoice', 'Dr Receivable + Discount; Cr Product / Service revenue + GST output; Dr COGS / Cr Inventory for stocked lines'),
     'sales.payment': ('Retail receipt / refund', 'Dr Cash/Bank/Card/UPI; Cr Receivable (or Customer Advances when the bill is not yet an invoice). Negative = refund.'),
+    'sales.eye_test_fee': ('Eye test fee (paid at the test)', 'Dr Cash / UPI; Cr Service revenue. Free and pay-after-sale fees do not post here (the sale bill carries a deferred fee).'),
     'sales.wholesale_invoice': ('Wholesale invoice', 'Dr Wholesale receivable; Cr Wholesale revenue + GST output'),
     'sales.wholesale_collection': ('Wholesale collection', 'Dr Cash/Bank; Cr Wholesale receivable'),
     'sales.wholesale_return': ('Wholesale return / credit note', 'Dr Sales returns + GST output; Cr Wholesale receivable'),

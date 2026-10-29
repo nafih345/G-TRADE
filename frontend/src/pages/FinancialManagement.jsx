@@ -36,7 +36,9 @@ import {
   TrendingDown as PaymentIcon,
   CompareArrows as SwapIcon,
   Undo as ReverseIcon,
-  FilterList as FilterIcon
+  FilterList as FilterIcon,
+  Payments as CashbookIcon,
+  RequestQuote as ChequeIcon
 } from '@mui/icons-material';
 import axios from 'axios';
 import ConfirmActionDialog from '../components/common/ConfirmActionDialog';
@@ -46,6 +48,8 @@ import { LedgerPanel, TrialBalancePanel, ProfitLossPanel, BalanceSheetPanel, Fin
 import VoucherRegister from '../components/financial/VoucherRegister';
 import StandardVoucherForm from '../components/financial/StandardVoucherForm';
 import AccountingIntegrationPanel from '../components/financial/AccountingIntegrationPanel';
+import CashbookPanel from '../components/financial/Cashbook';
+import ChequeRegister from '../components/financial/ChequeRegister';
 
 // Fixed Sub-Categories per Group (NO COGS!)
 const ACCOUNT_GROUPS = {
@@ -174,6 +178,8 @@ function FinancialManagementView() {
     if (path.includes('/financial/balance-sheet')) return { top: 6, sub: 'receipt' };
     if (path.includes('/financial/reports')) return { top: 7, sub: 'receipt' };
     if (path.includes('/financial/integration')) return { top: 8, sub: 'receipt' };
+    if (path.includes('/financial/cashbook')) return { top: 9, sub: 'receipt' };
+    if (path.includes('/financial/cheques')) return { top: 10, sub: 'receipt' };
     return { top: 0, sub: 'receipt' };
   };
 
@@ -198,7 +204,9 @@ function FinancialManagementView() {
       '/financial/profit-loss',
       '/financial/balance-sheet',
       '/financial/reports',
-      '/financial/integration'
+      '/financial/integration',
+      '/financial/cashbook',
+      '/financial/cheques'
     ];
     if (newTop === 2) setVoucherSubTab('receipt');
     navigate(topPaths[newTop] || '/financial/dashboard');
@@ -743,15 +751,18 @@ function FinancialManagementView() {
           scrollButtons="auto" 
           sx={{ px: 2, borderBottom: 1, borderColor: 'divider', '& .MuiTab-root': { fontWeight: 700, minHeight: 56 } }}
         >
-          <Tab icon={<DashboardIcon />} label="Financial Dashboard" iconPosition="start" />
-          <Tab icon={<ChartIcon />} label="Chart of Accounts" iconPosition="start" />
-          <Tab icon={<JournalIcon />} label="Vouchers" iconPosition="start" />
-          <Tab icon={<LedgerIcon />} label="Ledger" iconPosition="start" />
-          <Tab icon={<TrialIcon />} label="Trial Balance" iconPosition="start" />
-          <Tab icon={<ProfitIcon />} label="Profit & Loss (P&L)" iconPosition="start" />
-          <Tab icon={<BalanceIcon />} label="Balance Sheet" iconPosition="start" />
-          <Tab icon={<ReportIcon />} label="Financial Reports" iconPosition="start" />
-          <Tab icon={<SwapIcon />} label="Accounting Integration" iconPosition="start" />
+          <Tab value={0} icon={<DashboardIcon />} label="Financial Dashboard" iconPosition="start" />
+          <Tab value={1} icon={<ChartIcon />} label="Chart of Accounts" iconPosition="start" />
+          <Tab value={2} icon={<JournalIcon />} label="Vouchers" iconPosition="start" />
+          <Tab value={3} icon={<LedgerIcon />} label="Ledger" iconPosition="start" />
+          {/* Explicit values: Cashbook sits beside Ledger but keeps the next free index. */}
+          <Tab value={9} icon={<CashbookIcon />} label="Cashbook" iconPosition="start" />
+          <Tab value={10} icon={<ChequeIcon />} label="Cheque Register" iconPosition="start" />
+          <Tab value={4} icon={<TrialIcon />} label="Trial Balance" iconPosition="start" />
+          <Tab value={5} icon={<ProfitIcon />} label="Profit & Loss (P&L)" iconPosition="start" />
+          <Tab value={6} icon={<BalanceIcon />} label="Balance Sheet" iconPosition="start" />
+          <Tab value={7} icon={<ReportIcon />} label="Financial Reports" iconPosition="start" />
+          <Tab value={8} icon={<SwapIcon />} label="Accounting Integration" iconPosition="start" />
         </Tabs>
       </Card>
 
@@ -1376,6 +1387,12 @@ function FinancialManagementView() {
       {topTab === 3 && (
         <LedgerPanel accounts={accounts} accountId={ledgerAccountId} onAccountChange={setLedgerAccountId} />
       )}
+
+      {/* 7b. CASHBOOK VIEW */}
+      {topTab === 9 && <CashbookPanel />}
+
+      {/* 7c. CHEQUE REGISTER */}
+      {topTab === 10 && <ChequeRegister />}
 
       {/* 8. TRIAL BALANCE VIEW */}
       {topTab === 4 && <TrialBalancePanel onOpenLedger={openLedger} />}

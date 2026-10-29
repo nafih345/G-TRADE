@@ -1,5 +1,7 @@
 import datetime
+import uuid
 
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
@@ -9,12 +11,12 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
-from . import integration, reports, settlements
+from . import cashbook, cheques, integration, reports, settlements
 from .accounting_catalog import SOURCES, ROLES
 from .mapping import role_status, save_mapping, deactivate_mapping, accounts_in_active_mappings
 from .models import (
     AccountGroup, ChartOfAccount, VoucherType, JournalEntry, LedgerEntry, AccountMapping, PostingFailure,
-    FiscalPeriod, AccountingPolicy, FinancialAuditLog,
+    FiscalPeriod, AccountingPolicy, FinancialAuditLog, Cheque,
 )
 from .permissions import FinancePermission, FINANCE_OVERRIDE_ROLES, user_role
 from .serializers import (
@@ -24,7 +26,7 @@ from .serializers import (
 )
 from .services import (
     AccountingError, error_text, create_journal, post_draft, reverse_entry, audit, normalize_lines,
-    post_opening_balances, recompute_balance_cache,
+    post_opening_balances, recompute_balance_cache, resolve_account,
 )
 
 
@@ -207,13 +209,32 @@ class JournalEntryViewSet(FinanceViewSetMixin, viewsets.ModelViewSet):
     def create(self, request, *args, **kwargs):
         try:
             data = self._voucher_payload(request)
-            entry = create_journal(
-                lines=[dict(l) for l in data['lines']], date=data['date'], narration=data['narration'],
-                status=data['status'], voucher_type_code=data['voucher_type_code'],
-                source_module='financial', source_event='voucher', source_number=data['reference_no'],
-                reference_type={'RV': 'RECEIPT_VOUCHER', 'PV': 'PAYMENT_VOUCHER', 'CV': 'CONTRA_ENTRY', 'JV': 'JOURNAL_VOUCHER'}[data['voucher_type_code']],
-                branch=_branch(data.get('branch')), user=request.user, idempotency_key=data.get('idempotency_key') or None,
-            )
+            code = data['voucher_type_code']
+            cheque_lines = [l for l in data['lines'] if l.get('cheque')]
+            if cheque_lines:
+                if code not in cheques.DIRECTION_OF:
+                    raise AccountingError('Cheque details are taken on Receipt and Payment Vouchers only.')
+                if data['status'] != 'POSTED':
+                    raise AccountingError('Cheque details can only be saved on a posted voucher.')
+                side = 'debit' if code == 'RV' else 'credit'
+                if any(l[side] <= 0 for l in cheque_lines):
+                    raise AccountingError(f"A cheque belongs on the cash / bank {side} line of the voucher.")
+            key = data.get('idempotency_key') or None
+            repeated = bool(key) and JournalEntry.all_objects.filter(idempotency_key=key).exists()
+            with transaction.atomic():
+                entry = create_journal(
+                    lines=[{k: v for k, v in l.items() if k != 'cheque'} for l in data['lines']], date=data['date'],
+                    narration=data['narration'], status=data['status'], voucher_type_code=code,
+                    source_module='financial', source_event='voucher', source_number=data['reference_no'],
+                    reference_type={'RV': 'RECEIPT_VOUCHER', 'PV': 'PAYMENT_VOUCHER', 'CV': 'CONTRA_ENTRY', 'JV': 'JOURNAL_VOUCHER'}[code],
+                    branch=_branch(data.get('branch')), user=request.user, idempotency_key=key,
+                )
+                if cheque_lines and not repeated:
+                    book = cheques.ChequeBook(code, user=request.user, branch=_request_branch(request))
+                    for l in cheque_lines:
+                        book.add(l['cheque'], l['debit'] or l['credit'], voucher_number=entry.entry_number, journal=entry,
+                                 bank_account=resolve_account(l['account']), party_name=data['reference_no'])
+                    book.save()
         except AccountingError as exc:
             return _error(exc)
         audit('VOUCHER_CREATED', 'journal', entry.pk, f"{entry.entry_number} ({entry.status}) ₹{entry.total_amount}",
@@ -272,6 +293,7 @@ class JournalEntryViewSet(FinanceViewSetMixin, viewsets.ModelViewSet):
             with transaction.atomic():
                 reversal = reverse_entry(entry, user=request.user, reason=reason)
                 settlements.on_voucher_reversed(entry)
+                cheques.on_voucher_reversed(entry)
         except AccountingError as exc:
             return _error(exc)
         audit('JOURNAL_REVERSED', 'journal', entry.pk, f"{entry.entry_number} reversed by {reversal.entry_number}: {reason}",
@@ -285,6 +307,14 @@ def _branch(pk):
         return None
     from apps.company.models import Branch
     return Branch.objects.filter(pk=pk).first()
+
+
+def _request_branch(request):
+    """The working branch (X-Branch-Id) in multi-branch mode, else None."""
+    if not getattr(request, 'multi_branch_enabled', False):
+        return None
+    branch = getattr(request, 'active_branch', None)
+    return branch if getattr(branch, 'pk', None) else None
 
 
 class LedgerEntryViewSet(FinanceViewSetMixin, viewsets.ReadOnlyModelViewSet):
@@ -343,6 +373,75 @@ def ledger_register_view(request):
     return reports.ledger_register(_date_param(request, 'date_from'), _date_param(request, 'date_to'),
                                    p.get('branch'), sources=sources,
                                    services_only=p.get('services') in ('1', 'true'), search=p.get('search') or '')
+
+
+def _cashbook_branches(request):
+    """(branch ids the Cashbook may read or None for every branch, label). Single-branch mode
+    reads everything; a user limited to some branches never gets rows from the others."""
+    from rest_framework.exceptions import PermissionDenied
+    from apps.common.branch_context import get_allowed_branch_ids
+    from apps.company.models import Branch
+
+    if not getattr(request, 'multi_branch_enabled', False):
+        return None, 'All branches'
+    allowed = get_allowed_branch_ids(request)
+    wanted = (request.query_params.get('branch') or 'all').strip()
+    if wanted == 'all':
+        if allowed is None:
+            return None, 'All branches'
+        return sorted(allowed), 'All permitted branches'
+    try:
+        branch = Branch.objects.filter(pk=wanted).first()
+    except (ValueError, DjangoValidationError):
+        branch = None
+    if branch is None:
+        raise AccountingError('Unknown branch.')
+    if allowed is not None and str(branch.pk) not in allowed:
+        raise PermissionDenied('You do not have access to the selected branch.')
+    return [str(branch.pk)], branch.name
+
+
+@_report
+def cashbook_accounts_view(request):
+    return {'accounts': cashbook.cash_accounts()}
+
+
+@_report
+def cashbook_view(request):
+    p = request.query_params
+    wanted = (p.get('account') or '').strip()
+    if wanted == 'all':
+        account_ids = [a['id'] for a in cashbook.cash_accounts()]
+        if not account_ids:
+            raise AccountingError('No cash accounts in the Chart of Accounts.')
+    else:
+        wanted = wanted or cashbook.default_cash_account_id()
+        if not wanted:
+            raise AccountingError('No cash accounts in the Chart of Accounts.')
+        try:
+            uuid.UUID(str(wanted))
+        except ValueError:
+            raise AccountingError('Select a valid cash account.')
+        account_ids = [wanted]
+    branch_ids, branch_label = _cashbook_branches(request)
+    try:
+        data = cashbook.cashbook(
+            account_ids, all_accounts=wanted == 'all', date_from=_date_param(request, 'date_from'),
+            date_to=_date_param(request, 'date_to'), branch_ids=branch_ids, search=p.get('search') or '',
+            show_reversed=p.get('show_reversed') in ('1', 'true'), page=_int(p.get('page'), 1),
+            page_size=_int(p.get('page_size'), 100), export=p.get('export') in ('1', 'true'))
+    except cashbook.CashbookError as exc:
+        raise AccountingError(str(exc))
+    data['branch'] = {'id': (p.get('branch') or 'all') if getattr(request, 'multi_branch_enabled', False) else 'all',
+                      'label': branch_label}
+    return data
+
+
+def _int(value, default):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 @_report
@@ -637,7 +736,8 @@ def _settlement_input(request, voucher):
 @permission_classes([FinancePermission])
 def settlement_receipt_view(request):
     try:
-        result, created = settlements.post_bill_receipt(_settlement_input(request, 'RV'), user=request.user)
+        result, created = settlements.post_bill_receipt(_settlement_input(request, 'RV'), user=request.user,
+                                                       branch=_request_branch(request))
     except AccountingError as exc:
         return _error(exc)
     return Response(dict(result, duplicate=not created), status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
@@ -647,7 +747,8 @@ def settlement_receipt_view(request):
 @permission_classes([FinancePermission])
 def settlement_payment_view(request):
     try:
-        entry, created = settlements.post_bill_payment(_settlement_input(request, 'PV'), user=request.user)
+        entry, created = settlements.post_bill_payment(_settlement_input(request, 'PV'), user=request.user,
+                                                      branch=_request_branch(request))
     except AccountingError as exc:
         return _error(exc)
     return Response(dict(JournalEntrySerializer(entry).data, duplicate=not created),
@@ -669,10 +770,64 @@ def settlement_batch_view(request, voucher):
             if data['party_kind'] not in settlements.PARTY_KINDS[voucher]:
                 raise AccountingError(f"A {'Receipt' if voucher == 'RV' else 'Payment'} Voucher cannot settle {data['party_kind']} bills.")
             _check_voucher_date(data['date'], request.user)
-        results, duplicate = settlements.post_bill_batch(voucher, items, user=request.user)
+        results, duplicate = settlements.post_bill_batch(voucher, items, user=request.user,
+                                                         branch=_request_branch(request))
     except AccountingError as exc:
         return _error(exc)
     if voucher == 'PV':
         results = JournalEntrySerializer(results, many=True).data
     return Response({'results': results, 'duplicate': duplicate},
                     status=status.HTTP_200_OK if duplicate else status.HTTP_201_CREATED)
+
+
+# ---------------------------------------------------------------------------
+# Cheque Register
+# ---------------------------------------------------------------------------
+
+@_report
+def cheque_register_view(request):
+    """GET /financial/cheques/ — cheques from Receipt / Payment Vouchers, filtered, with a summary."""
+    p = request.query_params
+    direction = (p.get('direction') or '').upper()
+    if direction and direction not in ('RECEIVED', 'ISSUED'):
+        raise AccountingError('direction must be RECEIVED or ISSUED.')
+    statuses = [s for s in (p.get('status') or '').upper().split(',') if s]
+    valid = {s for s, _ in Cheque.STATUS_CHOICES}
+    if any(s not in valid for s in statuses):
+        raise AccountingError(f"status must be one of {', '.join(sorted(valid))}.")
+    if p.get('bank_account'):
+        try:
+            uuid.UUID(p['bank_account'])
+        except ValueError:
+            raise AccountingError('Select a valid bank account.')
+    branch_ids, branch_label = _cashbook_branches(request)
+    data = cheques.cheque_register(
+        direction=direction, statuses=statuses, date_field=p.get('date_field') or 'cheque',
+        date_from=_date_param(request, 'date_from'), date_to=_date_param(request, 'date_to'),
+        search=p.get('search') or '', due=(p.get('due') or '').lower(), bank_account=p.get('bank_account') or '',
+        branch_ids=branch_ids, sort=p.get('sort') or 'due', page=_int(p.get('page'), 1),
+        page_size=_int(p.get('page_size'), 100), export=p.get('export') in ('1', 'true'))
+    data['branch'] = {'id': (p.get('branch') or 'all') if getattr(request, 'multi_branch_enabled', False) else 'all',
+                      'label': branch_label}
+    return data
+
+
+@api_view(['GET', 'PATCH'])
+@permission_classes([FinancePermission])
+def cheque_detail_view(request, pk):
+    cheque = get_object_or_404(Cheque.objects.select_related('bank_account', 'branch', 'created_by'), pk=pk)
+    from apps.common.branch_context import get_allowed_branch_ids
+    allowed = get_allowed_branch_ids(request) if getattr(request, 'multi_branch_enabled', False) else None
+    if allowed is not None and str(cheque.branch_id) not in allowed:
+        return _error('You do not have access to this cheque.', status.HTTP_403_FORBIDDEN)
+    if request.method == 'PATCH':
+        ser = cheques.ChequeUpdateSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        try:
+            with transaction.atomic():
+                cheques.update_cheque(Cheque.objects.select_for_update().get(pk=cheque.pk),
+                                      ser.validated_data, user=request.user)
+        except AccountingError as exc:
+            return _error(exc)
+        cheque = Cheque.objects.select_related('bank_account', 'branch', 'created_by').get(pk=cheque.pk)
+    return Response(cheques.cheque_row(cheque))

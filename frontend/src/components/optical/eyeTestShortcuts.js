@@ -39,7 +39,7 @@ export const EYE_TEST_SHORTCUTS = [
   { id: 'diagnosis', keys: ['Alt+G'], group: '4. Observations & Advice', label: 'Go to Doctor / Primary Diagnosis' },
   { id: 'nextVisit', keys: ['Alt+V'], group: '4. Observations & Advice', label: 'Go to Next Visit' },
   // 5. Charges & actions
-  { id: 'charges', keys: ['Alt+C'], group: '5. Charges & Actions', label: 'Go to Procedure Charge' },
+  { id: 'charges', keys: ['Alt+C'], group: '5. Charges & Actions', label: 'Go to Test Type (Free / Paid — charges are entered on the payment screen at Save)' },
   { id: 'orthoptics', keys: ['Alt+B'], group: '5. Charges & Actions', label: 'Open Orthoptics (Binocular Vision) Form' },
   { id: 'rxPrint', keys: ['Ctrl+P'], group: '5. Charges & Actions', label: 'Rx Print preview' },
   { id: 'saveRecord', keys: ['Ctrl+S'], group: '5. Charges & Actions', label: 'Save Clinical Record' },

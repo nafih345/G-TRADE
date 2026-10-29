@@ -29,6 +29,7 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from .accounting_catalog import payment_role
+from .cheques import CHEQUE_METHOD, ChequeBook, ChequeInputSerializer
 from .mapping import resolve_role
 from .models import ChartOfAccount, JournalEntry, JournalSequence, PostingFailure
 from .services import AccountingError, audit, create_journal, money
@@ -269,6 +270,14 @@ class PayLineSerializer(serializers.Serializer):
     bank_account = serializers.UUIDField(required=False, allow_null=True)
     ref_no = serializers.CharField(required=False, allow_blank=True, default='', max_length=60)
     ref_date = serializers.DateField(required=False, allow_null=True)
+    cheque = ChequeInputSerializer(required=False, allow_null=True, default=None)
+
+    def validate(self, attrs):
+        if attrs['method'] == CHEQUE_METHOD and not attrs.get('cheque'):
+            raise serializers.ValidationError('Enter the cheque details for the Cheque payment.')
+        if attrs['method'] != CHEQUE_METHOD and attrs.get('cheque'):
+            raise serializers.ValidationError('Cheque details belong on a Cheque payment only.')
+        return attrs
 
 
 class SettlementInputSerializer(serializers.Serializer):
@@ -380,15 +389,16 @@ def _receipt_result(number):
             'total': str(sum((Decimal(r['amount']) for r in rows), ZERO))}
 
 
-def post_bill_receipt(data, user=None):
+def post_bill_receipt(data, user=None, branch=None):
     """Settle customer / dealer bills. Returns (result, created)."""
-    number, created = _settle_receipt(data, user)
+    number, created = _settle_receipt(data, user, branch=branch)
     # The receipts are booked on commit; read back what the books did.
     return _receipt_result(number), created
 
 
-def _settle_receipt(data, user=None):
-    """The receipt settlement itself -> (settlement number, created). Books on commit."""
+def _settle_receipt(data, user=None, book=None, branch=None):
+    """The receipt settlement itself -> (settlement number, created). Books on commit. A batch
+    passes its own `book` so a cheque split over several parties is saved once, at the end."""
     from apps.company.models import DocumentNumberClaim
     kind = data['party_kind']
     if kind not in PARTY_KINDS['RV']:
@@ -416,6 +426,13 @@ def _settle_receipt(data, user=None):
         banks = [_bank(p) for p in data['payments']]
         bank_of = {id(p): b for p, b in zip(data['payments'], banks)}
         narration = data['narration'].strip()
+        own_book = book is None
+        book = book if book is not None else ChequeBook('RV', user=user, branch=branch)
+        for pay in data['payments']:
+            if pay.get('cheque'):
+                book.add(pay['cheque'], pay['amount'], voucher_number=number,
+                         bank_account=bank_of[id(pay)] or resolve_role(payment_role(pay['method'])),
+                         party_kind=kind, party_id=party.pk, party_name=_party_row(kind, party)['name'])
 
         if kind == 'customer':
             from apps.sales.models import Invoice, Payment
@@ -457,6 +474,8 @@ def _settle_receipt(data, user=None):
                      'allocations': [{'bill': bills[str(a['bill'])]['number'], 'amount': str(a['amount'])}
                                      for a in data['allocations']]},
               user=user)
+        if own_book:
+            book.save()
     return number, True
 
 
@@ -464,7 +483,7 @@ def _settle_receipt(data, user=None):
 # Payment (supplier)
 # ---------------------------------------------------------------------------
 
-def post_bill_payment(data, user=None):
+def post_bill_payment(data, user=None, book=None, branch=None):
     """Settle supplier bills with one Payment Voucher. Returns (journal, created)."""
     from apps.purchasing.models import Supplier
     if data['party_kind'] != 'supplier':
@@ -481,7 +500,7 @@ def post_bill_payment(data, user=None):
         Supplier.objects.select_for_update().filter(pk=supplier.pk).first()
         bills = _checked_bills('supplier', supplier.pk, data)
         accounts = _Accounts()
-        lines, allocations = [], []
+        lines, allocations, cheque_pays = [], [], []
         for a in data['allocations']:
             bill = bills[str(a['bill'])]
             lines.append({'account': bill['account_id'], 'debit': a['amount'], 'credit': ZERO,
@@ -494,6 +513,8 @@ def post_bill_payment(data, user=None):
             acc = bank or accounts.role(payment_role(pay['method']))
             lines.append({'account': acc, 'debit': ZERO, 'credit': pay['amount'],
                           'memo': ' '.join(x for x in (pay['method'], _pay_note(pay)) if x)})
+            if pay.get('cheque'):
+                cheque_pays.append((pay, acc))
         total = sum((a['amount'] for a in data['allocations']), ZERO)
         try:
             entry = create_journal(
@@ -508,6 +529,13 @@ def post_bill_payment(data, user=None):
         except IntegrityError:  # same key saved concurrently
             return JournalEntry.all_objects.get(idempotency_key=key), False
         Supplier.objects.filter(pk=supplier.pk).update(outstanding_balance=F('outstanding_balance') - total)
+        own_book = book is None
+        book = book if book is not None else ChequeBook('PV', user=user, branch=branch)
+        for pay, acc in cheque_pays:
+            book.add(pay['cheque'], pay['amount'], voucher_number=entry.entry_number, journal=entry,
+                     bank_account=acc, party_kind='supplier', party_id=supplier.pk, party_name=supplier.name)
+        if own_book:
+            book.save()
     audit('VOUCHER_CREATED', 'journal', entry.pk, f"{entry.entry_number} bill-to-bill ₹{entry.total_amount}", user=user)
     return entry, True
 
@@ -524,14 +552,16 @@ def on_voucher_reversed(entry):
     Supplier.objects.filter(pk=party.get('id')).update(outstanding_balance=F('outstanding_balance') + total)
 
 
-def post_bill_batch(voucher, items, user=None):
+def post_bill_batch(voucher, items, user=None, branch=None):
     """Several parties' settlements (each its own number / voucher) in ONE transaction: if any
     of them is refused, none is saved. Returns ([result, ...], all_were_duplicates)."""
+    book = ChequeBook(voucher, user=user, branch=branch)
     with transaction.atomic():
         if voucher == 'RV':
-            done = [_settle_receipt(d, user) for d in items]
+            done = [_settle_receipt(d, user, book=book) for d in items]
         else:
-            done = [post_bill_payment(d, user) for d in items]
+            done = [post_bill_payment(d, user, book=book) for d in items]
+        book.save()
     duplicate = not any(created for _, created in done)
     # After commit: the receipts' journals now exist.
     if voucher == 'RV':

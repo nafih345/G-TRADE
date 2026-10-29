@@ -4,6 +4,7 @@ from decimal import Decimal
 from rest_framework import serializers
 
 from .accounting_catalog import SOURCES
+from .cheques import ChequeInputSerializer
 from .models import (
     AccountGroup, ChartOfAccount, VoucherType, JournalEntry, LedgerEntry, AccountMapping, PostingFailure,
     FiscalPeriod, AccountingPolicy, FinancialAuditLog,
@@ -116,6 +117,8 @@ class VoucherLineInputSerializer(serializers.Serializer):
     debit = serializers.DecimalField(max_digits=15, decimal_places=2, required=False, default=0, min_value=Decimal('0'))
     credit = serializers.DecimalField(max_digits=15, decimal_places=2, required=False, default=0, min_value=Decimal('0'))
     memo = serializers.CharField(required=False, allow_blank=True, default='')
+    # Receipt / Payment Vouchers: the cheque behind this cash/bank line (Cheque pay mode).
+    cheque = ChequeInputSerializer(required=False, allow_null=True, default=None)
 
 
 class VoucherInputSerializer(serializers.Serializer):

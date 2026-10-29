@@ -5,7 +5,8 @@
   GET   /api/inventory/stock-overview/facets/          filter options + what this user may do
   GET   /api/inventory/stock-overview/lookup/?code=    exact scan match (barcodes / SKU)
   GET   /api/inventory/stock-overview/export/?export_format=xlsx|csv   filtered list as a file
-  PATCH /api/inventory/stock-overview/<id>/            prices, minimum stock, rack, bin, UOM
+  PATCH /api/inventory/stock-overview/<id>/            codes, name, brand, category, model, colour/size,
+                                                       supplier, prices, minimum stock, rack, bin, UOM
   POST  /api/inventory/stock-overview/<id>/adjust/     set the counted quantity (ledgered)
   GET   /api/inventory/stock-overview/<id>/history/    the product's stock movements
 
@@ -38,7 +39,8 @@ from rest_framework.response import Response
 
 from apps.common.request_actor import actor_from_request, get_actor, reset_actor, set_actor
 from apps.common.sequences import bump_sequence
-from apps.products.models import Product, ProductBarcode, ProductVariantGroup
+from apps.products.barcode_utils import find_barcode_owner
+from apps.products.models import BarcodeHistory, Product, ProductBarcode, ProductVariantGroup
 from apps.purchasing.models import PurchaseInvoice, PurchaseInvoiceItem, PurchaseOrder, Supplier
 
 from .models import StockAdjustment, StockAdjustmentSequence, StockLedger
@@ -58,9 +60,19 @@ STOCK_ADJUST_ROLES = {'SUPER_ADMIN', 'ADMINISTRATOR', 'MANAGER', 'INVENTORY_MANA
 IMPORT_ROLES = {'SUPER_ADMIN', 'ADMINISTRATOR', 'MANAGER', 'INVENTORY_MANAGER', 'PURCHASE_EXECUTIVE'}
 EXPORT_ROLES = {'SUPER_ADMIN', 'ADMINISTRATOR', 'MANAGER', 'ACCOUNTANT', 'INVENTORY_MANAGER', 'PURCHASE_EXECUTIVE'}
 
+DETAIL_EDIT_ROLES = LOCATION_EDIT_ROLES
+
 PRICE_FIELDS = {'cost_price', 'retail_price', 'mrp'}
 LOCATION_FIELDS = {'minimum_stock', 'rack_location', 'bin_location', 'unit'}
-EDITABLE_FIELDS = PRICE_FIELDS | LOCATION_FIELDS
+CODE_FIELDS = {'sku', 'barcode', 'secondary_barcode'}
+# Free-text fields → max length. model_no lives in extra_data; color/size are real columns but
+# legacy rows keep them in extra_data (serialize_row reads both).
+TEXT_FIELDS = {'name': 255, 'brand': 150, 'category': 150, 'model_no': 150, 'color': 100, 'size': 100,
+               'supplier_name': 150, 'rack_location': 150, 'bin_location': 150}
+DETAIL_FIELDS = CODE_FIELDS | {'name', 'brand', 'category', 'model_no', 'color', 'size', 'supplier_name'}
+EDITABLE_FIELDS = PRICE_FIELDS | LOCATION_FIELDS | DETAIL_FIELDS
+EXTRA_KEYS = {'model_no': ('model_no', 'model', 'model_number'), 'color': ('color', 'colour'),
+              'size': ('size', 'frame_size')}
 
 MAX_QTY = 10_000_000
 MAX_PRICE = Decimal('9999999999.99')  # Product price columns: max_digits=12, decimal_places=2
@@ -83,6 +95,7 @@ def capabilities(user):
         'view_cost': role in COST_VIEW_ROLES,
         'edit_prices': role in PRICE_EDIT_ROLES,
         'edit_location': role in LOCATION_EDIT_ROLES,
+        'edit_details': role in DETAIL_EDIT_ROLES,
         'adjust_stock': role in STOCK_ADJUST_ROLES,
         'view_history': role in ALL_ROLES,
         'import': role in IMPORT_ROLES,
@@ -266,7 +279,9 @@ def serialize_row(p, caps):
         'cost_price': _money(p.cost_price) if caps['view_cost'] else None,
         'retail_price': _money(p.retail_price),
         'mrp': product_mrp(p),
-        'supplier_name': getattr(p, 'last_supplier_name', None) or p.supplier_name or '',
+        # The product's own vendor (editable here); the last purchase's supplier stands in when unset.
+        'supplier_name': p.supplier_name or getattr(p, 'last_supplier_name', None) or '',
+        'own_supplier_name': p.supplier_name or '',
         'last_purchase_date': p.last_purchase_date.isoformat() if getattr(p, 'last_purchase_date', None) else None,
         'status': stock_status(p),
         'updated_at': p.updated_at.isoformat() if p.updated_at else None,
@@ -327,6 +342,13 @@ def _parse_int(value, field, errors, *, minimum=0):
 
 def _current_value(product, field):
     """The field's value in the same shape serialize_row sends, for optimistic-lock checks."""
+    if field in EXTRA_KEYS:
+        own = (getattr(product, field) or '').strip() if field != 'model_no' else ''
+        return own or str(_extra(product, *EXTRA_KEYS[field]) or '')
+    if field in ('brand', 'category'):
+        return getattr(product, f'{field}_name') or ''
+    if field == 'supplier_name':
+        return product.supplier_name or ''
     if field == 'mrp':
         return product_mrp(product)
     if field in ('cost_price', 'retail_price'):
@@ -656,6 +678,8 @@ class StockOverviewViewSet(viewsets.GenericViewSet):
             raise PermissionDenied('Your role cannot change the purchase cost.')
         if set(changes) & LOCATION_FIELDS and not caps['edit_location']:
             raise PermissionDenied('Your role cannot change stock levels or locations.')
+        if set(changes) & DETAIL_FIELDS and not caps['edit_details']:
+            raise PermissionDenied('Your role cannot change product details.')
 
         errors, clean = {}, {}
         for field, value in changes.items():
@@ -663,10 +687,19 @@ class StockOverviewViewSet(viewsets.GenericViewSet):
                 clean[field] = _parse_money(value, field, errors)
             elif field == 'minimum_stock':
                 clean[field] = _parse_int(value, field, errors)
-            elif field in ('rack_location', 'bin_location'):
+            elif field in CODE_FIELDS:
                 text = '' if value is None else str(value).strip()
                 if len(text) > 150:
                     errors[field] = 'At most 150 characters.'
+                elif field == 'sku' and not text:
+                    errors[field] = 'Item code is required.'
+                clean[field] = text or None
+            elif field in TEXT_FIELDS:
+                text = '' if value is None else str(value).strip()
+                if len(text) > TEXT_FIELDS[field]:
+                    errors[field] = f'At most {TEXT_FIELDS[field]} characters.'
+                elif field == 'name' and not text:
+                    errors[field] = 'Product name is required.'
                 clean[field] = text or None
             elif field == 'unit':
                 if value in (None, ''):
@@ -701,14 +734,44 @@ class StockOverviewViewSet(viewsets.GenericViewSet):
                 return Response({'detail': 'Selling price cannot be more than the MRP.',
                                  'errors': {'retail_price': 'More than MRP.'}}, status=status.HTTP_400_BAD_REQUEST)
 
+            code_errors = self._code_errors(product, clean)
+            if code_errors:
+                return Response({'detail': 'Please correct the highlighted values.', 'errors': code_errors},
+                                status=status.HTTP_400_BAD_REQUEST)
+
             fields = ['updated_at']
+            barcode_history = []
+            extra = dict(product.extra_data) if isinstance(product.extra_data, dict) else {}
             for field, value in clean.items():
                 if field == 'mrp':
                     product.wholesale_price = value
-                    extra = dict(product.extra_data) if isinstance(product.extra_data, dict) else {}
                     extra['mrp'] = float(value)
-                    product.extra_data = extra
                     fields += ['wholesale_price', 'extra_data']
+                elif field in EXTRA_KEYS:
+                    # Drop legacy spellings so the value shown afterwards is the one typed
+                    # (serialize_row falls back to extra_data when the column is blank).
+                    for key in [k for k in extra if str(k).lower() in EXTRA_KEYS[field]]:
+                        extra.pop(key)
+                    if field == 'model_no':
+                        if value:
+                            extra['model_no'] = value
+                    else:
+                        setattr(product, field, value)
+                        fields.append(field)
+                    fields.append('extra_data')
+                elif field in ('brand', 'category'):
+                    self._set_master(product, field, value)
+                    fields += [f'{field}_name', field]
+                elif field in ('barcode', 'secondary_barcode'):
+                    old = getattr(product, field)
+                    if (old or None) != value:
+                        label = 'Second barcode' if field == 'secondary_barcode' else 'Barcode'
+                        barcode_history.append(BarcodeHistory(
+                            product=product, old_barcode=old, new_barcode=value,
+                            changed_by=get_actor() or 'Stock Overview',
+                            reason=f"{label} {'cleared' if not value else 'updated'} in Stock Overview"))
+                    setattr(product, field, value)
+                    fields.append(field)
                 elif field == 'unit':
                     product.unit = value
                     fields.append('unit')
@@ -718,8 +781,37 @@ class StockOverviewViewSet(viewsets.GenericViewSet):
             if request.user and request.user.is_authenticated:
                 product.updated_by = request.user
                 fields.append('updated_by')
+            product.extra_data = extra
             product.save(update_fields=list(dict.fromkeys(fields)))
+            if barcode_history:
+                BarcodeHistory.objects.bulk_create(barcode_history)
         return Response(self._row(product.pk))
+
+    @staticmethod
+    def _code_errors(product, clean):
+        """SKU and barcodes stay unique: a code may not already belong to another product."""
+        errors = {}
+        if 'sku' in clean and clean['sku'] and \
+                Product.all_objects.filter(sku__iexact=clean['sku']).exclude(pk=product.pk).exists():
+            errors['sku'] = 'Another product already uses this item code.'
+        barcode = clean.get('barcode', product.barcode)
+        secondary = clean.get('secondary_barcode', product.secondary_barcode)
+        if barcode and barcode == secondary and {'barcode', 'secondary_barcode'} & set(clean):
+            errors['secondary_barcode' if 'secondary_barcode' in clean else 'barcode'] = 'Same as the other barcode.'
+        for field in ('barcode', 'secondary_barcode'):
+            if clean.get(field) and field not in errors:
+                owner = find_barcode_owner(clean[field], exclude_pk=product.pk)
+                if owner is not None:
+                    errors[field] = f'Already used by {owner.name} ({owner.sku}).'
+        return errors
+
+    @staticmethod
+    def _set_master(product, field, name):
+        """Brand / category are typed text; link the master record of that name, or unlink."""
+        from apps.masters.models import Brand, ProductCategory
+        model = Brand if field == 'brand' else ProductCategory
+        setattr(product, f'{field}_name', name)
+        setattr(product, field, model.objects.filter(name__iexact=name).first() if name else None)
 
     # -- quantity adjustment --------------------------------------------------------------------
     @action(detail=True, methods=['post'])
