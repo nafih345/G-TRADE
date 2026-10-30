@@ -72,7 +72,7 @@ const OPTIONAL_COLUMNS = [
   ['mrp', 'MRP'], ['tax_percent', 'Tax %'], ['barcode', 'Barcode'], ['stock', 'Stock'],
 ];
 const DEFAULT_COLVIS = {
-  long_name: false, category: true, sub_category: false, group: false, brand: true, model_number: true,
+  long_name: false, category: true, sub_category: true, group: true, brand: true, model_number: true,
   hsn_code: false, cost_price: true, mrp: true, tax_percent: true, barcode: true, stock: true,
 };
 
@@ -126,7 +126,12 @@ export default function ProductVariantMaster({
   const [selected, setSelected] = useState(() => new Set());
   const [filter, setFilter] = useState('');
   const [sort, setSort] = useState(null);
-  const [colVis, setColVis] = useState(() => ({ ...DEFAULT_COLVIS, ...readJson(COLVIS_KEY, {}) }));
+  const [colVis, setColVis] = useState(() => {
+    const saved = readJson(COLVIS_KEY, {});
+    // v2: Subcategory / Group became default columns (cascading row dropdowns); turn them on once.
+    const migrated = saved._v >= 2 ? saved : { ...saved, sub_category: true, group: true };
+    return { ...DEFAULT_COLVIS, ...migrated, _v: 2 };
+  });
   const [serverErrors, setServerErrors] = useState({});
   const [groupErrors, setGroupErrors] = useState({});
   const [skuPreview, setSkuPreview] = useState({});
@@ -152,6 +157,9 @@ export default function ProductVariantMaster({
   const [subCategoryOptions, setSubCategoryOptions] = useState([]);
   const [groupOptions, setGroupOptions] = useState([]);
   const [modelNumberOptions, setModelNumberOptions] = useState([]);
+  // { category (lower-case): { sub_category, group, brand, model_number: [...] } } — values the
+  // catalogue already uses under each category (the masters themselves are flat lists).
+  const [hierarchy, setHierarchy] = useState({});
   const [templates, setTemplates] = useState([]);
   const [loadedTemplate, setLoadedTemplate] = useState(null);
   const [templateMenu, setTemplateMenu] = useState(null);
@@ -245,6 +253,7 @@ export default function ProductVariantMaster({
       setTaxOptions(Array.from(new Set([...TAX_DEFAULTS, ...rates])).sort((a, b) => a - b));
     }).catch(() => {});
     axios.get(TEMPLATE_API).then(r => setTemplates(r.data?.results || r.data || [])).catch(() => setTemplates([]));
+    axios.get(`${API}hierarchy/`).then(r => setHierarchy(r.data?.categories || {})).catch(() => setHierarchy({}));
   }, [open, initialGroupId, initialProductId, context, resetAll, loadGroup]);
 
   // Existing-product finder (parents + stand-alone products).
@@ -312,16 +321,43 @@ export default function ProductVariantMaster({
 
   const purchaseLocked = useCallback((r) => isPurchase && Boolean(r.id), [isPurchase]);
 
+  // Cascading dropdowns: values already used with a category (catalogue + rows on screen) are
+  // offered first. Read through a ref only when a dropdown opens, so typing in the grid doesn't
+  // rebuild `columns` (which would re-render every row).
+  const cascadeRef = useRef({});
+  cascadeRef.current = { hierarchy, rows, parent };
+  const linkedFor = useCallback((field, category) => {
+    const cat = String(category || '').trim().toLowerCase();
+    if (!cat) return [];
+    const { hierarchy: h, rows: rs, parent: p } = cascadeRef.current;
+    const vals = [...(h[cat]?.[field] || [])];
+    [p, ...rs].forEach(r => {
+      if (String(r.category || p.category || '').trim().toLowerCase() !== cat) return;
+      const v = r[field] || p[field];
+      if (v) vals.push(v);
+    });
+    return vals;
+  }, []);
+  const cascadeOptions = useCallback((field, all) => (row) => {
+    const category = row.category || cascadeRef.current.parent.category;
+    const linked = linkedFor(field, category);
+    return linked.length ? [{ label: `Used with ${category}`, items: linked }, { label: 'All', items: all }] : [{ items: all }];
+  }, [linkedFor]);
+  const headerOptions = useCallback((field, all) => {
+    const linked = linkedFor(field, parent.category);
+    return linked.length ? Array.from(new Set([...linked, ...all])) : all;
+  }, [linkedFor, parent.category, hierarchy]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const columns = useMemo(() => {
     const parentName = parent.name.trim();
     const cols = [
       { key: 'name', label: 'Product Name', width: 210, readOnly: purchaseLocked, placeholder: (r) => (parentName ? `${parentName} ${variantLabel(r.attributes, attrKeys)}`.trim() : '') },
       colVis.long_name && { key: 'long_name', label: 'Long Name', width: 170, readOnly: purchaseLocked },
-      colVis.category && { key: 'category', label: 'Category', width: 120, readOnly: purchaseLocked, placeholder: () => parent.category },
-      colVis.sub_category && { key: 'sub_category', label: 'Subcategory', width: 120, readOnly: purchaseLocked, placeholder: () => parent.sub_category },
-      colVis.group && { key: 'group', label: 'Group', width: 120, readOnly: purchaseLocked, placeholder: () => parent.group },
-      colVis.brand && { key: 'brand', label: 'Brand', width: 110, readOnly: purchaseLocked, placeholder: () => parent.brand },
-      colVis.model_number && { key: 'model_number', label: 'Model No.', width: 110, readOnly: purchaseLocked, placeholder: () => parent.model_number },
+      colVis.category && { key: 'category', label: 'Category', width: 120, readOnly: purchaseLocked, placeholder: () => parent.category, options: () => [{ items: categoryOptions }] },
+      colVis.sub_category && { key: 'sub_category', label: 'Subcategory', width: 120, readOnly: purchaseLocked, placeholder: () => parent.sub_category, options: cascadeOptions('sub_category', subCategoryOptions) },
+      colVis.group && { key: 'group', label: 'Group', width: 120, readOnly: purchaseLocked, placeholder: () => parent.group, options: cascadeOptions('group', groupOptions) },
+      colVis.brand && { key: 'brand', label: 'Brand', width: 110, readOnly: purchaseLocked, placeholder: () => parent.brand, options: cascadeOptions('brand', brandOptions) },
+      colVis.model_number && { key: 'model_number', label: 'Model No.', width: 110, readOnly: purchaseLocked, placeholder: () => parent.model_number, options: cascadeOptions('model_number', modelNumberOptions) },
       ...attrKeys.map(k => ({ key: `attr:${k}`, attr: k, label: attributeMeta(k).label || titleCase(k), width: 100, readOnly: purchaseLocked })),
       isPurchase
         ? { key: 'quantity', label: 'Purchase Qty', width: 90, numeric: true, align: 'right' }
@@ -336,7 +372,8 @@ export default function ProductVariantMaster({
       colVis.stock && { key: 'stock', label: 'Stock', width: 70, align: 'right', display: (r) => (r.id ? (r.stock ?? 0) : '—') },
     ];
     return cols.filter(Boolean);
-  }, [parent, attrKeys, colVis, isPurchase, purchaseLocked, skuPreview, baseSku, autoBarcode]);
+  }, [parent, attrKeys, colVis, isPurchase, purchaseLocked, skuPreview, baseSku, autoBarcode,
+    categoryOptions, subCategoryOptions, groupOptions, brandOptions, modelNumberOptions, cascadeOptions]);
 
   // ------------------------------------------------------------------ row editing
 
@@ -1002,10 +1039,10 @@ export default function ProductVariantMaster({
                         error={Boolean(groupErrors.base_sku)} helperText={groupErrors.base_sku || 'Variant SKUs = Base-Attribute codes'} />
                     </Grid>
                     <Grid item xs={6} sm={4} md={2}><AttributeField label="Category" value={parent.category} onChange={setCategory} options={categoryOptions} {...masterProps(categoryMaster)} /></Grid>
-                    <Grid item xs={6} sm={4} md={2}><AttributeField label="Subcategory" value={parent.sub_category} onChange={setParentField('sub_category')} options={subCategoryOptions} {...masterProps(subCategoryMaster)} /></Grid>
-                    <Grid item xs={6} sm={4} md={2}><AttributeField label="Group" value={parent.group} onChange={setParentField('group')} options={groupOptions} {...masterProps(groupMaster)} /></Grid>
-                    <Grid item xs={6} sm={4} md={2}><AttributeField label="Brand" value={parent.brand} onChange={setParentField('brand')} options={brandOptions} {...masterProps(brandMaster)} /></Grid>
-                    <Grid item xs={6} sm={4} md={2}><AttributeField label="Model Number" value={parent.model_number} onChange={setParentField('model_number')} options={modelNumberOptions} {...masterProps(modelNumberMaster)} /></Grid>
+                    <Grid item xs={6} sm={4} md={2}><AttributeField label="Subcategory" value={parent.sub_category} onChange={setParentField('sub_category')} options={headerOptions('sub_category', subCategoryOptions)} {...masterProps(subCategoryMaster)} /></Grid>
+                    <Grid item xs={6} sm={4} md={2}><AttributeField label="Group" value={parent.group} onChange={setParentField('group')} options={headerOptions('group', groupOptions)} {...masterProps(groupMaster)} /></Grid>
+                    <Grid item xs={6} sm={4} md={2}><AttributeField label="Brand" value={parent.brand} onChange={setParentField('brand')} options={headerOptions('brand', brandOptions)} {...masterProps(brandMaster)} /></Grid>
+                    <Grid item xs={6} sm={4} md={2}><AttributeField label="Model Number" value={parent.model_number} onChange={setParentField('model_number')} options={headerOptions('model_number', modelNumberOptions)} {...masterProps(modelNumberMaster)} /></Grid>
                     <Grid item xs={6} sm={4} md={2}><AttributeField label="Unit" value={parent.unit} onChange={setParentField('unit')} options={unitOptions} {...masterProps(unitMaster)} /></Grid>
                     <Grid item xs={6} sm={4} md={2}><TextField fullWidth size="small" label="HSN / Tax Code" value={parent.hsn_code} onChange={(e) => setParentField('hsn_code')(e.target.value)} /></Grid>
                     <Grid item xs={6} sm={4} md={2}>

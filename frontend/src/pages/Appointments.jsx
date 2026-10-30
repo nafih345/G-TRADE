@@ -241,8 +241,7 @@ export default function Appointments() {
       // newest rows, so every page is read.
       const aptsReq = fetchAllPages('/api/sales/appointments/');
       const custReq = fetchAllPages('/api/sales/customers/');
-      const usersReq = axios.get('/api/admin/users/');
-      [aptsReq, custReq, usersReq].forEach((req) => req.catch(() => {})); // awaited below
+      [aptsReq, custReq].forEach((req) => req.catch(() => {})); // awaited below
 
       try {
         const aptData = await aptsReq;
@@ -253,16 +252,6 @@ export default function Appointments() {
         custPool = [...custPool, ...(await custReq)];
       } catch (e) {}
 
-      try {
-        const resUsers = await usersReq;
-        if (resUsers.data && Array.isArray(resUsers.data)) {
-          const apiDocNames = resUsers.data
-            .filter(u => u.role === 'DOCTOR' || u.role === 'OPTOMETRIST' || (u.designation && u.designation.toLowerCase().includes('doc')))
-            .map(u => u.name || `Dr. ${u.first_name} ${u.last_name}`)
-            .filter(Boolean);
-          docPool = [...docPool, ...apiDocNames];
-        }
-      } catch (e) {}
 
       applyPools(aptList, custPool, docPool);
     };

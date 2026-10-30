@@ -37,6 +37,37 @@ export function announceSessionEnded(message) {
   window.dispatchEvent(new CustomEvent(SESSION_ENDED_EVENT, { detail: { message } }));
 }
 
+export const TOKEN_REFRESHED_EVENT = 'auth:token-refreshed';
+
+let pendingRefresh = null;
+
+/**
+ * The access token lives 24h (SIMPLE_JWT.ACCESS_TOKEN_LIFETIME). A tab left open past that used
+ * to get 401 `token_not_valid` on every request — empty screens, nothing saved — until the user
+ * reloaded. Trade the refresh token for a new access token instead; concurrent 401s share one
+ * refresh. Resolves to the new access token, or null when the session really is over.
+ */
+function refreshAccessToken() {
+  if (!pendingRefresh) {
+    pendingRefresh = (async () => {
+      const refresh = localStorage.getItem('refresh_token');
+      if (!refresh) return null;
+      try {
+        const { data } = await axios.post('/api/auth/token/refresh/', { refresh }, { __skipAuthRefresh: true });
+        if (!data?.access) return null;
+        localStorage.setItem('access_token', data.access);
+        if (data.refresh) localStorage.setItem('refresh_token', data.refresh);
+        axios.defaults.headers.common.Authorization = `Bearer ${data.access}`;
+        window.dispatchEvent(new CustomEvent(TOKEN_REFRESHED_EVENT, { detail: { access: data.access } }));
+        return data.access;
+      } catch {
+        return null;
+      }
+    })().finally(() => { pendingRefresh = null; });
+  }
+  return pendingRefresh;
+}
+
 export function installSessionGuard() {
   if (installed) return;
   installed = true;
@@ -44,6 +75,22 @@ export function installSessionGuard() {
     const res = error?.response;
     const code = res?.data?.code;
     const config = error?.config;
+    // Expired access token: refresh once and replay the request; if that fails, sign out cleanly.
+    if (res?.status === 401 && code === 'token_not_valid' && config && !config.__skipAuthRefresh
+        && !config.__authRetried && axios.defaults.headers.common.Authorization) {
+      const access = await refreshAccessToken();
+      if (access) {
+        return axios.request({
+          ...config,
+          headers: { ...config.headers, Authorization: `Bearer ${access}` },
+          __authRetried: true,
+        });
+      }
+      if (axios.defaults.headers.common.Authorization) {
+        announceSessionEnded('Your sign-in has expired. Please sign in again.');
+      }
+      return Promise.reject(error);
+    }
     // user_not_found: the account behind the token no longer exists (e.g. after a database restore).
     if (res?.status === 401 && ['session_expired', 'session_timeout', 'user_not_found', 'user_inactive'].includes(code)
         && axios.defaults.headers.common.Authorization) {

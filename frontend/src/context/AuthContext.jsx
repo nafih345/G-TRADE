@@ -1,6 +1,6 @@
 import React, { createContext, useState, useContext, useEffect } from 'react';
 import axios from 'axios';
-import { SESSION_ENDED_EVENT } from '../utils/sessionGuard';
+import { SESSION_ENDED_EVENT, TOKEN_REFRESHED_EVENT } from '../utils/sessionGuard';
 
 const AuthContext = createContext(null);
 
@@ -165,8 +165,14 @@ export const AuthProvider = ({ children }) => {
       setToken(null);
       setUser(null);
     };
+    // sessionGuard swapped an expired access token for a fresh one — keep state in step.
+    const onRefreshed = (e) => { if (e.detail?.access) setToken(e.detail.access); };
     window.addEventListener(SESSION_ENDED_EVENT, onEnded);
-    return () => window.removeEventListener(SESSION_ENDED_EVENT, onEnded);
+    window.addEventListener(TOKEN_REFRESHED_EVENT, onRefreshed);
+    return () => {
+      window.removeEventListener(SESSION_ENDED_EVENT, onEnded);
+      window.removeEventListener(TOKEN_REFRESHED_EVENT, onRefreshed);
+    };
   }, []);
 
   return (

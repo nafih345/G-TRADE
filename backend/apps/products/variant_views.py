@@ -3,6 +3,7 @@
   GET    /api/products/variant-groups/?search=        parent products (with variant counts)
   GET    /api/products/variant-groups/{id}/           one parent with every variant + stock
   GET    /api/products/variant-groups/for-product/?product=<id>
+  GET    /api/products/variant-groups/hierarchy/      values used per category (cascading row dropdowns)
   POST   /api/products/variant-groups/bulk-save/      validate + save (dry_run: true = validate only)
   GET    /api/products/variant-groups/import-template/   sample .xlsx
   POST   /api/products/variant-groups/import-preview/    parse + validate an uploaded sheet (writes nothing)
@@ -160,6 +161,27 @@ class ProductVariantGroupViewSet(viewsets.ReadOnlyModelViewSet):
         if product.variant_group_id:
             return Response(serialize_group(product.variant_group, with_variants=True))
         return Response({'id': None, 'standalone': True, 'variants': [serialize_variant(product)]})
+
+    @action(detail=False, methods=['get'])
+    def hierarchy(self, request):
+        """Which subcategories / groups / brands / model numbers the catalogue already uses under
+        each category, so a row's dropdowns can offer the matching values first. The masters
+        themselves are flat lists; this is learned from active products. Keys are lower-cased
+        category names."""
+        from django.db.models.fields.json import KT
+
+        rows = (Product.objects.filter(is_active=True).exclude(category_name__isnull=True).exclude(category_name='')
+                .annotate(sub=KT('extra_data__sub_category'), grp=KT('extra_data__group'), model=KT('extra_data__model_no'))
+                .values_list('category_name', 'sub', 'grp', 'brand_name', 'model')
+                .distinct())
+        fields = ('sub_category', 'group', 'brand', 'model_number')
+        out = {}
+        for category, *values in rows.iterator(chunk_size=2000):
+            bucket = out.setdefault(category.strip().lower(), {f: set() for f in fields})
+            for f, v in zip(fields, values):
+                if v and str(v).strip():
+                    bucket[f].add(str(v).strip())
+        return Response({'categories': {c: {f: sorted(vals, key=str.lower)[:500] for f, vals in b.items()} for c, b in out.items()}})
 
     @action(detail=False, methods=['post'], url_path='bulk-save')
     def bulk_save(self, request):

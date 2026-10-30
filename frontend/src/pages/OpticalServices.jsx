@@ -421,8 +421,7 @@ export default function OpticalServices() {
       // patients / exams, so every page is read.
       const custReq = fetchAllPages('/api/sales/customers/');
       const testsReq = fetchAllPages('/api/sales/eye-examinations/');
-      const usersReq = axios.get('/api/admin/users/');
-      [custReq, testsReq, usersReq].forEach((req) => req.catch(() => {})); // awaited below
+      [custReq, testsReq].forEach((req) => req.catch(() => {})); // awaited below
 
       try {
         const custData = await custReq;
@@ -496,16 +495,6 @@ export default function OpticalServices() {
         }
       } catch (e) {}
 
-      try {
-        const resUsers = await usersReq;
-        if (resUsers.data && Array.isArray(resUsers.data)) {
-          const apiDocNames = resUsers.data
-            .filter(u => u.role === 'DOCTOR' || u.role === 'OPTOMETRIST' || (u.designation && u.designation.toLowerCase().includes('doc')))
-            .map(u => u.name || `Dr. ${u.first_name} ${u.last_name}`)
-            .filter(Boolean);
-          docsList = [...docsList, ...apiDocNames];
-        }
-      } catch (e) {}
 
       docsList = [...docsList, ...readAdminDocNames()];
 

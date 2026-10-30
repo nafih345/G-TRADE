@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, startTransition } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useDebounce } from '../hooks/useDebounce';
 import {
@@ -451,7 +451,7 @@ export default function Products() {
           <Button variant="outlined" startIcon={<ImportIcon />} onClick={() => setImportOpen(true)} sx={{ fontWeight: 800 }}>
             Import from Excel
           </Button>
-          <Button variant="outlined" startIcon={<MultiItemsIcon />} onClick={() => setVariantMaster({ open: true, productId: null, importGroup: null })} sx={{ fontWeight: 800 }}>
+          <Button variant="outlined" startIcon={<MultiItemsIcon />} onClick={() => startTransition(() => setVariantMaster({ open: true, productId: null, importGroup: null }))} sx={{ fontWeight: 800 }}>
             Add Multiple Items
           </Button>
           <Button variant="contained" startIcon={<AddIcon />} onClick={handleOpen} sx={{ backgroundColor: '#2563EB', fontWeight: 800 }}>
@@ -608,7 +608,7 @@ export default function Products() {
                                     color="primary"
                                     title={isBackendId(product.id) ? 'Manage Variants / View Stock' : 'Save this product to the database first'}
                                     disabled={!isBackendId(product.id)}
-                                    onClick={() => setVariantMaster({ open: true, productId: product.id, importGroup: null })}
+                                    onClick={() => startTransition(() => setVariantMaster({ open: true, productId: product.id, importGroup: null }))}
                                   >
                                     <VariantsIcon fontSize="small" />
                                   </IconButton>

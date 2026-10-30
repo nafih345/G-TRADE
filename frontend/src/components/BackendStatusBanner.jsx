@@ -13,11 +13,14 @@ import { checkBackendHealth, subscribeBackendStatus } from '../utils/backendStat
 
 const TITLES = {
   unreachable: 'Cannot reach the server',
+  offline: 'You are offline',
   degraded: 'The server is running, but its database is not',
   outdated: 'The server is running an older release than this app',
 };
 
 const EXPLANATIONS = {
+  offline:
+    'This computer has lost its internet connection. The app will reconnect by itself when it is back.',
   unreachable:
     'Nothing is answering at the API address, so nothing you enter can be saved. Screens will stay empty.',
   degraded:
@@ -38,7 +41,7 @@ export default function BackendStatusBanner() {
   // A new kind of failure un-dismisses: the operator dismissed the old message, not this one.
   useEffect(() => { setDismissed(false); }, [state.status]);
 
-  const broken = state.status === 'unreachable' || state.status === 'degraded' || state.status === 'outdated';
+  const broken = state.status === 'unreachable' || state.status === 'offline' || state.status === 'degraded' || state.status === 'outdated';
 
   const handleRecheck = async () => {
     setRechecking(true);
@@ -52,7 +55,7 @@ export default function BackendStatusBanner() {
   return (
     <Collapse in={broken && !dismissed} unmountOnExit>
       <Alert
-        severity="error"
+        severity={state.status === 'offline' ? 'warning' : 'error'}
         variant="filled"
         sx={{ borderRadius: 0, alignItems: 'flex-start', '& .MuiAlert-message': { width: '100%' } }}
         // Both controls live in `action`: MUI renders its own close icon only when `action`

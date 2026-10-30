@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback, startTransition } from 'react';
 import axios from 'axios';
 import {
   Box, Grid, Card, Typography, TextField, Button, MenuItem,
@@ -1318,7 +1318,8 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
             variant="outlined"
             size="small"
             startIcon={<MultiItemsIcon />}
-            onClick={() => setMultiItemsOpen(true)}
+            // Transition: mounting the dialog is heavy; let the click paint first (INP).
+            onClick={() => startTransition(() => setMultiItemsOpen(true))}
             sx={{ flexShrink: 0, fontWeight: 800, borderRadius: '24px', px: 2, whiteSpace: 'nowrap' }}
           >
             Add Multiple Items

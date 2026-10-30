@@ -51,7 +51,8 @@ export function resolveApiBaseUrl() {
 
 // 'checking' until the first probe answers; 'ok' once it does; 'degraded' when the backend
 // is up but its database/migrations are not; 'outdated' when it is healthy but an older release
-// than this frontend; 'unreachable' when nothing answers at all.
+// than this frontend; 'unreachable' when nothing answers at all; 'offline' when the browser
+// itself has no network (navigator.onLine), which no server-side fix would help.
 //
 // `source` records who decided. /api/health/ says *why* it is broken — "could not translate
 // host name dpg-…" names the deleted database outright — whereas ordinary traffic can only
@@ -83,9 +84,24 @@ export const subscribeBackendStatus = (fn) => {
  */
 export async function checkBackendHealth() {
   lastProbeAt = Date.now();
+  if (isOffline()) {
+    setState({ status: 'offline', detail: 'this computer has no internet connection', baseUrl: primaryBaseUrl || '(same origin)', source: 'health' });
+    return state;
+  }
+  // Every probe goes to the primary (direct) address first, so a session that fell back to the
+  // Vercel proxy during a blip returns to the direct road as soon as it works again.
+  if (primaryBaseUrl !== null && axios.defaults.baseURL !== primaryBaseUrl) {
+    try {
+      await axios.get('/api/health/', { baseURL: primaryBaseUrl, timeout: 90000, __noFallback: true });
+      console.info(`[api] ${primaryBaseUrl} reachable again; leaving the same-origin /api proxy`);
+      axios.defaults.baseURL = primaryBaseUrl;
+    } catch {
+      /* still unreachable directly — probe through whatever road is current */
+    }
+  }
   const baseUrl = axios.defaults.baseURL || '(same origin)';
   try {
-    const { data } = await axios.get('/api/health/', { timeout: 90000 });
+    const { data } = await axios.get('/api/health/', { timeout: 90000, __noFallback: true });
     if (clearLocalDataIfReset(data?.data_reset_epoch)) {
       window.location.reload();
       return state;
@@ -115,9 +131,11 @@ export async function checkBackendHealth() {
   } catch (err) {
     const detail = err?.code === 'ECONNABORTED'
       ? 'no answer within 90s — the server may be asleep or gone'
-      : err?.response
-        ? `HTTP ${err.response.status} from /api/health/`
-        : (err?.message || 'the request never reached a server');
+      : isHibernating(err)
+        ? 'the server is asleep and waking up (HTTP 429 from the proxy) — retrying'
+        : err?.response
+          ? `HTTP ${err.response.status} from /api/health/`
+          : (err?.message || 'the request never reached a server');
     setState({ status: 'unreachable', detail, baseUrl, source: 'health' });
   }
   return state;
@@ -125,6 +143,20 @@ export async function checkBackendHealth() {
 
 let installed = false;
 let lastProbeAt = 0;
+// The address resolveApiBaseUrl() chose at boot; null until installBackendHealthWatch runs.
+let primaryBaseUrl = null;
+
+const isOffline = () => typeof navigator !== 'undefined' && navigator.onLine === false;
+
+// A sleeping Render free instance will not be woken by traffic arriving through Vercel's
+// rewrite: Render answers it 429 with `x-render-routing: hibernate-rate-limited`, and keeps
+// doing so until something else wakes the service. Only a direct request does that.
+// (The app's own throttles — sign-in lockout — also answer 429, but with a JSON body.)
+const isHibernating = (error) => {
+  const res = error?.response;
+  if (res?.status !== 429) return false;
+  return /hibernate/i.test(res.headers?.['x-render-routing'] || '') || typeof res.data === 'string';
+};
 const REPROBE_INTERVAL_MS = 30000;
 const UNREACHABLE_RETRY_MS = 15000;
 
@@ -167,6 +199,7 @@ const reprobeIfBroken = () => {
 export function installBackendHealthWatch() {
   if (installed) return;
   installed = true;
+  primaryBaseUrl = axios.defaults.baseURL || '';
 
   axios.interceptors.response.use(
     (response) => {
@@ -175,12 +208,23 @@ export function installBackendHealthWatch() {
     },
     (error) => {
       const config = error?.config;
-      if (config && !config.__sameOriginRetry && isNetworkFailure(error) && canFallBackToSameOrigin()) {
+      // Offline (net::ERR_INTERNET_DISCONNECTED): the proxy is no more reachable than the
+      // backend, so switching roads would only strand the session on the proxy afterwards.
+      if (config && !config.__sameOriginRetry && !config.__noFallback && isNetworkFailure(error)
+          && !isOffline() && canFallBackToSameOrigin()) {
         console.warn(
           `[api] ${axios.defaults.baseURL} unreachable (${error.message}); switching to the same-origin /api proxy`
         );
         axios.defaults.baseURL = '';
         return axios.request({ ...config, baseURL: '', __sameOriginRetry: true });
+      }
+      // On the proxy and the backend has gone to sleep: the proxy cannot wake it, a direct
+      // request can. Go back to the direct road and retry there.
+      if (config && !config.__directRetry && !config.__noFallback && primaryBaseUrl
+          && config.baseURL === '' && isHibernating(error)) {
+        console.warn('[api] backend asleep behind the proxy; retrying directly to wake it');
+        axios.defaults.baseURL = primaryBaseUrl;
+        return axios.request({ ...config, baseURL: primaryBaseUrl, __directRetry: true, timeout: Math.max(config.timeout || 0, 90000) });
       }
 
       // A 4xx is the API working and saying no; only a 5xx or a dead socket is an outage.
@@ -200,8 +244,8 @@ export function installBackendHealthWatch() {
       } else if (isNetworkFailure(error)) {
         if (!keepHealthVerdict) {
           setState({
-            status: 'unreachable',
-            detail: error?.message || 'the request never reached a server',
+            status: isOffline() ? 'offline' : 'unreachable',
+            detail: isOffline() ? 'this computer has no internet connection' : (error?.message || 'the request never reached a server'),
             baseUrl: axios.defaults.baseURL || '(same origin)',
             source: 'traffic',
           });
@@ -217,11 +261,13 @@ export function installBackendHealthWatch() {
   // "Unreachable" is usually a blip (DNS hiccup, Wi-Fi drop). Keep asking while it lasts so
   // the banner clears by itself instead of waiting for the user to press Re-check.
   setInterval(() => {
-    if (state.status === 'unreachable' && Date.now() - lastProbeAt >= UNREACHABLE_RETRY_MS) {
+    if ((state.status === 'unreachable' || state.status === 'offline') && !isOffline()
+        && Date.now() - lastProbeAt >= UNREACHABLE_RETRY_MS) {
       checkBackendHealth();
     }
   }, 5000);
   window.addEventListener('online', () => checkBackendHealth());
+  window.addEventListener('offline', () => checkBackendHealth());
 }
 
 // Render's free plan puts the backend to sleep after 15 minutes without a request. Filling in
