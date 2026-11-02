@@ -46,14 +46,14 @@ export default function VirtualizedProductGrid({ endpoint, extraParams = {}, emp
   const rows = useMemo(() => (data?.pages || []).flatMap(p => p.results || []), [data]);
   const totalCount = data?.pages?.[0]?.count ?? 0;
 
-  const columns = useMemo(() => {
-    const headers = data?.pages?.[0]?.column_headers || [];
-    const coreLabels = new Set(CORE_COLUMNS.map(c => c.label.toLowerCase()));
-    const customColumns = headers
-      .filter(h => h && !coreLabels.has(h.toLowerCase()))
-      .map(h => ({ key: h, label: h, width: 150 }));
-    return [...CORE_COLUMNS, ...customColumns];
-  }, [data]);
+  // A batch preview shows the uploaded sheet itself: its columns, in its order, with
+  // its cell text. The catalogue (no column_headers) shows the database fields.
+  const sourceHeaders = data?.pages?.[0]?.column_headers;
+  const columns = useMemo(() => (
+    sourceHeaders?.length
+      ? sourceHeaders.map(h => ({ key: h, label: h, width: 150, fromSheet: true }))
+      : CORE_COLUMNS
+  ), [sourceHeaders]);
 
   const rowVirtualizer = useVirtualizer({
     count: hasNextPage ? rows.length + 1 : rows.length,
@@ -116,7 +116,9 @@ export default function VirtualizedProductGrid({ endpoint, extraParams = {}, emp
                     >
                       {row ? columns.map(col => (
                         <Box key={col.key} sx={{ width: col.width, flexShrink: 0, px: 1, fontSize: '0.8rem', textAlign: col.align || 'left', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                          {typeof row[col.key] === 'number' ? row[col.key].toLocaleString() : (row[col.key] ?? '—')}
+                          {col.fromSheet
+                            ? (row.source?.[col.key] ?? '')
+                            : (typeof row[col.key] === 'number' ? row[col.key].toLocaleString() : (row[col.key] ?? '—'))}
                         </Box>
                       )) : (
                         <Box sx={{ px: 2 }}><CircularProgress size={16} /></Box>

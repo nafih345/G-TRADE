@@ -1,5 +1,5 @@
 // Print Barcode Labels — used by Inventory → Products (row + bulk), the product barcode
-// section, the variant master, Purchase → Purchase Entry and Barcode Printing.
+// section, the variant master, Purchase → Purchase Entry and Administration → Barcode Settings.
 //
 // Pick a saved label template (the workflow's default is preselected), set quantities per
 // product / variant, review what will print, then print. Every value on the label comes

@@ -18,6 +18,7 @@ import DesignerCanvas, { PX_PER_MM } from './DesignerCanvas';
 import ElementPalette from './ElementPalette';
 import PropertiesPanel from './PropertiesPanel';
 import PreviewDataPicker from './PreviewDataPicker';
+import ManualBarcodeField from './ManualBarcodeField';
 import { NamePrompt, NewTemplateDialog, VersionsDialog, DeletedDialog } from './TemplateDialogs';
 import {
   createElement, alignElements, scaleElements, fitElementsToLabel, autoLayout, blankTemplate,
@@ -211,8 +212,6 @@ export default function LabelDesigner({ bundle, setBundle, reload, onPrintLabels
     } else if (fixId === 'widen') {
       const pad = t.layout.paddingMm || 0;
       updateElement(el.id, { x: pad, w: r2(t.width_mm - 2 * pad), rotation: 0 });
-    } else if (fixId === 'internal') {
-      updateElement(el.id, { barcode: { ...el.barcode, whenTooLong: 'internal' } });
     }
     setSelection([el.id]);
   };
@@ -536,6 +535,7 @@ export default function LabelDesigner({ bundle, setBundle, reload, onPrintLabels
 
           <Paper variant="outlined" sx={{ p: 1, mb: 1 }}>
             <PreviewDataPicker onData={setPreviewData} />
+            <ManualBarcodeField data={previewData} onData={setPreviewData} />
           </Paper>
 
           <Box

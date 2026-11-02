@@ -1,4 +1,4 @@
-// Purchase → Stock Overview API (backend: apps/inventory/stock_overview.py).
+// Inventory → Stock Overview API (backend: apps/inventory/stock_overview.py).
 // Every value shown on the screen comes from these calls — nothing is cached locally, so the
 // table always reflects the database (and the stock ledger behind it).
 import axios from 'axios';

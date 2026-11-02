@@ -2,8 +2,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  blankCheque, chequeDaysLeft, chequeDueDate, chequeFromRow, chequePayload, daysBetween, daysLeftLabel, daysLeftTone,
-  validateCheque,
+  blankCheque, chequeDaysLeft, chequeDueDate, chequeEditPayload, chequeFromRow, chequePartyLabel, chequePayload, daysBetween,
+  daysLeftLabel, daysLeftTone, validateCheque,
 } from '../cheques.js';
 
 test('daysBetween counts whole calendar days, across month and DST boundaries', () => {
@@ -41,11 +41,28 @@ test('validation', () => {
 });
 
 test('payload trims, nulls a blank deposit date and round-trips through a register row', () => {
-  const c = blankCheque({ chequeNumber: ' 0012 ', chequeDate: '2026-10-29', bankName: ' SBI ', partyName: 'Asha', remarks: '' });
+  const c = blankCheque({ chequeNumber: ' 0012 ', chequeDate: '2026-10-29', bankName: ' SBI ', bankBranch: ' MG Road ', partyName: 'Asha', remarks: '' });
   const p = chequePayload(c, 17);
-  assert.deepEqual(p, { cheque_number: '0012', cheque_date: '2026-10-29', bank_name: 'SBI', deposited_date: null,
-    party_name: 'Asha', remarks: '', ref: '17' });
+  assert.deepEqual(p, { cheque_number: '0012', cheque_date: '2026-10-29', bank_name: 'SBI', bank_branch: 'MG Road',
+    deposited_date: null, party_name: 'Asha', remarks: '', ref: '17' });
   assert.equal('ref' in chequePayload(c), false);
-  assert.deepEqual(chequeFromRow({ ...p, deposited_date: null }), {
-    chequeNumber: '0012', chequeDate: '2026-10-29', bankName: 'SBI', depositedDate: '', partyName: 'Asha', remarks: '' });
+  assert.deepEqual(chequeFromRow({ ...p, deposited_date: null, status: 'PENDING' }), {
+    chequeNumber: '0012', chequeDate: '2026-10-29', bankName: 'SBI', bankBranch: 'MG Road', depositedDate: '', partyName: 'Asha',
+    remarks: '', status: 'PENDING', clearedDate: '', statusNote: '' });
+});
+
+test('edit payload sends details always, status fields only when changed', () => {
+  const row = { cheque_number: 'A1', cheque_date: '2026-10-29', bank_name: 'SBI', status: 'DEPOSITED', cleared_date: null, status_note: '' };
+  const same = chequeEditPayload(chequeFromRow(row), row);
+  assert.deepEqual(Object.keys(same).sort(), ['bank_branch', 'bank_name', 'cheque_date', 'cheque_number', 'deposited_date', 'party_name', 'remarks']);
+  const cleared = chequeEditPayload({ ...chequeFromRow(row), status: 'CLEARED', clearedDate: '2026-10-31', statusNote: ' ok ' }, row);
+  assert.equal(cleared.status, 'CLEARED');
+  assert.equal(cleared.cleared_date, '2026-10-31');
+  assert.equal(cleared.status_note, 'ok');
+  assert.equal('ref' in cleared, false);
+});
+
+test('party label follows the direction', () => {
+  assert.equal(chequePartyLabel('RECEIVED'), 'Drawer Name');
+  assert.equal(chequePartyLabel('ISSUED'), 'Payee Name');
 });

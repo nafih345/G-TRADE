@@ -75,7 +75,10 @@ class Command(BaseCommand):
                 )
             return
 
-        User.objects.create_superuser(username=username, email=email, password=password)
+        # The bootstrap account belongs to the default tenant (#1, seeded by common 0002).
+        from apps.common.tenancy import DEFAULT_TENANT_ID
+        User.objects.create_superuser(username=username, email=email, password=password,
+                                      tenant_id=DEFAULT_TENANT_ID)
         self.stdout.write(self.style.SUCCESS(
             f"bootstrap_admin: created superuser '{username}' (role SUPER_ADMIN)."
         ))

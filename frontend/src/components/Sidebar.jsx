@@ -75,6 +75,7 @@ const menuItems = [
       { text: 'Categories', path: '/inventory/categories' },
       { text: 'Brands', path: '/inventory/brands' },
       { text: 'Lens Catalog Matrix', path: '/inventory/lenses' },
+      { text: 'Stock Overview', path: '/inventory/stock-overview' },
       { text: 'Stock Transfer', path: '/inventory/stock-transfer', multiBranchOnly: true }
     ]
   },
@@ -85,7 +86,6 @@ const menuItems = [
     subItems: [
       { text: 'Purchase Entry', path: '/purchase/entry' },
       { text: 'Suppliers', path: '/purchase/suppliers' },
-      { text: 'Stock Overview', path: '/purchase/stock-overview' },
       { text: 'Purchase Orders', path: '/purchase/orders' },
       { text: 'Lens Purchase Order', path: '/purchase/lens-orders' },
       { text: 'Stock Receive', path: '/purchase/receive' },
@@ -111,7 +111,9 @@ const menuItems = [
         ]
       },
       { text: 'Ledger', path: '/financial/ledger' },
+      { text: 'Day Book', path: '/financial/daybook' },
       { text: 'Cashbook', path: '/financial/cashbook' },
+      { text: 'Bank Book', path: '/financial/bankbook' },
       { text: 'Cheque Register', path: '/financial/cheques' },
       { text: 'Trial Balance', path: '/financial/trial-balance' },
       { text: 'Profit & Loss', path: '/financial/profit-loss' },
@@ -125,11 +127,26 @@ const menuItems = [
     icon: <AccountsIcon />,
     roles: ['*'],
     subItems: [
+      { text: 'Payment Voucher', path: '/accounts/vouchers/payment' },
+      { text: 'Receipt Voucher', path: '/accounts/vouchers/receipt' },
       { text: 'Receipts', path: '/accounts/receipts' },
       { text: 'Payments', path: '/accounts/payments' },
       { text: 'Expenses', path: '/accounts/expenses' },
       { text: 'Customer Due', path: '/accounts/customer-due' },
-      { text: 'Supplier Due', path: '/accounts/supplier-due' }
+      { text: 'Supplier Due', path: '/accounts/supplier-due' },
+      { text: 'Profit & Loss', path: '/accounts/profit-loss' },
+      {
+        text: 'Reports',
+        path: '/accounts/reports/payment-vouchers',
+        children: [
+          { text: 'Payment Voucher Report', path: '/accounts/reports/payment-vouchers' },
+          { text: 'Receipt Voucher Report', path: '/accounts/reports/receipt-vouchers' },
+          { text: 'Expense Report', path: '/accounts/reports/expenses' },
+          { text: 'Customer Outstanding', path: '/accounts/reports/customer-outstanding' },
+          { text: 'Supplier Outstanding', path: '/accounts/reports/supplier-outstanding' },
+          { text: 'Accounts Activity', path: '/accounts/reports/activity' }
+        ]
+      }
     ]
   },
   {
@@ -142,7 +159,7 @@ const menuItems = [
       { text: 'Service Master', path: '/admin/service-master' },
       { text: 'Branch Management', path: '/admin/branches', multiBranchOnly: true },
       { text: 'Excel Import Management', path: '/admin/excel-import' },
-      { text: 'Barcode Printing', path: '/admin/barcode-printing' },
+      { text: 'Barcode Settings', path: '/admin/barcode-settings' },
       { text: 'Roles', path: '/admin/roles' },
       { text: 'Permissions', path: '/admin/permissions' },
       { text: 'Audit Logs', path: '/admin/audit' }
@@ -196,6 +213,9 @@ export default function Sidebar({ open, toggleSidebar, isMobile = false }) {
 
     if (location.pathname.includes('/financial/vouchers')) {
       setNestedExpanded(prev => ({ ...prev, Vouchers: true }));
+    }
+    if (location.pathname.startsWith('/accounts/reports')) {
+      setNestedExpanded(prev => ({ ...prev, Reports: true }));
     }
   }, [location.pathname]);
 

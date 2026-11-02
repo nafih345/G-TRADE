@@ -266,7 +266,7 @@ export function planBarcode({ value, format, boxW, barcode = {}, dpi = 0 }) {
 }
 
 // Concrete ways out when a barcode can't print at a safe bar width: a denser format that
-// fits, a wider box, or the short internal code. The designer applies these fix ids.
+// fits or a wider box. The designer applies these fix ids.
 function barcodeFitHints(el, value, format, boxW, ctx) {
   const plan = planBarcode({ value, format, boxW, barcode: el.barcode, dpi: ctx.dpi });
   if (plan.error || plan.safe) return { unsafe: false };
@@ -283,10 +283,6 @@ function barcodeFitHints(el, value, format, boxW, ctx) {
   if (usable > boxW + 0.5) {
     const wider = planBarcode({ value, format, boxW: usable, barcode: { ...el.barcode, moduleMm: 0 }, dpi: ctx.dpi });
     if (!wider.error && wider.safe) fixes.push({ id: 'widen', label: 'Widen the barcode to the label width' });
-  }
-  if (el.barcode?.whenTooLong !== 'internal' && el.field !== 'sku') {
-    fixes.push({ id: 'internal', label: 'Print a short internal code when a barcode is too long' });
-    tips.push('Or print a short internal code mapped to the product — its SKU / barcode is never changed.');
   }
   return { unsafe: true, fixes, suggestion: tips.join(' ') };
 }
@@ -341,18 +337,6 @@ function barcodeHtml(el, value, format, boxW, boxH, dpi, warn, hints = {}) {
   return `<div class="gl-bc">${svg}${text}</div>`;
 }
 
-// True when this template would substitute the short internal code for this product (some
-// barcode element opted in and the product's barcode can't print at a safe bar width).
-export function needsInternalCode(template, fields, ctx = {}) {
-  const fullCtx = { dpi: 0, labelW: num(template.width_mm), padding: num(template.layout?.paddingMm, 0), ...ctx };
-  return (template.layout?.elements || []).some((el) => {
-    if (el.hidden || el.type !== 'barcode' || el.field === 'sku' || el.barcode?.whenTooLong !== 'internal') return false;
-    const fmt = !el.barcode?.format || el.barcode.format === 'inherit' ? template.layout?.defaultBarcodeFormat || 'CODE128' : el.barcode.format;
-    const rotated = el.rotation === 90 || el.rotation === 270;
-    return barcodeFitHints(el, fields?.barcode || '', fmt, rotated ? el.h : el.w, fullCtx).unsafe;
-  });
-}
-
 function elementInner(el, data, ctx, boxW, boxH, warn) {
   switch (el.type) {
     case 'field': {
@@ -372,20 +356,8 @@ function elementInner(el, data, ctx, boxW, boxH, warn) {
     }
     case 'barcode': {
       const fmt = !el.barcode?.format || el.barcode.format === 'inherit' ? ctx.defaultFormat : el.barcode.format;
-      let value = el.field === 'sku' ? rawFieldValue('sku', data) : (data.barcodeOverride || rawFieldValue('barcode', data));
-      const hints = barcodeFitHints(el, value, fmt, boxW, ctx);
-      // Too long to scan at this size: print the product's short internal code (a scan code
-      // already mapped to this product) — only when the template opts in.
-      const internalCode = data.internalCode || data.fields?.internal_code || '';
-      if (hints.unsafe && el.barcode?.whenTooLong === 'internal' && el.field !== 'sku') {
-        if (internalCode && internalCode !== value) {
-          warn({ level: 'info', elementId: el.id, kind: 'barcode', message: `“${value}” is too long for a scannable barcode here — printing this product’s short internal code ${internalCode} (it scans back to the same product).` });
-          value = internalCode;
-          return barcodeHtml(el, value, fmt, boxW, boxH, ctx.dpi, warn, barcodeFitHints(el, value, fmt, boxW, ctx));
-        }
-        warn({ level: 'info', elementId: el.id, kind: 'barcode', message: `“${value}” is too long for a scannable barcode here. A short internal code linked to this product is created when the label is printed.` });
-      }
-      return barcodeHtml(el, value, fmt, boxW, boxH, ctx.dpi, warn, hints);
+      const value = el.field === 'sku' ? rawFieldValue('sku', data) : (data.barcodeOverride || rawFieldValue('barcode', data));
+      return barcodeHtml(el, value, fmt, boxW, boxH, ctx.dpi, warn, barcodeFitHints(el, value, fmt, boxW, ctx));
     }
     case 'qr': {
       const value = el.field === 'barcode' ? (data.barcodeOverride || rawFieldValue('barcode', data)) : rawFieldValue(el.field, data);

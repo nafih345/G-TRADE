@@ -241,17 +241,6 @@ function BarcodeSizing({ el, template, setBarcode, dpi, previewData }) {
           <NumField label="mm" value={b.moduleMm} min={0.1} max={1} step={0.005} onChange={(v) => setBarcode({ moduleMm: v })} width={96} />
         )}
       </Row>
-      <TextField
-        select size="small" label="If a code is too long to scan at this size"
-        value={b.whenTooLong || 'warn'} onChange={(e) => setBarcode({ whenTooLong: e.target.value })}
-        helperText={b.whenTooLong === 'internal'
-          ? 'Prints a short numeric code saved against the product (it scans back to it). The product’s SKU / barcode are never changed.'
-          : 'The label still prints, with a warning in the preview and print dialog.'}
-        disabled={el.field === 'sku'}
-      >
-        <MenuItem value="warn">Warn me (print the full code)</MenuItem>
-        <MenuItem value="internal">Use the product’s short internal code</MenuItem>
-      </TextField>
       {plan && !plan.error && (
         <Box data-testid="barcode-readout" sx={{ p: 1, borderRadius: 1, fontSize: 12, bgcolor: plan.safe && plan.fits ? '#ecfdf5' : '#fffbeb', border: '1px solid', borderColor: plan.safe && plan.fits ? 'success.light' : 'warning.light' }}>
           <b>{plan.safe && plan.fits ? '✓ Scannable size' : '⚠ Too small to scan reliably'}</b> — “{value}” in {fmt}: {plan.modules} bar-widths<br />

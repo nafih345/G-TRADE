@@ -22,7 +22,8 @@ const EXPLANATIONS = {
   offline:
     'This computer has lost its internet connection. The app will reconnect by itself when it is back.',
   unreachable:
-    'Nothing is answering at the API address, so nothing you enter can be saved. Screens will stay empty.',
+    'This computer could not connect to the API address, so nothing you enter can be saved until it does. '
+    + 'The server may be down, or this network may be having trouble. The app keeps retrying by itself.',
   degraded:
     'Requests are reaching the server but failing there. Lists will look empty and anything you save may be lost.',
   outdated:

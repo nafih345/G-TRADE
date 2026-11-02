@@ -22,6 +22,8 @@ const SalesInvoice = lazy(() => import('./pages/SalesInvoice'));
 const WholesaleSales = lazy(() => import('./pages/WholesaleSales'));
 const WholesaleReports = lazy(() => import('./pages/WholesaleReports'));
 const AccountsCOA = lazy(() => import('./pages/AccountsCOA'));
+const AccountsVouchers = lazy(() => import('./pages/AccountsVouchers'));
+const AccountsProfitLoss = lazy(() => import('./pages/AccountsProfitLoss'));
 const FinancialManagement = lazy(() => import('./pages/FinancialManagement'));
 const OpticalServices = lazy(() => import('./pages/OpticalServices'));
 const Appointments = lazy(() => import('./pages/Appointments'));
@@ -238,6 +240,7 @@ function MainLayout() {
                 <Route path="/inventory/brands" element={<Products />} />
                 <Route path="/inventory/lenses" element={<Products />} />
                 <Route path="/inventory/lens" element={<Products />} />
+                <Route path="/inventory/stock-overview" element={<StockOverview />} />
 
                 {/* Purchase Sub-Routes */}
                 <Route path="/purchase" element={<Purchases />} />
@@ -248,9 +251,20 @@ function MainLayout() {
                 <Route path="/purchase/stock-receive" element={<Purchases />} />
                 <Route path="/purchase/returns" element={<Purchases />} />
                 <Route path="/purchase/lens-orders" element={<Purchases />} />
-                <Route path="/purchase/stock-overview" element={<StockOverview />} />
+                <Route path="/purchase/stock-overview" element={<Navigate to="/inventory/stock-overview" replace />} />
 
                 {/* Accounts Sub-Routes */}
+                <Route path="/accounts/vouchers" element={<Navigate to="/accounts/vouchers/payment" replace />} />
+                <Route path="/accounts/vouchers/payment" element={<AccountsVouchers />} />
+                <Route path="/accounts/vouchers/receipt" element={<AccountsVouchers />} />
+                <Route path="/accounts/reports" element={<Navigate to="/accounts/reports/payment-vouchers" replace />} />
+                <Route path="/accounts/reports/payment-vouchers" element={<AccountsVouchers />} />
+                <Route path="/accounts/reports/receipt-vouchers" element={<AccountsVouchers />} />
+                <Route path="/accounts/reports/expenses" element={<AccountsVouchers />} />
+                <Route path="/accounts/reports/customer-outstanding" element={<AccountsVouchers />} />
+                <Route path="/accounts/reports/supplier-outstanding" element={<AccountsVouchers />} />
+                <Route path="/accounts/reports/activity" element={<AccountsVouchers />} />
+                <Route path="/accounts/profit-loss" element={<AccountsProfitLoss />} />
                 <Route path="/accounts/receipts" element={<AccountsCOA />} />
                 <Route path="/accounts/payments" element={<AccountsCOA />} />
                 <Route path="/accounts/expenses" element={<AccountsCOA />} />
@@ -269,7 +283,9 @@ function MainLayout() {
                 <Route path="/financial/vouchers/all" element={<FinancialManagement />} />
                 <Route path="/financial/journal-entries" element={<FinancialManagement />} />
                 <Route path="/financial/ledger" element={<FinancialManagement />} />
+                <Route path="/financial/daybook" element={<FinancialManagement />} />
                 <Route path="/financial/cashbook" element={<FinancialManagement />} />
+                <Route path="/financial/bankbook" element={<FinancialManagement />} />
                 <Route path="/financial/cheques" element={<FinancialManagement />} />
                 <Route path="/financial/trial-balance" element={<FinancialManagement />} />
                 <Route path="/financial/profit-loss" element={<FinancialManagement />} />
@@ -286,7 +302,8 @@ function MainLayout() {
                 <Route path="/admin/service-master" element={<Administration />} />
                 <Route path="/admin/branches" element={<Administration />} />
                 <Route path="/admin/excel-import" element={<Administration />} />
-                <Route path="/admin/barcode-printing" element={<Administration />} />
+                <Route path="/admin/barcode-settings" element={<Administration />} />
+                <Route path="/admin/barcode-printing" element={<Navigate to="/admin/barcode-settings" replace />} />
                 <Route path="/admin/roles" element={<Administration />} />
                 <Route path="/admin/permissions" element={<Administration />} />
                 <Route path="/admin/audit" element={<Administration />} />

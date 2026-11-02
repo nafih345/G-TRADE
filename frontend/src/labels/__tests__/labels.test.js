@@ -8,7 +8,7 @@ import {
   createElement, geometryWarnings, snapPosition, alignElements, scaleElements, fitElementsToLabel, autoLayout,
   convertLegacySettings, jobTotals, a4SheetCount, blankTemplate, templateUsesRestricted, normalizeTemplate,
 } from '../labelModel.js';
-import { barcodeProblem, encodeBarcode, patternToRuns, renderLabelHtml, labelCss, planBarcode, moduleWidthOptions, needsInternalCode } from '../renderLabel.js';
+import { barcodeProblem, encodeBarcode, patternToRuns, renderLabelHtml, labelCss, planBarcode, moduleWidthOptions } from '../renderLabel.js';
 
 const data = (fields, job = {}, store = { store_name: 'Greensol Opticals' }) => ({ fields, job, store });
 const fieldEl = (field, extra = {}) => ({ ...createElement('field', { field }), ...extra });
@@ -226,15 +226,14 @@ test('a fixed bar width that does not fit is reported, never silently accepted',
   assert.ok(w.fixes.some((f) => f.id === 'format128'));
 });
 
-test('short internal code is only used when opted in, and only for codes too long to scan', () => {
+test('the product barcode is never swapped for an internal code, even on older templates', () => {
   const t = { ...blankTemplate(), width_mm: 38, height_mm: 25 };
   t.layout.elements = [{ ...createElement('barcode'), id: 'bc', x: 1, y: 10, w: 36, h: 12 }];
+  t.layout.elements[0].barcode.whenTooLong = 'internal'; // saved before auto-numbering was removed
   const long = { barcode: 'TITTW1234GUN54XL', internal_code: '2000000000077' };
-  assert.equal(needsInternalCode(t, long, { dpi: 203 }), false); // not opted in
-  t.layout.elements[0].barcode.whenTooLong = 'internal';
-  assert.equal(needsInternalCode(t, long, { dpi: 203 }), true);
-  assert.equal(needsInternalCode(t, { barcode: '8901234567890' }, { dpi: 203 }), false); // fits → original
-  const { html } = renderLabelHtml(t, { fields: long }, { dpi: 203 });
-  assert.match(html, /data-value="2000000000077"/);
-  assert.match(html, />2000000000077</, 'digits match what is encoded');
+  const { html, warnings } = renderLabelHtml(t, { fields: long }, { dpi: 203 });
+  assert.match(html, /data-value="TITTW1234GUN54XL"/);
+  assert.doesNotMatch(html, /2000000000077/);
+  assert.ok(warnings.some((w) => w.kind === 'barcode-fit'), 'too-long codes still warn');
+  assert.ok(warnings.every((w) => !(w.fixes || []).some((f) => f.id === 'internal')));
 });

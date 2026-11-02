@@ -1,7 +1,7 @@
 // Settings → Barcode Labels. The store-wide barcode label system:
 //   Designer             — visual editor for database-saved label templates.
 //   Printing & Defaults  — template per workflow, printers, calibration, test prints.
-// Every Print button (Products, Purchase Entry, Barcode Printing) prints from these.
+// Every Print button (Products, Purchase Entry, Barcode Settings) prints from these.
 import React, { useState } from 'react';
 import { Card, Box, Tabs, Tab, Typography, Alert, Button, CircularProgress } from '@mui/material';
 import { Brush, Print } from '@mui/icons-material';
@@ -18,7 +18,7 @@ export default function BarcodeLabelSettings() {
 
   const onPrintLabels = (template, product) => {
     if (!product) {
-      notify('Pick “Real product” in “Preview with” to print from here — or print from Inventory, Purchase Entry or Barcode Printing.', 'info');
+      notify('Pick “Real product” in “Preview with” to print from here — or print from Inventory, Purchase Entry or Barcode Settings.', 'info');
       return;
     }
     setPrintJob({ template, products: [product] });
@@ -30,7 +30,7 @@ export default function BarcodeLabelSettings() {
         <Box sx={{ flex: 1 }}>
           <Typography variant="h6" fontWeight={800}>Barcode Label Designer</Typography>
           <Typography variant="body2" color="text.secondary">
-            Design once — Products, Purchase Entry and Barcode Printing print with these templates and fill in each product’s real data.
+            Design once — Products, Purchase Entry and Barcode Settings print with these templates and fill in each product’s real data.
           </Typography>
         </Box>
         <Tabs value={tab} onChange={(e, v) => setTab(v)}>

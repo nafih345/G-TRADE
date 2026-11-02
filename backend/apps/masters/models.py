@@ -3,12 +3,17 @@ from apps.common.models import BaseUUIDModel
 
 class ProductCategory(BaseUUIDModel):
     name = models.CharField(max_length=100)
-    code = models.CharField(max_length=50, unique=True)
+    code = models.CharField(max_length=50)
     description = models.TextField(blank=True, null=True)
     gst_percentage = models.CharField(max_length=20, default='18%')
     hsn_code = models.CharField(max_length=50, default='90031100')
     status = models.CharField(max_length=20, default='Active')
     display_order = models.IntegerField(default=1)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'code'], name='masters_productcategory_code_tenant'),
+        ]
 
     def __str__(self):
         return f"{self.name} ({self.code})"
@@ -16,7 +21,12 @@ class ProductCategory(BaseUUIDModel):
 
 class Brand(BaseUUIDModel):
     name = models.CharField(max_length=100)
-    code = models.CharField(max_length=50, unique=True)
+    code = models.CharField(max_length=50)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'code'], name='masters_brand_code_tenant'),
+        ]
 
     def __str__(self):
         return self.name
@@ -24,7 +34,12 @@ class Brand(BaseUUIDModel):
 
 class Unit(BaseUUIDModel):
     name = models.CharField(max_length=50)
-    code = models.CharField(max_length=20, unique=True)  # PCS, KG, LTR, etc.
+    code = models.CharField(max_length=20)  # PCS, KG, LTR, etc.
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'code'], name='masters_unit_code_tenant'),
+        ]
 
     def __str__(self):
         return self.name

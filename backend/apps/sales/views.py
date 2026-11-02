@@ -26,6 +26,8 @@ from .patient_utils import (
     find_duplicate_customer, find_duplicate_exam,
 )
 from .eye_test_fees import derive_fee_fields, fee_exam_ids, sync_invoice_eye_test_fees
+from .sales_report import build_sales_report, report_queryset
+from .eye_test_report import build_billing_reference
 from apps.inventory.models import StockLedger
 from apps.inventory.stock_utils import adjust_branch_stock_many
 from apps.common.branch_mixins import BranchScopedViewSetMixin
@@ -604,6 +606,17 @@ class EyeExaminationViewSet(viewsets.ModelViewSet):
     def next_test_no(self, request):
         return Response({'test_no': peek_next_test_no()})
 
+    @action(detail=True, methods=['get'])
+    def report(self, request, pk=None):
+        # Eye Test Report: the visit plus its billing references (fee receipt / the bill the fee
+        # went onto / spectacle bills dispensed against this Test No).
+        exam = self.get_object()
+        data = dict(self.get_serializer(exam).data)
+        # The linked Customer's code is the patient's permanent ID; the exam's own patient_id is
+        # whatever the form held at the time and can be stale.
+        data['patient_code'] = exam.customer.patient_code if exam.customer_id and exam.customer else None
+        return Response({'exam': data, 'billing': build_billing_reference(exam)})
+
 class AppointmentViewSet(viewsets.ModelViewSet):
     queryset = Appointment.objects.all()
     serializer_class = AppointmentSerializer
@@ -771,6 +784,16 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
         # A deleted bill's deferred eye test fees go back to pending for the next sale.
         sync_invoice_eye_test_fees(instance, released=True)
         super().perform_destroy(instance)
+
+    @action(detail=False, methods=['get'], url_path='report')
+    def report(self, request):
+        """Reports → Sales Report: ?date_from=&date_to=&document_type= — every bill in range with
+        its customer, linked eye test, line details, payment and staff (see sales_report.py).
+        Unpaged: the client always asks for a bounded date range."""
+        # The mixin's branch-scoped rows, without get_queryset's read prefetches (the report
+        # prefetches its own, with bank accounts and variant groups joined in).
+        base = super().get_queryset()
+        return Response({'results': build_sales_report(report_queryset(base, request.query_params))})
 
     @action(detail=True, methods=['post'], url_path='convert')
     def convert(self, request, pk=None):

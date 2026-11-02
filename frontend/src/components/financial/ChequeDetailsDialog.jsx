@@ -1,8 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Grid, InputAdornment, TextField, Typography,
+  Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Grid, InputAdornment, MenuItem, TextField, Typography,
 } from '@mui/material';
-import { blankCheque, chequeDaysLeft, chequeDueDate, daysLeftLabel, daysLeftTone, validateCheque } from '../../utils/cheques';
+import {
+  CHEQUE_STATUSES, blankCheque, chequeDaysLeft, chequeDueDate, chequeFromRow, daysLeftLabel, daysLeftTone, validateCheque,
+} from '../../utils/cheques';
 import { formatDate } from '../../utils/localeFormat';
 
 const TONE_COLOR = { overdue: 'error', today: 'warning', soon: 'info', later: 'success' };
@@ -14,26 +16,35 @@ export const DaysLeftChip = ({ days, size = 'small' }) => {
 };
 
 /**
- * Cheque details for one Cheque pay line (Receipt / Payment Voucher) — or, from the Cheque
- * Register, for correcting a saved cheque (`amountLocked`: the amount is what the voucher posted).
+ * Cheque details for one Cheque pay line (Receipt / Payment Voucher) — or, with `row` (a Cheque
+ * Register row), for editing a saved cheque from the register or a posted voucher: the amount is
+ * then locked (it is what the voucher posted) and the status / cleared date can be changed too.
  * Cheque Amount here IS the pay line's amount; saving writes it back to the line.
  */
-export default function ChequeDetailsDialog({ open, direction = 'RECEIVED', value, amount, defaults = {}, amountLocked = false, saving = false, onSave, onClose }) {
+export default function ChequeDetailsDialog({ open, direction = 'RECEIVED', value, amount, row = null, defaults = {}, amountLocked = false, saving = false, onSave, onClose }) {
   const [draft, setDraft] = useState(() => blankCheque());
   const [amt, setAmt] = useState('');
   const [tried, setTried] = useState(false);
+  const saved = !!row;
+  const locked = amountLocked || saved;
 
   useEffect(() => {
     if (!open) return;
-    setDraft(value ? { ...blankCheque(), ...value } : blankCheque({ partyName: defaults.partyName || '', bankName: defaults.bankName || '' }));
-    setAmt(amount === undefined || amount === null ? '' : String(amount));
+    const initial = row ? chequeFromRow(row) : value;
+    setDraft(initial ? { ...blankCheque(), ...initial } : blankCheque({ partyName: defaults.partyName || '', bankName: defaults.bankName || '' }));
+    const a = row ? row.amount : amount;
+    setAmt(a === undefined || a === null ? '' : String(a));
     setTried(false);
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const set = (k) => (e) => setDraft(d => ({ ...d, [k]: e.target.value }));
   const problems = validateCheque(draft, amt);
+  if (saved && draft.status === 'CLEARED' && draft.clearedDate && draft.depositedDate && draft.clearedDate < draft.depositedDate) {
+    problems.push('the cleared date is before the deposited date');
+  }
+  const statusOptions = saved ? [row.status, ...(row.allowed_status || [])] : [];
   const days = chequeDaysLeft(draft);
-  const received = direction === 'RECEIVED';
+  const received = (row?.direction || direction) === 'RECEIVED';
 
   const save = (e) => {
     e?.preventDefault();
@@ -46,9 +57,11 @@ export default function ChequeDetailsDialog({ open, direction = 'RECEIVED', valu
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
       <Box component="form" onSubmit={save} noValidate>
         <DialogTitle sx={{ fontWeight: 850, pb: 1 }}>
-          {received ? 'Cheque Received' : 'Cheque Issued'} — Details
+          {saved ? 'Edit ' : ''}{received ? 'Cheque Received' : 'Cheque Issued'} — Details
           <Typography variant="body2" color="text.secondary">
-            {received ? 'The cheque you received from the party.' : 'The cheque you are giving to the party.'}
+            {saved
+              ? `On ${row.voucher_number || 'its voucher'}. A new number or date is also written into the voucher's own records.`
+              : received ? 'The cheque you received from the party.' : 'The cheque you are giving to the party.'}
           </Typography>
         </DialogTitle>
         <DialogContent dividers>
@@ -66,9 +79,13 @@ export default function ChequeDetailsDialog({ open, direction = 'RECEIVED', valu
                 placeholder={received ? "Party's bank (drawn on)" : 'Your bank'} inputProps={{ maxLength: 150 }} />
             </Grid>
             <Grid item xs={12} sm={6}>
+              <TextField fullWidth size="small" label="Bank Branch" value={draft.bankBranch || ''} onChange={set('bankBranch')}
+                placeholder="Branch (optional)" inputProps={{ maxLength: 120 }} />
+            </Grid>
+            <Grid item xs={12} sm={6}>
               <TextField fullWidth size="small" required type="number" label="Cheque Amount" value={amt} onChange={(e) => setAmt(e.target.value)}
-                disabled={amountLocked} error={tried && !(parseFloat(amt) > 0)}
-                helperText={amountLocked ? 'Posted on the voucher — reverse the voucher to change it.' : 'Same as this payment line’s amount.'}
+                disabled={locked} error={tried && !(parseFloat(amt) > 0)}
+                helperText={locked ? 'Posted on the voucher — reverse the voucher to change it.' : 'Same as this payment line’s amount.'}
                 inputProps={{ min: 0, step: '0.01', style: { textAlign: 'right', fontWeight: 700 } }}
                 InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }} />
             </Grid>
@@ -91,8 +108,28 @@ export default function ChequeDetailsDialog({ open, direction = 'RECEIVED', valu
                 </Box>
               </Box>
             </Grid>
+            {saved && (
+              <>
+                <Grid item xs={12} sm={6}>
+                  <TextField select fullWidth size="small" label="Status" value={draft.status} onChange={set('status')}
+                    helperText="Tracking only — posts nothing.">
+                    {statusOptions.map(st => <MenuItem key={st} value={st}>{CHEQUE_STATUSES[st]?.label || st}</MenuItem>)}
+                  </TextField>
+                </Grid>
+                <Grid item xs={12} sm={6}>
+                  <TextField fullWidth size="small" type="date" label="Cleared Date" value={draft.status === 'CLEARED' ? draft.clearedDate : ''}
+                    onChange={set('clearedDate')} disabled={draft.status !== 'CLEARED'} InputLabelProps={{ shrink: true }}
+                    inputProps={{ min: draft.depositedDate || draft.chequeDate || undefined }}
+                    helperText={draft.status === 'CLEARED' ? 'Blank = today' : 'Set when the status is Cleared'} />
+                </Grid>
+                <Grid item xs={12}>
+                  <TextField fullWidth size="small" label="Status Note" value={draft.statusNote} onChange={set('statusNote')}
+                    placeholder="e.g. Bounced — funds insufficient" inputProps={{ maxLength: 255 }} />
+                </Grid>
+              </>
+            )}
             <Grid item xs={12}>
-              <TextField fullWidth size="small" label={received ? 'Company / Party Name (issued by)' : 'Company / Party Name (payee)'}
+              <TextField fullWidth size="small" label={received ? 'Drawer Name (who issued the cheque)' : 'Payee Name (cheque made out to)'}
                 value={draft.partyName} onChange={set('partyName')} inputProps={{ maxLength: 200 }}
                 helperText="Defaults to the voucher’s party when left blank." />
             </Grid>

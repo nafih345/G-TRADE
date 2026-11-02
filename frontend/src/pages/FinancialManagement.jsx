@@ -38,6 +38,8 @@ import {
   Undo as ReverseIcon,
   FilterList as FilterIcon,
   Payments as CashbookIcon,
+  EventNote as DayBookIcon,
+  AccountBalance as BankBookIcon,
   RequestQuote as ChequeIcon
 } from '@mui/icons-material';
 import axios from 'axios';
@@ -49,6 +51,8 @@ import VoucherRegister from '../components/financial/VoucherRegister';
 import StandardVoucherForm from '../components/financial/StandardVoucherForm';
 import AccountingIntegrationPanel from '../components/financial/AccountingIntegrationPanel';
 import CashbookPanel from '../components/financial/Cashbook';
+import BankBookPanel from '../components/financial/BankBook';
+import DayBookPanel from '../components/financial/DayBook';
 import ChequeRegister from '../components/financial/ChequeRegister';
 
 // Fixed Sub-Categories per Group (NO COGS!)
@@ -178,7 +182,9 @@ function FinancialManagementView() {
     if (path.includes('/financial/balance-sheet')) return { top: 6, sub: 'receipt' };
     if (path.includes('/financial/reports')) return { top: 7, sub: 'receipt' };
     if (path.includes('/financial/integration')) return { top: 8, sub: 'receipt' };
+    if (path.includes('/financial/daybook')) return { top: 11, sub: 'receipt' };
     if (path.includes('/financial/cashbook')) return { top: 9, sub: 'receipt' };
+    if (path.includes('/financial/bankbook')) return { top: 12, sub: 'receipt' };
     if (path.includes('/financial/cheques')) return { top: 10, sub: 'receipt' };
     return { top: 0, sub: 'receipt' };
   };
@@ -206,7 +212,9 @@ function FinancialManagementView() {
       '/financial/reports',
       '/financial/integration',
       '/financial/cashbook',
-      '/financial/cheques'
+      '/financial/cheques',
+      '/financial/daybook',
+      '/financial/bankbook'
     ];
     if (newTop === 2) setVoucherSubTab('receipt');
     navigate(topPaths[newTop] || '/financial/dashboard');
@@ -755,8 +763,10 @@ function FinancialManagementView() {
           <Tab value={1} icon={<ChartIcon />} label="Chart of Accounts" iconPosition="start" />
           <Tab value={2} icon={<JournalIcon />} label="Vouchers" iconPosition="start" />
           <Tab value={3} icon={<LedgerIcon />} label="Ledger" iconPosition="start" />
-          {/* Explicit values: Cashbook sits beside Ledger but keeps the next free index. */}
+          {/* Explicit values: Day Book / Cashbook sit beside Ledger but keep the next free index. */}
+          <Tab value={11} icon={<DayBookIcon />} label="Day Book" iconPosition="start" />
           <Tab value={9} icon={<CashbookIcon />} label="Cashbook" iconPosition="start" />
+          <Tab value={12} icon={<BankBookIcon />} label="Bank Book" iconPosition="start" />
           <Tab value={10} icon={<ChequeIcon />} label="Cheque Register" iconPosition="start" />
           <Tab value={4} icon={<TrialIcon />} label="Trial Balance" iconPosition="start" />
           <Tab value={5} icon={<ProfitIcon />} label="Profit & Loss (P&L)" iconPosition="start" />
@@ -1388,8 +1398,14 @@ function FinancialManagementView() {
         <LedgerPanel accounts={accounts} accountId={ledgerAccountId} onAccountChange={setLedgerAccountId} />
       )}
 
+      {/* 7a. DAY BOOK VIEW */}
+      {topTab === 11 && <DayBookPanel />}
+
       {/* 7b. CASHBOOK VIEW */}
       {topTab === 9 && <CashbookPanel />}
+
+      {/* 7b2. BANK BOOK */}
+      {topTab === 12 && <BankBookPanel />}
 
       {/* 7c. CHEQUE REGISTER */}
       {topTab === 10 && <ChequeRegister />}

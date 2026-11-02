@@ -1,8 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-  Dialog, DialogTitle, DialogContent, DialogActions, Button, TextField, MenuItem,
-  Stack, Typography, Alert, Box, Chip, CircularProgress, Grid
+  Button, Card, TextField, MenuItem, Stack, Typography, Alert, Box, Chip, CircularProgress, Grid
 } from '@mui/material';
 import { useDebounce } from '../../hooks/useDebounce';
 import { notify } from '../../utils/notify';
@@ -29,8 +28,9 @@ export function describeSeries(cfg) {
 // Editor for the shared product barcode series (BarcodeSeriesConfig): prefix
 // pattern, total digits, check digit and the next running number. Every
 // "Generate Barcode" (Product Master, Manage Barcode, bulk generate, variants,
-// label printing, Excel import) mints from this one series.
-export default function BarcodeConfigDialog({ open, onClose, onSaved }) {
+// Excel import) mints from this one series. refreshKey reloads the saved values
+// after the parent mints codes, so the next number shown stays current.
+export default function BarcodeSeriesSettings({ refreshKey = 0 }) {
   const [saved, setSaved] = useState(null);
   const [form, setForm] = useState(null);
   const [preview, setPreview] = useState(null);
@@ -40,7 +40,6 @@ export default function BarcodeConfigDialog({ open, onClose, onSaved }) {
   const prefixRef = useRef(null);
 
   useEffect(() => {
-    if (!open) return;
     setError('');
     axios.get(BARCODE_CONFIG_URL)
       .then((res) => {
@@ -56,7 +55,7 @@ export default function BarcodeConfigDialog({ open, onClose, onSaved }) {
         });
       })
       .catch(() => setError('Could not load the barcode settings.'));
-  }, [open]);
+  }, [refreshKey]);
 
   const nextChanged = form && saved && form.next_number !== String(saved.next_number);
   const payload = form && {
@@ -66,10 +65,14 @@ export default function BarcodeConfigDialog({ open, onClose, onSaved }) {
     ...(nextChanged ? { next_number: Number(form.next_number) } : {})
   };
   const debouncedPayload = useDebounce(payload ? JSON.stringify(payload) : '', 300);
+  const dirty = Boolean(payload && saved) && (nextChanged
+    || payload.prefix_pattern !== saved.prefix_pattern
+    || payload.total_length !== saved.total_length
+    || payload.check_digit !== saved.check_digit);
 
   // Live preview via a server dry run — the same code path that mints real barcodes.
   useEffect(() => {
-    if (!open || !debouncedPayload) return undefined;
+    if (!debouncedPayload) return undefined;
     let cancelled = false;
     setChecking(true);
     axios.put(BARCODE_CONFIG_URL, { ...JSON.parse(debouncedPayload), dry_run: true })
@@ -82,7 +85,7 @@ export default function BarcodeConfigDialog({ open, onClose, onSaved }) {
       })
       .finally(() => { if (!cancelled) setChecking(false); });
     return () => { cancelled = true; };
-  }, [open, debouncedPayload]);
+  }, [debouncedPayload]);
 
   const set = (patch) => setForm((f) => ({ ...f, ...patch }));
 
@@ -98,9 +101,10 @@ export default function BarcodeConfigDialog({ open, onClose, onSaved }) {
     setSaving(true);
     try {
       const res = await axios.put(BARCODE_CONFIG_URL, payload);
+      setSaved(res.data);
+      setPreview(res.data.preview);
+      set({ next_number: String(res.data.next_number) });
       notify('Barcode settings saved.', 'success');
-      onSaved && onSaved(res.data);
-      onClose();
     } catch (e) {
       const d = e?.response?.data;
       setError((Array.isArray(d?.detail) ? d.detail[0] : d?.detail) || 'Could not save the barcode settings.');
@@ -112,18 +116,16 @@ export default function BarcodeConfigDialog({ open, onClose, onSaved }) {
   const nextLower = nextChanged && saved && Number(form.next_number) < saved.next_number;
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth PaperProps={{ sx: { borderRadius: 3.5 } }}>
-      <DialogTitle sx={{ fontWeight: 800 }}>
-        Barcode Settings
-        <Typography variant="body2" color="text.secondary" fontWeight={500}>
-          How new product barcodes are numbered. Existing barcodes are not changed.
-        </Typography>
-      </DialogTitle>
-      <DialogContent dividers>
-        {!form ? (
-          error ? <Alert severity="error">{error}</Alert> : <Box sx={{ py: 4, textAlign: 'center' }}><CircularProgress size={24} /></Box>
-        ) : (
-          <Stack spacing={2}>
+    <Card variant="outlined" sx={{ p: 2.5, mb: 3, borderRadius: 3 }}>
+      <Typography variant="subtitle1" fontWeight={800}>Barcode Number Series</Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+        How new product barcodes are numbered. Existing barcodes are not changed.
+      </Typography>
+      {!form ? (
+        error ? <Alert severity="error">{error}</Alert> : <Box sx={{ py: 4, textAlign: 'center' }}><CircularProgress size={24} /></Box>
+      ) : (
+        <Stack spacing={2}>
+          <Box>
             <Grid container spacing={2}>
               <Grid item xs={12} sm={6}>
                 <TextField
@@ -133,7 +135,6 @@ export default function BarcodeConfigDialog({ open, onClose, onSaved }) {
                   inputRef={prefixRef}
                   helperText="Fixed start of every code. Leave empty for none."
                   inputProps={{ maxLength: 40, style: { fontFamily: 'monospace', fontWeight: 700 } }}
-                  autoFocus
                 />
                 <Stack direction="row" spacing={0.5} sx={{ mt: 0.5, flexWrap: 'wrap', rowGap: 0.5 }}>
                   {TOKENS.map((tok) => (
@@ -187,57 +188,57 @@ export default function BarcodeConfigDialog({ open, onClose, onSaved }) {
                 />
               </Grid>
             </Grid>
+          </Box>
 
-            {nextLower && (
-              <Alert severity="warning">
-                Moving the number back re-enters a used range. Numbers already held by a product are skipped automatically.
-              </Alert>
-            )}
-            {error && <Alert severity="error">{error}</Alert>}
+          {nextLower && (
+            <Alert severity="warning">
+              Moving the number back re-enters a used range. Numbers already held by a product are skipped automatically.
+            </Alert>
+          )}
+          {error && <Alert severity="error">{error}</Alert>}
 
-            {preview && !error && (
-              <Box sx={{ border: '1px dashed #94a3b8', borderRadius: 2, p: 2, bgcolor: '#f8fafc' }}>
-                <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
-                  <Typography variant="subtitle2" fontWeight={800}>Next barcodes</Typography>
-                  {checking && <CircularProgress size={14} />}
-                </Stack>
-                <Stack spacing={0.25}>
-                  {preview.samples.map((code) => (
-                    <Typography key={code} sx={{ fontFamily: 'monospace', fontWeight: 700, letterSpacing: 1 }}>
-                      <Box component="span" sx={{ color: 'primary.main' }}>{code.slice(0, preview.resolved_prefix.length)}</Box>
-                      {form.check_digit === 'MOD10'
-                        ? <>{code.slice(preview.resolved_prefix.length, -1)}<Box component="span" sx={{ color: 'success.main' }}>{code.slice(-1)}</Box></>
-                        : code.slice(preview.resolved_prefix.length)}
-                    </Typography>
-                  ))}
-                </Stack>
-                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-                  <Box component="span" sx={{ color: 'primary.main', fontWeight: 700 }}>Prefix</Box>
-                  {` ${preview.resolved_prefix.length || 0} + running number ${preview.variable ? '(variable)' : preview.sequence_digits}`}
-                  {form.check_digit === 'MOD10' && <> + <Box component="span" sx={{ color: 'success.main', fontWeight: 700 }}>check</Box> 1</>}
-                  {` · ${Number(preview.remaining).toLocaleString()} codes left in this series`}
+          {preview && !error && (
+            <Box sx={{ border: '1px dashed #94a3b8', borderRadius: 2, p: 2, bgcolor: '#f8fafc' }}>
+              <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
+                <Typography variant="subtitle2" fontWeight={800}>Next barcodes</Typography>
+                {checking && <CircularProgress size={14} />}
+              </Stack>
+              <Stack spacing={0.25}>
+                {preview.samples.map((code) => (
+                  <Typography key={code} sx={{ fontFamily: 'monospace', fontWeight: 700, letterSpacing: 1 }}>
+                    <Box component="span" sx={{ color: 'primary.main' }}>{code.slice(0, preview.resolved_prefix.length)}</Box>
+                    {form.check_digit === 'MOD10'
+                      ? <>{code.slice(preview.resolved_prefix.length, -1)}<Box component="span" sx={{ color: 'success.main' }}>{code.slice(-1)}</Box></>
+                      : code.slice(preview.resolved_prefix.length)}
+                  </Typography>
+                ))}
+              </Stack>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+                <Box component="span" sx={{ color: 'primary.main', fontWeight: 700 }}>Prefix</Box>
+                {` ${preview.resolved_prefix.length || 0} + running number ${preview.variable ? '(variable)' : preview.sequence_digits}`}
+                {form.check_digit === 'MOD10' && <> + <Box component="span" sx={{ color: 'success.main', fontWeight: 700 }}>check</Box> 1</>}
+                {` · ${Number(preview.remaining).toLocaleString()} codes left in this series`}
+              </Typography>
+              {!preview.numeric && (
+                <Typography variant="caption" color="warning.main" sx={{ display: 'block' }}>
+                  Letters in the prefix: labels must use Code 128 / Code 39 (not EAN / UPC).
                 </Typography>
-                {!preview.numeric && (
-                  <Typography variant="caption" color="warning.main" sx={{ display: 'block' }}>
-                    Letters in the prefix: labels must use Code 128 / Code 39 (not EAN / UPC).
-                  </Typography>
-                )}
-                {preview.numeric && (form.variable || Number(form.total_length) !== 13) && (
-                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-                    Not 13 digits: print labels with Code 128 rather than EAN-13.
-                  </Typography>
-                )}
-              </Box>
-            )}
+              )}
+              {preview.numeric && (form.variable || Number(form.total_length) !== 13) && (
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                  Not 13 digits: print labels with Code 128 rather than EAN-13.
+                </Typography>
+              )}
+            </Box>
+          )}
+
+          <Stack direction="row" justifyContent="flex-end">
+            <Button variant="contained" onClick={handleSave} disabled={!dirty || saving || Boolean(error) || checking}>
+              {saving ? 'Saving…' : 'Save'}
+            </Button>
           </Stack>
-        )}
-      </DialogContent>
-      <DialogActions>
-        <Button onClick={onClose}>Cancel</Button>
-        <Button variant="contained" onClick={handleSave} disabled={!form || saving || Boolean(error) || checking}>
-          {saving ? 'Saving…' : 'Save'}
-        </Button>
-      </DialogActions>
-    </Dialog>
+        </Stack>
+      )}
+    </Card>
   );
 }

@@ -53,8 +53,8 @@ def ensure_accounting_defaults(user=None):
         return {'accounts': [], 'mappings': []}
     with transaction.atomic():
         # The policy row doubles as the lock, so two postings healing at once can't both map a role.
-        AccountingPolicy.objects.get_or_create(pk=1)
-        AccountingPolicy.objects.select_for_update().get(pk=1)
+        policy = AccountingPolicy.get()
+        AccountingPolicy.objects.select_for_update().get(pk=policy.pk)
         added_accounts, added_mappings = [], []
         by_code = {}
         for row in DEFAULT_ACCOUNTS:

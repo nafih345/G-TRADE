@@ -1,25 +1,35 @@
 from decimal import Decimal
 
 from django.db import models
-from apps.common.models import BaseUUIDModel
+from apps.common.models import BaseUUIDModel, TenantOwnedModel
 
 
-class PatientCodeSequence(models.Model):
+class PatientCodeSequence(TenantOwnedModel):
     """Per-prefix atomic counter for human-readable Customer.patient_code values
     (see patient_utils.reserve_patient_code). Mirrors apps.products.BarcodeSequence."""
-    prefix = models.CharField(max_length=10, unique=True)
+    prefix = models.CharField(max_length=10)
     last_number = models.BigIntegerField(default=1000)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'prefix'], name='sales_patientcodesequence_prefix_tenant'),
+        ]
 
     def __str__(self):
         return f"{self.prefix} -> {self.last_number}"
 
 
-class TestNoSequence(models.Model):
-    """Single global atomic counter for Test Number, shared across Appointment and
+class TestNoSequence(TenantOwnedModel):
+    """Per-tenant atomic counter for Test Number, shared across Appointment and
     EyeExamination so it stays one continuous sequence regardless of which screen a test
     was first registered from (see patient_utils.reserve_test_numbers)."""
-    prefix = models.CharField(max_length=10, unique=True)
+    prefix = models.CharField(max_length=10)
     last_number = models.BigIntegerField(default=1000)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'prefix'], name='sales_testnosequence_prefix_tenant'),
+        ]
 
     def __str__(self):
         return f"{self.prefix} -> {self.last_number}"
@@ -32,7 +42,7 @@ class Customer(BaseUUIDModel):
     # guessed the "next" P-xxxx number from whatever local data it happened to have loaded,
     # which let two different patients collide on the same code; this field/sequence makes
     # that guess a single, backend-guaranteed-unique source of truth instead.
-    patient_code = models.CharField(max_length=20, unique=True, blank=True, null=True, db_index=True)
+    patient_code = models.CharField(max_length=20, blank=True, null=True, db_index=True)
     name = models.CharField(max_length=150)
     email = models.EmailField(blank=True, null=True)
     phone = models.CharField(max_length=20, blank=True, null=True)
@@ -50,6 +60,11 @@ class Customer(BaseUUIDModel):
     outstanding_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
     credit_limit = models.DecimalField(max_digits=12, decimal_places=2, default=5000.0)
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'patient_code'], name='sales_customer_patient_code_tenant'),
+        ]
+
     def __str__(self):
         return self.name
 
@@ -60,7 +75,7 @@ class Service(BaseUUIDModel):
     Managed from Administration -> Service Master."""
     # Human-readable code (SRV001, SRV002, ...) assigned atomically on create by
     # ServiceViewSet.perform_create when the client doesn't send one.
-    service_code = models.CharField(max_length=20, unique=True, blank=True, db_index=True)
+    service_code = models.CharField(max_length=20, blank=True, db_index=True)
     name = models.CharField(max_length=150)
     description = models.TextField(blank=True, null=True)
     default_price = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
@@ -69,6 +84,9 @@ class Service(BaseUUIDModel):
 
     class Meta:
         ordering = ['service_code']
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'service_code'], name='sales_service_service_code_tenant'),
+        ]
 
     def __str__(self):
         return f"{self.service_code} - {self.name}"
@@ -117,7 +135,7 @@ class Invoice(BaseUUIDModel):
     # blank=True: the serializer must not require this upfront — InvoiceViewSet.perform_create
     # auto-generates one when omitted, but DRF's own required-field validation runs before
     # perform_create is ever reached, so without blank=True that auto-generation was unreachable.
-    invoice_number = models.CharField(max_length=50, unique=True, blank=True)
+    invoice_number = models.CharField(max_length=50, blank=True)
     # Nullable: POS Billing genuinely supports anonymous walk-in sales (buy sunglasses, no
     # patient record needed) — a required FK here would force fabricating a fake Customer row
     # for every such sale just to satisfy the constraint. SET_NULL (not CASCADE) so deleting a
@@ -166,6 +184,17 @@ class Invoice(BaseUUIDModel):
     delivered_at = models.DateField(null=True, blank=True)
     # Free-text note attached when updating fulfillment (who collected, courier ref, remarks).
     fulfillment_notes = models.CharField(max_length=255, blank=True, null=True)
+    # Staff member who served the customer (New Sale's Salesman box). Free text, not a user FK:
+    # staff accounts live on the client and one shared login often bills for several people.
+    salesman = models.CharField(max_length=100, blank=True, default='')
+    # Eye test this sale was dispensed against (New Sale's Test No) — the Sales Report resolves
+    # it to the EyeExamination and the patient's visit sequence.
+    test_no = models.CharField(max_length=20, blank=True, default='')
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'invoice_number'], name='sales_invoice_invoice_number_tenant'),
+        ]
 
     def __str__(self):
         return f"Inv: {self.invoice_number}"
@@ -222,7 +251,7 @@ class Payment(BaseUUIDModel):
     # invoice itself) since a single invoice can be settled across multiple receipts over time
     # (advance at booking, balance on collection, etc.), and the Payments tab needs to list each
     # one individually.
-    receipt_no = models.CharField(max_length=50, unique=True, blank=True, null=True, db_index=True)
+    receipt_no = models.CharField(max_length=50, blank=True, null=True, db_index=True)
     branch = models.ForeignKey('company.Branch', on_delete=models.SET_NULL, null=True, blank=True, db_index=True, related_name='+')
     invoice = models.ForeignKey(Invoice, on_delete=models.SET_NULL, null=True, blank=True, related_name='payments')
     customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name='payments')
@@ -244,6 +273,9 @@ class Payment(BaseUUIDModel):
 
     class Meta:
         ordering = ['-payment_date', '-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'receipt_no'], name='sales_payment_receipt_no_tenant'),
+        ]
 
     def __str__(self):
         return f"{self.receipt_no or self.id} - {self.customer_name} (₹{self.amount})"
@@ -273,6 +305,9 @@ class EyeExamination(BaseUUIDModel):
     visit_number = models.CharField(max_length=50, blank=True, null=True)
     branch = models.CharField(max_length=100, blank=True, null=True)
     optometrist = models.CharField(max_length=100, blank=True, null=True)
+    # The Eye Test form's Test Type (FREE EYE TEST / COMPREHENSIVE EYE TEST / ...). Older rows
+    # only had it inside raw_data's diagnosis snapshot — migration 0026 copied it out.
+    test_type = models.CharField(max_length=50, blank=True, default='')
     examination_date = models.DateTimeField(auto_now_add=True)
 
     # Tab 2: Complaints & History
@@ -427,7 +462,7 @@ class EyeExamination(BaseUUIDModel):
             # two exams share a number even under a race; blank/NULL rows (legacy or
             # not-yet-assigned) are excluded. See migration 0016.
             models.UniqueConstraint(
-                fields=['test_no'],
+                fields=['tenant', 'test_no'],
                 condition=models.Q(test_no__isnull=False) & ~models.Q(test_no=''),
                 name='uniq_eyeexamination_test_no',
             ),
@@ -442,7 +477,7 @@ class Appointment(BaseUUIDModel):
     # richer status/priority vocabulary ("Booked", "Standard Booking", "VIP Patient", ...) and
     # a DRF ChoiceField would 400-reject anything outside a fixed enum. Kept as plain CharFields
     # so the frontend stays the single source of truth for these labels.
-    appointment_code = models.CharField(max_length=30, unique=True, blank=True, null=True, db_index=True)
+    appointment_code = models.CharField(max_length=30, blank=True, null=True, db_index=True)
     token = models.CharField(max_length=20, blank=True, null=True)
 
     # Real link to the patient record — the primary purpose of this model existing at all is
@@ -480,6 +515,9 @@ class Appointment(BaseUUIDModel):
 
     class Meta:
         ordering = ['-appointment_date', '-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'appointment_code'], name='sales_appointment_appointment_code_tenant'),
+        ]
 
     def __str__(self):
         return f"{self.patient_name} - {self.appointment_date} ({self.status})"
@@ -490,7 +528,7 @@ class Appointment(BaseUUIDModel):
 # ==========================================
 
 class Dealer(BaseUUIDModel):
-    dealer_code = models.CharField(max_length=50, unique=True)
+    dealer_code = models.CharField(max_length=50)
     business_name = models.CharField(max_length=200)
     owner_name = models.CharField(max_length=150, blank=True, null=True)
     gstin = models.CharField(max_length=20, blank=True, null=True)
@@ -510,6 +548,11 @@ class Dealer(BaseUUIDModel):
     category = models.CharField(max_length=50, default='Optical Shop')
     sales_executive = models.CharField(max_length=100, blank=True, null=True)
     status = models.CharField(max_length=20, default='Active')
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'dealer_code'], name='sales_dealer_dealer_code_tenant'),
+        ]
 
     def __str__(self):
         return f"{self.business_name} ({self.dealer_code})"
@@ -532,7 +575,7 @@ class WholesalePriceList(BaseUUIDModel):
 
 
 class WholesaleQuotation(BaseUUIDModel):
-    quotation_number = models.CharField(max_length=50, unique=True)
+    quotation_number = models.CharField(max_length=50)
     dealer = models.ForeignKey(Dealer, on_delete=models.CASCADE, related_name='quotations')
     date = models.DateField()
     expiry_date = models.DateField()
@@ -543,12 +586,17 @@ class WholesaleQuotation(BaseUUIDModel):
     status = models.CharField(max_length=20, default='Draft')
     terms = models.TextField(blank=True, null=True)
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'quotation_number'], name='sales_wholesalequotation_quotation_number_tenant'),
+        ]
+
     def __str__(self):
         return f"Quote {self.quotation_number} - {self.dealer.business_name}"
 
 
 class WholesaleOrder(BaseUUIDModel):
-    order_number = models.CharField(max_length=50, unique=True)
+    order_number = models.CharField(max_length=50)
     dealer = models.ForeignKey(Dealer, on_delete=models.CASCADE, related_name='wholesale_orders')
     quotation_ref = models.CharField(max_length=50, blank=True, null=True)
     order_date = models.DateField()
@@ -558,12 +606,17 @@ class WholesaleOrder(BaseUUIDModel):
     status = models.CharField(max_length=30, default='Draft')
     payment_terms = models.CharField(max_length=50, default='Credit Net 30')
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'order_number'], name='sales_wholesaleorder_order_number_tenant'),
+        ]
+
     def __str__(self):
         return f"WO {self.order_number} - {self.dealer.business_name}"
 
 
 class WholesaleDeliveryChallan(BaseUUIDModel):
-    challan_number = models.CharField(max_length=50, unique=True)
+    challan_number = models.CharField(max_length=50)
     order = models.ForeignKey(WholesaleOrder, on_delete=models.CASCADE, related_name='challans')
     dealer = models.ForeignKey(Dealer, on_delete=models.CASCADE, related_name='challans')
     dispatch_date = models.DateField()
@@ -572,12 +625,17 @@ class WholesaleDeliveryChallan(BaseUUIDModel):
     driver_phone = models.CharField(max_length=20, blank=True, null=True)
     delivery_status = models.CharField(max_length=30, default='In Transit')
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'challan_number'], name='sales_wholesaledeliverychallan_challan_number_tenant'),
+        ]
+
     def __str__(self):
         return f"Challan {self.challan_number}"
 
 
 class WholesaleInvoice(BaseUUIDModel):
-    invoice_number = models.CharField(max_length=50, unique=True)
+    invoice_number = models.CharField(max_length=50)
     dealer = models.ForeignKey(Dealer, on_delete=models.CASCADE, related_name='wholesale_invoices')
     order_ref = models.CharField(max_length=50, blank=True, null=True)
     invoice_date = models.DateField()
@@ -594,12 +652,17 @@ class WholesaleInvoice(BaseUUIDModel):
     # difference. Null = saved before the backend moved wholesale stock (see that module).
     stock_applied = models.JSONField(null=True, blank=True, editable=False)
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'invoice_number'], name='sales_wholesaleinvoice_invoice_number_tenant'),
+        ]
+
     def __str__(self):
         return f"W-Inv {self.invoice_number} - {self.dealer.business_name}"
 
 
 class WholesalePaymentCollection(BaseUUIDModel):
-    receipt_number = models.CharField(max_length=50, unique=True)
+    receipt_number = models.CharField(max_length=50)
     dealer = models.ForeignKey(Dealer, on_delete=models.CASCADE, related_name='payments')
     invoice_number = models.CharField(max_length=50, blank=True, null=True)
     payment_date = models.DateField()
@@ -610,18 +673,28 @@ class WholesalePaymentCollection(BaseUUIDModel):
     # went to or came from. Blank = the generic Bank / UPI role mapping (see financial/banks.py).
     bank_account = models.ForeignKey('financial.ChartOfAccount', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'receipt_number'], name='sales_wholesalepaymentcollection_receipt_number_tenant'),
+        ]
+
     def __str__(self):
         return f"Coll {self.receipt_number} - ₹{self.amount_paid}"
 
 
 class WholesaleReturn(BaseUUIDModel):
-    return_number = models.CharField(max_length=50, unique=True)
+    return_number = models.CharField(max_length=50)
     invoice_number = models.CharField(max_length=50)
     dealer = models.ForeignKey(Dealer, on_delete=models.CASCADE, related_name='returns')
     return_date = models.DateField()
     reason = models.CharField(max_length=200)
     return_amount = models.DecimalField(max_digits=12, decimal_places=2)
     action_taken = models.CharField(max_length=50, default='Credit Note Issued')
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'return_number'], name='sales_wholesalereturn_return_number_tenant'),
+        ]
 
     def __str__(self):
         return f"Return {self.return_number} - {self.dealer.business_name}"

@@ -30,8 +30,11 @@ export const daysBetween = (from, to) => {
 };
 
 export const blankCheque = (defaults = {}) => ({
-  chequeNumber: '', chequeDate: localYmd(), bankName: '', depositedDate: '', partyName: '', remarks: '', ...defaults,
+  chequeNumber: '', chequeDate: localYmd(), bankName: '', bankBranch: '', depositedDate: '', partyName: '', remarks: '', ...defaults,
 });
+
+/** Who the cheque's party is: the drawer of a cheque we received, the payee of one we issued. */
+export const chequePartyLabel = (direction) => (direction === 'ISSUED' ? 'Payee Name' : 'Drawer Name');
 
 /** The countdown runs to the (planned) deposit date, else the cheque date. */
 export const chequeDueDate = (c) => (c ? c.depositedDate || c.chequeDate || '' : '');
@@ -69,6 +72,7 @@ export const chequePayload = (c, ref) => ({
   cheque_number: String(c.chequeNumber || '').trim(),
   cheque_date: c.chequeDate,
   bank_name: String(c.bankName || '').trim(),
+  bank_branch: String(c.bankBranch || '').trim(),
   deposited_date: c.depositedDate || null,
   party_name: String(c.partyName || '').trim(),
   remarks: String(c.remarks || '').trim(),
@@ -78,5 +82,16 @@ export const chequePayload = (c, ref) => ({
 /** Register row (API shape) -> the dialog's shape, for editing a saved cheque. */
 export const chequeFromRow = (r) => ({
   chequeNumber: r.cheque_number || '', chequeDate: r.cheque_date || '', bankName: r.bank_name || '',
-  depositedDate: r.deposited_date || '', partyName: r.party_name || '', remarks: r.remarks || '',
+  bankBranch: r.bank_branch || '', depositedDate: r.deposited_date || '', partyName: r.party_name || '',
+  remarks: r.remarks || '', status: r.status || 'PENDING', clearedDate: r.cleared_date || '', statusNote: r.status_note || '',
 });
+
+/** PATCH body for a saved cheque (ChequeUpdateSerializer). The amount is never sent: the voucher posted it.
+ *  Status / cleared date / note go only when they changed, so a plain detail fix never moves the status. */
+export const chequeEditPayload = (c, row = {}) => {
+  const body = chequePayload(c);
+  if (c.status && c.status !== row.status) body.status = c.status;
+  if ((c.clearedDate || null) !== (row.cleared_date || null)) body.cleared_date = c.clearedDate || null;
+  if ((c.statusNote || '') !== (row.status_note || '')) body.status_note = String(c.statusNote || '').trim();
+  return body;
+};

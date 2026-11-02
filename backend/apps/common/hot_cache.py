@@ -24,6 +24,9 @@ def _ttl():
 
 
 def get_or_load(key, loader):
+    # Rows differ per tenant (each has its own BusinessSettings, branches, ...), so keys do too.
+    from apps.common.tenancy import cache_prefix
+    key = cache_prefix() + key
     seconds = _ttl()
     if seconds <= 0:
         return loader()

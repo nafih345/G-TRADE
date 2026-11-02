@@ -7,7 +7,7 @@ import { fetchLabelBundle, importLegacyIfNeeded, apiError } from './labelApi.js'
 export const WORKFLOWS = [
   { id: 'inventory', label: 'Inventory → Products', key: 'inventory_template' },
   { id: 'purchase', label: 'Purchase → Purchase Entry', key: 'purchase_template' },
-  { id: 'barcode_printing', label: 'Barcode Printing', key: 'barcode_printing_template' },
+  { id: 'barcode_printing', label: 'Barcode Settings', key: 'barcode_printing_template' },
 ];
 
 export function templateForWorkflow(bundle, workflow) {

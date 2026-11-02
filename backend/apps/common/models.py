@@ -2,7 +2,45 @@ import uuid
 from django.db import models
 from django.conf import settings
 
-class SoftDeleteQuerySet(models.QuerySet):
+from apps.common import tenancy
+from apps.common.tenancy import TenantManager, TenantQuerySet
+
+
+class Tenant(models.Model):
+    """A client business. Every TenantOwnedModel row belongs to exactly one, and API requests
+    only ever see their own tenant's rows (see apps/common/tenancy.py). Users are tied to a
+    tenant by authentication.User.tenant; create tenants with `manage.py create_tenant`."""
+    name = models.CharField(max_length=150, unique=True)
+    code = models.SlugField(max_length=40, unique=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['id']
+
+    def __str__(self):
+        return f"{self.name} (#{self.pk})"
+
+
+class TenantOwnedModel(models.Model):
+    """Abstract base for every row that belongs to one tenant. `objects` is tenant-scoped and
+    save() stamps / verifies the tenant (tenancy.check_write)."""
+    tenant = models.ForeignKey(
+        Tenant, on_delete=models.PROTECT, default=tenancy.default_tenant_id,
+        editable=False, related_name='+', db_index=True,
+    )
+
+    objects = TenantManager()
+
+    class Meta:
+        abstract = True
+
+    def save(self, *args, **kwargs):
+        tenancy.check_write(self)
+        super().save(*args, **kwargs)
+
+
+class SoftDeleteQuerySet(TenantQuerySet):
     def delete(self):
         return super().update(is_deleted=True)
 
@@ -21,7 +59,7 @@ class SoftDeleteManager(models.Manager):
         return SoftDeleteQuerySet(self.model, using=self._db).filter(is_deleted=False)
 
 
-class BaseUUIDModel(models.Model):
+class BaseUUIDModel(TenantOwnedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -44,7 +82,7 @@ class BaseUUIDModel(models.Model):
 
     # Managers
     objects = SoftDeleteManager()
-    all_objects = models.Manager()
+    all_objects = TenantManager()  # includes soft-deleted rows; still tenant-scoped
 
     class Meta:
         abstract = True

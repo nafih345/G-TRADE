@@ -13,9 +13,11 @@ import {
 } from '@mui/icons-material';
 import { useDebounce } from '../../hooks/useDebounce';
 import BarcodePrintDialog from '../inventory/BarcodePrintDialog';
+import BarcodeSeriesSettings from './BarcodeSeriesSettings';
 
-// A catalog-wide console for finding products missing a barcode and bulk
-// generating/printing labels, independent of the Products page's row actions.
+// Administration → Barcode Settings: the barcode number series, plus a catalog-wide
+// console for finding products missing a barcode and bulk generating/printing
+// labels, independent of the Products page's row actions.
 export default function BarcodePrintingManager() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
@@ -26,6 +28,7 @@ export default function BarcodePrintingManager() {
   const [selected, setSelected] = useState(new Map()); // id -> product row
   const [printOpen, setPrintOpen] = useState(false);
   const [bulkGenerating, setBulkGenerating] = useState(false);
+  const [seriesRefreshKey, setSeriesRefreshKey] = useState(0);
 
   const { data, isLoading } = useQuery({
     queryKey: ['barcode-admin-products', debouncedSearch, missingOnly, page, rowsPerPage],
@@ -87,6 +90,7 @@ export default function BarcodePrintingManager() {
       });
       alert(`Generated barcodes for ${res.data.generated} product(s).`);
       setSelected(new Map());
+      setSeriesRefreshKey((k) => k + 1);
       queryClient.invalidateQueries({ queryKey: ['barcode-admin-products'] });
     } catch (e) {
       alert('Could not generate barcodes. Please try again.');
@@ -97,7 +101,11 @@ export default function BarcodePrintingManager() {
 
   return (
     <Box>
-      <Typography variant="h6" fontWeight={800} sx={{ mb: 0.5 }}>Barcode Printing</Typography>
+      <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>Barcode Settings</Typography>
+
+      <BarcodeSeriesSettings refreshKey={seriesRefreshKey} />
+
+      <Typography variant="subtitle1" fontWeight={800}>Product Barcodes & Labels</Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2.5 }}>
         Find products across the full catalog, generate missing barcodes, and print labels in bulk.
       </Typography>

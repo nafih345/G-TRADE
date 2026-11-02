@@ -12,7 +12,17 @@ from django.db import IntegrityError, connection, transaction
 
 def bump_sequence(model, lookup, count=1, defaults=None):
     """Add `count` to `last_number` on the `model` row matching `lookup` (field -> value) and
-    return the new last_number, creating the row with `defaults` if it doesn't exist yet."""
+    return the new last_number, creating the row with `defaults` if it doesn't exist yet.
+
+    Raw SQL skips the ORM's tenant filter, so for a tenant-owned counter the current tenant is
+    added to `lookup` here — each tenant keeps its own series."""
+    from apps.common.models import TenantOwnedModel
+    from apps.common.tenancy import TenantRequired, default_tenant_id
+    if issubclass(model, TenantOwnedModel) and 'tenant_id' not in lookup:
+        tenant_id = default_tenant_id()
+        if tenant_id is None:
+            raise TenantRequired()
+        lookup = {**lookup, 'tenant_id': tenant_id}
     qn = connection.ops.quote_name
     where = ' AND '.join(f"{qn(model._meta.get_field(name).column)} = %s" for name in lookup)
     sql = (f"UPDATE {qn(model._meta.db_table)} SET last_number = last_number + %s "

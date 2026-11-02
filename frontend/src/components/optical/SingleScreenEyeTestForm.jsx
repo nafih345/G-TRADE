@@ -21,7 +21,8 @@ import {
   CheckCircle as ActiveIcon,
   Close as CloseIcon,
   Edit as EditIcon,
-  PersonAdd as PersonAddIcon
+  PersonAdd as PersonAddIcon,
+  Assessment as ReportIcon
 } from '@mui/icons-material';
 import OrthopticsModal from './OrthopticsModal';
 import PrintPrescriptionCard from './PrintPrescriptionCard';
@@ -31,6 +32,7 @@ import {
   applyPaymentChoice, billRecordFromExam, eyeTestFeeTotal, paymentChoiceOf, payModeLabel,
 } from '../../utils/eyeTestBill';
 import { printEyeTestBill, printEyeTestReceipt } from '../../utils/printEyeTestBill';
+import EyeTestReportDialog from './EyeTestReportDialog';
 
 // Common medical aid / insurance schemes offered as quick picks on the charges bar. The field
 // is free-solo, so staff can still type any scheme not listed here.
@@ -145,6 +147,8 @@ export default function SingleScreenEyeTestForm({
 
   // Anchors the A4/A5 choice menu for the invoice print icon to whichever row's button was clicked
   const [invoicePrintMenu, setInvoicePrintMenu] = useState({ anchorEl: null, row: null });
+  // Eye Test Report for a directory row; the same patient's other visits are switchable inside.
+  const [reportRow, setReportRow] = useState(null);
 
   // Bottom Table Filter States
   const [historySearch, setHistorySearch] = useState('');
@@ -1263,7 +1267,18 @@ export default function SingleScreenEyeTestForm({
           <ListItemIcon><PrintIcon fontSize="small" /></ListItemIcon>
           <ListItemText>Payment Receipt (80 mm)</ListItemText>
         </MenuItem>
+        <MenuItem onClick={() => { setReportRow(invoicePrintMenu.row); setInvoicePrintMenu({ anchorEl: null, row: null }); }}>
+          <ListItemIcon><ReportIcon fontSize="small" /></ListItemIcon>
+          <ListItemText>Eye Test Report</ListItemText>
+        </MenuItem>
       </Menu>
+
+      <EyeTestReportDialog
+        open={Boolean(reportRow)}
+        exam={reportRow}
+        visits={reportRow?.patientId ? safeExams.filter(e => e.patientId === reportRow.patientId) : []}
+        onClose={() => setReportRow(null)}
+      />
 
       {/* 🏥 Orthoptics Examination Modal */}
       <OrthopticsModal

@@ -156,7 +156,7 @@ def find_barcode_owner(code, exclude_pk=None):
     return qs.first()
 
 
-def _taken(codes):
+def taken_barcodes(codes):
     taken = set(Product.all_objects.filter(barcode__in=codes).values_list('barcode', flat=True))
     taken |= set(Product.all_objects.filter(secondary_barcode__in=codes).values_list('secondary_barcode', flat=True))
     taken |= set(ProductBarcode.objects.filter(code__in=codes).values_list('code', flat=True))
@@ -186,12 +186,129 @@ def reserve_product_barcodes(count=1, avoid=None):
                 new_last = cursor.fetchone()[0]
         start = new_last - need + 1
         batch = [format_series_code(prefix, seq_digits, config.check_digit, start + i, variable) for i in range(need)]
-        taken = _taken(batch) | avoid
+        taken = taken_barcodes(batch) | avoid
         out.extend(c for c in batch if c not in taken and c not in out)
         if len(out) >= count:
             return out[:count]
     raise BarcodeConfigError('Could not find free barcodes in the series — most nearby numbers are already used. '
                              'Move "Next number" forward in the barcode settings.')
+
+
+# ---------------------------------------------------------------------------
+# Continuing a series that came from a file (Excel import)
+#
+# A "rule" says how to write the numbers after `last`. It's plain JSON, kept on the
+# ImportBatch between the preview and the confirmation. Nothing here reserves
+# anything: a preview that gets cancelled must not use up numbers.
+# ---------------------------------------------------------------------------
+_CODE_TAIL_RE = re.compile(r'(.*?)(\d+)')
+# Numbers further apart than this aren't one series. Keeps a stray manufacturer EAN out
+# of the shop's own run, where it would otherwise become the "last value".
+SEQUENCE_MAX_GAP = 1000
+MIN_SEQUENCE_CODES = 2
+MIN_CHECK_DIGIT_LENGTH = 8      # EAN-8 is the shortest code carrying one
+MIN_CHECK_DIGIT_CODES = 3       # one code in ten passes the check by chance
+
+
+def _longest_run(numbers):
+    runs = [[]]
+    for n in sorted(numbers):
+        if runs[-1] and n - runs[-1][-1] > SEQUENCE_MAX_GAP:
+            runs.append([])
+        runs[-1].append(n)
+    return max(runs, key=lambda run: (len(run), run[-1]))
+
+
+def detect_file_sequence(codes):
+    """The running series among `codes` as a rule, or None if they don't form one (a sheet
+    of unrelated manufacturer EANs, say). "Last value" is the highest in the series rather
+    than the last in the sheet, so an unsorted sheet can't restart it below its own codes."""
+    by_prefix = {}
+    for code in codes:
+        match = _CODE_TAIL_RE.fullmatch(code)
+        if match:
+            by_prefix.setdefault(match[1], {}).setdefault(int(match[2]), match[2])
+
+    best = None
+    for prefix, tails in by_prefix.items():
+        run = _longest_run(tails)
+        if best is None or (len(run), run[-1]) > (len(best[1]), best[1][-1]):
+            best = prefix, run, tails
+    if best is None or len(best[1]) < MIN_SEQUENCE_CODES:
+        return None
+
+    prefix, run, tails = best
+    run_tails = [tails[n] for n in run]
+    check = (not prefix and len(run) >= MIN_CHECK_DIGIT_CODES
+             and all(len(t) >= MIN_CHECK_DIGIT_LENGTH and gs1_check_digit(t[:-1]) == t[-1] for t in run_tails))
+    padded = any(t.startswith('0') for t in run_tails)
+    return {
+        'source': 'file', 'prefix': prefix, 'check': check,
+        'width': (len(run_tails[-1]) - check) if padded else 0,
+        'last': run[-1] // 10 if check else run[-1],
+        'count': len(run), 'first_code': prefix + run_tails[0], 'last_code': prefix + run_tails[-1],
+    }
+
+
+def settings_sequence():
+    """The rule for the series in Barcode Settings, for a file with no series of its own."""
+    config = BarcodeSeriesConfig.load()
+    prefix, seq_digits = series_layout(config.prefix_pattern, config.total_length, config.check_digit)
+    return {
+        'source': 'settings', 'prefix': prefix, 'check': config.check_digit == 'MOD10', 'seq_digits': seq_digits,
+        'variable': config.total_length == VARIABLE_LENGTH, 'last': config.last_number,
+    }
+
+
+def _sequence_code(rule, number):
+    if rule['source'] == 'settings':
+        return format_series_code(rule['prefix'], rule['seq_digits'], 'MOD10' if rule['check'] else 'NONE',
+                                  number, rule['variable'])
+    body = rule['prefix'] + str(number).zfill(rule['width'])
+    return body + gs1_check_digit(body) if rule['check'] else body
+
+
+def next_sequence_codes(rule, count, avoid=()):
+    """The next `count` free codes after rule['last'], and how many numbers were in use and
+    had to be stepped over. Those are the only breaks: a barcode can't be issued twice."""
+    avoid = set(avoid)
+    out, stepped_over = [], 0
+    number = rule['last'] + 1
+    while len(out) < count:
+        need = count - len(out)
+        batch = [_sequence_code(rule, number + i) for i in range(need)]
+        taken = taken_barcodes(batch) | (avoid & set(batch))
+        out.extend(c for c in batch if c not in taken)
+        stepped_over += len(taken)
+        number += need
+    return out, stepped_over
+
+
+def _series_number(code, config, prefix, seq_digits):
+    """The running number `code` holds in the configured series, or None if it isn't from it."""
+    if not code.startswith(prefix):
+        return None
+    tail = code[len(prefix):-1] if config.check_digit == 'MOD10' else code[len(prefix):]
+    if not tail.isdigit():
+        return None
+    number = int(tail)
+    try:
+        written = format_series_code(prefix, seq_digits, config.check_digit, number,
+                                     config.total_length == VARIABLE_LENGTH)
+    except BarcodeConfigError:
+        return None
+    return number if written == code else None
+
+
+def advance_series_past(codes):
+    """Moves the configured counter beyond any of `codes` that belong to its series. It only
+    ever goes up. Left behind, reserve_product_barcodes would run out of attempts stepping
+    over a long imported block, and the next barcode generated in the app would fail."""
+    config = BarcodeSeriesConfig.load()
+    prefix, seq_digits = series_layout(config.prefix_pattern, config.total_length, config.check_digit)
+    numbers = [n for n in (_series_number(c, config, prefix, seq_digits) for c in codes) if n is not None]
+    if numbers:
+        BarcodeSeriesConfig.objects.filter(pk=config.pk, last_number__lt=max(numbers)).update(last_number=max(numbers))
 
 
 def reserve_ean13(count=1):

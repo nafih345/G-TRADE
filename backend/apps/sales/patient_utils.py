@@ -71,13 +71,13 @@ def sync_test_no_sequence(test_no):
     except (TypeError, ValueError):
         return
     prefix = TEST_NO_PREFIX
-    TestNoSequence.objects.get_or_create(prefix=prefix, defaults={'last_number': 1000})
+    seq, _ = TestNoSequence.objects.get_or_create(prefix=prefix, defaults={'last_number': 1000})
     table = TestNoSequence._meta.db_table
     with transaction.atomic():
         with connection.cursor() as cursor:
             cursor.execute(
-                f"UPDATE {table} SET last_number = %s WHERE prefix = %s AND last_number < %s",
-                [n, prefix, n],
+                f"UPDATE {table} SET last_number = %s WHERE id = %s AND last_number < %s",
+                [n, seq.pk, n],
             )
 
 

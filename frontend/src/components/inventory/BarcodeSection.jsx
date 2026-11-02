@@ -21,7 +21,7 @@ import {
 import { useDebounce } from '../../hooks/useDebounce';
 import { renderBarcodeMarkup } from '../../utils/printBarcodeLabels';
 import BarcodePrintDialog from './BarcodePrintDialog';
-import BarcodeConfigDialog, { BARCODE_CONFIG_URL, describeSeries } from './BarcodeConfigDialog';
+import { BARCODE_CONFIG_URL, describeSeries } from '../admin/BarcodeSeriesSettings';
 import { focusRelative } from '../../pages/wholesale/keyboardNav';
 
 // The "Barcode" section from the spec: input + Generate/Regenerate/Copy/Print/Clear
@@ -63,7 +63,6 @@ export default function BarcodeSection({
   const [history, setHistory] = useState([]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [seriesConfig, setSeriesConfig] = useState(null);
-  const [configOpen, setConfigOpen] = useState(false);
 
   useEffect(() => {
     axios.get(BARCODE_CONFIG_URL).then((res) => setSeriesConfig(res.data)).catch(() => {});
@@ -238,7 +237,8 @@ export default function BarcodeSection({
         <Box sx={{ flex: 1 }} />
         <Button
           size="small" variant="text" startIcon={<SettingsIcon fontSize="small" />}
-          onClick={() => setConfigOpen(true)} sx={{ textTransform: 'none' }}
+          onClick={() => window.open(`${window.location.pathname}${window.location.search}#/admin/barcode-settings`, '_blank')}
+          sx={{ textTransform: 'none' }}
           tabIndex={keyboardNav ? -1 : undefined}
         >
           Barcode settings
@@ -395,8 +395,6 @@ export default function BarcodeSection({
           </Button>
         </DialogActions>
       </Dialog>
-
-      <BarcodeConfigDialog open={configOpen} onClose={() => setConfigOpen(false)} onSaved={setSeriesConfig} />
 
       <BarcodePrintDialog open={printOpen} onClose={() => setPrintOpen(false)} products={[previewProduct]} />
     </Box>

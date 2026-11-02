@@ -121,6 +121,13 @@ class BillToBillChequeTests(ChequeApiBase):
         self.assertEqual(c.bank_account_id, self.bank.pk)
         self.assertEqual(Payment.objects.filter(receipt_no__startswith=res.data['number']).count(), 2)
         self.assertEqual(balance(self.bank.code), D('600'))
+        # Correcting the number in the register rewrites the receipt's own notes too.
+        fix = self.client.patch(f'{FIN}/cheques/{c.pk}/', {'cheque_number': '445569'}, format='json')
+        self.assertEqual(fix.status_code, 200, fix.data)
+        notes = Payment.objects.get(receipt_no__startswith=res.data['number'], method='Cheque').notes
+        self.assertIn('445569', notes)
+        self.assertNotIn('445566', notes)
+        self.assertEqual(Payment.objects.get(receipt_no__startswith=res.data['number'], method='Cash').notes.count('445566'), 0)
         self.assertTrue(ledger_is_balanced())
         self.assertEqual(self.receipt([{'method': 'Cash', 'amount': '400'},
                                        {'method': 'Cheque', 'amount': '600', 'cheque': cheque('445566')}]).status_code, 200)
@@ -196,7 +203,8 @@ class ChequeRegisterTests(ChequeApiBase):
         done = self.client.patch(url, {'status': 'CLEARED'}, format='json')
         self.assertEqual((done.data['status'], done.data['cleared_date'], done.data['days_left']), ('CLEARED', TODAY, None))
         self.assertEqual(self.client.patch(url, {'status': 'BOUNCED'}, format='json').status_code, 400)
-        self.assertEqual(self.client.patch(url, {'bank_name': 'Other'}, format='json').status_code, 400)
+        # A typo can still be corrected after clearing.
+        self.assertEqual(self.client.patch(url, {'bank_name': 'Other'}, format='json').status_code, 200)
         self.assertEqual(self.client.patch(url, {'status': 'DEPOSITED'}, format='json').data['cleared_date'], None)
 
         b = Cheque.objects.get(cheque_number='B2')
@@ -209,6 +217,34 @@ class ChequeRegisterTests(ChequeApiBase):
         self.assertEqual(self.client.patch(burl, {'remarks': 'x'}, format='json').status_code, 400)
         # Tracking only: nothing was posted by any of this.
         self.assertEqual(JournalEntry.objects.count(), 3)
+
+    def test_editing_details_syncs_the_voucher_and_refuses_duplicates(self):
+        c = Cheque.objects.get(cheque_number='A1')
+        entry = c.journal_entry
+        bank_line = entry.lines.get(account=self.bank)
+        bank_line.memo = f'Cheque A1 ({c.cheque_date})'
+        bank_line.save()
+        url = f'{FIN}/cheques/{c.pk}/'
+        new_date = TODAY - datetime.timedelta(days=4)
+        res = self.client.patch(url, {'cheque_number': 'A11', 'cheque_date': str(new_date), 'bank_branch': 'MG Road',
+                                      'party_name': 'Asha (drawer)', 'remarks': 'typo fixed'}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual((res.data['cheque_number'], res.data['bank_branch'], res.data['party_name']),
+                         ('A11', 'MG Road', 'Asha (drawer)'))
+        bank_line.refresh_from_db()
+        self.assertEqual(bank_line.memo, f'Cheque A11 ({new_date})')
+        self.assertEqual(entry.lines.exclude(pk=bank_line.pk).filter(memo__contains='A11').count(), 0)
+        self.assertTrue(ledger_is_balanced())
+        self.assertEqual(self.register(search='mg road')['rows'][0]['cheque_number'], 'A11')
+        # Renumbering onto another live cheque of the same bank is refused; another bank is fine.
+        self.assertEqual(self.client.patch(url, {'cheque_number': 'B2', 'bank_name': 'canara'}, format='json').status_code, 400)
+        self.assertEqual(self.client.patch(url, {'cheque_number': 'B2'}, format='json').status_code, 200)
+
+    def test_voucher_filter_finds_a_vouchers_cheques(self):
+        c = Cheque.objects.get(cheque_number='C3')
+        rows = self.register(voucher=c.voucher_number)['rows']
+        self.assertEqual([r['cheque_number'] for r in rows], ['C3'])
+        self.assertEqual(self.register(voucher=c.voucher_number[:-1] + 'X')['rows'], [])
 
     def test_finance_role_required(self):
         self.client.force_authenticate(make_user('CASHIER', username='cashier'))

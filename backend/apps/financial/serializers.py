@@ -126,6 +126,8 @@ class VoucherInputSerializer(serializers.Serializer):
     date = serializers.DateField()
     narration = serializers.CharField(required=False, allow_blank=True, default='')
     reference_no = serializers.CharField(required=False, allow_blank=True, default='', max_length=80)
+    # The voucher's own Reference No (bill / instrument / document no). reference_no above names the party.
+    reference = serializers.CharField(required=False, allow_blank=True, default='', max_length=80)
     status = serializers.ChoiceField(choices=('DRAFT', 'POSTED'), default='POSTED')
     idempotency_key = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=120)
     branch = serializers.UUIDField(required=False, allow_null=True)

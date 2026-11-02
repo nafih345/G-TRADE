@@ -11,12 +11,12 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
-from . import cashbook, cheques, integration, reports, settlements
+from . import accounts_reports, bankbook, cashbook, cheques, daybook, integration, reports, settlements, voucher_report
 from .accounting_catalog import SOURCES, ROLES
 from .mapping import role_status, save_mapping, deactivate_mapping, accounts_in_active_mappings
 from .models import (
     AccountGroup, ChartOfAccount, VoucherType, JournalEntry, LedgerEntry, AccountMapping, PostingFailure,
-    FiscalPeriod, AccountingPolicy, FinancialAuditLog, Cheque,
+    FiscalPeriod, AccountingPolicy, FinancialAuditLog, Cheque, PendingBankSettlement,
 )
 from .permissions import FinancePermission, FINANCE_OVERRIDE_ROLES, user_role
 from .serializers import (
@@ -193,7 +193,8 @@ class JournalEntryViewSet(FinanceViewSetMixin, viewsets.ModelViewSet):
             qs = qs.filter(date__lte=p['date_to'])
         if p.get('search'):
             s = p['search'].strip()
-            qs = qs.filter(Q(entry_number__icontains=s) | Q(narration__icontains=s) | Q(source_number__icontains=s))
+            qs = qs.filter(Q(entry_number__icontains=s) | Q(narration__icontains=s) | Q(source_number__icontains=s)
+                           | Q(metadata__reference__icontains=s))
         return qs
 
     def _voucher_payload(self, request):
@@ -228,6 +229,7 @@ class JournalEntryViewSet(FinanceViewSetMixin, viewsets.ModelViewSet):
                     source_module='financial', source_event='voucher', source_number=data['reference_no'],
                     reference_type={'RV': 'RECEIPT_VOUCHER', 'PV': 'PAYMENT_VOUCHER', 'CV': 'CONTRA_ENTRY', 'JV': 'JOURNAL_VOUCHER'}[code],
                     branch=_branch(data.get('branch')), user=request.user, idempotency_key=key,
+                    metadata={'reference': data['reference'].strip()} if data['reference'].strip() else None,
                 )
                 if cheque_lines and not repeated:
                     book = cheques.ChequeBook(code, user=request.user, branch=_request_branch(request))
@@ -255,6 +257,7 @@ class JournalEntryViewSet(FinanceViewSetMixin, viewsets.ModelViewSet):
                 LedgerEntry.objects.bulk_create([LedgerEntry(journal_entry=entry, account=l['account'], debit=l['debit'],
                                                              credit=l['credit'], memo=l['memo']) for l in parsed])
                 entry.date, entry.narration, entry.source_number = data['date'], data['narration'], data['reference_no']
+                entry.metadata = {**(entry.metadata or {}), 'reference': data['reference'].strip()}
                 entry.total_amount = sum(l['debit'] for l in parsed)
                 entry.save()
             if data['status'] == 'POSTED':
@@ -334,9 +337,9 @@ class LedgerEntryViewSet(FinanceViewSetMixin, viewsets.ReadOnlyModelViewSet):
 def _report(fn):
     @api_view(['GET'])
     @permission_classes([FinancePermission])
-    def view(request):
+    def view(request, **kwargs):
         try:
-            return Response(fn(request))
+            return Response(fn(request, **kwargs))
         except (AccountingError, ValueError) as exc:
             return _error(exc)
     view.__name__ = fn.__name__
@@ -352,6 +355,20 @@ def trial_balance_view(request):
 def profit_loss_view(request):
     return reports.profit_and_loss(_date_param(request, 'date_from'), _date_param(request, 'date_to'),
                                    request.query_params.get('branch'))
+
+
+@_report
+def profit_loss_statement_view(request):
+    """Accounts → Profit & Loss: direct/indirect grouped statement (pl_statement.py)."""
+    from . import pl_statement
+    p = request.query_params
+    branch_ids, branch_label = _cashbook_branches(request)
+    data = pl_statement.profit_and_loss_statement(
+        _date_param(request, 'date_from'), _date_param(request, 'date_to'), branch_ids=branch_ids,
+        compare=p.get('compare') in ('1', 'true'), breakdown=(p.get('breakdown') or '').strip() or None)
+    data['branch'] = {'id': (p.get('branch') or 'all') if getattr(request, 'multi_branch_enabled', False) else 'all',
+                      'label': branch_label}
+    return data
 
 
 @_report
@@ -435,6 +452,118 @@ def cashbook_view(request):
     data['branch'] = {'id': (p.get('branch') or 'all') if getattr(request, 'multi_branch_enabled', False) else 'all',
                       'label': branch_label}
     return data
+
+
+@_report
+def daybook_view(request):
+    p = request.query_params
+    today = timezone.localdate()
+    date_from = _date_param(request, 'date_from', today)
+    date_to = _date_param(request, 'date_to', date_from)
+    if (date_to - date_from).days > 366:
+        raise AccountingError('The Day Book covers at most one year at a time. Narrow the dates.')
+    split = lambda name: [v.strip() for v in (p.get(name) or '').split(',') if v.strip()]  # noqa: E731
+    branch_ids, branch_label = _cashbook_branches(request)
+    try:
+        data = daybook.daybook(
+            date_from, date_to, branch_ids=branch_ids, search=p.get('search') or '',
+            kinds=split('kind'), modes=split('mode'), show_reversed=p.get('show_reversed') in ('1', 'true'),
+            page=_int(p.get('page'), 1), page_size=_int(p.get('page_size'), 100),
+            export=p.get('export') in ('1', 'true'))
+    except daybook.DayBookError as exc:
+        raise AccountingError(str(exc))
+    data['branch'] = {'id': (p.get('branch') or 'all') if getattr(request, 'multi_branch_enabled', False) else 'all',
+                      'label': branch_label}
+    return data
+
+
+@_report
+def voucher_report_view(request):
+    """Accounts → Reports → Payment / Receipt Voucher Report (?voucher=PV|RV)."""
+    p = request.query_params
+    today = timezone.localdate()
+    date_from = _date_param(request, 'date_from', today.replace(day=1))
+    date_to = _date_param(request, 'date_to', today)
+    if (date_to - date_from).days > 366:
+        raise AccountingError('A voucher report covers at most one year at a time. Narrow the dates.')
+    branch_ids, branch_label = _cashbook_branches(request)
+    try:
+        data = voucher_report.voucher_report(
+            p.get('voucher'), date_from, date_to, branch_ids=branch_ids, search=p.get('search') or '',
+            status=p.get('status') or '', origin=p.get('origin') or 'all',
+            modes=[v.strip() for v in (p.get('mode') or '').split(',') if v.strip()],
+            account=_uuid_or_none(p.get('account')),
+            page=_int(p.get('page'), 1), page_size=_int(p.get('page_size'), 100),
+            export=p.get('export') in ('1', 'true'))
+    except voucher_report.VoucherReportError as exc:
+        raise AccountingError(str(exc))
+    data['branch'] = {'id': (p.get('branch') or 'all') if getattr(request, 'multi_branch_enabled', False) else 'all',
+                      'label': branch_label}
+    return data
+
+
+def _accounts_report(request, fn, *args, max_days=366, dated=True, **kwargs):
+    """Shared plumbing of the Accounts → Reports endpoints: dates (default this month), the
+    branch scope, paging / export, and the report's own errors as 400s."""
+    p = request.query_params
+    today = timezone.localdate()
+    if dated:
+        date_from = _date_param(request, 'date_from', today.replace(day=1))
+        date_to = _date_param(request, 'date_to', today)
+        if (date_to - date_from).days > max_days:
+            raise AccountingError('A report covers at most one year at a time. Narrow the dates.')
+    else:
+        date_from, date_to = _date_param(request, 'date_from'), _date_param(request, 'date_to')
+    branch_ids, branch_label = _cashbook_branches(request)
+    try:
+        data = fn(*args, date_from=date_from, date_to=date_to, branch_ids=branch_ids, search=p.get('search') or '',
+                  page=_int(p.get('page'), 1), page_size=_int(p.get('page_size'), 100),
+                  export=p.get('export') in ('1', 'true'), **kwargs)
+    except accounts_reports.AccountsReportError as exc:
+        raise AccountingError(str(exc))
+    data['branch'] = {'id': (p.get('branch') or 'all') if getattr(request, 'multi_branch_enabled', False) else 'all',
+                      'label': branch_label}
+    return data
+
+
+@_report
+def expense_report_view(request):
+    """Accounts → Reports → Expense Report."""
+    p = request.query_params
+    return _accounts_report(request, accounts_reports.expense_report, bucket=p.get('bucket') or '',
+                            group=p.get('group') or '', account=_uuid_or_none(p.get('account')))
+
+
+@_report
+def outstanding_report_view(request, side):
+    """Accounts → Reports → Customer Outstanding (receivable) / Supplier Outstanding (payable).
+    Dues are as on today; date_from / date_to (optional) narrow by bill date."""
+    p = request.query_params
+    return _accounts_report(request, accounts_reports.outstanding_report, side, dated=False,
+                            kind=p.get('kind') or '', aging=p.get('aging') or '',
+                            overdue_only=p.get('overdue') in ('1', 'true'))
+
+
+@_report
+def accounts_activity_view(request):
+    """Accounts → Reports → Accounts Activity (?view=register|accounts)."""
+    p = request.query_params
+    if p.get('view') == 'accounts':
+        return _accounts_report(request, accounts_reports.account_activity, account_type=p.get('account_type') or '',
+                                include_zero=p.get('include_zero') in ('1', 'true'))
+    return _accounts_report(request, accounts_reports.activity_register,
+                            voucher_types=[v.strip() for v in (p.get('voucher_type') or '').split(',') if v.strip()],
+                            origin=p.get('origin') or 'all', status=p.get('status') or '',
+                            account=_uuid_or_none(p.get('account')))
+
+
+def _uuid_or_none(value):
+    if not value:
+        return None
+    try:
+        return uuid.UUID(str(value))
+    except ValueError:
+        raise AccountingError('account must be a valid id.')
 
 
 def _int(value, default):
@@ -805,7 +934,7 @@ def cheque_register_view(request):
         direction=direction, statuses=statuses, date_field=p.get('date_field') or 'cheque',
         date_from=_date_param(request, 'date_from'), date_to=_date_param(request, 'date_to'),
         search=p.get('search') or '', due=(p.get('due') or '').lower(), bank_account=p.get('bank_account') or '',
-        branch_ids=branch_ids, sort=p.get('sort') or 'due', page=_int(p.get('page'), 1),
+        voucher=p.get('voucher') or '', branch_ids=branch_ids, sort=p.get('sort') or 'due', page=_int(p.get('page'), 1),
         page_size=_int(p.get('page_size'), 100), export=p.get('export') in ('1', 'true'))
     data['branch'] = {'id': (p.get('branch') or 'all') if getattr(request, 'multi_branch_enabled', False) else 'all',
                       'label': branch_label}
@@ -831,3 +960,147 @@ def cheque_detail_view(request, pk):
             return _error(exc)
         cheque = Cheque.objects.select_related('bank_account', 'branch', 'created_by').get(pk=cheque.pk)
     return Response(cheques.cheque_row(cheque))
+
+
+# ---------------------------------------------------------------------------
+# Bank Book
+# ---------------------------------------------------------------------------
+
+def _branch_label(request, label):
+    return {'id': (request.query_params.get('branch') or 'all') if getattr(request, 'multi_branch_enabled', False) else 'all',
+            'label': label}
+
+
+@_report
+def bankbook_accounts_view(request):
+    return {'accounts': bankbook.bank_accounts()}
+
+
+@_report
+def bankbook_view(request):
+    p = request.query_params
+    wanted = (p.get('account') or '').strip()
+    if wanted == 'all':
+        account_ids = [a['id'] for a in bankbook.bank_accounts()]
+        if not account_ids:
+            raise AccountingError('No bank accounts in the Chart of Accounts.')
+    else:
+        wanted = wanted or bankbook.default_bank_account_id()
+        if not wanted:
+            raise AccountingError('No bank accounts in the Chart of Accounts.')
+        try:
+            uuid.UUID(str(wanted))
+        except ValueError:
+            raise AccountingError('Select a valid bank account.')
+        account_ids = [wanted]
+    branch_ids, branch_label = _cashbook_branches(request)
+    try:
+        data = bankbook.bankbook(
+            account_ids, all_accounts=wanted == 'all', date_from=_date_param(request, 'date_from'),
+            date_to=_date_param(request, 'date_to'), branch_ids=branch_ids, search=p.get('search') or '',
+            txn_type=p.get('type') or '', modes=[m.strip() for m in (p.get('mode') or '').split(',') if m.strip()],
+            show_reversed=p.get('show_reversed') in ('1', 'true'), page=_int(p.get('page'), 1),
+            page_size=_int(p.get('page_size'), 100), export=p.get('export') in ('1', 'true'))
+    except bankbook.BankBookError as exc:
+        raise AccountingError(str(exc))
+    data['branch'] = _branch_label(request, branch_label)
+    return data
+
+
+def _check_branch_access(request, branch_id):
+    from apps.common.branch_context import get_allowed_branch_ids
+    allowed = get_allowed_branch_ids(request) if getattr(request, 'multi_branch_enabled', False) else None
+    return allowed is None or str(branch_id) in allowed
+
+
+@api_view(['PUT', 'PATCH'])
+@permission_classes([FinancePermission])
+def bankbook_entry_detail_view(request, journal_id, account_id):
+    """Set the UTR / reference, mode, bank date and remarks of one Bank Book row."""
+    journal = get_object_or_404(JournalEntry, pk=journal_id)
+    if not _check_branch_access(request, journal.branch_id):
+        return _error('You do not have access to this entry.', status.HTTP_403_FORBIDDEN)
+    account = get_object_or_404(ChartOfAccount.all_objects.select_related('account_group'), pk=account_id)
+    ser = bankbook.EntryDetailSerializer(data=request.data, partial=True)
+    ser.is_valid(raise_exception=True)
+    try:
+        with transaction.atomic():
+            d = bankbook.save_entry_detail(journal, account, ser.validated_data, user=request.user)
+    except AccountingError as exc:
+        return _error(exc)
+    return Response({'reference': d.reference, 'mode': d.mode, 'value_date': d.value_date, 'remarks': d.remarks})
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([FinancePermission])
+def bankbook_pending_view(request):
+    """GET: pending bank settlements, filtered, with a summary. POST: record a new one."""
+    if request.method == 'POST':
+        ser = bankbook.PendingInputSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        try:
+            with transaction.atomic():
+                row = bankbook.create_pending(ser.validated_data, user=request.user, branch=_request_branch(request))
+        except AccountingError as exc:
+            return _error(exc)
+        return Response(bankbook.pending_row(row), status=status.HTTP_201_CREATED)
+    p = request.query_params
+    direction = (p.get('direction') or '').upper()
+    if direction and direction not in ('RECEIVE', 'PAY'):
+        return _error('direction must be RECEIVE or PAY.')
+    statuses = [s for s in (p.get('status') or '').upper().split(',') if s]
+    if any(s not in bankbook.PENDING_TRANSITIONS for s in statuses):
+        return _error('status must be PENDING, SETTLED or CANCELLED.')
+    if p.get('bank_account'):
+        try:
+            uuid.UUID(p['bank_account'])
+        except ValueError:
+            return _error('Select a valid bank account.')
+    try:
+        branch_ids, branch_label = _cashbook_branches(request)
+        data = bankbook.pending_list(
+            direction=direction, statuses=statuses, due=(p.get('due') or '').lower(), search=p.get('search') or '',
+            bank_account=p.get('bank_account') or '', branch_ids=branch_ids,
+            date_from=_date_param(request, 'date_from'), date_to=_date_param(request, 'date_to'),
+            page=_int(p.get('page'), 1), page_size=_int(p.get('page_size'), 100),
+            export=p.get('export') in ('1', 'true'))
+    except AccountingError as exc:
+        return _error(exc)
+    data['branch'] = _branch_label(request, branch_label)
+    return Response(data)
+
+
+def _pending_qs():
+    return PendingBankSettlement.objects.select_related('bank_account', 'branch', 'created_by', 'updated_by', 'journal_entry')
+
+
+@api_view(['GET', 'PATCH'])
+@permission_classes([FinancePermission])
+def bankbook_pending_detail_view(request, pk):
+    row = get_object_or_404(_pending_qs(), pk=pk)
+    if not _check_branch_access(request, row.branch_id):
+        return _error('You do not have access to this settlement.', status.HTTP_403_FORBIDDEN)
+    if request.method == 'PATCH':
+        ser = bankbook.PendingUpdateSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        try:
+            with transaction.atomic():
+                bankbook.update_pending(PendingBankSettlement.objects.select_for_update().get(pk=row.pk),
+                                        ser.validated_data, user=request.user)
+        except AccountingError as exc:
+            return _error(exc)
+        row = _pending_qs().get(pk=row.pk)
+    return Response(bankbook.pending_row(row))
+
+
+@api_view(['GET'])
+@permission_classes([FinancePermission])
+def bankbook_pending_matches_view(request, pk):
+    row = get_object_or_404(PendingBankSettlement, pk=pk)
+    if not _check_branch_access(request, row.branch_id):
+        return _error('You do not have access to this settlement.', status.HTTP_403_FORBIDDEN)
+    try:
+        branch_ids, _label = _cashbook_branches(request)
+    except AccountingError as exc:
+        return _error(exc)
+    return Response({'results': bankbook.settlement_matches(row, branch_ids=branch_ids)})

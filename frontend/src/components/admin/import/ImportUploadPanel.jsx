@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
 import axios from 'axios';
-import { Card, Typography, Button, TextField, MenuItem, Stack, Alert, LinearProgress } from '@mui/material';
+import { Card, Typography, Button, TextField, MenuItem, Stack, Alert, LinearProgress, FormControlLabel, Switch } from '@mui/material';
 import { CloudUpload as UploadIcon } from '@mui/icons-material';
 
 export default function ImportUploadPanel({ onImportStarted }) {
   const [file, setFile] = useState(null);
   const [duplicateStrategy, setDuplicateStrategy] = useState('UPDATE');
+  const [autoBarcode, setAutoBarcode] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadPct, setUploadPct] = useState(0);
   const [error, setError] = useState(null);
@@ -18,6 +19,7 @@ export default function ImportUploadPanel({ onImportStarted }) {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('duplicate_strategy', duplicateStrategy);
+    formData.append('auto_barcode', autoBarcode ? 'true' : 'false');
     try {
       const res = await axios.post('/api/import/upload/', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
@@ -41,7 +43,8 @@ export default function ImportUploadPanel({ onImportStarted }) {
       <Typography variant="h6" fontWeight={800} sx={{ mb: 0.5 }}>Import Products from Excel / CSV</Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
         Supports unlimited rows — the file is streamed and imported in the background in
-        chunks, so this page stays responsive no matter how large the file is.
+        chunks, so this page stays responsive no matter how large the file is. Columns can be in any
+        order and are matched by their headings; every visible sheet with product columns is imported.
       </Typography>
 
       {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>{error}</Alert>}
@@ -64,9 +67,22 @@ export default function ImportUploadPanel({ onImportStarted }) {
         </TextField>
 
         <Button variant="contained" onClick={handleUpload} disabled={uploading || !file} sx={{ fontWeight: 800, px: 3 }}>
-          {uploading ? (uploadPct < 100 ? `Uploading ${uploadPct}%...` : 'Starting Import...') : 'Start Import'}
+          {uploading
+            ? (uploadPct < 100 ? `Uploading ${uploadPct}%...` : 'Starting...')
+            : (autoBarcode ? 'Preview Barcodes' : 'Start Import')}
         </Button>
       </Stack>
+
+      <FormControlLabel
+        sx={{ mt: 1.5, display: 'flex' }}
+        control={<Switch checked={autoBarcode} onChange={(e) => setAutoBarcode(e.target.checked)} />}
+        label={<Typography variant="body2" fontWeight={700}>Auto-generate missing barcodes</Typography>}
+      />
+      <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+        {autoBarcode
+          ? 'Barcodes in your file are used as they are. Missing ones continue the same series, and you can review them before anything is imported.'
+          : 'Barcodes in your file are used as they are. Rows without one are imported with the barcode left blank.'}
+      </Typography>
 
       {uploading && (
         <LinearProgress variant="determinate" value={uploadPct} sx={{ mt: 2, height: 6, borderRadius: 3 }} />

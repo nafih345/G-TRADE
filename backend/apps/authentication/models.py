@@ -2,6 +2,8 @@ import uuid
 from django.db import models
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 
+from apps.common import tenancy
+
 class UserManager(BaseUserManager):
     def create_user(self, username, email=None, password=None, **extra_fields):
         if not username:
@@ -35,6 +37,11 @@ class User(AbstractUser):
     role = models.CharField(max_length=30, choices=ROLE_CHOICES, default='SALES_EXECUTIVE')
     phone = models.CharField(max_length=20, blank=True, null=True)
     is_active = models.BooleanField(default=True)
+    # The client business this account works for. Signed into every token as `tenant_id`;
+    # all API data is filtered by it (apps/common/tenancy.py). A user without one cannot sign in.
+    # New accounts default to the tenant of the request creating them (else the default tenant).
+    tenant = models.ForeignKey('common.Tenant', on_delete=models.PROTECT, null=True, blank=True,
+                               default=tenancy.default_tenant_id, related_name='users', db_index=True)
     
     objects = UserManager()
 

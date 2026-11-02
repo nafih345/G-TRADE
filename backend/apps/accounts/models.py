@@ -15,7 +15,7 @@ class Account(BaseUUIDModel):
         ('INACTIVE', 'Inactive'),
     ]
 
-    code = models.CharField(max_length=50, unique=True)
+    code = models.CharField(max_length=50)
     name = models.CharField(max_length=150)
     account_type = models.CharField(max_length=20, choices=ACCOUNT_TYPES)
     account_group = models.CharField(max_length=100, blank=True, null=True)
@@ -25,6 +25,11 @@ class Account(BaseUUIDModel):
     branch_name = models.CharField(max_length=100, default='Main Branch')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='ACTIVE')
     description = models.TextField(blank=True, null=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'code'], name='accounts_account_code_tenant'),
+        ]
 
     def __str__(self):
         return f"{self.code} - {self.name}"
@@ -36,10 +41,15 @@ class JournalEntry(BaseUUIDModel):
         ('POSTED', 'Posted'),
     ]
 
-    entry_number = models.CharField(max_length=50, unique=True)
+    entry_number = models.CharField(max_length=50)
     date = models.DateField()
     description = models.TextField(blank=True, null=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='DRAFT')
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'entry_number'], name='accounts_journalentry_entry_number_tenant'),
+        ]
 
     def __str__(self):
         return self.entry_number

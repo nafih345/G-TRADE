@@ -41,6 +41,7 @@ import {
 } from 'recharts';
 import axios from 'axios';
 import EyeTestClinicalReport from '../components/reports/EyeTestClinicalReport';
+import SalesComprehensiveReport from '../components/reports/SalesComprehensiveReport';
 
 // 4 MASTER REPORT CATEGORIES
 const MASTER_CATEGORIES = [
@@ -466,6 +467,8 @@ export default function Reports() {
       {/* 👁️ SPECIAL CASE: CLINIC EYE TEST REPORT */}
       {activeSubReport === 'eyetest' ? (
         <EyeTestClinicalReport />
+      ) : activeSubReport === 'sales-overview' ? (
+        <SalesComprehensiveReport />
       ) : (
         /* STANDARD UNIFIED ENTERPRISE REPORT DATA TABLE & KPI VIEW */
         <Stack spacing={3}>

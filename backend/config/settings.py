@@ -110,6 +110,8 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    # Sets the request's tenant from the JWT; must run before anything that queries tenant data.
+    'apps.common.tenant_context.TenantContextMiddleware',
     'apps.common.branch_context.BranchContextMiddleware',
     # Pauses writes while a database restore runs (apps/security/middleware.py).
     'apps.security.middleware.RestoreMaintenanceMiddleware',
@@ -407,6 +409,12 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # back silently, so a cached row could outlive the test that created it.
 RUNNING_TESTS = len(sys.argv) > 1 and sys.argv[1] == 'test'
 HOT_CACHE_SECONDS = 0 if RUNNING_TESTS else int(os.environ.get('HOT_CACHE_SECONDS', '30'))
+
+# Tenant an /api/ request without a valid token is scoped to (apps/common/tenant_context.py).
+# Always None in real use: tokenless requests see no tenant data. The test runner uses the
+# default tenant because most API tests predate tenancy and call AllowAny views anonymously;
+# apps/common/tests_tenancy.py checks the real (None) behaviour.
+TENANCY_ANONYMOUS_TENANT_ID = 1 if RUNNING_TESTS else None
 
 # Custom User Model
 AUTH_USER_MODEL = 'authentication.User'

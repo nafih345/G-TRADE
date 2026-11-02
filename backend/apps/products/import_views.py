@@ -1,3 +1,5 @@
+import bisect
+import csv
 import datetime
 import threading
 import uuid
@@ -8,8 +10,9 @@ from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 from django.db import models, connection, transaction
 from django.core.management import call_command
-from django.http import HttpResponse
-from .models import Product, ImportBatch, ImportErrorLog
+from django.http import HttpResponse, StreamingHttpResponse
+from django.utils import timezone
+from .models import Product, ImportBatch, ImportBarcodeRow, ImportErrorLog
 from . import import_engine
 
 from django.contrib.auth import get_user_model
@@ -40,6 +43,7 @@ def ensure_import_tables_exist():
             ('masters_tax', Tax),
             ('masters_storagerack', StorageRack),
             ('products_importbatch', ImportBatch),
+            ('products_importbarcoderow', ImportBarcodeRow),
             ('products_importerrorlog', ImportErrorLog),
             ('products_product', Product)
         ]
@@ -78,9 +82,11 @@ def _batch_summary(b):
         'uploaded_date': b.uploaded_date.strftime('%Y-%m-%d %H:%M:%S') if b.uploaded_date else '',
         'status': b.status,
         'duplicate_strategy': b.duplicate_strategy,
+        'auto_barcode': b.auto_barcode,
         'total_rows': b.total_rows,
         'processed_rows': b.processed_rows,
         'imported_rows': b.imported_rows,
+        'updated_rows': b.updated_rows,
         'failed_rows': b.failed_rows,
         'duplicate_rows': b.duplicate_rows,
         'processing_time': b.processing_time,
@@ -99,6 +105,8 @@ def start_import(request):
     Saves the uploaded file, creates an ImportBatch, and starts a background
     thread that streams + chunk-imports it. Returns immediately — the browser
     never waits for the import itself, only for the upload to be accepted.
+    With auto_barcode on, the thread only prepares the barcode preview; nothing
+    is imported until /confirm/.
     """
     ensure_import_tables_exist()
     file_obj = request.FILES.get('file')
@@ -112,6 +120,7 @@ def start_import(request):
     duplicate_strategy = request.data.get('duplicate_strategy', 'UPDATE')
     if duplicate_strategy not in ('SKIP', 'UPDATE', 'REPLACE', 'DUPLICATE'):
         duplicate_strategy = 'UPDATE'
+    auto_barcode = str(request.data.get('auto_barcode', '')).lower() in ('1', 'true', 'on')
 
     uploaded_by = request.data.get('uploaded_by', 'Administrator')
     batch_num = f"BATCH-{datetime.datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
@@ -130,9 +139,10 @@ def start_import(request):
                 file_name=file_obj.name,
                 original_file_name=file_obj.name,
                 uploaded_by=uploaded_by,
-                status='PENDING',
+                status='ANALYZING' if auto_barcode else 'PENDING',
                 duplicate_strategy=duplicate_strategy,
-                remarks='Queued for background import.'
+                auto_barcode=auto_barcode,
+                remarks='Checking the barcodes in your file...' if auto_barcode else 'Queued for background import.'
             )
             transaction.on_commit(lambda: import_engine.start_import_thread(batch.id))
     except Exception as e:
@@ -167,11 +177,11 @@ def get_import_status(request, pk):
 def get_import_rows(request, pk):
     """Paginated + searched product rows belonging to one import batch."""
     try:
-        batch = ImportBatch.objects.get(id=pk)
+        batch = ImportBatch.objects.defer('file_data').get(id=pk)
     except ImportBatch.DoesNotExist:
         return Response({'error': 'Import batch not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-    qs = Product.objects.filter(import_batch=batch).order_by('name')
+    qs = Product.objects.filter(import_batch=batch).order_by('import_row', 'name')
     search = request.query_params.get('search', '').strip()
     if search:
         qs = qs.filter(
@@ -179,6 +189,17 @@ def get_import_rows(request, pk):
             models.Q(barcode__icontains=search) | models.Q(brand_name__icontains=search) |
             models.Q(category_name__icontains=search) | models.Q(supplier_name__icontains=search)
         )
+
+    # The sheet's own cells, except that a barcode the import generated has to show too.
+    headers = list(batch.column_headers or [])
+    barcode_header = import_engine.resolve_field_headers(headers).get('barcode')
+    if headers and not barcode_header:
+        barcode_header = 'Barcode'
+        headers.append(barcode_header)
+
+    def source_cells(p):
+        cells = p.extra_data or {}
+        return {**cells, barcode_header: p.barcode} if p.barcode and not cells.get(barcode_header) else cells
 
     paginator = ImportRowsPagination()
     page = paginator.paginate_queryset(qs, request)
@@ -194,12 +215,86 @@ def get_import_rows(request, pk):
         'selling_price': float(p.retail_price),
         'stock': p.stock,
         'is_active': p.is_active,
-        **(p.extra_data or {}),
+        'source': source_cells(p),    # keyed by column_headers
     } for p in page]
 
     response = paginator.get_paginated_response(rows)
-    response.data['column_headers'] = batch.column_headers or []
+    response.data['column_headers'] = headers
     return response
+
+
+@api_view(['GET'])
+@authentication_classes([])
+@permission_classes([permissions.AllowAny])
+def get_barcode_preview(request, pk):
+    """
+    The rows due a generated barcode, each with the code it would get right now. A
+    row's code comes from how many included rows are ahead of it (see ImportBarcodeRow),
+    so excluded rows take no number and the codes stay continuous.
+    """
+    try:
+        batch = ImportBatch.objects.defer('file_data').get(id=pk)
+    except ImportBatch.DoesNotExist:
+        return Response({'error': 'Import batch not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    all_rows = batch.barcode_rows.all()
+    excluded = sorted(all_rows.filter(excluded=True).values_list('position', flat=True))
+    missing = batch.barcode_summary.get('missing', 0)
+    included = missing - len(excluded)
+
+    qs = all_rows.order_by('position')
+    search = request.query_params.get('search', '').strip()
+    if search:
+        qs = qs.filter(models.Q(product_name__icontains=search) | models.Q(product_code__icontains=search))
+
+    paginator = ImportRowsPagination()
+    page = paginator.paginate_queryset(qs, request)
+    ranks = {r.position: r.position - bisect.bisect_left(excluded, r.position) for r in page}
+    wanted = set(ranks.values()) | {0, included - 1}
+    slots = dict(all_rows.filter(position__in=wanted).values_list('position', 'slot_code'))
+    rows = [{
+        'id': str(r.id),
+        'sheet_name': r.sheet_name,
+        'row_number': r.row_number,
+        'product_code': r.product_code,
+        'product_name': r.product_name,
+        'excluded': r.excluded,
+        'barcode': None if r.excluded else slots.get(ranks[r.position]),
+    } for r in page]
+
+    response = paginator.get_paginated_response(rows)
+    response.data['summary'] = {
+        **batch.barcode_summary,
+        'to_generate': included,
+        'excluded': len(excluded),
+        'first_new_code': slots.get(0) if included else None,
+        'last_new_code': slots.get(included - 1) if included else None,
+    }
+    return response
+
+
+@api_view(['POST'])
+@authentication_classes([])
+@permission_classes([permissions.AllowAny])
+def set_barcode_exclusion(request, pk):
+    """Clears (or restores) the generated barcode on the given rows, or on all of them."""
+    rows = ImportBarcodeRow.objects.filter(batch_id=pk, batch__status='AWAITING_CONFIRMATION')
+    if not request.data.get('all'):
+        rows = rows.filter(id__in=request.data.get('row_ids') or [])
+    return Response({'updated': rows.update(excluded=bool(request.data.get('excluded', True)))})
+
+
+@api_view(['POST'])
+@authentication_classes([])
+@permission_classes([permissions.AllowAny])
+def confirm_import(request, pk):
+    """The user has seen the barcode preview: start the real import. Only the first call counts."""
+    confirmed = ImportBatch.objects.filter(id=pk, status='AWAITING_CONFIRMATION').update(
+        status='PENDING', remarks='Queued for background import.', updated_at=timezone.now())
+    if not confirmed:
+        return Response({'error': 'This import is not waiting for confirmation.'}, status=status.HTTP_409_CONFLICT)
+    import_engine.start_import_thread(pk)
+    return Response({'batch_id': str(pk), 'status': 'PENDING'}, status=status.HTTP_202_ACCEPTED)
 
 
 @api_view(['GET'])
@@ -208,7 +303,7 @@ def get_import_rows(request, pk):
 def get_import_errors(request, pk):
     """Paginated failed-row log for one import batch."""
     try:
-        batch = ImportBatch.objects.get(id=pk)
+        batch = ImportBatch.objects.defer('file_data').get(id=pk)
     except ImportBatch.DoesNotExist:
         return Response({'error': 'Import batch not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -260,7 +355,7 @@ def handle_import_batch_detail(request, pk):
             - option2: Delete ImportBatch AND delete associated products from PostgreSQL
     """
     try:
-        batch = ImportBatch.objects.get(id=pk)
+        batch = ImportBatch.objects.defer('file_data').get(id=pk)
     except ImportBatch.DoesNotExist:
         return Response({'error': 'Import batch not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -338,18 +433,25 @@ def export_failed_records_csv(request, pk):
     Exports failed records for a specific import batch as downloadable CSV file
     """
     try:
-        batch = ImportBatch.objects.get(id=pk)
+        batch = ImportBatch.objects.defer('file_data').get(id=pk)
     except ImportBatch.DoesNotExist:
         return Response({'error': 'Import batch not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-    failed_logs = batch.error_logs.all()
+    class Echo:
+        def write(self, value):
+            return value
 
-    csv_rows = ["Row Number,Product Code,Product Name,Error Reason,Raw Data JSON\n"]
-    for f in failed_logs:
-        raw_json_str = str(f.raw_data).replace('"', '""') if f.raw_data else ""
-        csv_rows.append(f'{f.row_number},"{f.product_code or ""}","{f.product_name or ""}","{f.error_message}","{raw_json_str}"\n')
+    def rows():
+        # Streamed: a huge batch can have as many failures as rows.
+        writer = csv.writer(Echo())
+        yield writer.writerow(['Sheet', 'Row Number', 'Product Code', 'Product Name', 'Error Type', 'Error Reason',
+                               *(batch.column_headers or [])])
+        for f in batch.error_logs.order_by('row_number').iterator(chunk_size=2000):
+            raw = f.raw_data or {}
+            yield writer.writerow([f.sheet_name, f.row_number, f.product_code or '', f.product_name or '', f.error_type,
+                                   f.error_message, *[raw.get(h, '') for h in (batch.column_headers or [])]])
 
-    response = HttpResponse("".join(csv_rows), content_type='text/csv')
+    response = StreamingHttpResponse(rows(), content_type='text/csv')
     response['Content-Disposition'] = f'attachment; filename="Failed_Records_{batch.batch_number}.csv"'
     return response
 
@@ -359,7 +461,7 @@ def export_failed_records_csv(request, pk):
 @permission_classes([permissions.AllowAny])
 def archive_import_batch(request, pk):
     try:
-        batch = ImportBatch.objects.get(id=pk)
+        batch = ImportBatch.objects.defer('file_data').get(id=pk)
         Product.objects.filter(import_batch=batch).update(is_active=False)
         batch.status = 'ARCHIVED'
         batch.save()
@@ -373,7 +475,7 @@ def archive_import_batch(request, pk):
 @permission_classes([permissions.AllowAny])
 def restore_import_batch(request, pk):
     try:
-        batch = ImportBatch.objects.get(id=pk)
+        batch = ImportBatch.objects.defer('file_data').get(id=pk)
         Product.objects.filter(import_batch=batch).update(is_active=True)
         batch.status = 'SUCCESS'
         batch.save()

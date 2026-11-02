@@ -14,6 +14,7 @@
     "test:lens": "node --test src/utils/__tests__/lensUnits.test.js",
     "test:lens-po": "node --test src/utils/__tests__/lensPurchaseOrders.test.js",
     "test:eye-test": "node --test src/utils/__tests__/eyeTestBill.test.js",
+    "test:eye-report": "node --test src/utils/__tests__/eyeTestReport.test.js",
     "test:cheques": "node --test src/utils/__tests__/cheques.test.js"
   },
   "dependencies": {

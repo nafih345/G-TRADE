@@ -137,7 +137,8 @@ class RegisterUserView(generics.CreateAPIView):
     permission_classes = [IsSuperAdmin]
 
     def perform_create(self, serializer):
-        user = serializer.save()
+        # New accounts always join the creator's tenant; the body can't choose another.
+        user = serializer.save(tenant_id=self.request.user.tenant_id)
         password = self.request.data.get('password')
         if password:
             user.set_password(password)

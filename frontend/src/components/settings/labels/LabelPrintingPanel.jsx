@@ -1,9 +1,9 @@
 // Settings → Barcode Labels → Printing & Defaults: which template each workflow prints
-// with, printer names, calibration (offset / scale / dpi), default copies, the unique
-// per-label barcode series, plus test / calibration prints and browser setup help.
+// with, printer names, calibration (offset / scale / dpi), default copies, plus test /
+// calibration prints and browser setup help.
 import React, { useEffect, useState } from 'react';
 import {
-  Box, Stack, Typography, TextField, MenuItem, Button, Alert, Checkbox, FormControlLabel, Divider, Grid, Paper,
+  Box, Stack, Typography, TextField, MenuItem, Button, Alert, Divider, Grid, Paper,
 } from '@mui/material';
 import { Save, Science, KeyboardDoubleArrowDown } from '@mui/icons-material';
 import { NumField } from './PropertiesPanel';
@@ -13,7 +13,7 @@ import { printCalibration, feedOneLabel } from '../../../labels/printLabels';
 import { notify } from '../../../utils/notify';
 
 const EDITABLE = ['inventory_template', 'purchase_template', 'barcode_printing_template', 'thermal_printer_name', 'a4_printer_name',
-  'h_offset_mm', 'v_offset_mm', 'print_scale_percent', 'default_copies', 'printer_dpi', 'unique_label_series'];
+  'h_offset_mm', 'v_offset_mm', 'print_scale_percent', 'default_copies', 'printer_dpi'];
 
 export default function LabelPrintingPanel({ bundle, setBundle }) {
   const templates = bundle?.templates || [];
@@ -99,10 +99,6 @@ export default function LabelPrintingPanel({ bundle, setBundle }) {
                 </TextField>
                 <NumField label="Default quantity per product" value={form.default_copies} min={1} max={500} step={1} onChange={(v) => set('default_copies', Math.round(v))} disabled={!canDesign} />
               </Stack>
-              <FormControlLabel
-                control={<Checkbox checked={form.unique_label_series !== false} onChange={(e) => set('unique_label_series', e.target.checked)} disabled={!canDesign} />}
-                label={<Typography variant="body2">Give every printed label its own scannable code (saved against the product, so each one still scans back to it)</Typography>}
-              />
             </Stack>
           </Box>
           <Stack direction="row" spacing={1}>

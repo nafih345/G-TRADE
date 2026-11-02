@@ -2,7 +2,7 @@ from django.db import models
 from django.db.models import Q
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from apps.common.models import BaseUUIDModel
+from apps.common.models import BaseUUIDModel, TenantOwnedModel
 from apps.company.models import Branch
 
 User = get_user_model()
@@ -19,11 +19,14 @@ class AccountGroup(BaseUUIDModel):
         ('Expense', 'Expense'),
     ]
 
-    name = models.CharField(max_length=100, unique=True)
+    name = models.CharField(max_length=100)
     account_type = models.CharField(max_length=20, choices=ACCOUNT_TYPES)
 
     class Meta:
         ordering = ['name']
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'name'], name='financial_accountgroup_name_tenant'),
+        ]
 
     def __str__(self):
         return f"{self.name} ({self.account_type})"
@@ -57,8 +60,8 @@ class ChartOfAccount(BaseUUIDModel):
         ('EXPENSE', 'Expense'),
     ]
 
-    code = models.CharField(max_length=50, unique=True)
-    name = models.CharField(max_length=150, unique=True)
+    code = models.CharField(max_length=50)
+    name = models.CharField(max_length=150)
     account_group = models.ForeignKey(AccountGroup, on_delete=models.PROTECT, related_name='accounts')
     parent_account = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, related_name='children')
     account_subtype = models.CharField(max_length=20, choices=SUBTYPE_CHOICES, blank=True, default='')
@@ -82,6 +85,10 @@ class ChartOfAccount(BaseUUIDModel):
 
     class Meta:
         ordering = ['code']
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'code'], name='financial_chartofaccount_code_tenant'),
+            models.UniqueConstraint(fields=['tenant', 'name'], name='financial_chartofaccount_name_tenant'),
+        ]
 
     def __str__(self):
         return f"{self.code} - {self.name}"
@@ -123,10 +130,13 @@ class BankDetail(BaseUUIDModel):
 
 class VoucherType(BaseUUIDModel):
     name = models.CharField(max_length=100)
-    code = models.CharField(max_length=20, unique=True)
+    code = models.CharField(max_length=20)
 
     class Meta:
         ordering = ['code']
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'code'], name='financial_vouchertype_code_tenant'),
+        ]
 
     def __str__(self):
         return f"{self.code} - {self.name}"
@@ -145,7 +155,7 @@ class JournalEntry(BaseUUIDModel):
     # while both remain visible in the ledger.
     LEDGER_STATUSES = ('POSTED', 'REVERSED')
 
-    entry_number = models.CharField(max_length=50, unique=True)
+    entry_number = models.CharField(max_length=50)
     date = models.DateField()
     narration = models.TextField(blank=True, null=True)
     voucher_type = models.ForeignKey(VoucherType, on_delete=models.SET_NULL, null=True, blank=True, related_name='journal_entries')
@@ -171,7 +181,7 @@ class JournalEntry(BaseUUIDModel):
     branch = models.ForeignKey(Branch, on_delete=models.SET_NULL, null=True, blank=True, related_name='journal_entries')
     # Client-supplied key for manual vouchers (one per form submission) so a double-click or
     # a retried request can never post the same voucher twice.
-    idempotency_key = models.CharField(max_length=120, null=True, blank=True, unique=True)
+    idempotency_key = models.CharField(max_length=120, null=True, blank=True)
     total_amount = models.DecimalField(max_digits=15, decimal_places=2, default=0)
     # Anything the posting rule needs to reproduce its figures later — e.g. the unit costs
     # COGS was booked at, so an edited invoice keeps its original cost basis.
@@ -184,6 +194,8 @@ class JournalEntry(BaseUUIDModel):
     class Meta:
         ordering = ['-date', '-created_at']
         constraints = [
+            models.UniqueConstraint(fields=['tenant', 'entry_number'], name='financial_journalentry_entry_number_tenant'),
+            models.UniqueConstraint(fields=['tenant', 'idempotency_key'], name='financial_journalentry_idempotency_key_tenant'),
             # At most one live (posted, non-reversal) entry per source document event. This
             # is the database-level guarantee that a document is booked exactly once, even
             # if two requests race each other past the service-level check.
@@ -281,7 +293,7 @@ class PostingFailure(BaseUUIDModel):
 class FiscalPeriod(BaseUUIDModel):
     STATUS_CHOICES = [('OPEN', 'Open'), ('CLOSED', 'Closed')]
 
-    name = models.CharField(max_length=60, unique=True)
+    name = models.CharField(max_length=60)
     start_date = models.DateField()
     end_date = models.DateField()
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='OPEN')
@@ -291,6 +303,7 @@ class FiscalPeriod(BaseUUIDModel):
     class Meta:
         ordering = ['-start_date']
         constraints = [
+            models.UniqueConstraint(fields=['tenant', 'name'], name='financial_fiscalperiod_name_tenant'),
             models.CheckConstraint(condition=Q(end_date__gte=models.F('start_date')), name='fiscal_period_dates_ordered'),
         ]
 
@@ -298,8 +311,8 @@ class FiscalPeriod(BaseUUIDModel):
         return f"{self.name} [{self.status}]"
 
 
-class AccountingPolicy(models.Model):
-    """Singleton (pk=1) holding the switches for automated posting."""
+class AccountingPolicy(TenantOwnedModel):
+    """Per-tenant singleton holding the switches for automated posting."""
     auto_posting_enabled = models.BooleanField(default=True)
     # {source_key: bool} — a source missing here counts as enabled.
     source_enabled = models.JSONField(default=dict, blank=True)
@@ -315,23 +328,26 @@ class AccountingPolicy(models.Model):
     inventory_valuation = models.CharField(max_length=30, default='LAST_PURCHASE_COST')
     updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['tenant'], name='financial_accountingpolicy_one_per_tenant')]
+
     @classmethod
     def get(cls):
-        obj, _ = cls.objects.get_or_create(pk=1)
+        obj, _ = cls.objects.get_or_create()
         return obj
 
 
-class JournalSequence(models.Model):
+class JournalSequence(TenantOwnedModel):
     """Gap-free journal numbering per prefix and year (row-locked on increment)."""
     prefix = models.CharField(max_length=10)
     year = models.PositiveIntegerField()
     last_number = models.PositiveIntegerField(default=0)
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=['prefix', 'year'], name='uniq_journal_sequence')]
+        constraints = [models.UniqueConstraint(fields=['tenant', 'prefix', 'year'], name='uniq_journal_sequence')]
 
 
-class FinancialAuditLog(models.Model):
+class FinancialAuditLog(TenantOwnedModel):
     action = models.CharField(max_length=40, db_index=True)
     object_type = models.CharField(max_length=40)
     object_id = models.CharField(max_length=64, blank=True, default='')
@@ -371,9 +387,11 @@ class Cheque(BaseUUIDModel):
     cheque_number = models.CharField(max_length=40)
     cheque_date = models.DateField()
     bank_name = models.CharField(max_length=150, blank=True, default='')
+    bank_branch = models.CharField(max_length=120, blank=True, default='')   # branch of bank_name
     amount = models.DecimalField(max_digits=14, decimal_places=2)
     deposited_date = models.DateField(null=True, blank=True)
     cleared_date = models.DateField(null=True, blank=True)
+    # Drawer (who signed a cheque we received) or payee (who a cheque we issued is made out to).
     party_name = models.CharField(max_length=200, blank=True, default='')
     party_kind = models.CharField(max_length=20, blank=True, default='')
     party_id = models.CharField(max_length=64, blank=True, default='')
@@ -396,3 +414,72 @@ class Cheque(BaseUUIDModel):
     def due_date(self):
         """The date the countdown runs to: the (planned) deposit date, else the cheque date."""
         return self.deposited_date or self.cheque_date
+
+
+# Instruments a bank movement can be made by (Bank Book "Mode"). Blank = read from the posting.
+BANK_MODE_CHOICES = [
+    ('NEFT', 'NEFT'), ('RTGS', 'RTGS'), ('IMPS', 'IMPS'), ('UPI', 'UPI'), ('BANK_TRANSFER', 'Bank Transfer'),
+    ('CHEQUE', 'Cheque'), ('CARD', 'Card'), ('POS', 'POS Terminal'), ('CASH', 'Cash Deposit / Withdrawal'),
+    ('OTHER', 'Other'),
+]
+
+
+class BankEntryDetail(BaseUUIDModel):
+    """Bank Book details for one posted bank movement (one journal's net effect on one bank
+    ledger): the UTR / reference, the instrument and the date the bank shows it. Tracking only:
+    the journal already moved the money, so nothing here ever posts or changes an amount."""
+    journal_entry = models.ForeignKey(JournalEntry, on_delete=models.CASCADE, related_name='bank_details')
+    bank_account = models.ForeignKey(ChartOfAccount, on_delete=models.PROTECT, related_name='bank_entry_details')
+    reference = models.CharField(max_length=80, blank=True, default='')
+    mode = models.CharField(max_length=20, choices=BANK_MODE_CHOICES, blank=True, default='')
+    value_date = models.DateField(null=True, blank=True)
+    remarks = models.CharField(max_length=500, blank=True, default='')
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['journal_entry', 'bank_account'], name='fin_bank_detail_once')]
+
+    def __str__(self):
+        return f"{self.journal_entry_id} @ {self.bank_account_id}: {self.reference}"
+
+
+class PendingBankSettlement(BaseUUIDModel):
+    """A party has agreed to settle (or we have agreed to pay) by bank later. Tracking only, like
+    the Cheque Register: nothing is posted when it is entered. When the money actually moves it
+    is booked the normal way (Receipt / Payment Voucher, Record Payment ...) and this row is
+    marked Settled, optionally linked to that journal so the Bank Book shows the match."""
+    DIRECTION_CHOICES = [('RECEIVE', 'To Receive'), ('PAY', 'To Pay')]
+    STATUS_CHOICES = [('PENDING', 'Pending'), ('SETTLED', 'Settled'), ('CANCELLED', 'Cancelled')]
+
+    number = models.CharField(max_length=30)
+    direction = models.CharField(max_length=8, choices=DIRECTION_CHOICES)
+    party_kind = models.CharField(max_length=20, blank=True, default='')   # customer / dealer / supplier / other
+    party_id = models.CharField(max_length=64, blank=True, default='')
+    party_name = models.CharField(max_length=200)
+    party_phone = models.CharField(max_length=40, blank=True, default='')
+    bill_numbers = models.CharField(max_length=255, blank=True, default='')
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    agreed_date = models.DateField()
+    expected_date = models.DateField()
+    bank_account = models.ForeignKey(ChartOfAccount, on_delete=models.SET_NULL, null=True, blank=True,
+                                     related_name='pending_bank_settlements')
+    mode = models.CharField(max_length=20, choices=BANK_MODE_CHOICES, blank=True, default='BANK_TRANSFER')
+    reference = models.CharField(max_length=80, blank=True, default='')
+    notes = models.CharField(max_length=500, blank=True, default='')
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='PENDING', db_index=True)
+    settled_date = models.DateField(null=True, blank=True)
+    settled_amount = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    journal_entry = models.ForeignKey(JournalEntry, on_delete=models.SET_NULL, null=True, blank=True,
+                                      related_name='pending_bank_settlements')
+    status_note = models.CharField(max_length=255, blank=True, default='')
+    status_changed_at = models.DateTimeField(null=True, blank=True)
+    branch = models.ForeignKey(Branch, on_delete=models.SET_NULL, null=True, blank=True, related_name='pending_bank_settlements')
+
+    class Meta:
+        ordering = ['expected_date', 'created_at']
+        indexes = [models.Index(fields=['status', 'expected_date'], name='fin_pbs_status_due')]
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'number'], name='financial_pendingbanksettlement_number_tenant'),
+        ]
+
+    def __str__(self):
+        return f"{self.number} {self.get_direction_display()} {self.party_name} ₹{self.amount} [{self.status}]"

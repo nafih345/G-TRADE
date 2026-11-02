@@ -11,8 +11,9 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ('id', 'username', 'email', 'first_name', 'last_name', 'role', 'role_display', 'phone', 'is_active')
-        read_only_fields = ('id', 'is_active')
+        fields = ('id', 'username', 'email', 'first_name', 'last_name', 'role', 'role_display', 'phone', 'is_active',
+                  'tenant')
+        read_only_fields = ('id', 'is_active', 'tenant')
 
 
 def ensure_login_role(user):
@@ -25,6 +26,17 @@ def ensure_login_role(user):
             'detail': 'This account is not configured for sign-in yet. Access denied.',
             'code': 'role_not_enabled',
         })
+    ensure_login_tenant(user)
+
+
+def ensure_login_tenant(user):
+    """Every token carries the user's tenant, so an account without an active one can't sign in."""
+    tenant = user.tenant if user.tenant_id else None
+    if tenant is None or not tenant.is_active:
+        raise exceptions.AuthenticationFailed({
+            'detail': 'This account is not linked to an active business. Access denied.',
+            'code': 'no_tenant' if tenant is None else 'tenant_inactive',
+        })
 
 
 def login_user_payload(user):
@@ -32,6 +44,7 @@ def login_user_payload(user):
     if user.is_superuser:
         data['role'] = 'SUPER_ADMIN'
         data['role_display'] = 'Super Admin'
+    data['tenant_name'] = user.tenant.name if user.tenant_id else None
     return data
 
 
@@ -50,7 +63,7 @@ class SessionTokenRefreshSerializer(TokenRefreshSerializer):
         from apps.security import policy
         refresh = RefreshToken(attrs['refresh'])
         user = User.objects.filter(pk=refresh.get('user_id'), is_active=True).first()
-        if user is None:
+        if user is None or user.tenant_id is None or refresh.get('tenant_id') != user.tenant_id:
             raise policy.SessionEnded()
         policy.validate_session(refresh.get('sid'), user, policy.get_settings().inactivity_timeout_minutes)
         return super().validate(attrs)

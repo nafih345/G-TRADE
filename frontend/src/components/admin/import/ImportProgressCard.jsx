@@ -1,10 +1,13 @@
 import React, { useEffect, useRef } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import axios from 'axios';
 import { Card, Typography, Grid, LinearProgress, Chip, Stack, Box, Alert } from '@mui/material';
 
+import ImportBarcodeReview from './ImportBarcodeReview';
+
 const TERMINAL_STATUSES = ['SUCCESS', 'PARTIAL', 'FAILED'];
-const STATUS_COLORS = { PENDING: 'default', PROCESSING: 'primary', SUCCESS: 'success', PARTIAL: 'warning', FAILED: 'error' };
+const AWAITING_REVIEW = 'AWAITING_CONFIRMATION';
+const STATUS_COLORS = { ANALYZING: 'info', PENDING: 'default', PROCESSING: 'primary', SUCCESS: 'success', PARTIAL: 'warning', FAILED: 'error' };
 
 function formatDuration(sec) {
   if (sec < 60) return `${sec}s`;
@@ -12,7 +15,8 @@ function formatDuration(sec) {
   return m < 60 ? `${m}m ${sec % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
-export default function ImportProgressCard({ batchId, onDone, onMissing }) {
+export default function ImportProgressCard({ batchId, onDone, onMissing, onCancelled }) {
+  const queryClient = useQueryClient();
   // First progress sample seen by this card. The rate is measured from here rather
   // than from mount time, so reopening the page mid-import doesn't credit rows
   // imported before it was opened to the last few seconds.
@@ -29,7 +33,9 @@ export default function ImportProgressCard({ batchId, onDone, onMissing }) {
     queryFn: async () => (await axios.get(`/api/import/${batchId}/status/`)).data,
     enabled: !!batchId,
     retry: (count, err) => err?.response?.status !== 404 && count < 2,
-    refetchInterval: (query) => (TERMINAL_STATUSES.includes(query.state.data?.status) ? false : 1500),
+    refetchInterval: (query) => (
+      [...TERMINAL_STATUSES, AWAITING_REVIEW].includes(query.state.data?.status) ? false : 1500
+    ),
   });
 
   useEffect(() => {
@@ -44,6 +50,16 @@ export default function ImportProgressCard({ batchId, onDone, onMissing }) {
   }, [batch, onDone]);
 
   if (!batchId || !batch) return null;
+
+  if (batch.status === AWAITING_REVIEW) {
+    return (
+      <ImportBarcodeReview
+        batch={batch}
+        onCancelled={onCancelled}
+        onConfirmed={() => queryClient.invalidateQueries({ queryKey: ['import-status', batchId] })}
+      />
+    );
+  }
 
   const total = batch.total_rows || 0;
   const processed = batch.processed_rows || 0;
@@ -74,6 +90,10 @@ export default function ImportProgressCard({ batchId, onDone, onMissing }) {
         <Grid item xs={6} sm={4} md={2}>
           <Typography variant="caption" color="text.secondary">Imported</Typography>
           <Typography variant="h6" fontWeight={800} color="success.main">{(batch.imported_rows || 0).toLocaleString()}</Typography>
+        </Grid>
+        <Grid item xs={6} sm={4} md={2}>
+          <Typography variant="caption" color="text.secondary">Updated</Typography>
+          <Typography variant="h6" fontWeight={800} color="info.main">{(batch.updated_rows || 0).toLocaleString()}</Typography>
         </Grid>
         <Grid item xs={6} sm={4} md={2}>
           <Typography variant="caption" color="text.secondary">Duplicates</Typography>

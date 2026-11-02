@@ -99,9 +99,9 @@ export async function checkBackendHealth() {
       /* still unreachable directly — probe through whatever road is current */
     }
   }
-  const baseUrl = axios.defaults.baseURL || '(same origin)';
   try {
-    const { data } = await axios.get('/api/health/', { timeout: 90000, __noFallback: true });
+    const data = await probeHealth();
+    const baseUrl = axios.defaults.baseURL || '(same origin)';
     if (clearLocalDataIfReset(data?.data_reset_epoch)) {
       window.location.reload();
       return state;
@@ -135,10 +135,29 @@ export async function checkBackendHealth() {
         ? 'the server is asleep and waking up (HTTP 429 from the proxy) — retrying'
         : err?.response
           ? `HTTP ${err.response.status} from /api/health/`
-          : (err?.message || 'the request never reached a server');
-    setState({ status: 'unreachable', detail, baseUrl, source: 'health' });
+          : isLocalhost()
+            ? `${err?.message || 'no answer'} — the local backend is not running (start it with: npm run backend)`
+            : (err?.message || 'the request never reached a server');
+    setState({ status: 'unreachable', detail, baseUrl: axios.defaults.baseURL || '(same origin)', source: 'health' });
   }
   return state;
+}
+
+// Health probes skip the interceptor's fallback so they can report the road they are on, but a
+// probe that stops at a failed direct address calls a healthy backend unreachable: the PC's DNS
+// drops onrender.com, every Re-check fails the same way, and the banner stays up on an idle
+// screen even though the proxy works. So a probe tries the proxy too before giving up.
+async function probeHealth() {
+  try {
+    const { data } = await axios.get('/api/health/', { timeout: 90000, __noFallback: true });
+    return data;
+  } catch (err) {
+    if (!isNetworkFailure(err) || isOffline() || !canFallBackToSameOrigin()) throw err;
+    const { data } = await axios.get('/api/health/', { baseURL: '', timeout: 90000, __noFallback: true });
+    console.warn(`[api] ${axios.defaults.baseURL} unreachable (${err.message}); switching to the same-origin /api proxy`);
+    axios.defaults.baseURL = '';
+    return data;
+  }
 }
 
 let installed = false;

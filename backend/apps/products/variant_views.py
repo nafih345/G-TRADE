@@ -250,7 +250,7 @@ class ProductVariantGroupViewSet(viewsets.ReadOnlyModelViewSet):
                 for chunk in upload.chunks():
                     fh.write(chunk)
             try:
-                headers, stream = open_row_stream(path, ext)
+                headers, stream = open_row_stream(path, ext, IMPORT_ALIASES)
                 resolved = resolve_field_headers(headers, IMPORT_ALIASES)
                 raw_rows = []
                 for row_number, row in enumerate(stream, start=2):

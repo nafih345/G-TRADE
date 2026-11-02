@@ -35,9 +35,13 @@ import {
   Notes as NotesIcon,
   ReceiptLong as BillIcon,
   Science as LabIcon,
-  Payments as PaymentsIcon
+  Payments as PaymentsIcon,
+  Assessment as ReportIcon
 } from '@mui/icons-material';
 import PrintPrescriptionCard from '../components/optical/PrintPrescriptionCard';
+import EyeTestReportDialog from '../components/optical/EyeTestReportDialog';
+import { reportFromExam } from '../utils/eyeTestReport';
+import { FEE_STATUS_LABELS } from '../utils/eyeTestBill';
 
 // Patient IDs are generated client-side and aren't guaranteed globally unique (two different
 // patients can end up with the same "P-1003" from separate sessions) — so a plain `p.id` isn't
@@ -564,6 +568,25 @@ export default function PatientHistory() {
   };
 
   const [printingExam, setPrintingExam] = useState(null);
+  // Eye Test Report dialog: the visit shown (the patient's other visits are switchable inside).
+  const [reportExam, setReportExam] = useState(null);
+
+  // Newest visit first — the Eye Test Report button under the patient opens the latest one.
+  const visitTime = (e) => String(e.examination_date || e.date || '');
+  const patientVisitsNewestFirst = [...patientExams].sort((a, b) => visitTime(b).localeCompare(visitTime(a)));
+
+  // Eye Test Details for one visit card: Test No, date & time, test type, examiner and the bills
+  // it's referenced on (the fee's bill + bills dispensed against its Test No, from the invoices
+  // loaded for this page; the report itself asks the server for the complete list).
+  const examDetails = (exam) => {
+    const r = reportFromExam(exam);
+    const tno = r.visit.testNo;
+    const bills = tno
+      ? invoices.filter(inv => String(inv.test_no || '').trim() === tno).map(inv => inv.invoice_number).filter(Boolean)
+      : [];
+    if (r.billing.feeInvoiceNumber && !bills.includes(r.billing.feeInvoiceNumber)) bills.unshift(r.billing.feeInvoiceNumber);
+    return { r, bills };
+  };
 
   const handleEditExam = (exam) => {
     navigate('/optical/eyetest', {
@@ -901,6 +924,18 @@ export default function PatientHistory() {
                       >
                         Book Appointment
                       </Button>
+                      <Button
+                        variant="outlined"
+                        color="secondary"
+                        fullWidth
+                        size="small"
+                        startIcon={<ReportIcon />}
+                        disabled={patientExams.length === 0}
+                        onClick={() => setReportExam(patientVisitsNewestFirst[0])}
+                        sx={{ fontWeight: 700, borderRadius: 2, textTransform: 'none' }}
+                      >
+                        Eye Test Report
+                      </Button>
                     </Stack>
                   </Grid>
                 </Grid>
@@ -940,22 +975,33 @@ export default function PatientHistory() {
                       </Typography>
                     </Card>
                   ) : (
-                    patientExams.map((exam, index) => (
-                      <Card key={exam.id || index} variant="outlined" sx={{ borderRadius: 3, overflow: 'hidden' }}>
-                        <Box sx={{ p: 2, bgcolor: 'action.hover', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+                    patientExams.map((exam, index) => {
+                      const { r: details, bills } = examDetails(exam);
+                      const fee = details.billing;
+                      const feeLabel = fee.isFreeTest ? 'Free test' : (FEE_STATUS_LABELS[fee.feeStatus] || '');
+                      const feeColor = { FREE: 'info', PAID: 'success', PENDING: 'warning', BILLED: 'default' }[fee.isFreeTest ? 'FREE' : fee.feeStatus] || 'default';
+                      return (
+                      <Card key={exam.backendId || exam.id || index} variant="outlined" sx={{ borderRadius: 3, overflow: 'hidden' }}>
+                        <Box sx={{ p: 2, bgcolor: 'action.hover', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, flexWrap: 'wrap' }}>
                             <Chip label={`Visit #${patientExams.length - index}`} size="small" color="primary" sx={{ fontWeight: 800 }} />
                             <Typography variant="subtitle2" fontWeight={800}>
-                              📅 Date: {exam.date || new Date().toISOString().split('T')[0]}
+                              Test No: {details.visit.testNo || '—'}
                             </Typography>
-                            <Typography variant="caption" color="text.secondary">
-                              Exam ID: {exam.id || `EX-${1000 + index}`}
+                            <Typography variant="subtitle2" fontWeight={700}>
+                              📅 {details.visit.date || exam.date || '—'}{details.visit.time ? ` · 🕒 ${details.visit.time}` : ''}
                             </Typography>
                           </Box>
                           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                            <Typography variant="caption" fontWeight={700} color="primary.main">
-                              Optometrist: {exam.assignedOptometrist || exam.optometrist || '—'}
-                            </Typography>
+                            <Button
+                              size="small"
+                              variant="contained"
+                              startIcon={<ReportIcon />}
+                              onClick={() => setReportExam(exam)}
+                              sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 2 }}
+                            >
+                              Eye Test Report
+                            </Button>
                             <Tooltip title="Print This Exam / Prescription">
                               <IconButton size="small" onClick={() => setPrintingExam(exam)}>
                                 <PrintIcon fontSize="small" />
@@ -966,6 +1012,30 @@ export default function PatientHistory() {
                                 <EditIcon fontSize="small" />
                               </IconButton>
                             </Tooltip>
+                          </Box>
+                        </Box>
+
+                        {/* Eye Test Details — who examined, what test, and where it was billed */}
+                        <Box sx={{ px: 2, py: 1.25, display: 'grid', gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(4, 1fr)' }, gap: 1.5, borderTop: '1px solid', borderColor: 'divider' }}>
+                          <Box>
+                            <Typography variant="caption" color="text.secondary" display="block">EXAMINED BY</Typography>
+                            <Typography variant="body2" fontWeight={800} color="primary.main">{details.visit.optometrist || '—'}</Typography>
+                          </Box>
+                          <Box>
+                            <Typography variant="caption" color="text.secondary" display="block">TEST TYPE</Typography>
+                            <Typography variant="body2" fontWeight={700}>{details.visit.testType || '—'}</Typography>
+                          </Box>
+                          <Box>
+                            <Typography variant="caption" color="text.secondary" display="block">EYE TEST FEE</Typography>
+                            {feeLabel ? (
+                              <Chip size="small" color={feeColor} variant={fee.feeStatus === 'PENDING' ? 'filled' : 'outlined'}
+                                label={`${feeLabel}${!fee.isFreeTest && fee.amount ? ` · ₹${fee.amount}` : ''}${fee.receiptNo ? ` · ${fee.receiptNo}` : ''}`}
+                                sx={{ fontWeight: 700, mt: 0.25 }} />
+                            ) : <Typography variant="body2" fontWeight={700}>—</Typography>}
+                          </Box>
+                          <Box>
+                            <Typography variant="caption" color="text.secondary" display="block">BILL REFERENCE</Typography>
+                            <Typography variant="body2" fontWeight={700}>{bills.length ? bills.join(', ') : 'Not billed yet'}</Typography>
                           </Box>
                         </Box>
 
@@ -1050,7 +1120,8 @@ export default function PatientHistory() {
                           </Grid>
                         </CardContent>
                       </Card>
-                    ))
+                      );
+                    })
                   )}
                 </Box>
               )}
@@ -1472,6 +1543,13 @@ export default function PatientHistory() {
           )}
         </Grid>
       </Grid>
+
+      <EyeTestReportDialog
+        open={Boolean(reportExam)}
+        exam={reportExam}
+        visits={patientVisitsNewestFirst}
+        onClose={() => setReportExam(null)}
+      />
 
       {/* Print This Exam / Prescription — reuses the same card the Eye Test wizard's final
           step prints from, so a past visit prints identically to how it looked when recorded. */}

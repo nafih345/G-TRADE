@@ -46,6 +46,25 @@ AdminReadOwnerWrite = _role_permission(ADMIN_ROLES, OWNER_ROLES)
 OwnerOnly = _role_permission(OWNER_ROLES, OWNER_ROLES)
 
 
+class SingleTenantInstall(permissions.BasePermission):
+    """Backups and restores copy / replace the whole database, and the security policy and audit
+    trail are server-wide — with several tenants on one server any of them would reach into the
+    other businesses' data. They stay available only while the server hosts a single tenant."""
+    message = ('Backups, restores and server-wide security settings are disabled while this '
+               'server hosts more than one business.')
+    writes_only = False
+
+    def has_permission(self, request, view):
+        if self.writes_only and request.method in permissions.SAFE_METHODS:
+            return True
+        from apps.common.models import Tenant
+        return Tenant.objects.count() <= 1
+
+
+class SingleTenantWrites(SingleTenantInstall):
+    writes_only = True
+
+
 def _bad(errors, detail='Please fix the highlighted fields.'):
     return Response({'detail': detail, 'errors': errors}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -130,7 +149,7 @@ def _validate_settings(data, user):
 
 
 class SecuritySettingsView(APIView):
-    permission_classes = [AdminReadOwnerWrite]
+    permission_classes = [AdminReadOwnerWrite, SingleTenantWrites]
 
     def get(self, request):
         return Response(_settings_payload(SecuritySettings.load(), request.user))
@@ -306,7 +325,7 @@ def _paginate(request, view, qs, serialize):
 
 
 class SecurityAuditLogView(APIView):
-    permission_classes = [AdminOnly]
+    permission_classes = [AdminOnly, SingleTenantInstall]
 
     def get(self, request):
         qs = SecurityAuditLog.objects.all()
@@ -323,14 +342,14 @@ class SecurityAuditLogView(APIView):
 # ---- backups -----------------------------------------------------------------------------------
 
 class BackupHealthView(APIView):
-    permission_classes = [AdminOnly]
+    permission_classes = [AdminOnly, SingleTenantInstall]
 
     def get(self, request):
         return Response(service.health())
 
 
 class BackupHistoryView(APIView):
-    permission_classes = [AdminOnly]
+    permission_classes = [AdminOnly, SingleTenantInstall]
 
     def get(self, request):
         service.recover_stale()
@@ -349,7 +368,7 @@ class BackupHistoryView(APIView):
 
 
 class BackupCreateView(APIView):
-    permission_classes = [AdminOnly]
+    permission_classes = [AdminOnly, SingleTenantInstall]
 
     def post(self, request):
         try:
@@ -360,7 +379,7 @@ class BackupCreateView(APIView):
 
 
 class BackupDetailView(APIView):
-    permission_classes = [AdminReadOwnerWrite]
+    permission_classes = [AdminReadOwnerWrite, SingleTenantInstall]
 
     def get(self, request, pk):
         service.recover_stale()
@@ -379,7 +398,7 @@ class BackupDetailView(APIView):
 class BackupDownloadLinkView(APIView):
     """A signed link valid for DOWNLOAD_TTL seconds, so the browser can stream the file natively
     (no bearer header on a plain navigation) without exposing a reusable credential."""
-    permission_classes = [AdminOnly]
+    permission_classes = [AdminOnly, SingleTenantInstall]
 
     def post(self, request, pk):
         record = get_object_or_404(BackupRecord, pk=pk)
@@ -392,7 +411,7 @@ class BackupDownloadLinkView(APIView):
 
 class BackupDownloadView(APIView):
     authentication_classes = []
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.AllowAny, SingleTenantInstall]
 
     def get(self, request, pk):
         from django.contrib.auth import get_user_model
@@ -433,7 +452,7 @@ class BackupDownloadView(APIView):
 
 
 class BackupUploadView(APIView):
-    permission_classes = [OwnerOnly]
+    permission_classes = [OwnerOnly, SingleTenantInstall]
 
     def post(self, request):
         uploaded = request.FILES.get('file')
@@ -460,7 +479,7 @@ class BackupUploadView(APIView):
 
 
 class RestoreStartView(APIView):
-    permission_classes = [OwnerOnly]
+    permission_classes = [OwnerOnly, SingleTenantInstall]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'reauth'
 
@@ -497,7 +516,7 @@ def _is_uuid(value):
 
 
 class RestoreStatusView(APIView):
-    permission_classes = [AdminOnly]
+    permission_classes = [AdminOnly, SingleTenantInstall]
 
     def get(self, request, pk):
         service.recover_stale()
@@ -554,7 +573,7 @@ def _validate_schedule(data):
 
 
 class BackupScheduleView(APIView):
-    permission_classes = [AdminOnly]
+    permission_classes = [AdminOnly, SingleTenantInstall]
 
     def get(self, request):
         return Response(_schedule_payload(scheduler.ensure_current(BackupSchedule.load())))

@@ -1,0 +1,113 @@
+"""Per-request tenant resolution (see apps/common/tenancy.py for what the tenant scopes).
+
+The tenant comes from the `tenant_id` claim of the caller's access token. The token is signed,
+so a client cannot pick another tenant without forging it, and nothing in the request body or
+headers is consulted. This runs as middleware — before DRF authenticates — because other
+middleware (BranchContextMiddleware) already queries tenant data. LenientJWTAuthentication
+then confirms the token's tenant is still the user's own (check_user_tenant).
+
+Every /api/ request is "strict": without a valid token it sees no tenant rows and may write
+none, whatever the view's permission_classes allow.
+"""
+from django.conf import settings
+from rest_framework import exceptions
+
+from apps.common import hot_cache, tenancy
+
+
+def _user_tenant_id(user_id):
+    from django.contrib.auth import get_user_model
+    User = get_user_model()
+    return hot_cache.get_or_load(
+        f'tenant:user:{user_id}',
+        lambda: User.objects.filter(pk=user_id).values_list('tenant_id', flat=True).first())
+
+
+def tenant_from_request(request):
+    """Tenant id from a valid Bearer access token, or None."""
+    from rest_framework_simplejwt.exceptions import TokenError
+    from rest_framework_simplejwt.settings import api_settings
+    from rest_framework_simplejwt.tokens import AccessToken
+
+    parts = (request.META.get('HTTP_AUTHORIZATION') or '').split()
+    if len(parts) != 2 or parts[0] not in api_settings.AUTH_HEADER_TYPES:
+        return None
+    try:
+        token = AccessToken(parts[1])
+    except (TokenError, Exception):
+        return None
+    tenant_id = token.get('tenant_id')
+    if tenant_id is None:
+        # Issued before tenancy existed: fall back to the user's tenant. Refreshing such a
+        # token is refused (SessionTokenRefreshSerializer), so these age out within a day.
+        user_id = token.get(api_settings.USER_ID_CLAIM)
+        tenant_id = _user_tenant_id(user_id) if user_id else None
+    try:
+        return int(tenant_id) if tenant_id is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _tenant_active(tenant_id):
+    from apps.common.models import Tenant
+    return hot_cache.get_or_load(
+        f'tenant:active:{tenant_id}',
+        lambda: Tenant.objects.filter(pk=tenant_id, is_active=True).exists())
+
+
+def check_user_tenant(user):
+    """Called once the token's user is known: the token's tenant must be the user's, and active."""
+    tenant_id = tenancy.current_tenant_id()
+    if user.tenant_id is None or tenant_id != user.tenant_id:
+        raise exceptions.AuthenticationFailed('Your sign-in is no longer valid for this business. Sign in again.',
+                                              code='tenant_mismatch')
+    if not _tenant_active(tenant_id):
+        raise exceptions.PermissionDenied('This business account is disabled.')
+
+
+def install_drf_hook():
+    """Scope a request whose user DRF authenticated without a JWT tenant claim reaching the
+    middleware (DRF's force_authenticate in tests, any non-JWT authentication class) to that
+    user's tenant, for the rest of the view. Requests with a token are already scoped."""
+    from rest_framework.views import APIView
+
+    if getattr(APIView, '_tenant_hook_installed', False):
+        return
+    orig_dispatch = APIView.dispatch
+    orig_perform_authentication = APIView.perform_authentication
+
+    def dispatch(self, request, *args, **kwargs):
+        self._tenant_tokens = []
+        try:
+            return orig_dispatch(self, request, *args, **kwargs)
+        finally:
+            for token in reversed(self._tenant_tokens):
+                tenancy.deactivate(token)
+
+    def perform_authentication(self, request):
+        orig_perform_authentication(self, request)
+        user = request.user
+        tenant_id = getattr(user, 'tenant_id', None) if getattr(user, 'is_authenticated', False) else None
+        if tenant_id is not None and tenancy.current_tenant_id() is None:
+            self._tenant_tokens.append(tenancy.activate(tenant_id, strict=True))
+
+    APIView.dispatch = dispatch
+    APIView.perform_authentication = perform_authentication
+    APIView._tenant_hook_installed = True
+
+
+class TenantContextMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        tenant_id = tenant_from_request(request)
+        if tenant_id is None:
+            # None outside the test runner (see settings.TENANCY_ANONYMOUS_TENANT_ID).
+            tenant_id = getattr(settings, 'TENANCY_ANONYMOUS_TENANT_ID', None)
+        request.tenant_id = tenant_id
+        token = tenancy.activate(tenant_id, strict=request.path.startswith('/api/'))
+        try:
+            return self.get_response(request)
+        finally:
+            tenancy.deactivate(token)

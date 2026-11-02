@@ -1,5 +1,5 @@
 from django.db import models
-from apps.common.models import BaseUUIDModel
+from apps.common.models import BaseUUIDModel, TenantOwnedModel
 
 class StockLedger(BaseUUIDModel):
     TRANSACTION_TYPES = [
@@ -58,17 +58,27 @@ class StockAdjustment(BaseUUIDModel):
     new_quantity = models.IntegerField(blank=True, null=True)
     reference = models.CharField(max_length=100, blank=True, default='')
     performed_by = models.CharField(max_length=150, blank=True, default='')
-    client_token = models.CharField(max_length=64, unique=True, blank=True, null=True)
+    client_token = models.CharField(max_length=64, blank=True, null=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'client_token'], name='inventory_stockadjustment_client_token_tenant'),
+        ]
 
     def __str__(self):
         return f"Adj: {self.product.name} {self.adjustment_type} {self.quantity}"
 
 
-class StockAdjustmentSequence(models.Model):
+class StockAdjustmentSequence(TenantOwnedModel):
     """Atomic counter behind StockAdjustment.adjustment_number (ADJ-000001…), bumped with
     apps.common.sequences.bump_sequence like the other *Sequence tables."""
-    prefix = models.CharField(max_length=10, unique=True)
+    prefix = models.CharField(max_length=10)
     last_number = models.BigIntegerField(default=0)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'prefix'], name='inventory_stockadjustmentsequence_prefix_tenant'),
+        ]
 
     def __str__(self):
         return f"{self.prefix} -> {self.last_number}"

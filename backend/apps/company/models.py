@@ -1,6 +1,6 @@
 from django.db import models
 from django.db import transaction
-from apps.common.models import BaseUUIDModel
+from apps.common.models import BaseUUIDModel, TenantOwnedModel
 
 class Company(BaseUUIDModel):
     name = models.CharField(max_length=150)
@@ -50,7 +50,7 @@ class Company(BaseUUIDModel):
 class Branch(BaseUUIDModel):
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='branches')
     name = models.CharField(max_length=100)
-    code = models.CharField(max_length=20, unique=True)
+    code = models.CharField(max_length=20)
     address = models.TextField(blank=True, null=True)
     phone = models.CharField(max_length=20, blank=True, null=True)
     # Extended location / contact details surfaced in Branch Management (spec section 2).
@@ -69,6 +69,9 @@ class Branch(BaseUUIDModel):
 
     class Meta:
         ordering = ['-is_default', 'name']
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'code'], name='company_branch_code_tenant'),
+        ]
 
     def __str__(self):
         return f"{self.name} ({self.code})"
@@ -91,8 +94,13 @@ class Branch(BaseUUIDModel):
 class Warehouse(BaseUUIDModel):
     branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name='warehouses')
     name = models.CharField(max_length=100)
-    code = models.CharField(max_length=20, unique=True)
+    code = models.CharField(max_length=20)
     address = models.TextField(blank=True, null=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'code'], name='company_warehouse_code_tenant'),
+        ]
 
     def __str__(self):
         return self.name
@@ -190,7 +198,7 @@ class StockTransfer(BaseUUIDModel):
         ('COMPLETED', 'Completed'),
         ('CANCELLED', 'Cancelled'),
     ]
-    transfer_number = models.CharField(max_length=50, unique=True, blank=True)
+    transfer_number = models.CharField(max_length=50, blank=True)
     from_branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name='transfers_out')
     to_branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name='transfers_in')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
@@ -199,6 +207,9 @@ class StockTransfer(BaseUUIDModel):
 
     class Meta:
         ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'transfer_number'], name='company_stocktransfer_transfer_number_tenant'),
+        ]
 
     def __str__(self):
         return f"{self.transfer_number} {self.from_branch_id}->{self.to_branch_id} ({self.status})"
@@ -218,14 +229,14 @@ class StockTransferItem(BaseUUIDModel):
 # BUSINESS & LOCALIZATION SETTINGS
 # ==========================================
 
-class DocumentSequence(models.Model):
+class DocumentSequence(TenantOwnedModel):
     """How one document type is numbered (Settings → Business & Localization → Numbering
     Sequences). The running counter lives in DocumentSequenceCounter, one row per reset period,
     so a yearly / monthly reset never rewrites history. See apps/company/numbering.py."""
     RESET_CHOICES = [
         ('NEVER', 'Never'), ('MONTHLY', 'Monthly'), ('YEARLY', 'Yearly'), ('FISCAL_YEAR', 'Fiscal year'),
     ]
-    doc_type = models.CharField(max_length=30, unique=True)
+    doc_type = models.CharField(max_length=30)
     prefix = models.CharField(max_length=30, blank=True, default='')
     suffix = models.CharField(max_length=20, blank=True, default='')
     padding = models.PositiveSmallIntegerField(default=4)
@@ -237,25 +248,28 @@ class DocumentSequence(models.Model):
 
     class Meta:
         ordering = ['doc_type']
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'doc_type'], name='company_documentsequence_doc_type_tenant'),
+        ]
 
     def __str__(self):
         return f"{self.doc_type}: {self.prefix}…{self.suffix}"
 
 
-class DocumentSequenceCounter(models.Model):
+class DocumentSequenceCounter(TenantOwnedModel):
     """last_number handed out for (doc_type, period). Bumped with apps.common.sequences."""
     doc_type = models.CharField(max_length=30)
     period_key = models.CharField(max_length=20, default='ALL')
     last_number = models.PositiveIntegerField(default=0)
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=['doc_type', 'period_key'], name='uniq_doc_seq_period')]
+        constraints = [models.UniqueConstraint(fields=['tenant', 'doc_type', 'period_key'], name='uniq_doc_seq_period')]
 
     def __str__(self):
         return f"{self.doc_type}/{self.period_key} = {self.last_number}"
 
 
-class CustomField(models.Model):
+class CustomField(TenantOwnedModel):
     """A user-defined extra field for a module (Settings → Custom Fields). Definitions only:
     modules render and store them as they adopt the feature."""
     FIELD_TYPES = [
@@ -279,13 +293,13 @@ class CustomField(models.Model):
 
     class Meta:
         ordering = ['module', 'sort_order', 'name']
-        constraints = [models.UniqueConstraint(fields=['module', 'key'], name='uniq_custom_field_key')]
+        constraints = [models.UniqueConstraint(fields=['tenant', 'module', 'key'], name='uniq_custom_field_key')]
 
     def __str__(self):
         return f"{self.module}.{self.key}"
 
 
-class SettingsAuditLog(models.Model):
+class SettingsAuditLog(TenantOwnedModel):
     """Who changed which business setting, and from what to what."""
     section = models.CharField(max_length=30)  # LOCALIZATION / TAX / NUMBERING / CUSTOM_FIELD
     action = models.CharField(max_length=20)   # UPDATE / CREATE / DELETE
@@ -301,7 +315,7 @@ class SettingsAuditLog(models.Model):
         return f"{self.created_at:%Y-%m-%d %H:%M} {self.section} {self.summary}"
 
 
-class DocumentNumberClaim(models.Model):
+class DocumentNumberClaim(TenantOwnedModel):
     """The number a screen sent with a new document (its double-submit guard) → the system number
     the document actually got. Written in the document's own transaction, so a repeated POST of
     the same entry is refused exactly as the UNIQUE number column used to refuse it."""
@@ -311,4 +325,4 @@ class DocumentNumberClaim(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=['doc_type', 'client_token'], name='uniq_doc_number_claim')]
+        constraints = [models.UniqueConstraint(fields=['tenant', 'doc_type', 'client_token'], name='uniq_doc_number_claim')]

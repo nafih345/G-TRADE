@@ -25,7 +25,8 @@ import VirtualizedProductGrid from './VirtualizedProductGrid';
 import FailedRecordsPanel from './FailedRecordsPanel';
 
 const ACTIVE_BATCH_KEY = 'excel_import_active_batch';
-const RUNNING_STATUSES = ['PENDING', 'PROCESSING'];
+const RUNNING_STATUSES = ['ANALYZING', 'PENDING', 'PROCESSING'];
+const AWAITING_REVIEW = 'AWAITING_CONFIRMATION';
 
 const TABS = [
   { value: 'upload', label: 'Upload & Progress', icon: <UploadIcon /> },
@@ -66,8 +67,8 @@ export default function ExcelImportManager() {
   // remembered id) still gets its progress card.
   useEffect(() => {
     if (activeBatchId) return;
-    const running = batches.find(b => RUNNING_STATUSES.includes(b.status));
-    if (running) setActiveBatchId(running.id);
+    const open = batches.find(b => RUNNING_STATUSES.includes(b.status) || b.status === AWAITING_REVIEW);
+    if (open) setActiveBatchId(open.id);
   }, [batches, activeBatchId]);
 
   const handleImportStarted = (batchId) => {
@@ -84,8 +85,15 @@ export default function ExcelImportManager() {
     setPreviewBatch({ id: batch.id, batch_number: batch.batch_number });
     setAlertMsg({
       severity: batch.status === 'FAILED' ? 'error' : (batch.status === 'PARTIAL' ? 'warning' : 'success'),
-      text: `Import ${batch.batch_number} finished: ${batch.imported_rows} imported, ${batch.duplicate_rows} duplicates, ${batch.failed_rows} failed.`
+      text: `Import ${batch.batch_number} finished: ${batch.imported_rows} imported, ${batch.updated_rows || 0} updated, ${batch.duplicate_rows} duplicates, ${batch.failed_rows} failed, of ${batch.total_rows} rows.`
     });
+  };
+
+  const handleReviewCancelled = async () => {
+    // History first: while it still lists the batch, the effect above would reopen it.
+    await refetchHistory();
+    setActiveBatchId(null);
+    setAlertMsg({ severity: 'info', text: 'Import cancelled. Nothing was imported.' });
   };
 
   const handleDownloadSample = () => window.open('/api/import/download-template/', '_blank');
@@ -94,14 +102,14 @@ export default function ExcelImportManager() {
     if (!batchToDelete) return;
     try {
       const res = await axios.delete(`/api/import/${batchToDelete.id}/?delete_mode=${deleteMode}`);
-      const deletedSkus = res.data?.deleted_product_skus || [];
-      const deletedIds = res.data?.deleted_product_ids || [];
+      const deletedSkus = new Set(res.data?.deleted_product_skus || []);
+      const deletedIds = new Set(res.data?.deleted_product_ids || []);
 
       // Keep the legacy localStorage inventory cache (still read by other pages) in sync
       try {
         const local = JSON.parse(localStorage.getItem('optical_inventory_items') || '[]');
         const cleaned = deleteMode === 'option2'
-          ? local.filter(p => !deletedSkus.includes(String(p.code)) && !deletedSkus.includes(String(p.sku)) && !deletedIds.includes(String(p.id)))
+          ? local.filter(p => !deletedSkus.has(String(p.code)) && !deletedSkus.has(String(p.sku)) && !deletedIds.has(String(p.id)))
           : local;
         localStorage.setItem('optical_inventory_items', JSON.stringify(cleaned));
         window.dispatchEvent(new Event('optical_stock_updated'));
@@ -149,7 +157,12 @@ export default function ExcelImportManager() {
       {activeTab === 'upload' && (
         <>
           <ImportUploadPanel onImportStarted={handleImportStarted} />
-          <ImportProgressCard batchId={activeBatchId} onDone={handleImportDone} onMissing={() => setActiveBatchId(null)} />
+          <ImportProgressCard
+            batchId={activeBatchId}
+            onDone={handleImportDone}
+            onMissing={() => setActiveBatchId(null)}
+            onCancelled={handleReviewCancelled}
+          />
         </>
       )}
 
@@ -163,7 +176,7 @@ export default function ExcelImportManager() {
               onChange={(e) => setPreviewBatch(batches.find(b => b.id === e.target.value) || null)}
             >
               {batches.map(b => (
-                <MenuItem key={b.id} value={b.id}>{b.batch_number} ({b.imported_rows} rows)</MenuItem>
+                <MenuItem key={b.id} value={b.id}>{b.batch_number} ({b.imported_rows + (b.updated_rows || 0)} rows)</MenuItem>
               ))}
             </TextField>
           </Box>
@@ -195,13 +208,15 @@ export default function ExcelImportManager() {
                   <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Status</TableCell>
                   <TableCell align="right" sx={{ color: '#fff', fontWeight: 800 }}>Total Rows</TableCell>
                   <TableCell align="right" sx={{ color: '#fff', fontWeight: 800 }}>Imported</TableCell>
+                  <TableCell align="right" sx={{ color: '#fff', fontWeight: 800 }}>Updated</TableCell>
+                  <TableCell align="right" sx={{ color: '#fff', fontWeight: 800 }}>Duplicates</TableCell>
                   <TableCell align="right" sx={{ color: '#fff', fontWeight: 800 }}>Failed</TableCell>
                   <TableCell align="center" sx={{ color: '#fff', fontWeight: 800 }}>Actions</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
                 {batches.length === 0 ? (
-                  <TableRow><TableCell colSpan={9} align="center" sx={{ py: 5 }}>
+                  <TableRow><TableCell colSpan={11} align="center" sx={{ py: 5 }}>
                     <Typography variant="body2" color="text.secondary">No import batches yet.</Typography>
                   </TableCell></TableRow>
                 ) : batches.map(b => (
@@ -213,11 +228,13 @@ export default function ExcelImportManager() {
                     <TableCell>
                       <Chip
                         label={b.status} size="small" sx={{ fontWeight: 800 }}
-                        color={{ SUCCESS: 'success', PARTIAL: 'warning', FAILED: 'error', PROCESSING: 'primary', PENDING: 'info' }[b.status] || 'default'}
+                        color={{ SUCCESS: 'success', PARTIAL: 'warning', FAILED: 'error', PROCESSING: 'primary', PENDING: 'info', ANALYZING: 'info', AWAITING_CONFIRMATION: 'warning' }[b.status] || 'default'}
                       />
                     </TableCell>
                     <TableCell align="right" sx={{ fontWeight: 700 }}>{b.total_rows}</TableCell>
                     <TableCell align="right" sx={{ fontWeight: 800, color: 'success.main' }}>{b.imported_rows}</TableCell>
+                    <TableCell align="right" sx={{ fontWeight: 700, color: 'info.main' }}>{b.updated_rows || 0}</TableCell>
+                    <TableCell align="right" sx={{ fontWeight: 700, color: 'warning.main' }}>{b.duplicate_rows}</TableCell>
                     <TableCell align="right" sx={{ fontWeight: 700, color: 'error.main' }}>{b.failed_rows}</TableCell>
                     <TableCell align="center">
                       <Stack direction="row" spacing={1} justifyContent="center">

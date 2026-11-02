@@ -1,4 +1,4 @@
-// Purchase → Stock Overview: live inventory over the whole catalogue.
+// Inventory → Stock Overview: live inventory over the whole catalogue.
 //
 // Every figure comes from /api/inventory/stock-overview/ (server-side search, filters, sort and
 // pagination — the catalogue is never loaded into the browser). Every column except Status and
@@ -661,7 +661,7 @@ export default function StockOverview() {
     <Box sx={{ p: { xs: 1.5, md: 2 }, pb: 6 }}>
       {/* Header */}
       <Breadcrumbs sx={{ mb: 0.5, fontSize: 13 }}>
-        <Link component={RouterLink} to="/purchase/entry" underline="hover" color="inherit">Purchase</Link>
+        <Link component={RouterLink} to="/inventory/products" underline="hover" color="inherit">Inventory</Link>
         <Typography color="text.primary" fontSize={13} fontWeight={700}>Stock Overview</Typography>
       </Breadcrumbs>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 2, flexWrap: 'wrap', mb: 2.5 }}>

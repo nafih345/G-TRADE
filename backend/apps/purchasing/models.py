@@ -1,14 +1,19 @@
 from decimal import Decimal
 from django.db import models
 from django.db.models.functions import Lower
-from apps.common.models import BaseUUIDModel
+from apps.common.models import BaseUUIDModel, TenantOwnedModel
 
 
-class SupplierCodeSequence(models.Model):
+class SupplierCodeSequence(TenantOwnedModel):
     """Per-prefix atomic counter for human-readable Supplier.supplier_code values
     (see supplier_utils.reserve_supplier_codes). Mirrors apps.sales.PatientCodeSequence."""
-    prefix = models.CharField(max_length=10, unique=True)
+    prefix = models.CharField(max_length=10)
     last_number = models.BigIntegerField(default=1000)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'prefix'], name='purchasing_suppliercodesequence_prefix_tenant'),
+        ]
 
     def __str__(self):
         return f"{self.prefix} (last: {self.last_number})"
@@ -18,7 +23,7 @@ class Supplier(BaseUUIDModel):
     # blank=True: SupplierViewSet.perform_create auto-generates one via reserve_supplier_codes
     # when omitted, but DRF's required-field validation runs before perform_create, so without
     # blank=True that auto-generation would be unreachable (same lesson as Invoice.invoice_number).
-    supplier_code = models.CharField(max_length=30, unique=True, blank=True, null=True, db_index=True)
+    supplier_code = models.CharField(max_length=30, blank=True, null=True, db_index=True)
     name = models.CharField(max_length=150)
     company_name = models.CharField(max_length=150, blank=True, null=True)
     contact_person = models.CharField(max_length=150, blank=True, null=True)
@@ -42,11 +47,12 @@ class Supplier(BaseUUIDModel):
 
     class Meta:
         constraints = [
+            models.UniqueConstraint(fields=['tenant', 'supplier_code'], name='purchasing_supplier_supplier_code_tenant'),
             # One live supplier per company name (case-insensitive). SupplierSerializer.validate_name
             # gives the friendly error; this index closes the race between two concurrent saves.
             # Soft-deleted rows are excluded so a deleted supplier's name can be registered again.
             models.UniqueConstraint(
-                Lower('name'), condition=models.Q(is_deleted=False),
+                models.F('tenant'), Lower('name'), condition=models.Q(is_deleted=False),
                 name='uniq_live_supplier_name_ci',
             ),
         ]
@@ -63,7 +69,7 @@ class PurchaseOrder(BaseUUIDModel):
         ('CANCELLED', 'Cancelled'),
     ]
 
-    order_number = models.CharField(max_length=50, unique=True)
+    order_number = models.CharField(max_length=50)
     supplier = models.ForeignKey(Supplier, on_delete=models.CASCADE, related_name='purchase_orders')
     branch = models.ForeignKey('company.Branch', on_delete=models.SET_NULL, null=True, blank=True, db_index=True, related_name='+')
     order_date = models.DateField()
@@ -71,6 +77,11 @@ class PurchaseOrder(BaseUUIDModel):
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.0'))
     tax_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.0'))
     net_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.0'))
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'order_number'], name='purchasing_purchaseorder_order_number_tenant'),
+        ]
 
     def __str__(self):
         return f"PO: {self.order_number}"
@@ -114,7 +125,7 @@ class PurchaseInvoice(BaseUUIDModel):
         ('CREDIT', 'Credit'),
     ]
 
-    invoice_number = models.CharField(max_length=50, unique=True)
+    invoice_number = models.CharField(max_length=50)
     supplier_invoice_number = models.CharField(max_length=100, blank=True, null=True)
     supplier = models.ForeignKey(Supplier, on_delete=models.CASCADE, related_name='purchase_invoices')
 
@@ -166,6 +177,11 @@ class PurchaseInvoice(BaseUUIDModel):
     payment_status = models.CharField(max_length=10, choices=PAYMENT_STATUS_CHOICES, blank=True, default='')
 
     attachment = models.FileField(upload_to='purchase_attachments/', blank=True, null=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'invoice_number'], name='purchasing_purchaseinvoice_invoice_number_tenant'),
+        ]
 
     def __str__(self):
         return f"Purchase Entry: {self.invoice_number}"
@@ -230,7 +246,7 @@ class LensPurchaseOrder(BaseUUIDModel):
         ('CANCELLED', 'Cancelled'),
     ]
 
-    po_number = models.CharField(max_length=50, unique=True)
+    po_number = models.CharField(max_length=50)
     supplier = models.ForeignKey(Supplier, on_delete=models.PROTECT, related_name='lens_purchase_orders')
     branch = models.ForeignKey('company.Branch', on_delete=models.SET_NULL, null=True, blank=True, db_index=True, related_name='+')
     order_date = models.DateField()
@@ -248,6 +264,9 @@ class LensPurchaseOrder(BaseUUIDModel):
 
     class Meta:
         ordering = ['-order_date', '-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'po_number'], name='purchasing_lenspurchaseorder_po_number_tenant'),
+        ]
 
     def __str__(self):
         return f"Lens PO: {self.po_number}"

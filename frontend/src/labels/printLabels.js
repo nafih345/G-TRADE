@@ -4,7 +4,7 @@
 //   A4 sheet:     210 × 297 mm pages with the template's grid (margins / gaps / start cell).
 // Printer calibration (offset, scale) moves / scales the print, never the design.
 import axios from 'axios';
-import { renderLabelHtml, labelCss, hasUsableLogo, escapeHtml, needsInternalCode } from './renderLabel.js';
+import { renderLabelHtml, labelCss, hasUsableLogo, escapeHtml } from './renderLabel.js';
 import { num, r2, sheetUsage } from './labelModel.js';
 import { UUID_RE } from './labelApi.js';
 
@@ -89,21 +89,6 @@ export function buildPrintDocument(template, labelHtmls, { settings, logo = '', 
   return { css: css + a4Css(template, cal), body: sheets.join('') };
 }
 
-// Resolves `qty` distinct codes for one product: the first is the product's own barcode,
-// the rest come from the existing persisted EAN-13 series (POST label_barcode_series →
-// ProductBarcode), so each physical tag is unique yet still scans back to the product.
-// Values are never invented client-side; on any failure the product barcode repeats.
-async function labelSeries(product, primary, qty, enabled) {
-  if (!enabled || qty <= 1 || !UUID_RE.test(String(product?.id || ''))) return Array(qty).fill(primary);
-  try {
-    const { data } = await axios.post(`/api/products/items/${product.id}/label_barcode_series/`, { count: qty });
-    const codes = Array.isArray(data?.barcodes) ? data.barcodes : [];
-    return Array.from({ length: qty }, (_, i) => codes[i] || primary);
-  } catch {
-    return Array(qty).fill(primary);
-  }
-}
-
 // A typed override must still scan back to this product at billing — register it first
 // (as primary if the product has none, else as an extra scan-in code).
 async function registerOverride(product, code) {
@@ -125,37 +110,19 @@ export async function printLabelJob({ template, rows, settings = {}, store = {},
   const active = rows.filter((r) => !r.skipReason && (parseInt(r.qty, 10) || 0) > 0);
   const failed = [];
   const html = [];
-  const encodesBarcode = (template.layout?.elements || []).some((e) => !e.hidden && (e.type === 'barcode' || e.type === 'qr') && e.field === 'barcode');
-  // The persisted series is EAN-13 — only use it where the label's symbology can carry it.
-  const seriesOk = settings.unique_label_series !== false && encodesBarcode &&
-    ['CODE128', 'CODE39', 'EAN13'].includes(template.layout?.defaultBarcodeFormat || 'CODE128');
 
   const override = String(manualBarcode || '').trim();
-  if (override && active.length === 1) {
+  const useOverride = override && active.length === 1;
+  if (useOverride) {
     const problem = await registerOverride(active[0].product, override);
     if (problem) return { printed: 0, failed: [], error: problem };
   }
 
   for (const r of active) {
     const qty = parseInt(r.qty, 10) || 0;
-    const primary = r.data?.fields?.barcode || '';
-    let codes;
-    if (override && active.length === 1) {
-      codes = Array(qty).fill(override);
-    } else if (UUID_RE.test(String(r.product?.id || '')) && needsInternalCode(template, r.data?.fields, ctx)) {
-      // Barcode too long to scan at this size: print short numeric codes from the product's
-      // persisted series (ProductBarcode — each scans back to this product). The product's
-      // own barcode / SKU are untouched. Skip entry #0, which is the product's own barcode.
-      // eslint-disable-next-line no-await-in-loop
-      const series = await labelSeries(r.product, primary, seriesOk ? qty + 1 : 2, true);
-      const internal = series.slice(1).filter((c) => c && c !== primary);
-      codes = internal.length ? Array.from({ length: qty }, (_, i) => internal[seriesOk ? i : 0] || internal[0]) : Array(qty).fill(primary);
-    } else {
-      // eslint-disable-next-line no-await-in-loop
-      codes = await labelSeries(r.product, primary, qty, seriesOk);
-    }
+    // Every copy carries the same number: the product's saved barcode or the typed override.
+    const code = useOverride ? override : (r.data?.fields?.barcode || '');
     for (let i = 0; i < qty; i += 1) {
-      const code = codes[i] || primary;
       const data = {
         fields: { ...(r.data?.fields || {}), barcode: code },
         store,

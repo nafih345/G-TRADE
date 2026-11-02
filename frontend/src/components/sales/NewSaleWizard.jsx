@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import axios from 'axios';
 import useBarcodeScanner from '../../hooks/useBarcodeScanner';
 import { sendInvoiceWhatsApp } from '../../utils/whatsappInvoice';
@@ -682,6 +682,20 @@ export default function NewSaleWizard({
   const [invoiceDate, setInvoiceDate] = useState(todayISO());
   const [deliveryDate, setDeliveryDate] = useState(todayISO());
   const [salesman, setSalesman] = useState('ADMIN');
+  // Staff accounts (Administration → User Accounts) by name, so the Sales Report shows who served
+  // the customer; the generic roles stay for shops that bill under one shared login. A bill
+  // reopened with a name no longer in the list keeps it.
+  const salesmanOptions = useMemo(() => {
+    let staff = [];
+    try {
+      const users = JSON.parse(localStorage.getItem('optical_users_db') || '[]');
+      if (Array.isArray(users)) {
+        staff = users.filter(u => u && u.name && String(u.status || 'Active').toLowerCase() !== 'inactive')
+          .map(u => String(u.name).trim());
+      }
+    } catch (e) { /* ignore malformed cache */ }
+    return [...new Set([...staff, 'ADMIN', 'OPTOMETRIST', 'SALES STAFF', salesman].filter(Boolean))];
+  }, [salesman]);
   const [remark, setRemark] = useState('');
   // Diagnosis text lives in rxData.notes (auto-filled from the patient's last eye exam when one
   // is on file — see handleSelectCustomer); icdCode has no equivalent history to pull from since
@@ -1844,7 +1858,10 @@ export default function NewSaleWizard({
     // through the pay-mode boxes below.
     const savedMethod = backend?.payment_method || local?.paymentMode || local?.paymentMethod || '';
     setPaymentMode(/credit/i.test(savedMethod) ? 'Credit' : 'Cash');
-    if (local?.salesman) setSalesman(local.salesman);
+    const savedSalesman = backend?.salesman || local?.salesman;
+    if (savedSalesman) setSalesman(savedSalesman);
+    // Straight into state, not handleTestNoChange: reopening a bill must not re-load the patient.
+    setTestNo(backend?.test_no || local?.testNo || '');
     setIcdCode(local?.icdCode || '');
     setRxData({ ...EMPTY_RX, ...(local?.rxData || {}), notes: local?.rxData?.notes || local?.diagnosis || '' });
 
@@ -2319,6 +2336,10 @@ export default function NewSaleWizard({
           customer_name: customerName,
           invoice_date: invoiceDate || todayISO(),
           status,
+          // Who served the customer and the eye test this sale was dispensed against — shown on
+          // Reports → Sales Report.
+          salesman: salesman || '',
+          test_no: String(testNo || '').trim(),
           total_amount: grossTotal,
           tax_amount: totalTax,
           discount_amount: itemDiscounts,
@@ -2421,6 +2442,7 @@ export default function NewSaleWizard({
       paymentMethod: paymentMethodLabel,
       multiPay: paySettlement.recorded,
       salesman,
+      testNo,
       rxData
     };
 
@@ -2758,9 +2780,7 @@ export default function NewSaleWizard({
                   value={salesman} onChange={(e) => setSalesman(e.target.value)}
                   SelectProps={{ style: { fontWeight: 800, fontSize: '0.82rem' } }}
                 >
-                  <MenuItem value="ADMIN">ADMIN</MenuItem>
-                  <MenuItem value="OPTOMETRIST">OPTOMETRIST</MenuItem>
-                  <MenuItem value="SALES STAFF">SALES STAFF</MenuItem>
+                  {salesmanOptions.map((name) => <MenuItem key={name} value={name}>{name}</MenuItem>)}
                 </TextField>
               </Grid>
 

@@ -1543,7 +1543,8 @@ export default function OpticalServices() {
         appointment_id: patientData?.appointmentNum || '',
         branch: patientData?.branch || 'Main Branch',
         optometrist: patientData?.assignedOptometrist || '',
-        
+        test_type: diagnosis?.testType || 'FREE EYE TEST',
+
         complaints: Array.isArray(medicalHistory?.complaints) ? medicalHistory.complaints.join(', ') : (medicalHistory?.complaints || ''),
         complaint_duration: medicalHistory?.complaintDuration || '',
         glasses_usage: medicalHistory?.glassesUsage || '',

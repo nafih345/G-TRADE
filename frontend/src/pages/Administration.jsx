@@ -59,7 +59,7 @@ export default function Administration() {
   // Tab sync from path
   const getTabFromPath = (pathname) => {
     if (pathname.includes('/admin/excel-import') || pathname.includes('/admin/import')) return 'excel-import';
-    if (pathname.includes('/admin/barcode-printing')) return 'barcode-printing';
+    if (pathname.includes('/admin/barcode-settings')) return 'barcode-settings';
     if (pathname.includes('/admin/doctors')) return 'doctors';
     if (pathname.includes('/admin/service-master')) return 'service-master';
     if (pathname.includes('/admin/branches')) return 'branches';
@@ -82,7 +82,7 @@ export default function Administration() {
     if (newValue === 'service-master') navigate('/admin/service-master');
     if (newValue === 'branches') navigate('/admin/branches');
     if (newValue === 'excel-import') navigate('/admin/excel-import');
-    if (newValue === 'barcode-printing') navigate('/admin/barcode-printing');
+    if (newValue === 'barcode-settings') navigate('/admin/barcode-settings');
     if (newValue === 'roles') navigate('/admin/roles');
     if (newValue === 'permissions') navigate('/admin/permissions');
     if (newValue === 'audit') navigate('/admin/audit');
@@ -624,7 +624,7 @@ export default function Administration() {
           <Tab value="service-master" label="Service Master" icon={<ServiceIcon />} iconPosition="start" sx={{ fontWeight: 700, color: '#7c3aed' }} />
           <Tab value="branches" label="Branch Management (Add Branch)" icon={<BranchIcon />} iconPosition="start" sx={{ fontWeight: 700, color: '#16a34a' }} />
           <Tab value="excel-import" label="Excel Import Management" icon={<ImportIcon />} iconPosition="start" sx={{ fontWeight: 700, color: '#2563eb' }} />
-          <Tab value="barcode-printing" label="Barcode Printing" icon={<BarcodeIcon />} iconPosition="start" sx={{ fontWeight: 700, color: '#7c3aed' }} />
+          <Tab value="barcode-settings" label="Barcode Settings" icon={<BarcodeIcon />} iconPosition="start" sx={{ fontWeight: 700, color: '#7c3aed' }} />
           <Tab value="roles" label="System Roles & Titles" icon={<AdminIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab value="permissions" label="Module Access Matrix" icon={<SecurityIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab value="audit" label="Security Audit Logs" icon={<AuditIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
@@ -1058,7 +1058,7 @@ export default function Administration() {
       {/* 4. EXCEL IMPORT MANAGEMENT TAB */}
       {activeTab === 'excel-import' && <ExcelImportManager />}
 
-      {activeTab === 'barcode-printing' && <BarcodePrintingManager />}
+      {activeTab === 'barcode-settings' && <BarcodePrintingManager />}
 
       {/* 5. ROLES TAB */}
       {activeTab === 'roles' && (

@@ -1,10 +1,12 @@
 import uuid
 from decimal import Decimal
 from django.db import models
-from apps.common.models import BaseUUIDModel
+from apps.common.models import BaseUUIDModel, TenantOwnedModel
 
-class ImportBatch(models.Model):
+class ImportBatch(TenantOwnedModel):
     STATUS_CHOICES = [
+        ('ANALYZING', 'Working Out Barcodes'),
+        ('AWAITING_CONFIRMATION', 'Waiting For Barcode Review'),
         ('PENDING', 'Pending Validation'),
         ('PROCESSING', 'Importing In Background'),
         ('VALIDATED', 'Validated Ready'),
@@ -27,7 +29,7 @@ class ImportBatch(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     is_deleted = models.BooleanField(default=False)
 
-    batch_number = models.CharField(max_length=50, unique=True)
+    batch_number = models.CharField(max_length=50)
     file_name = models.CharField(max_length=255)
     original_file_name = models.CharField(max_length=255, blank=True, null=True)
     file = models.FileField(upload_to='import_batches/', blank=True, null=True)
@@ -39,10 +41,14 @@ class ImportBatch(models.Model):
     uploaded_date = models.DateTimeField(auto_now_add=True)
     status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='PENDING')
     duplicate_strategy = models.CharField(max_length=30, choices=STRATEGY_CHOICES, default='UPDATE')
-    
+    # Fill rows missing a barcode, after a preview the user confirms. Off, they stay blank.
+    auto_barcode = models.BooleanField(default=False)
+    barcode_summary = models.JSONField(default=dict, blank=True) # What the preview found + the series rule it used
+
     total_rows = models.IntegerField(default=0)
     processed_rows = models.IntegerField(default=0) # Rows streamed & classified so far (drives live progress)
-    imported_rows = models.IntegerField(default=0)
+    imported_rows = models.IntegerField(default=0) # New products created
+    updated_rows = models.IntegerField(default=0) # Existing products overwritten
     failed_rows = models.IntegerField(default=0)
     duplicate_rows = models.IntegerField(default=0)
     processing_time = models.FloatField(default=0.0) # Seconds
@@ -53,8 +59,39 @@ class ImportBatch(models.Model):
     logs = models.JSONField(default=list, blank=True, null=True) # Step-by-step audit logs
     ip_address = models.CharField(max_length=50, blank=True, null=True)
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'batch_number'], name='products_importbatch_batch_number_tenant'),
+        ]
+
     def __str__(self):
         return f"{self.batch_number} - {self.file_name} ({self.status})"
+
+
+class ImportBarcodeRow(TenantOwnedModel):
+    """One sheet row due a generated barcode, from the preview until the import ends.
+
+    slot_code belongs to the position, not to the row: the row with `rank` included rows
+    before it shows the code in slot `rank`. Clearing a row is then a single UPDATE, and
+    every code after it moves up by one, so the numbers never have a hole in them.
+    final_code is what the row really gets, fixed once when the import starts."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    batch = models.ForeignKey(ImportBatch, on_delete=models.CASCADE, related_name='barcode_rows')
+    position = models.IntegerField()
+    row_index = models.IntegerField() # Same count as Product.import_row
+    sheet_name = models.CharField(max_length=100, default='Sheet 1')
+    row_number = models.IntegerField()
+    product_code = models.CharField(max_length=150, blank=True, default='')
+    product_name = models.CharField(max_length=255, blank=True, default='')
+    slot_code = models.CharField(max_length=150)
+    final_code = models.CharField(max_length=150, blank=True, null=True)
+    excluded = models.BooleanField(default=False)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['batch', 'position'], name='uniq_import_barcode_position')]
+
+    def __str__(self):
+        return f"Row {self.row_number}: {self.slot_code}"
 
 
 class ImportErrorLog(models.Model):
@@ -86,7 +123,7 @@ class ProductVariantGroup(BaseUUIDModel):
     Created and edited by the Add Multiple Items / Product Variant Master screen.
     """
     name = models.CharField(max_length=255, db_index=True)
-    base_sku = models.CharField(max_length=120, unique=True, blank=True, null=True)
+    base_sku = models.CharField(max_length=120, blank=True, null=True)
     description = models.TextField(blank=True, null=True)
     long_description = models.TextField(blank=True, null=True)
 
@@ -105,6 +142,11 @@ class ProductVariantGroup(BaseUUIDModel):
     attribute_keys = models.JSONField(default=list, blank=True)
     is_active = models.BooleanField(default=True)
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'base_sku'], name='products_productvariantgroup_base_sku_tenant'),
+        ]
+
     def __str__(self):
         return self.name
 
@@ -112,33 +154,41 @@ class ProductVariantGroup(BaseUUIDModel):
 class ProductVariantTemplate(BaseUUIDModel):
     """Reusable Add Multiple Items configuration (category, attributes, default option
     values, tax, SKU rule, visible columns). Never holds transaction data."""
-    name = models.CharField(max_length=150, unique=True)
+    name = models.CharField(max_length=150)
     category_name = models.CharField(max_length=150, blank=True, null=True)
     config = models.JSONField(default=dict, blank=True)
 
     class Meta:
         ordering = ['name']
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'name'], name='products_productvarianttemplate_name_tenant'),
+        ]
 
     def __str__(self):
         return self.name
 
 
-class BulkSaveReceipt(models.Model):
+class BulkSaveReceipt(TenantOwnedModel):
     """Idempotency record for the bulk variant save: a retried request carrying the same
     client token gets the stored response instead of creating the products twice."""
-    token = models.CharField(max_length=64, unique=True)
+    token = models.CharField(max_length=64)
     response = models.JSONField(default=dict)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'token'], name='products_bulksavereceipt_token_tenant'),
+        ]
 
 
 class Product(BaseUUIDModel):
     name = models.CharField(max_length=255)
-    sku = models.CharField(max_length=150, unique=True)
-    barcode = models.CharField(max_length=150, unique=True, blank=True, null=True)
+    sku = models.CharField(max_length=150)
+    barcode = models.CharField(max_length=150, blank=True, null=True)
     # Optional second scan-in code (e.g. the manufacturer's own EAN alongside our
     # in-store code). Entered by hand, never printed as a label series; unique
     # across barcode / secondary_barcode / ProductBarcode (barcode_utils.find_barcode_owner).
-    secondary_barcode = models.CharField(max_length=150, unique=True, blank=True, null=True)
+    secondary_barcode = models.CharField(max_length=150, blank=True, null=True)
     description = models.TextField(blank=True, null=True)
     
     category = models.ForeignKey('masters.ProductCategory', on_delete=models.SET_NULL, null=True, blank=True, related_name='products')
@@ -172,6 +222,8 @@ class Product(BaseUUIDModel):
     # Link to Batch & Active state for Archiving/Deletion
     import_batch = models.ForeignKey(ImportBatch, on_delete=models.SET_NULL, null=True, blank=True, related_name='products')
     is_active = models.BooleanField(default=True)
+    # Position in the uploaded file, so a batch can be shown back in the sheet's own order.
+    import_row = models.IntegerField(blank=True, null=True)
     
     # Complete raw row & custom header attributes from uploaded Excel/CSV files
     extra_data = models.JSONField(default=dict, blank=True, null=True)
@@ -187,6 +239,9 @@ class Product(BaseUUIDModel):
 
     class Meta:
         constraints = [
+            models.UniqueConstraint(fields=['tenant', 'sku'], name='products_product_sku_tenant'),
+            models.UniqueConstraint(fields=['tenant', 'barcode'], name='products_product_barcode_tenant'),
+            models.UniqueConstraint(fields=['tenant', 'secondary_barcode'], name='products_product_secondary_barcode_tenant'),
             models.UniqueConstraint(
                 fields=['variant_group', 'variant_key'],
                 condition=models.Q(variant_group__isnull=False, variant_key__isnull=False),
@@ -198,22 +253,28 @@ class Product(BaseUUIDModel):
             models.Index(fields=['name'], name='product_name_idx'),
             models.Index(fields=['rack_location'], name='product_rack_idx'),
             models.Index(fields=['is_active', 'stock'], name='product_active_stock_idx'),
+            models.Index(fields=['import_batch', 'import_row'], name='product_batch_row_idx'),
         ]
 
     def __str__(self):
         return f"{self.name} ({self.sku})"
 
 
-class BarcodeSequence(models.Model):
+class BarcodeSequence(TenantOwnedModel):
     """Per-prefix atomic counter used to mint unique product barcodes (see barcode_utils.reserve_barcodes)."""
-    prefix = models.CharField(max_length=10, unique=True)
+    prefix = models.CharField(max_length=10)
     last_number = models.BigIntegerField(default=100000)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'prefix'], name='products_barcodesequence_prefix_tenant'),
+        ]
 
     def __str__(self):
         return f"{self.prefix} -> {self.last_number}"
 
 
-class BarcodeSeriesConfig(models.Model):
+class BarcodeSeriesConfig(TenantOwnedModel):
     """Singleton: how new product barcodes are generated (barcode_utils.reserve_product_barcodes).
 
     code = resolved prefix pattern + zero-padded running number (+ optional GS1
@@ -229,26 +290,25 @@ class BarcodeSeriesConfig(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     updated_by_name = models.CharField(max_length=150, blank=True, default='')
 
-    SINGLETON_ID = 1
-
     class Meta:
         verbose_name = 'Barcode Series Configuration'
+        # One per tenant; the constraint lets concurrent first loads converge on one row.
+        constraints = [models.UniqueConstraint(fields=['tenant'], name='products_barcodeseriesconfig_one_per_tenant')]
 
     def __str__(self):
         return f"{self.prefix_pattern} / {self.total_length} digits -> {self.last_number}"
 
     @classmethod
     def load(cls):
-        obj = cls.objects.filter(id=cls.SINGLETON_ID).first()
+        obj = cls.objects.first()
         if obj is None:
             # Continue the legacy EAN-13 counter (also done by migration 0013).
             seq = BarcodeSequence.objects.filter(prefix='EAN13').first()
-            obj, _ = cls.objects.get_or_create(
-                id=cls.SINGLETON_ID, defaults={'last_number': seq.last_number if seq else 0})
+            obj, _ = cls.objects.get_or_create(defaults={'last_number': seq.last_number if seq else 0})
         return obj
 
 
-class ProductBarcode(models.Model):
+class ProductBarcode(TenantOwnedModel):
     """Additional scan-in barcodes that all resolve to the same product.
 
     When N labels are printed for one product the printer assigns each label its
@@ -259,11 +319,14 @@ class ProductBarcode(models.Model):
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='extra_barcodes')
-    code = models.CharField(max_length=150, unique=True, db_index=True)
+    code = models.CharField(max_length=150, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ['created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'code'], name='products_productbarcode_code_tenant'),
+        ]
 
     def __str__(self):
         return f"{self.code} -> {self.product_id}"
@@ -324,7 +387,7 @@ class LabelTemplate(BaseUUIDModel):
             super().save(*args, **kwargs)
 
 
-class LabelTemplateVersion(models.Model):
+class LabelTemplateVersion(TenantOwnedModel):
     """Snapshot of a LabelTemplate as it was *before* an update (kept for restore)."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     template = models.ForeignKey(LabelTemplate, on_delete=models.CASCADE, related_name='versions')
@@ -368,12 +431,19 @@ class LabelPrintSettings(BaseUUIDModel):
     # Browser-stored designs from before templates lived in the database were imported.
     legacy_migrated = models.BooleanField(default=False)
 
-    # Fixed primary key: concurrent first requests can't each create their own "singleton".
+    # Fixed primary key per tenant: concurrent first requests can't each create their own
+    # "singleton". The default tenant keeps the original id; others derive theirs from it.
     SINGLETON_ID = uuid.UUID('6c1a7b3e-0000-4000-8000-000000001abe')
 
     class Meta:
         verbose_name = 'Label Print Settings'
         verbose_name_plural = 'Label Print Settings'
+
+    @classmethod
+    def singleton_id(cls):
+        from apps.common import tenancy
+        tid = tenancy.current_tenant_id() or tenancy.DEFAULT_TENANT_ID
+        return cls.SINGLETON_ID if tid == tenancy.DEFAULT_TENANT_ID else uuid.uuid5(cls.SINGLETON_ID, str(tid))
 
     @classmethod
     def load(cls):
@@ -382,7 +452,7 @@ class LabelPrintSettings(BaseUUIDModel):
         if obj is None:
             try:
                 with transaction.atomic():
-                    obj = cls.objects.create(id=cls.SINGLETON_ID)
+                    obj = cls.objects.create(id=cls.singleton_id())
             except IntegrityError:
-                obj = cls.objects.get(id=cls.SINGLETON_ID)
+                obj = cls.objects.get(id=cls.singleton_id())
         return obj

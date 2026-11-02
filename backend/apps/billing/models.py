@@ -2,7 +2,7 @@ import uuid
 
 from django.db import models, transaction
 
-from apps.common.models import BaseUUIDModel
+from apps.common.models import BaseUUIDModel, TenantOwnedModel
 
 
 # Document types the Bill Rendering Engine can print. Slugs (no strict choices= on the
@@ -78,7 +78,7 @@ class BillTemplate(BaseUUIDModel):
             super().save(*args, **kwargs)
 
 
-class BillTemplateVersion(models.Model):
+class BillTemplateVersion(TenantOwnedModel):
     """Snapshot of a BillTemplate as it was *before* an update (kept for restore)."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     template = models.ForeignKey(BillTemplate, on_delete=models.CASCADE, related_name='versions')
@@ -103,13 +103,16 @@ class BillTemplateVersion(models.Model):
 class DocumentTemplateAssignment(BaseUUIDModel):
     """Which template renders a given document type. One row per document type."""
 
-    document_type = models.CharField(max_length=40, unique=True)
+    document_type = models.CharField(max_length=40)
     template = models.ForeignKey(
         BillTemplate, on_delete=models.SET_NULL, null=True, blank=True, related_name='assignments'
     )
 
     class Meta:
         ordering = ['document_type']
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'document_type'], name='billing_documenttemplateassignment_document_type_tenant'),
+        ]
 
     def __str__(self):
         return f"{self.document_type} -> {self.template_id}"

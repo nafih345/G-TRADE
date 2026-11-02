@@ -98,9 +98,14 @@ def open_session(user, request=None, two_factor=False):
 
 def issue_tokens(user, request=None, two_factor=False):
     from rest_framework_simplejwt.tokens import RefreshToken
+    if user.tenant_id is None:
+        raise exceptions.AuthenticationFailed('This account is not linked to a business.')
     session = open_session(user, request, two_factor)
     refresh = RefreshToken.for_user(user)
     refresh['sid'] = str(session.id)
+    # Copied into every access token minted from this refresh token. TenantContextMiddleware
+    # scopes the request by it; LenientJWTAuthentication checks it still matches the user.
+    refresh['tenant_id'] = user.tenant_id
     return {'refresh': str(refresh), 'access': str(refresh.access_token), 'session_id': str(session.id)}
 
 

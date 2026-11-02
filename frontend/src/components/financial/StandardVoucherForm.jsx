@@ -6,13 +6,15 @@ import {
 } from '@mui/material';
 import {
   Add as AddIcon, CheckCircle as CheckIcon, Delete as DeleteIcon, Print as PrintIcon, Refresh as RefreshIcon,
-  Search as SearchIcon, Warning as WarningIcon, PlaylistAdd as LoadIcon, ClearAll as ClearIcon,
+  Search as SearchIcon, Warning as WarningIcon, PlaylistAdd as LoadIcon, ClearAll as ClearIcon, Edit as EditIcon,
 } from '@mui/icons-material';
-import { apiError, finGet, finPost, newIdempotencyKey } from './financialApi';
+import { apiError, finGet, finPatch, finPost, newIdempotencyKey } from './financialApi';
 import VoucherSearchDialog from './VoucherSearchDialog';
 import PaymentModeDetails from '../common/PaymentModeDetails';
-import { DaysLeftChip } from './ChequeDetailsDialog';
-import { CHEQUE_MODE, blankCheque, chequeDaysLeft, chequePayload, validateCheque } from '../../utils/cheques';
+import ChequeDetailsDialog, { DaysLeftChip } from './ChequeDetailsDialog';
+import {
+  CHEQUE_MODE, blankCheque, chequeDaysLeft, chequeEditPayload, chequeFromRow, chequePayload, validateCheque,
+} from '../../utils/cheques';
 import useBankAccounts from '../../hooks/useBankAccounts';
 import { formatMoney, formatDate } from '../../utils/localeFormat';
 
@@ -97,6 +99,7 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
     date: today(),
     party: null,
     mode: 'Normal',
+    reference: '',
     narration: '',
     isSaved: false,
   });
@@ -111,6 +114,8 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
   const [billsError, setBillsError] = useState('');
   const [search, setSearch] = useState(null);   // { type: 'account', lineId } | { type: 'party' }
   const [saving, setSaving] = useState(false);
+  const [chequeEdit, setChequeEdit] = useState(null);   // { lineId, row }: a posted voucher's cheque being corrected
+  const [chequeEditSaving, setChequeEditSaving] = useState(false);
   const rootRef = useRef(null);
   const returnFocusRef = useRef(null);
 
@@ -316,6 +321,39 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
     setPayment(line.id, { cheque: blankCheque(), refNo: '', refDate: today() });
     focusSoon(`[data-vf="cheque-no-${line.id}"]`);
   };
+  // Once posted, a cheque is corrected through the Cheque Register API: same rules as the register,
+  // and the server carries a new number / date into this voucher's memo / receipt notes.
+  const editSavedCheque = async (line) => {
+    try {
+      const { rows = [] } = await finGet('cheques/', { voucher: voucherState.voucherNo, export: 1 });
+      const no = String(line.cheque?.chequeNumber || '').trim().toLowerCase();
+      const bank = String(line.cheque?.bankName || '').trim().toLowerCase();
+      const same = rows.filter(r => r.cheque_number.toLowerCase() === no);
+      const row = same.find(r => (r.bank_name || '').toLowerCase() === bank) || same[0];
+      if (!row) {
+        showToast(`Cheque ${line.cheque?.chequeNumber || ''} was not found in the Cheque Register for ${voucherState.voucherNo}.`, 'warning');
+      } else if (row.status === 'CANCELLED') {
+        showToast(`Cheque ${row.cheque_number} is cancelled and can no longer be edited.`, 'warning');
+      } else {
+        setChequeEdit({ lineId: line.id, row });
+      }
+    } catch (e) {
+      showToast(apiError(e, 'Could not load the cheque.'), 'error');
+    }
+  };
+  const saveSavedCheque = async ({ cheque }) => {
+    setChequeEditSaving(true);
+    try {
+      const updated = await finPatch(`cheques/${chequeEdit.row.id}/`, chequeEditPayload(cheque, chequeEdit.row));
+      const fresh = chequeFromRow(updated);
+      setPayment(chequeEdit.lineId, { cheque: fresh, refNo: fresh.chequeNumber, refDate: fresh.chequeDate });
+      setChequeEdit(null);
+      showToast(`Cheque ${updated.cheque_number} updated on ${voucherState.voucherNo} and in the Cheque Register.`, 'success');
+    } catch (e) {
+      showToast(apiError(e, 'Could not update the cheque.'), 'error');
+    }
+    setChequeEditSaving(false);
+  };
   // Delete a payment row; the last row is reset to a blank Cash line instead of removed.
   const removePaymentLine = (id) => setPaymentLines(prev => (prev.length <= 1 ? [blankPaymentLine()] : prev.filter(p => p.id !== id)));
   const fillBalance = () => {
@@ -427,6 +465,7 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
       date: voucherState.date,
       narration: voucherState.narration || `${voucherTitle} — ${partyName}`,
       reference_no: partyName,
+      reference: voucherState.reference.trim(),
       idempotency_key: voucherState.idempotencyKey,
       lines,
     });
@@ -465,7 +504,8 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
         party_kind: party.kind,
         party: party.id,
         date: voucherState.date,
-        narration: voucherState.narration,
+        // Bill-to-bill receipts are booked as receipt rows with no reference column: the Reference No rides in the narration.
+        narration: [voucherState.reference.trim() && `Ref ${voucherState.reference.trim()}`, voucherState.narration].filter(Boolean).join(' · '),
         idempotency_key: groups.length > 1 ? `${voucherState.idempotencyKey}:${party.id}` : voucherState.idempotencyKey,
         allocations: bills.map(r => ({ bill: r.id, amount: round2(num(r.amount)).toFixed(2), narration: r.narration || '' })),
         payments,
@@ -637,7 +677,12 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
               </Box>
             )}
           </Grid>
-          <Grid item xs={12}>
+          <Grid item xs={12} sm={6} md={3}>
+            <TextField fullWidth size="small" label="Reference No" value={voucherState.reference} disabled={locked}
+              placeholder="Bill / document / instrument no" inputProps={{ maxLength: 80 }}
+              onChange={(e) => setVoucherState(prev => ({ ...prev, reference: e.target.value }))} />
+          </Grid>
+          <Grid item xs={12} sm={6} md={9}>
             <TextField fullWidth size="small" label="Narration" value={voucherState.narration} disabled={locked}
               placeholder={`${voucherTitle} narration (optional)`}
               onChange={(e) => setVoucherState(prev => ({ ...prev, narration: e.target.value }))} />
@@ -933,12 +978,15 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
                       {/* One fixed grid: every field the same height with its label on the border. */}
                       <Box sx={{
                         display: 'grid', gap: 1.5, alignItems: 'center',
-                        gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))', lg: '1.3fr 0.9fr 1fr 1.3fr 1.6fr auto' },
+                        gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))', lg: '1.2fr 1fr 0.9fr 1fr 1.2fr 1.4fr auto' },
                         '& .MuiTextField-root': { bgcolor: '#fff' }, '& .MuiInputBase-input': { py: 0.75 },
                       }}>
                         <TextField size="small" fullWidth disabled={locked} label="Bank Name" value={line.cheque?.bankName || ''}
                           InputLabelProps={{ shrink: true }} placeholder={isReceipt ? "Party's bank (drawn on)" : 'Your bank'} inputProps={{ maxLength: 150 }}
                           onChange={(e) => setCheque(line, { bankName: e.target.value })} />
+                        <TextField size="small" fullWidth disabled={locked} label="Bank Branch" value={line.cheque?.bankBranch || ''}
+                          InputLabelProps={{ shrink: true }} placeholder="Branch (optional)" inputProps={{ maxLength: 120 }}
+                          onChange={(e) => setCheque(line, { bankBranch: e.target.value })} />
                         <TextField type="number" size="small" fullWidth required disabled={locked} label="Amount" value={line.amount}
                           InputLabelProps={{ shrink: true }} inputProps={{ min: 0, step: '0.01', style: { textAlign: 'right', fontWeight: 700 } }}
                           onChange={(e) => setPayment(line.id, { amount: e.target.value })} />
@@ -946,7 +994,7 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
                           InputLabelProps={{ shrink: true }} inputProps={{ min: line.cheque?.chequeDate || undefined }}
                           error={!!line.cheque?.depositedDate && !!line.cheque?.chequeDate && line.cheque.depositedDate < line.cheque.chequeDate}
                           onChange={(e) => setCheque(line, { depositedDate: e.target.value })} />
-                        <TextField size="small" fullWidth disabled={locked} label="Company / Party Name" value={line.cheque?.partyName || ''}
+                        <TextField size="small" fullWidth disabled={locked} label={isReceipt ? 'Drawer Name' : 'Payee Name'} value={line.cheque?.partyName || ''}
                           InputLabelProps={{ shrink: true }} placeholder={currentPartyName || 'Defaults to the voucher party'} inputProps={{ maxLength: 200 }}
                           onChange={(e) => setCheque(line, { partyName: e.target.value })} />
                         <TextField size="small" fullWidth disabled={locked} label="Remarks" value={line.cheque?.remarks || ''}
@@ -956,13 +1004,22 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
                           <Tooltip title={line.cheque?.chequeDate ? `Days left to the ${line.cheque.depositedDate ? 'deposit' : 'cheque'} date` : ''}>
                             <span><DaysLeftChip days={chequeDaysLeft(line.cheque)} /></span>
                           </Tooltip>
-                          <Tooltip title="Clear the cheque details">
-                            <span>
-                              <IconButton size="small" color="warning" disabled={locked} aria-label="Clear cheque details" onClick={() => clearCheque(line)}>
-                                <ClearIcon fontSize="small" />
-                              </IconButton>
-                            </span>
-                          </Tooltip>
+                          {locked ? (
+                            <Tooltip title="Edit this cheque's details (also updates the Cheque Register)">
+                              <Button size="small" variant="outlined" startIcon={<EditIcon fontSize="small" />} sx={{ fontWeight: 700, whiteSpace: 'nowrap' }}
+                                aria-label="Edit cheque details" onClick={() => editSavedCheque(line)}>
+                                Edit
+                              </Button>
+                            </Tooltip>
+                          ) : (
+                            <Tooltip title="Clear the cheque details">
+                              <span>
+                                <IconButton size="small" color="warning" aria-label="Clear cheque details" onClick={() => clearCheque(line)}>
+                                  <ClearIcon fontSize="small" />
+                                </IconButton>
+                              </span>
+                            </Tooltip>
+                          )}
                         </Stack>
                       </Box>
                     </TableCell>
@@ -1046,6 +1103,13 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
         emptyText={`No matching ${isReceipt ? 'customers or dealers' : 'suppliers'}.`}
         onClose={() => closeSearch()}
         onSelect={(parties, { dates }) => { closeSearch('[data-vf="party"]'); selectParties(parties, dates); }}
+      />
+      <ChequeDetailsDialog
+        open={!!chequeEdit}
+        row={chequeEdit?.row}
+        saving={chequeEditSaving}
+        onSave={saveSavedCheque}
+        onClose={() => setChequeEdit(null)}
       />
     </Box>
   );

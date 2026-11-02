@@ -10,7 +10,7 @@ import {
   Tooltip, Typography,
 } from '@mui/material';
 import {
-  Print as PrintIcon, FilterAlt as ApplyIcon, RestartAlt as ResetIcon, FileDownload as CsvIcon, MoreVert as MoreIcon,
+  Print as PrintIcon, FilterAlt as ApplyIcon, RestartAlt as ResetIcon, FileDownload as CsvIcon, MoreVert as MoreIcon, Edit as EditIcon,
 } from '@mui/icons-material';
 import { apiError, finGet, finPatch } from './financialApi';
 import ChequeDetailsDialog, { DaysLeftChip } from './ChequeDetailsDialog';
@@ -19,7 +19,7 @@ import { useBranch } from '../../context/BranchContext';
 import { useStoreProfile, companyFromProfile } from '../../utils/storeProfile';
 import { formatDate, formatMoney } from '../../utils/localeFormat';
 import { notify } from '../../utils/notify';
-import { CHEQUE_STATUSES, chequeFromRow, chequePayload, daysLeftLabel, localYmd } from '../../utils/cheques';
+import { CHEQUE_STATUSES, chequeEditPayload, daysLeftLabel, localYmd } from '../../utils/cheques';
 
 const NAVY = '#0f1e3d';
 const IN_COLOR = '#15803d';
@@ -199,11 +199,7 @@ export default function ChequeRegister() {
   const saveEdit = async ({ cheque }) => {
     setEditSaving(true);
     try {
-      const p = chequePayload(cheque);
-      const updated = await finPatch(`cheques/${editRow.id}/`, {
-        cheque_number: p.cheque_number, cheque_date: p.cheque_date, bank_name: p.bank_name,
-        deposited_date: p.deposited_date, party_name: p.party_name, remarks: p.remarks,
-      });
+      const updated = await finPatch(`cheques/${editRow.id}/`, chequeEditPayload(cheque, editRow));
       done(updated, `Cheque ${updated.cheque_number} updated.`);
     } catch (e) {
       notify(apiError(e, 'Could not update the cheque.'), 'error');
@@ -233,13 +229,14 @@ export default function ChequeRegister() {
   const exportCsv = async () => {
     try {
       const all = await fetchAll();
-      const header = ['#', 'Type', 'Voucher No.', 'Cheque No.', 'Cheque Date', 'Bank Name', 'Company / Party', 'Amount',
+      const header = ['#', 'Type', 'Voucher No.', 'Cheque No.', 'Cheque Date', 'Bank Name', 'Bank Branch', 'Drawer / Payee', 'Amount',
         'Deposited Date', 'Cleared Date', 'Due Date', 'Days Left', 'Status', 'Status Note', 'Our Bank Ledger', 'Remarks',
         ...(multiBranchEnabled ? ['Branch'] : []), 'Entered By', 'Entered On'];
       const lines = all.rows.map((r, i) => [i + 1, r.direction_label, r.voucher_number, r.cheque_number, r.cheque_date, r.bank_name,
-        r.party_name, r.amount, r.deposited_date || '', r.cleared_date || '', r.due_date, r.days_left ?? '', r.status_label, r.status_note,
-        r.bank_account_name, r.remarks, ...(multiBranchEnabled ? [r.branch_name] : []), r.created_by, String(r.created_at || '').slice(0, 10)]);
-      lines.push([], ['', '', '', '', '', '', 'Total', all.matched_amount]);
+        r.bank_branch, r.party_name, r.amount, r.deposited_date || '', r.cleared_date || '', r.due_date, r.days_left ?? '', r.status_label,
+        r.status_note, r.bank_account_name, r.remarks, ...(multiBranchEnabled ? [r.branch_name] : []), r.created_by,
+        String(r.created_at || '').slice(0, 10)]);
+      lines.push([], ['', '', '', '', '', '', '', 'Total', all.matched_amount]);
       const csv = [header, ...lines].map(row => row.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
       const url = URL.createObjectURL(new Blob([`﻿${csv}`], { type: 'text/csv;charset=utf-8' }));
       const a = Object.assign(document.createElement('a'), { href: url, download: `cheque_register_${localYmd()}.csv` });
@@ -347,8 +344,8 @@ export default function ChequeRegister() {
                 <TableCell sx={head}>Voucher No.</TableCell>
                 <TableCell sx={head}>Cheque No.</TableCell>
                 <TableCell sx={head}>Cheque Date</TableCell>
-                <TableCell sx={head}>Bank Name</TableCell>
-                <TableCell sx={head}>Company / Party</TableCell>
+                <TableCell sx={head}>Bank / Branch</TableCell>
+                <TableCell sx={head}>Drawer / Payee</TableCell>
                 <TableCell sx={head} align="right">Amount</TableCell>
                 <TableCell sx={head}>Deposited</TableCell>
                 <TableCell sx={head}>Days Left</TableCell>
@@ -356,7 +353,7 @@ export default function ChequeRegister() {
                 <TableCell sx={head}>Remarks</TableCell>
                 {multiBranchEnabled && <TableCell sx={head}>Branch</TableCell>}
                 <TableCell sx={head}>Our Bank</TableCell>
-                <TableCell sx={head} align="center" width={48} />
+                <TableCell sx={head} align="center" width={84} />
               </TableRow>
             </TableHead>
             <TableBody>
@@ -377,7 +374,10 @@ export default function ChequeRegister() {
                   </TableCell>
                   <TableCell sx={{ fontFamily: 'monospace', fontWeight: 800, whiteSpace: 'nowrap' }}>{r.cheque_number}</TableCell>
                   <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDate(r.cheque_date)}</TableCell>
-                  <TableCell>{r.bank_name || '—'}</TableCell>
+                  <TableCell>
+                    {r.bank_name || '—'}
+                    {r.bank_branch && <Typography variant="caption" color="text.secondary" display="block">{r.bank_branch}</Typography>}
+                  </TableCell>
                   <TableCell sx={{ minWidth: 140, fontWeight: 600 }}>{r.party_name || '—'}</TableCell>
                   <TableCell align="right" sx={{ fontWeight: 800, whiteSpace: 'nowrap' }}>{formatMoney(r.amount)}</TableCell>
                   <TableCell sx={{ whiteSpace: 'nowrap' }}>
@@ -392,8 +392,16 @@ export default function ChequeRegister() {
                   <TableCell sx={{ maxWidth: 200 }}><Typography variant="body2" noWrap title={r.remarks}>{r.remarks || '—'}</Typography></TableCell>
                   {multiBranchEnabled && <TableCell sx={{ whiteSpace: 'nowrap' }}>{r.branch_name || '—'}</TableCell>}
                   <TableCell sx={{ whiteSpace: 'nowrap' }}>{r.bank_account_name || '—'}</TableCell>
-                  <TableCell align="center">
-                    <Tooltip title={r.status === 'CANCELLED' ? 'Cancelled' : 'Update status / edit'}>
+                  <TableCell align="center" sx={{ whiteSpace: 'nowrap' }}>
+                    <Tooltip title={r.status === 'CANCELLED' ? 'A cancelled cheque cannot be edited' : 'Edit cheque details'}>
+                      <span>
+                        <IconButton size="small" color="primary" disabled={r.status === 'CANCELLED'} aria-label={`Edit cheque ${r.cheque_number}`}
+                          onClick={() => setEditRow(r)}>
+                          <EditIcon fontSize="small" />
+                        </IconButton>
+                      </span>
+                    </Tooltip>
+                    <Tooltip title={r.status === 'CANCELLED' ? 'Cancelled' : 'Update status'}>
                       <span>
                         <IconButton size="small" disabled={r.status === 'CANCELLED'} aria-label={`Actions for cheque ${r.cheque_number}`}
                           onClick={(e) => setMenu({ anchor: e.currentTarget, row: r })}>
@@ -426,9 +434,9 @@ export default function ChequeRegister() {
             <ListItemText primary={label} secondary={hint} />
           </MenuItem>
         ))}
-        {menu && ['PENDING', 'DEPOSITED', 'BOUNCED'].includes(menu.row.status) && (
+        {menu && (
           <MenuItem onClick={() => { setEditRow(menu.row); setMenu(null); }}>
-            <ListItemText primary="Edit Cheque Details" secondary="Correct the number, dates, bank, party or remarks." />
+            <ListItemText primary="Edit Cheque Details" secondary="Correct the number, dates, bank, drawer / payee, status or remarks." />
           </MenuItem>
         )}
       </Menu>
@@ -436,10 +444,7 @@ export default function ChequeRegister() {
       <StatusDialog target={statusTarget} onClose={() => setStatusTarget(null)} onDone={done} />
       <ChequeDetailsDialog
         open={!!editRow}
-        direction={editRow?.direction}
-        value={editRow ? chequeFromRow(editRow) : null}
-        amount={editRow?.amount}
-        amountLocked
+        row={editRow}
         saving={editSaving}
         onSave={saveEdit}
         onClose={() => setEditRow(null)}
@@ -457,7 +462,7 @@ function printHtml(data, { company, logo, filters }) {
       <td class="nw">${esc(r.voucher_number)}</td>
       <td class="nw"><b>${esc(r.cheque_number)}</b></td>
       <td class="nw">${esc(formatDate(r.cheque_date))}</td>
-      <td>${esc(r.bank_name)}</td>
+      <td>${esc(r.bank_name)}${r.bank_branch ? `<br><small>${esc(r.bank_branch)}</small>` : ''}</td>
       <td>${esc(r.party_name)}</td>
       <td class="r"><b>${esc(formatMoney(r.amount))}</b></td>
       <td class="nw">${r.deposited_date ? esc(formatDate(r.deposited_date)) : ''}${r.cleared_date ? `<br><small>Cleared ${esc(formatDate(r.cleared_date))}</small>` : ''}</td>
@@ -496,7 +501,7 @@ function printHtml(data, { company, logo, filters }) {
   <h2>CHEQUE REGISTER</h2>
   <div class="meta"><b>Filters:</b> ${esc(filters)} · <b>${data.count}</b> cheques · <b>${esc(formatMoney(data.matched_amount))}</b> · Days left as on ${esc(formatDate(data.today))}</div>
   <table>
-    <thead><tr><th>#</th><th>Type</th><th>Voucher No.</th><th>Cheque No.</th><th>Cheque Date</th><th>Bank</th><th>Company / Party</th>
+    <thead><tr><th>#</th><th>Type</th><th>Voucher No.</th><th>Cheque No.</th><th>Cheque Date</th><th>Bank</th><th>Drawer / Payee</th>
       <th class="r">Amount</th><th>Deposited</th><th>Days Left</th><th>Status</th><th>Remarks</th>${withBranch ? '<th>Branch</th>' : ''}</tr></thead>
     <tbody>${rows || `<tr><td colspan="${cols}" style="text-align:center;padding:18px;color:#64748b">No cheques for these filters.</td></tr>`}</tbody>
   </table>
