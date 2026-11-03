@@ -28,6 +28,7 @@ import { useAuth } from '../context/AuthContext';
 import { useBranch } from '../context/BranchContext';
 import GreensolLogo from './GreensolLogo';
 import { confirmLeave } from '../utils/navigationGuard';
+import { canOpenModule } from '../utils/moduleAccess';
 
 const DRAWER_WIDTH = 280;
 
@@ -35,6 +36,7 @@ const menuItems = [
   { text: 'Dashboard', icon: <DashboardIcon />, path: '/', roles: ['*'] },
   {
     text: 'Optical Services',
+    module: 'optical',
     icon: <VisibilityIcon />,
     roles: ['*'],
     subItems: [
@@ -46,6 +48,7 @@ const menuItems = [
 
   {
     text: 'Sales',
+    module: 'sales',
     icon: <SalesIcon />,
     roles: ['*'],
     subItems: [
@@ -60,6 +63,7 @@ const menuItems = [
   },
   {
     text: 'Wholesale Distribution',
+    module: 'wholesale',
     icon: <WholesaleIcon />,
     roles: ['*'],
     subItems: [
@@ -69,6 +73,7 @@ const menuItems = [
   },
   {
     text: 'Inventory',
+    module: 'inventory',
     icon: <InventoryIcon />,
     roles: ['*'],
     subItems: [
@@ -82,6 +87,7 @@ const menuItems = [
   },
   {
     text: 'Purchase',
+    module: 'purchase',
     icon: <PurchaseIcon />,
     roles: ['*'],
     subItems: [
@@ -95,6 +101,7 @@ const menuItems = [
   },
   {
     text: 'Financial',
+    module: 'financial',
     icon: <FinancialIcon />,
     roles: ['*'],
     subItems: [
@@ -125,6 +132,7 @@ const menuItems = [
   },
   {
     text: 'Accounts',
+    module: 'financial',
     icon: <AccountsIcon />,
     roles: ['*'],
     subItems: [
@@ -152,6 +160,7 @@ const menuItems = [
   },
   {
     text: 'Administration',
+    module: 'admin',
     icon: <AdminIcon />,
     roles: ['*'],
     subItems: [
@@ -169,6 +178,7 @@ const menuItems = [
 
   {
     text: 'Reports',
+    module: 'reports',
     icon: <ReportsIcon />,
     roles: ['*'],
     subItems: [
@@ -180,7 +190,7 @@ const menuItems = [
     ]
   },
 
-  { text: 'Settings', icon: <SettingsIcon />, path: '/settings', roles: ['*'] },
+  { text: 'Settings', icon: <SettingsIcon />, path: '/settings', roles: ['*'], module: 'settings' },
 
   // Platform owner only (user.is_platform_admin) — onboarding client businesses (tenants).
   { text: 'Client Management', icon: <ClientsIcon />, path: '/superadmin/tenants', roles: ['*'], platformOnly: true }
@@ -229,10 +239,6 @@ export default function Sidebar({ open, toggleSidebar, isMobile = false }) {
 
   const userRole = user?.role || 'SALES_EXECUTIVE';
 
-  const permissions = user?.permissions || {
-    optical: true, sales: true, wholesale: true, inventory: true, purchase: true, financial: true, accounts: true, reports: true, admin: true
-  };
-
   const filteredMenu = menuItems
     .map(item => {
       // Drop sub-items flagged multiBranchOnly when Multi-Branch Mode is OFF (spec section 1).
@@ -243,15 +249,8 @@ export default function Sidebar({ open, toggleSidebar, isMobile = false }) {
     })
     .filter(item => {
     if (item.platformOnly && !user?.is_platform_admin) return false;
-    if (item.text === 'Optical Services' && permissions.optical === false) return false;
-    if (item.text === 'Sales' && permissions.sales === false) return false;
-    if ((item.text === 'Wholesale' || item.text === 'Wholesale Distribution') && permissions.wholesale === false) return false;
-    if (item.text === 'Inventory' && permissions.inventory === false) return false;
-    if (item.text === 'Purchase' && permissions.purchase === false) return false;
-    if (item.text === 'Financial' && permissions.financial === false) return false;
-    if (item.text === 'Accounts' && permissions.accounts === false) return false;
-    if (item.text === 'Administration' && permissions.admin === false) return false;
-    if (item.text === 'Reports' && permissions.reports === false) return false;
+    // The client's subscribed modules and this role's level (user.module_access, server-side).
+    if (item.module && !canOpenModule(user, item.module)) return false;
     return item.roles.includes('*') || item.roles.includes(userRole);
   });
 

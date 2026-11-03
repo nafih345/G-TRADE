@@ -6,6 +6,11 @@ from apps.common import tenancy
 from apps.common.tenancy import TenantManager, TenantQuerySet
 
 
+def _all_modules():
+    from apps.common.module_access import MODULE_KEYS
+    return list(MODULE_KEYS)
+
+
 class Tenant(models.Model):
     """A client business. Every TenantOwnedModel row belongs to exactly one, and API requests
     only ever see their own tenant's rows (see apps/common/tenancy.py). Users are tied to a
@@ -20,11 +25,64 @@ class Tenant(models.Model):
     contact_phone = models.CharField(max_length=20, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # Subscription (apps/common/module_access.py): package + the module keys it grants, and
+    # per-role overrides of the default module levels.
+    package = models.CharField(max_length=20, default='FULL_SUITE')
+    modules = models.JSONField(default=_all_modules, blank=True)
+    role_permissions = models.JSONField(default=dict, blank=True)
+    # Seat limit: how many *active* user accounts the client may have (its owner included).
+    max_users = models.PositiveIntegerField(default=5)
+
+    # Deactivation record. Filled when the platform admin deactivates (or schedules it): the
+    # account stops working from `deactivation_effective_date` (see is_effectively_active).
+    # Reactivating clears them; the history stays in TenantAuditLog.
+    deactivation_category = models.CharField(max_length=40, blank=True, default='')
+    deactivation_reason = models.TextField(blank=True, default='')
+    deactivation_effective_date = models.DateField(null=True, blank=True)
+    # Planned end of a suspension, for the record only — reactivating stays a manual action.
+    deactivation_until = models.DateField(null=True, blank=True)
+    deactivated_at = models.DateTimeField(null=True, blank=True)
+    deactivated_by = models.CharField(max_length=150, blank=True, default='')
+
     class Meta:
         ordering = ['id']
 
     def __str__(self):
         return f"{self.name} (#{self.pk})"
+
+    @staticmethod
+    def active_q(today=None):
+        """Filter for tenants that may be used today: active and no deactivation already due."""
+        from django.utils import timezone
+        today = today or timezone.localdate()
+        return (models.Q(is_active=True)
+                & (models.Q(deactivation_effective_date__isnull=True)
+                   | models.Q(deactivation_effective_date__gt=today)))
+
+    @property
+    def is_effectively_active(self):
+        from django.utils import timezone
+        due = self.deactivation_effective_date and self.deactivation_effective_date <= timezone.localdate()
+        return bool(self.is_active and not due)
+
+
+class TenantAuditLog(models.Model):
+    """Platform-side history of a client account: onboarding, deactivation / reactivation (with
+    reason and effective date), module, seat, user and branch changes. Not tenant-owned — only
+    the platform console reads it."""
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name='audit_log')
+    action = models.CharField(max_length=40)
+    reason = models.TextField(blank=True, default='')
+    effective_date = models.DateField(null=True, blank=True)
+    details = models.JSONField(default=dict, blank=True)
+    actor = models.CharField(max_length=150, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+    def __str__(self):
+        return f"{self.tenant_id} {self.action} @ {self.created_at:%Y-%m-%d}"
 
 
 class TenantOwnedModel(models.Model):

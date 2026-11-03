@@ -43,8 +43,7 @@ function BrandMark({ size = 44 }) {
 }
 
 const STAFF_NOT_CONFIGURED =
-  'Account not configured — access denied. Sign-in for Admin, Manager, Accountant and Cashier '
-  + 'is disabled until those roles and their permissions are set up.';
+  'Sign-in is not enabled for this account’s role on this server. Contact your administrator.';
 
 const SERVER_ERROR =
   'The server could not process the sign-in (it may not be able to reach its database). '
@@ -68,7 +67,7 @@ const ERRORS = {
 };
 
 /**
- * variant 'staff'      — the regular sign-in page (/). Staff roles are not enabled yet.
+ * variant 'staff'      — the regular sign-in page (/), for every staff account.
  * variant 'superAdmin' — the dedicated Super Admin sign-in page (/super-admin/login).
  */
 export default function Login({ variant = 'staff' }) {
@@ -114,10 +113,7 @@ export default function Login({ variant = 'staff' }) {
         setError(result.message);
         setPassword('');
       } else {
-        // The demo role names have no working accounts yet — say so rather than "invalid".
-        const reason = !isSuperAdminPage && result.reason === 'invalid_credentials'
-          && DEMO_ROLES.includes(username.trim().toLowerCase()) ? 'role_not_enabled' : result.reason;
-        setError(ERRORS[variant][reason] || 'Sign-in failed. Please try again.');
+        setError(ERRORS[variant][result.reason] || 'Sign-in failed. Please try again.');
         setPassword('');
       }
     } catch (err) {

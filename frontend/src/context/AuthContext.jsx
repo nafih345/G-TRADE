@@ -12,6 +12,9 @@ const ROLE_LABELS = {
   SUPER_ADMIN: 'Super Admin',
   ADMINISTRATOR: 'Admin',
   ADMIN: 'Admin',
+  BRANCH_ADMIN: 'Branch Admin',
+  OPTOMETRIST: 'Optometrist',
+  DOCTOR: 'Doctor',
   MANAGER: 'Manager',
   ACCOUNTANT: 'Accountant',
   CASHIER: 'Cashier',
@@ -65,16 +68,15 @@ export const AuthProvider = ({ children }) => {
     if (saved) {
       setUser(withRoleLabel(saved));
       setLoading(false);
-      // Profiles cached before is_platform_admin existed: pick it up without a re-login.
-      if (!('is_platform_admin' in saved)) {
-        axios.get('/api/auth/profile/')
-          .then(({ data }) => {
-            const profile = withRoleLabel(data);
-            localStorage.setItem('user_profile', JSON.stringify(profile));
-            setUser(profile);
-          })
-          .catch(() => { /* keep the cached profile; the sign-in itself is still valid */ });
-      }
+      // Refresh the cached profile in the background: role and module access
+      // (user.module_access) can change in the platform console while a session is open.
+      axios.get('/api/auth/profile/')
+        .then(({ data }) => {
+          const profile = withRoleLabel(data);
+          localStorage.setItem('user_profile', JSON.stringify(profile));
+          setUser(profile);
+        })
+        .catch(() => { /* keep the cached profile; the sign-in itself is still valid */ });
       return;
     }
     // Token without a cached profile: ask the backend who it belongs to.

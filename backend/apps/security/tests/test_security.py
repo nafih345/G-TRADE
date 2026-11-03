@@ -2,7 +2,7 @@ from datetime import timedelta
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -182,6 +182,7 @@ class LoginProtectionTests(SecurityTestBase):
             self.login(password='wrong')
         self.assertEqual(self.login().status_code, 200)
 
+    @override_settings(LOGIN_ENABLED_ROLES=['SUPER_ADMIN'])
     def test_role_gate_still_applies(self):
         res = self.login('admin2')
         self.assertEqual(res.status_code, 401)

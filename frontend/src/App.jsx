@@ -1,5 +1,5 @@
 import React, { useState, useEffect, lazy, Suspense } from 'react';
-import { HashRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { HashRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { ThemeProvider, CssBaseline, Box, Typography, LinearProgress, useMediaQuery } from '@mui/material';
 import { getTheme } from './theme/theme';
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -12,6 +12,7 @@ import SessionActivityMonitor from './components/security/SessionActivityMonitor
 import { loadBusinessPrefs } from './utils/businessPrefs';
 import BackendStatusBanner from './components/BackendStatusBanner';
 import Login from './pages/Login';
+import { moduleForPath, canOpenModule } from './utils/moduleAccess';
 
 // Lazy loaded page components for maximum performance & fast route loading. Dashboard is lazy
 // too: it is the only startup screen using recharts, and eager import made the sign-in page
@@ -34,6 +35,24 @@ const Administration = lazy(() => import('./pages/Administration'));
 const Reports = lazy(() => import('./pages/Reports'));
 const Settings = lazy(() => import('./pages/Settings'));
 const TenantManagement = lazy(() => import('./pages/TenantManagement'));
+
+// A module the client isn't subscribed to, or this role has no access to (user.module_access),
+// can't be opened by typing its URL either. The server enforces writes on its own.
+function ModuleGate({ user, children }) {
+  const { pathname } = useLocation();
+  const module = moduleForPath(pathname);
+  if (module && !canOpenModule(user, module)) {
+    return (
+      <Box sx={{ p: 6, textAlign: 'center' }}>
+        <Typography variant="h6" fontWeight={700} gutterBottom>This module isn’t available</Typography>
+        <Typography variant="body2" color="text.secondary">
+          It is not part of your business’s plan, or your role has no access to it. Contact your administrator.
+        </Typography>
+      </Box>
+    );
+  }
+  return children;
+}
 
 function MainLayout() {
   const { user, loading } = useAuth();
@@ -190,6 +209,7 @@ function MainLayout() {
           
           <Box component="main" sx={{ flexGrow: 1, overflowY: 'auto' }}>
             <Suspense fallback={<LinearProgress color="primary" sx={{ height: 3 }} />}>
+              <ModuleGate user={user}>
               <Routes>
                 <Route path="/" element={<Dashboard />} />
                 <Route path="/super-admin/login" element={<Navigate to="/" replace />} />
@@ -342,6 +362,7 @@ function MainLayout() {
                 <Route path="/settings" element={<Settings />} />
                 <Route path="*" element={<Navigate to="/" />} />
               </Routes>
+              </ModuleGate>
             </Suspense>
           </Box>
         </Box>

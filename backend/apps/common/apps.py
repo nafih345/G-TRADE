@@ -39,3 +39,5 @@ class CommonConfig(AppConfig):
         from . import tenant_context, tenant_serializers
         tenant_serializers.install()
         tenant_context.install_drf_hook()
+        from . import module_access
+        module_access.install_api_gate()

@@ -14,12 +14,20 @@ class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ('id', 'username', 'email', 'first_name', 'last_name', 'role', 'role_display', 'phone', 'is_active',
-                  'tenant', 'is_platform_admin')
+                  'tenant', 'is_platform_admin', 'module_access')
         read_only_fields = ('id', 'is_active', 'tenant')
+
+    # {module: 'full'|'view'|'none'} from the tenant's subscription and this role's levels
+    # (apps/common/module_access.py) — drives the sidebar and route guard.
+    module_access = serializers.SerializerMethodField()
 
     def get_is_platform_admin(self, obj):
         from apps.common.permissions import is_platform_admin
         return is_platform_admin(obj)
+
+    def get_module_access(self, obj):
+        from apps.common.module_access import effective_access
+        return effective_access(obj)
 
 
 def ensure_login_role(user):
@@ -38,7 +46,7 @@ def ensure_login_role(user):
 def ensure_login_tenant(user):
     """Every token carries the user's tenant, so an account without an active one can't sign in."""
     tenant = user.tenant if user.tenant_id else None
-    if tenant is None or not tenant.is_active:
+    if tenant is None or not tenant.is_effectively_active:
         raise exceptions.AuthenticationFailed({
             'detail': 'This account is not linked to an active business. Access denied.',
             'code': 'no_tenant' if tenant is None else 'tenant_inactive',

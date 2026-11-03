@@ -52,7 +52,8 @@ def _tenant_active(tenant_id):
     from apps.common.models import Tenant
     return hot_cache.get_or_load(
         f'tenant:active:{tenant_id}',
-        lambda: Tenant.objects.filter(pk=tenant_id, is_active=True).exists())
+        # A scheduled deactivation counts from its effective date (Tenant.active_q).
+        lambda: Tenant.objects.filter(Tenant.active_q(), pk=tenant_id).exists())
 
 
 def check_user_tenant(user):

@@ -469,13 +469,15 @@ SIMPLE_JWT = {
     'USER_ID_CLAIM': 'user_id',
 }
 
-# Roles allowed to obtain a login token. Only Super Admin for now: the Admin / Manager /
-# Accountant / Cashier accounts and their permissions are not set up yet, so the login
-# endpoint refuses them (code "role_not_enabled"). Widen this list — or set
-# LOGIN_ENABLED_ROLES=SUPER_ADMIN,ADMINISTRATOR,... in the environment — once they are.
+# Roles allowed to obtain a login token. Every staff role by default: accounts are created only
+# by admin staff (Administration → Users) or the platform console, and what each role may open
+# is governed by the tenant's module access (apps/common/module_access.py). Set e.g.
+# LOGIN_ENABLED_ROLES=SUPER_ADMIN in the environment to lock sign-in down to owners again.
+_ALL_LOGIN_ROLES = ('SUPER_ADMIN,ADMINISTRATOR,BRANCH_ADMIN,OPTOMETRIST,DOCTOR,MANAGER,ACCOUNTANT,'
+                    'INVENTORY_MANAGER,SALES_EXECUTIVE,PURCHASE_EXECUTIVE,CASHIER')
 LOGIN_ENABLED_ROLES = [
     r.strip().upper()
-    for r in os.environ.get('LOGIN_ENABLED_ROLES', 'SUPER_ADMIN').split(',')
+    for r in os.environ.get('LOGIN_ENABLED_ROLES', _ALL_LOGIN_ROLES).split(',')
     if r.strip()
 ]
 

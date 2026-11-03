@@ -36,20 +36,7 @@ import { useBranch } from '../context/BranchContext';
 import ExcelImportManager from '../components/admin/import/ExcelImportManager';
 import BarcodePrintingManager from '../components/admin/BarcodePrintingManager';
 import ServiceMasterDialog from '../components/sales/ServiceMasterDialog';
-
-// Default initial users database
-const defaultUsersList = [
-  {
-    id: 'EMP-101',
-    name: 'Greensol Admin',
-    email: 'admin@greensol.com',
-    phone: '+91 9876543210',
-    role: 'SUPER_ADMIN',
-    roleDisplay: 'Super Admin',
-    status: 'Active',
-    permissions: { optical: true, sales: true, wholesale: true, inventory: true, purchase: true, financial: true, accounts: true, reports: true, admin: true }
-  }
-];
+import StaffUsersManager from '../components/admin/StaffUsersManager';
 
 export default function Administration() {
   const location = useLocation();
@@ -89,15 +76,6 @@ export default function Administration() {
   };
 
   // State
-  const [users, setUsers] = useState(() => {
-    try {
-      const saved = localStorage.getItem('optical_users_db');
-      return saved ? JSON.parse(saved) : defaultUsersList;
-    } catch (e) {
-      return defaultUsersList;
-    }
-  });
-
   // Doctor / Optometrist Master Database State
   const [doctors, setDoctors] = useState(() => {
     try {
@@ -248,10 +226,8 @@ export default function Administration() {
 
 
   const [searchQuery, setSearchQuery] = useState('');
-  const [addUserOpen, setAddUserOpen] = useState(false);
   const [addDoctorOpen, setAddDoctorOpen] = useState(false);
   const [addBranchOpen, setAddBranchOpen] = useState(false);
-  const [editPermissionsUser, setEditPermissionsUser] = useState(null);
 
   // Form Inputs for Adding Doctor
   const [doctorInput, setDoctorInput] = useState({
@@ -328,23 +304,6 @@ export default function Administration() {
 
     const updatedDoctors = [newDocObj, ...doctors];
     setDoctors(updatedDoctors);
-
-    // Also register doctor into staff users list if not present
-    const isUserExist = users.some(u => u.name === formattedName || u.email === newDocObj.email);
-    if (!isUserExist) {
-      const newDoctorUser = {
-        id: `EMP-${Math.floor(200 + Math.random() * 800)}`,
-        name: formattedName,
-        username: (newDocObj.email && newDocObj.email !== 'N/A') ? newDocObj.email.split('@')[0] : formattedName.toLowerCase().replace(/[^a-z0-9]/g, ''),
-        email: (newDocObj.email && newDocObj.email !== 'N/A') ? newDocObj.email : `${formattedName.toLowerCase().replace(/[^a-z0-9]/g, '')}@gopticals.com`,
-        phone: newDocObj.phone,
-        role: 'OPTOMETRIST',
-        roleDisplay: 'Optometrist Doctor',
-        status: 'Active',
-        permissions: { optical: true, sales: true, inventory: false, purchase: false, accounts: false, reports: true, admin: false }
-      };
-      setUsers(prev => [newDoctorUser, ...prev]);
-    }
 
     setAddDoctorOpen(false);
     setDoctorInput({
@@ -468,94 +427,6 @@ export default function Administration() {
     setAssignAccessOpen(false);
   };
 
-  // Form Inputs for Adding User
-  const [userInput, setUserInput] = useState({
-    id: `EMP-${Math.floor(100 + Math.random() * 900)}`,
-    name: '',
-    email: '',
-    phone: '',
-    password: '',
-    roleDisplay: 'Optometrist',
-    status: 'Active',
-    permissions: {
-      optical: true,
-      sales: true,
-      inventory: false,
-      purchase: false,
-      accounts: false,
-      reports: true,
-      admin: false
-    }
-  });
-
-  // Save users to localStorage
-  useEffect(() => {
-    try {
-      localStorage.setItem('optical_users_db', JSON.stringify(users));
-    } catch (e) {}
-  }, [users]);
-
-  // Handler to Save New User
-  const handleSaveUser = async () => {
-    if (!userInput.name || !userInput.email || !userInput.password) {
-      alert("Please fill in User Name, Email, and Password.");
-      return;
-    }
-
-    const newUserObj = {
-      id: userInput.id || `EMP-${Math.floor(100 + Math.random() * 900)}`,
-      name: userInput.name,
-      username: userInput.email.split('@')[0],
-      email: userInput.email,
-      phone: userInput.phone || 'N/A',
-      password: userInput.password,
-      role: userInput.roleDisplay.toUpperCase().replace(/\s+/g, '_'),
-      roleDisplay: userInput.roleDisplay,
-      status: 'Active',
-      permissions: { ...userInput.permissions }
-    };
-
-    setUsers([newUserObj, ...users]);
-
-    // POST to backend API
-    try {
-      await axios.post('/api/auth/users/', {
-        username: newUserObj.username,
-        email: newUserObj.email,
-        password: newUserObj.password,
-        first_name: newUserObj.name,
-        role: newUserObj.role
-      });
-    } catch (e) {}
-
-    setAddUserOpen(false);
-    setUserInput({
-      id: `EMP-${Math.floor(100 + Math.random() * 900)}`,
-      name: '',
-      email: '',
-      phone: '',
-      password: '',
-      roleDisplay: 'Optometrist',
-      status: 'Active',
-      permissions: { optical: true, sales: true, inventory: false, purchase: false, accounts: false, reports: true, admin: false }
-    });
-
-    alert(`User account '${newUserObj.name}' created successfully!`);
-  };
-
-  const handleDeleteUser = (userId) => {
-    if (window.confirm("Are you sure you want to delete this staff user account?")) {
-      setUsers(users.filter(u => u.id !== userId));
-    }
-  };
-
-  const handleUpdatePermissions = () => {
-    if (!editPermissionsUser) return;
-    setUsers(users.map(u => u.id === editPermissionsUser.id ? editPermissionsUser : u));
-    setEditPermissionsUser(null);
-    alert(`Access permissions updated for '${editPermissionsUser.name}'!`);
-  };
-
   const auditLogs = [
     { id: 'LOG-901', user: 'Greensol Admin', action: 'User Created', target: 'Dr. Sarah Miller', time: 'Just now' },
     { id: 'LOG-902', user: 'Greensol Admin', action: 'Permissions Modified', target: 'John Sales Exec', time: '1 hour ago' },
@@ -571,16 +442,6 @@ export default function Administration() {
           <Typography variant="body2" color="text.secondary">Manage staff accounts, doctors, branch locations, Excel imports, and security permissions</Typography>
         </Box>
         <Stack direction="row" spacing={1.5}>
-          {activeTab === 'users' && (
-            <Button 
-              variant="contained" 
-              startIcon={<AddIcon />} 
-              onClick={() => setAddUserOpen(true)} 
-              sx={{ backgroundColor: '#2563EB', fontWeight: 700, px: 3 }}
-            >
-              + Add New User
-            </Button>
-          )}
           {activeTab === 'doctors' && (
             <Button 
               variant="contained" 
@@ -631,65 +492,8 @@ export default function Administration() {
         </Tabs>
       </Card>
 
-      {/* 1. USERS TAB */}
-      {activeTab === 'users' && (() => {
-        const filteredUsers = users.filter(u => {
-          const query = searchQuery.toLowerCase();
-          return (u.name && u.name.toLowerCase().includes(query)) ||
-                 (u.email && u.email.toLowerCase().includes(query)) ||
-                 (u.id && u.id.toLowerCase().includes(query)) ||
-                 (u.roleDisplay && u.roleDisplay.toLowerCase().includes(query));
-        });
-
-        return (
-          <Stack spacing={3}>
-            <TextField 
-              placeholder="Search staff users by name, email, or role..." 
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              size="small"
-              sx={{ maxWidth: 400, bgcolor: '#fff', borderRadius: 2 }}
-              InputProps={{ startAdornment: <SearchIcon sx={{ color: 'text.secondary', mr: 1 }} /> }}
-            />
-
-            <Card sx={{ borderRadius: 3 }}>
-              <TableContainer>
-                <Table size="small">
-                  <TableHead sx={{ backgroundColor: '#0f172a' }}>
-                    <TableRow>
-                      <TableCell sx={{ color: '#fff', fontWeight: 800 }}>User ID</TableCell>
-                      <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Full Name</TableCell>
-                      <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Email Address</TableCell>
-                      <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Role</TableCell>
-                      <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Status</TableCell>
-                      <TableCell sx={{ color: '#fff', fontWeight: 800 }} align="right">Actions</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {filteredUsers.map(u => (
-                      <TableRow key={u.id} hover>
-                        <TableCell sx={{ fontWeight: 800, color: 'primary.main' }}>{u.id}</TableCell>
-                        <TableCell sx={{ fontWeight: 700 }}>{u.name}</TableCell>
-                        <TableCell>{u.email}</TableCell>
-                        <TableCell><Chip label={u.roleDisplay || u.role} color="primary" size="small" sx={{ fontWeight: 700 }} /></TableCell>
-                        <TableCell><Chip label={u.status} color="success" size="small" sx={{ fontWeight: 700 }} /></TableCell>
-                        <TableCell align="right">
-                          <IconButton size="small" color="primary" onClick={() => setEditPermissionsUser(u)}>
-                            <KeyIcon fontSize="small" />
-                          </IconButton>
-                          <IconButton size="small" color="error" onClick={() => handleDeleteUser(u.id)}>
-                            <DeleteIcon fontSize="small" />
-                          </IconButton>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </TableContainer>
-            </Card>
-          </Stack>
-        );
-      })()}
+      {/* 1. USERS TAB — real accounts, created directly by admin staff */}
+      {activeTab === 'users' && <StaffUsersManager />}
 
       {/* 2. DOCTORS & OPTOMETRISTS MASTER TAB */}
       {activeTab === 'doctors' && (() => {
@@ -1087,7 +891,7 @@ export default function Administration() {
         <Card sx={{ p: 4, borderRadius: 3 }}>
           <Typography variant="h6" fontWeight={800} sx={{ mb: 2 }}>Module Permissions Matrix</Typography>
           <Typography variant="body2" color="text.secondary">
-            Configure access controls per staff role. Click 'Key' icon in User Accounts Directory to customize individual user access.
+            Each user's access comes from their role. Assign the role when creating the user under User Accounts Directory; the dialog shows which modules that role opens.
           </Typography>
         </Card>
       )}
@@ -1357,73 +1161,6 @@ export default function Administration() {
         </DialogActions>
       </Dialog>
 
-      {/* --- DIALOG: ADD NEW USER ACCOUNT --- */}
-      <Dialog open={addUserOpen} onClose={() => setAddUserOpen(false)} maxWidth="sm" fullWidth PaperProps={{ sx: { borderRadius: 4 } }}>
-        <DialogTitle sx={{ fontWeight: 800 }}>Create New Staff User Account</DialogTitle>
-        <DialogContent dividers>
-          <Stack spacing={2.5} sx={{ pt: 1 }}>
-            <TextField fullWidth label="User / Employee ID" size="small" value={userInput.id} disabled />
-            <TextField fullWidth label="Full Name *" size="small" value={userInput.name} onChange={(e) => setUserInput({ ...userInput, name: e.target.value })} />
-            <TextField fullWidth label="Email Address (Username) *" size="small" value={userInput.email} onChange={(e) => setUserInput({ ...userInput, email: e.target.value })} />
-            <Grid container spacing={2}>
-              <Grid item xs={6}><TextField fullWidth label="Phone Number" size="small" value={userInput.phone} onChange={(e) => setUserInput({ ...userInput, phone: e.target.value })} /></Grid>
-              <Grid item xs={6}><TextField fullWidth label="Password *" type="password" size="small" value={userInput.password} onChange={(e) => setUserInput({ ...userInput, password: e.target.value })} /></Grid>
-            </Grid>
-            <TextField select fullWidth label="System Role" size="small" value={userInput.roleDisplay} onChange={(e) => setUserInput({ ...userInput, roleDisplay: e.target.value })}>
-              <MenuItem value="Super Admin">Super Admin</MenuItem>
-              <MenuItem value="Optometrist">Optometrist Doctor</MenuItem>
-              <MenuItem value="Sales Executive">Sales & Billing Executive</MenuItem>
-              <MenuItem value="Inventory Manager">Inventory Manager</MenuItem>
-            </TextField>
-          </Stack>
-        </DialogContent>
-        <DialogActions sx={{ p: 2, justifyContent: 'space-between' }}>
-          <Button onClick={() => setAddUserOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={handleSaveUser} sx={{ backgroundColor: '#2563EB', fontWeight: 700, px: 3 }}>
-            Save User Account
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* --- DIALOG: EDIT PERMISSIONS --- */}
-      <Dialog open={Boolean(editPermissionsUser)} onClose={() => setEditPermissionsUser(null)} maxWidth="sm" fullWidth PaperProps={{ sx: { borderRadius: 4 } }}>
-        <DialogTitle sx={{ fontWeight: 800 }}>Manage Access Permissions: {editPermissionsUser?.name}</DialogTitle>
-        <DialogContent dividers>
-          {editPermissionsUser && (
-            <Stack spacing={2}>
-              {[
-                { key: 'optical', label: '👁️ Optical Services' },
-                { key: 'sales', label: '🛒 Sales & POS Billing' },
-                { key: 'wholesale', label: '🏢 Wholesale Distribution' },
-                { key: 'inventory', label: '📦 Inventory & Stock' },
-                { key: 'purchase', label: '🚚 Purchasing & Suppliers' },
-                { key: 'financial', label: '🏛️ Financial & Accounting' },
-                { key: 'accounts', label: '💰 Accounts & Financial Ledger' },
-                { key: 'reports', label: '📊 Sales & Optical Reports' },
-                { key: 'admin', label: '⚙️ Administration' }
-              ].map(m => (
-                <Paper key={m.key} variant="outlined" sx={{ p: 1.5, borderRadius: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <Typography variant="body2" fontWeight={600}>{m.label}</Typography>
-                  <Switch 
-                    checked={!!editPermissionsUser.permissions?.[m.key]}
-                    onChange={(e) => setEditPermissionsUser({
-                      ...editPermissionsUser,
-                      permissions: { ...editPermissionsUser.permissions, [m.key]: e.target.checked }
-                    })}
-                    color="primary"
-                  />
-                </Paper>
-              ))}
-            </Stack>
-          )}
-        </DialogContent>
-        <DialogActions sx={{ p: 2, justifyContent: 'space-between' }}>
-          <Button onClick={() => setEditPermissionsUser(null)}>Cancel</Button>
-          <Button variant="contained" onClick={handleUpdatePermissions} sx={{ backgroundColor: '#2563EB', fontWeight: 700, px: 3 }}>
-            Save Updated Permissions
-          </Button>
-        </DialogActions>
-      </Dialog>
     </Box>
   );
 }

@@ -137,6 +137,13 @@ class RegisterUserView(generics.CreateAPIView):
     permission_classes = [IsSuperAdmin]
 
     def perform_create(self, serializer):
+        from apps.common.tenant_onboarding import OnboardingError, check_seat_available
+        tenant = self.request.user.tenant
+        if tenant is not None:
+            try:
+                check_seat_available(tenant)  # the client's seat limit (platform console)
+            except OnboardingError as e:
+                raise exceptions.ValidationError({'detail': e.message, 'code': 'seat_limit'})
         # New accounts always join the creator's tenant; the body can't choose another.
         user = serializer.save(tenant_id=self.request.user.tenant_id)
         password = self.request.data.get('password')

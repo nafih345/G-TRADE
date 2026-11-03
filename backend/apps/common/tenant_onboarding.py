@@ -17,8 +17,8 @@ from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.utils.text import slugify
 
-from apps.common import tenancy
-from apps.common.models import Tenant
+from apps.common import module_access, tenancy
+from apps.common.models import Tenant, TenantAuditLog
 
 
 class OnboardingError(ValueError):
@@ -49,8 +49,28 @@ def check_available(name, admin_username, code=None):
         raise OnboardingError('admin_username', f'The username "{admin_username}" is already taken.')
 
 
+def log_event(tenant, action, actor='', *, reason='', effective_date=None, **details):
+    """One TenantAuditLog row. `actor` is a User or a username."""
+    actor = getattr(actor, 'username', actor) or ''
+    return TenantAuditLog.objects.create(tenant=tenant, action=action, actor=actor, reason=reason or '',
+                                         effective_date=effective_date, details=details)
+
+
+def active_user_count(tenant):
+    return get_user_model().objects.filter(tenant=tenant, is_active=True).count()
+
+
+def check_seat_available(tenant, adding=1):
+    """Refuse a new / reactivated account once the client's seat limit is used up."""
+    used = active_user_count(tenant)
+    if used + adding > tenant.max_users:
+        raise OnboardingError('max_users', f'All {tenant.max_users} user seats of {tenant.name} are in use '
+                                           f'({used} active). Raise the seat limit or deactivate a user first.')
+
+
 def onboard_tenant(*, name, admin_username, password, admin_email='', contact_phone='',
-                   branch_name='', code=None):
+                   branch_name='', code=None, package=module_access.FULL_SUITE, modules=None,
+                   max_users=5, actor=''):
     """Create the tenant and its Super Admin in one transaction; returns (tenant, admin)."""
     from apps.company.models import Branch, Company
 
@@ -66,11 +86,18 @@ def onboard_tenant(*, name, admin_username, password, admin_email='', contact_ph
         raise OnboardingError('admin_username', 'Give the admin a username.')
     if not password:
         raise OnboardingError('password', 'Give the admin a password.')
+    try:
+        package, modules = module_access.normalize_modules(package, modules)
+    except ValueError as e:
+        raise OnboardingError('modules', str(e))
+    if not isinstance(max_users, int) or max_users < 1:
+        raise OnboardingError('max_users', 'Allow at least one user (the client’s admin).')
     check_available(name, admin_username, code)
 
     with transaction.atomic():
         tenant = Tenant.objects.create(name=name, code=code or _free_code(name),
-                                       contact_email=admin_email, contact_phone=contact_phone)
+                                       contact_email=admin_email, contact_phone=contact_phone,
+                                       package=package, modules=modules, max_users=max_users)
         # role SUPER_ADMIN is the tenant's own top role; never is_superuser / is_staff — those
         # open Django admin, which is not tenant-scoped, and is_superuser also marks the
         # platform owner (see apps.common.permissions.IsPlatformAdmin).
@@ -87,4 +114,6 @@ def onboard_tenant(*, name, admin_username, password, admin_email='', contact_ph
             )
             Branch.objects.create(company=company, name=(branch_name or '').strip() or 'Head Office',
                                   code='HO', phone=contact_phone or None, is_default=True, is_active=True)
+        log_event(tenant, 'ONBOARDED', actor, admin=admin.username, package=package, modules=modules,
+                  max_users=max_users)
     return tenant, admin
