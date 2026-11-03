@@ -9,10 +9,15 @@ from apps.common.tenancy import TenantManager, TenantQuerySet
 class Tenant(models.Model):
     """A client business. Every TenantOwnedModel row belongs to exactly one, and API requests
     only ever see their own tenant's rows (see apps/common/tenancy.py). Users are tied to a
-    tenant by authentication.User.tenant; create tenants with `manage.py create_tenant`."""
+    tenant by authentication.User.tenant. Create tenants from the platform console
+    (/api/superadmin/tenants/) or `manage.py create_tenant`; both go through
+    apps.common.tenant_onboarding."""
     name = models.CharField(max_length=150, unique=True)
     code = models.SlugField(max_length=40, unique=True)
     is_active = models.BooleanField(default=True)
+    # Platform-side contact for the client (who to call about the account), not shop data.
+    contact_email = models.EmailField(blank=True, default='')
+    contact_phone = models.CharField(max_length=20, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

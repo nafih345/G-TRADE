@@ -15,6 +15,7 @@ import {
   AccountBalanceOutlined as FinancialIcon,
   AssessmentOutlined as ReportsIcon,
   AdminPanelSettingsOutlined as AdminIcon,
+  BusinessOutlined as ClientsIcon,
   SettingsOutlined as SettingsIcon,
   ChevronLeft as ChevronLeftIcon,
   Menu as MenuIcon,
@@ -179,7 +180,10 @@ const menuItems = [
     ]
   },
 
-  { text: 'Settings', icon: <SettingsIcon />, path: '/settings', roles: ['*'] }
+  { text: 'Settings', icon: <SettingsIcon />, path: '/settings', roles: ['*'] },
+
+  // Platform owner only (user.is_platform_admin) — onboarding client businesses (tenants).
+  { text: 'Client Management', icon: <ClientsIcon />, path: '/superadmin/tenants', roles: ['*'], platformOnly: true }
 ];
 
 
@@ -238,6 +242,7 @@ export default function Sidebar({ open, toggleSidebar, isMobile = false }) {
       return item;
     })
     .filter(item => {
+    if (item.platformOnly && !user?.is_platform_admin) return false;
     if (item.text === 'Optical Services' && permissions.optical === false) return false;
     if (item.text === 'Sales' && permissions.sales === false) return false;
     if ((item.text === 'Wholesale' || item.text === 'Wholesale Distribution') && permissions.wholesale === false) return false;

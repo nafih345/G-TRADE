@@ -65,6 +65,16 @@ export const AuthProvider = ({ children }) => {
     if (saved) {
       setUser(withRoleLabel(saved));
       setLoading(false);
+      // Profiles cached before is_platform_admin existed: pick it up without a re-login.
+      if (!('is_platform_admin' in saved)) {
+        axios.get('/api/auth/profile/')
+          .then(({ data }) => {
+            const profile = withRoleLabel(data);
+            localStorage.setItem('user_profile', JSON.stringify(profile));
+            setUser(profile);
+          })
+          .catch(() => { /* keep the cached profile; the sign-in itself is still valid */ });
+      }
       return;
     }
     // Token without a cached profile: ask the backend who it belongs to.

@@ -8,12 +8,18 @@ User = get_user_model()
 
 class UserSerializer(serializers.ModelSerializer):
     role_display = serializers.CharField(source='get_role_display', read_only=True)
+    # The platform owner (manages client tenants) — distinct from a tenant's own Super Admin role.
+    is_platform_admin = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = ('id', 'username', 'email', 'first_name', 'last_name', 'role', 'role_display', 'phone', 'is_active',
-                  'tenant')
+                  'tenant', 'is_platform_admin')
         read_only_fields = ('id', 'is_active', 'tenant')
+
+    def get_is_platform_admin(self, obj):
+        from apps.common.permissions import is_platform_admin
+        return is_platform_admin(obj)
 
 
 def ensure_login_role(user):

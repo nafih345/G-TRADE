@@ -105,6 +105,10 @@ class TenantContextMiddleware:
         if tenant_id is None:
             # None outside the test runner (see settings.TENANCY_ANONYMOUS_TENANT_ID).
             tenant_id = getattr(settings, 'TENANCY_ANONYMOUS_TENANT_ID', None)
+        elif not _tenant_active(tenant_id):
+            # A deactivated tenant's still-unexpired token: no scope at all, so even views that
+            # skip authentication (AllowAny, authentication_classes = []) see nothing.
+            tenant_id = None
         request.tenant_id = tenant_id
         token = tenancy.activate(tenant_id, strict=request.path.startswith('/api/'))
         try:

@@ -134,6 +134,7 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/health/', health_check_view),
     path('api/auth/', include('apps.authentication.urls')),
+    path('api/superadmin/', include('apps.common.superadmin_urls')),
     path('api/company/', include('apps.company.urls')),
     path('api/billing/', include('apps.billing.urls')),
     path('api/masters/', include('apps.masters.urls')),

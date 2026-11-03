@@ -31,6 +31,7 @@ SENSITIVE_WRITES = [re.compile(p) for p in (
     r'^/api/security/settings/?$',
     r'^/api/backups/restore/?$',
     r'^/api/auth/register/?$',
+    r'^/api/superadmin(/|$)',
     r'^/api/company/user-branch-access(/|$)',
     r'^/api/company/business-settings/?$',
     r'^/api/company/localization/?$',

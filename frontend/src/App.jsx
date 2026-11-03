@@ -33,6 +33,7 @@ const StockOverview = lazy(() => import('./pages/StockOverview'));
 const Administration = lazy(() => import('./pages/Administration'));
 const Reports = lazy(() => import('./pages/Reports'));
 const Settings = lazy(() => import('./pages/Settings'));
+const TenantManagement = lazy(() => import('./pages/TenantManagement'));
 
 function MainLayout() {
   const { user, loading } = useAuth();
@@ -307,6 +308,10 @@ function MainLayout() {
                 <Route path="/admin/roles" element={<Administration />} />
                 <Route path="/admin/permissions" element={<Administration />} />
                 <Route path="/admin/audit" element={<Administration />} />
+                <Route
+                  path="/superadmin/tenants"
+                  element={user.is_platform_admin ? <TenantManagement /> : <Navigate to="/" replace />}
+                />
 
                 {/* Reports Sub-Routes (All 22 Enterprise Reports) */}
                 <Route path="/reports" element={<Reports />} />
