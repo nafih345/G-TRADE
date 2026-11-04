@@ -3,7 +3,7 @@ from rest_framework.test import APITestCase
 
 from apps.financial.models import AccountGroup, ChartOfAccount
 from apps.purchasing.models import PurchaseInvoice, Supplier
-from apps.sales.models import Dealer, Invoice, Payment, WholesalePaymentCollection
+from apps.sales.models import Dealer, EyeExamination, Invoice, Payment, WholesalePaymentCollection
 
 from .helpers import D, TODAY, balance, ledger_is_balanced, live, make_user
 from .test_sources import Booked
@@ -36,6 +36,39 @@ class PaymentBankPostingTests(Booked):
                                                       bank_account=self.hdfc)
         self.assertEqual(balance('100201'), D('500'))
         self.assertEqual(balance('1002'), 0)
+
+    def test_gpay_eye_test_fee_debits_the_linked_bank(self):
+        with self.booked():
+            EyeExamination.objects.create(patient_name='Asha', test_no='T-1', fee_status='PAID', fee_amount=D('250'),
+                                          fee_paid_amount=D('250'), fee_payment_mode='UPI', fee_bank_account=self.hdfc)
+        self.assertEqual(balance('100201'), D('250'))
+        self.assertTrue(ledger_is_balanced())
+
+
+class EyeTestFeeBankApiTests(APITestCase):
+    url = '/api/sales/eye-examinations/'
+
+    def setUp(self):
+        self.hdfc = make_bank()
+
+    def _post(self, **fee):
+        body = {'patient_id': 'P-1', 'patient_name': 'Asha', 'procedure_charge': 250, 'fee_paid_amount': 250}
+        body.update(fee)
+        return self.client.post(self.url, body, format='json')
+
+    def test_gpay_keeps_the_bank_and_cash_drops_it(self):
+        res = self._post(fee_payment_mode='UPI', fee_bank_account=str(self.hdfc.pk))
+        self.assertEqual(res.status_code, 201, res.content)
+        self.assertEqual(str(res.data['fee_bank_account']), str(self.hdfc.pk))
+        self.assertEqual(res.data['fee_bank_account_name'], 'HDFC Current')
+        res = self.client.patch(f"{self.url}{res.data['id']}/", {'fee_payment_mode': 'CASH'}, format='json')
+        self.assertIsNone(res.data['fee_bank_account'])
+
+    def test_non_bank_account_is_rejected(self):
+        cash = ChartOfAccount.objects.get(code='1001')
+        res = self._post(fee_payment_mode='UPI', fee_bank_account=str(cash.pk))
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('fee_bank_account', res.data)
 
 
 class PurchaseEntryPaymentTests(Booked):

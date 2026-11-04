@@ -13,7 +13,8 @@ import {
   AccountTree as BranchTreeIcon,
   DesignServices as DesignerIcon,
   LocalOffer as LabelIcon,
-  AccountBalance as BankIcon
+  AccountBalance as BankIcon,
+  PriceCheck as PricingIcon
 } from '@mui/icons-material';
 import { useLocation } from 'react-router-dom';
 import axios from 'axios';
@@ -25,18 +26,20 @@ import BankMasterSettings from '../components/settings/BankMasterSettings';
 import StoreProfileSettings from '../components/settings/store/StoreProfileSettings';
 import BusinessLocalizationSettings from '../components/settings/business/BusinessLocalizationSettings';
 import SystemSecuritySettings from '../components/settings/security/SystemSecuritySettings';
+import PricingRulesSettings from '../components/settings/pricing/PricingRulesSettings';
 import { GREEN, greenButtonSx } from '../components/settings/store/storeUi';
 import { STORE_PROFILE_EVENT } from '../utils/storeProfile';
 
 // Deep-link ids for /settings?tab=<id> (e.g. the barcode print dialog's
 // "Label Settings" button). Index = tab position. Business & Localization also takes
 // &section=<general|currency|tax|numbering|other|fields>.
-const TAB_IDS = ['store', 'localization', 'security', 'business', 'bill-designer', 'barcode-labels', 'banks'];
+const TAB_IDS = ['store', 'localization', 'security', 'business', 'bill-designer', 'barcode-labels', 'banks', 'pricing'];
 // Retired ids still linked from elsewhere: the old "Billing & Tax Config", "POS & Barcode Scanner" and
 // "Clinical & Eye Exam Defaults" tabs.
 const TAB_ALIASES = { billing: 'localization', pos: 'barcode-labels', clinical: 'store' };
 const LOCALIZATION_TAB = 1;
 const SECURITY_TAB = 2;
+const PRICING_TAB = 7;
 // Keys of retired tabs (Billing & Tax → Business & Localization; Clinical & Eye Exam Defaults) to drop from the local blob.
 // autoLogoutMinutes: the inactivity timeout is now a server-enforced policy (System Security & Backup).
 const RETIRED_KEYS = ['currency', 'defaultGst', 'invoicePrefix', 'invoiceFooter', 'defaultDoctor', 'examReminderMonths',
@@ -198,10 +201,13 @@ export default function Settings() {
                 ? 'Configure regional settings, currency, language, tax, numbering sequences, and other preferences.'
                 : activeTab === SECURITY_TAB
                   ? 'Manage security, backups, and recovery settings for your optical business.'
-                  : 'Configure optical store profile, business & localization, POS barcode rules, and system preferences'}
+                  : activeTab === PRICING_TAB
+                    ? 'Block selling below cost, set a minimum margin, and manage clearance / special-offer items.'
+                    : 'Configure optical store profile, business & localization, POS barcode rules, and system preferences'}
           </Typography>
         </Box>
-        <Button
+        {/* Pricing Rules & Offers saves from its own "Save Rules" button. */}
+        {activeTab !== PRICING_TAB && <Button
           variant="contained"
           startIcon={<SaveIcon />}
           onClick={handleHeaderSave}
@@ -209,7 +215,7 @@ export default function Settings() {
           sx={{ ...greenButtonSx, px: 3, py: 1 }}
         >
           {formTab?.state.saving ? 'Saving…' : 'Save Changes'}
-        </Button>
+        </Button>}
       </Box>
 
       {saveError && !formTab && (
@@ -244,6 +250,7 @@ export default function Settings() {
           <Tab label="Bill & Invoice Designer" icon={<DesignerIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab label="Barcode Labels" icon={<LabelIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab label="Bank Master" icon={<BankIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
+          <Tab label="Pricing Rules & Offers" icon={<PricingIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
         </Tabs>
       </Card>
 
@@ -306,6 +313,9 @@ export default function Settings() {
 
       {/* TAB 6: BANK MASTER (banks offered on Bank / UPI payments) */}
       {activeTab === 6 && <BankMasterSettings />}
+
+      {/* TAB 7: PRICING RULES & OFFERS — below-cost lock, minimum margin, clearance / offer items */}
+      {activeTab === PRICING_TAB && <PricingRulesSettings />}
 
       {/* TAB 0: STORE & CLINIC PROFILE */}
       {activeTab === 0 && (

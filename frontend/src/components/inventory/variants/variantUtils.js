@@ -214,13 +214,27 @@ export const rowFromSaved = (v) => makeRow({}, v.attributes || {}, {
   stock: v.stock ?? 0,
   minimum_stock: v.minimum_stock ?? null,
   is_active: v.is_active !== false,
+  copy: v.copy || 1,
 });
+
+// Header (parent) fields every new row is filled with, so each row carries real values instead
+// of grey placeholders. Unsaved rows still holding the old header value follow later header edits.
+export const INHERITED_FIELDS = ['category', 'sub_category', 'group', 'brand', 'model_number', 'hsn_code', 'tax_percent'];
+
+// The name a variant row gets from the parent: "Nafi Black / M". Empty without a parent name,
+// so the server's own "needs a Product Name" check still applies.
+export const autoVariantName = (parentName, attrs, order = []) => {
+  const base = String(parentName || '').trim();
+  return base ? `${base} ${variantLabel(attrs, order)}`.trim() : '';
+};
 
 // Regenerate against the current grid without losing work: rows whose combination already
 // exists are kept untouched (saved rows always stay), new combinations are appended, and
-// unsaved rows whose combination is no longer generated are dropped. `editedDropped` counts
-// the dropped rows the user had typed into, so the caller can warn first.
-export const mergeGenerated = (rows, combos, defaults) => {
+// unsaved rows whose combination is no longer generated are dropped. `copies` ("Add multiple
+// times") tops every combination up to that many rows. `extraFor(combo)` adds per-row values
+// (e.g. the auto name). `editedDropped` counts the dropped rows the user had typed into, so
+// the caller can warn first.
+export const mergeGenerated = (rows, combos, defaults, { copies = 1, extraFor = () => ({}) } = {}) => {
   const wanted = new Map(combos.map(c => [variantKey(c), c]));
   const kept = [];
   let editedDropped = 0;
@@ -229,11 +243,13 @@ export const mergeGenerated = (rows, combos, defaults) => {
     if (r.id || !r._generated || wanted.has(k)) kept.push(r);
     else if (r._edited) editedDropped += 1;
   });
-  const have = new Set(kept.map(r => variantKey(r.attributes)));
+  const have = new Map();
+  kept.forEach(r => { const k = variantKey(r.attributes); have.set(k, (have.get(k) || 0) + 1); });
   const added = [];
-  combos.forEach(c => {
-    const k = variantKey(c);
-    if (!have.has(k)) { have.add(k); added.push(makeRow(defaults, c, { _generated: true })); }
+  wanted.forEach((c, k) => {
+    for (let n = have.get(k) || 0; n < Math.max(1, copies); n += 1) {
+      added.push(makeRow(defaults, c, { ...extraFor(c), _generated: true }));
+    }
   });
   const dropped = rows.length - kept.length;
   return { rows: [...kept, ...added], added: added.length, dropped, editedDropped };
@@ -247,7 +263,7 @@ const num = (v) => (v === '' || v == null ? null : Number(String(v).replace(/[,%
 export const validateRows = (rows, { grouped = true, context = 'inventory', parentName = '' } = {}) => {
   const errors = {};
   const add = (r, f, m) => { (errors[r._rid] = errors[r._rid] || {})[f] = m; };
-  const seen = { key: new Map(), sku: new Map(), barcode: new Map() };
+  const seen = { sku: new Map(), barcode: new Map() };
   rows.forEach((r, i) => {
     // A variant row takes its name from the parent; without either it can't be saved.
     const hasName = String(r.name || '').trim() || (parentName && grouped);
@@ -264,18 +280,38 @@ export const validateRows = (rows, { grouped = true, context = 'inventory', pare
     if (mrp && sp && sp > mrp) add(r, 'sales_price', 'Sales price cannot be more than MRP.');
     if (r.id && context === 'inventory' && num(r.opening_stock)) add(r, 'opening_stock', 'Opening stock is for new items only.');
 
-    const checks = [['sku', String(r.sku || '').trim().toLowerCase()], ['barcode', String(r.barcode || '').trim()]];
-    if (grouped) checks.push(['key', variantKey(r.attributes)]);
-    checks.forEach(([field, val]) => {
+    [['sku', String(r.sku || '').trim().toLowerCase()], ['barcode', String(r.barcode || '').trim()]].forEach(([field, val]) => {
       if (!val) return;
-      if (seen[field].has(val)) {
-        const other = seen[field].get(val) + 1;
-        if (field === 'key') add(r, 'attributes', `Duplicate variant — same as row ${other}.`);
-        else add(r, field, `${field === 'sku' ? 'SKU' : 'Barcode'} repeated — same as row ${other}.`);
-      } else seen[field].set(val, i);
+      if (seen[field].has(val)) add(r, field, `${field === 'sku' ? 'SKU' : 'Barcode'} repeated — same as row ${seen[field].get(val) + 1}.`);
+      else seen[field].set(val, i);
     });
   });
   return errors;
+};
+
+// Rows sharing a combination ("Add multiple times") are separate items — each its own SKU and
+// barcode — told apart by a copy number the server folds into the variant key ("…#2").
+// Saved rows keep the copy they were saved with; new rows take the lowest free numbers.
+export const assignCopies = (rows) => {
+  const used = new Map();
+  const out = new Map();
+  rows.forEach(r => {
+    if (!r.id) return;
+    const k = variantKey(r.attributes);
+    const c = Number(r.copy) || 1;
+    (used.get(k) || used.set(k, new Set()).get(k)).add(c);
+    out.set(r._rid, c);
+  });
+  rows.forEach(r => {
+    if (r.id) return;
+    const k = variantKey(r.attributes);
+    const taken = used.get(k) || used.set(k, new Set()).get(k);
+    let c = 1;
+    while (taken.has(c)) c += 1;
+    taken.add(c);
+    out.set(r._rid, c);
+  });
+  return out;
 };
 
 // Server errors arrive keyed by payload index → map them back onto row ids.

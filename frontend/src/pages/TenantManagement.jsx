@@ -20,12 +20,12 @@ import {
 import {
   Visibility, VisibilityOff, ContentCopy as CopyIcon, Refresh as RefreshIcon, Search as SearchIcon,
   PersonAddAlt1 as OnboardIcon, Tune as ManageIcon, PowerSettingsNew as PowerIcon,
-  AutoAwesome as GenerateIcon, ExpandMore as ExpandIcon, ExpandLess as CollapseIcon,
+  AutoAwesome as GenerateIcon, ExpandMore as ExpandIcon, ExpandLess as CollapseIcon, Storage as DataIcon,
 } from '@mui/icons-material';
 import { apiErrorMessage } from '../utils/apiError';
 import { notify } from '../utils/notify';
 import ModuleAccessEditor from '../components/superadmin/ModuleAccessEditor';
-import ClientWorkspaceDialog from '../components/superadmin/ClientWorkspaceDialog';
+import ClientWorkspaceDialog, { WORKSPACE_TABS } from '../components/superadmin/ClientWorkspaceDialog';
 import { DeactivateDialog, ReactivateDialog } from '../components/superadmin/LifecycleDialogs';
 import {
   API, STATUS_META, copy, fmtDate, generatePassword, isReauth, packageLabel, splitErrors,
@@ -223,6 +223,8 @@ export default function TenantManagement() {
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('ACTIVE');
   const [workspaceId, setWorkspaceId] = useState(null);
+  const [workspaceTab, setWorkspaceTab] = useState(WORKSPACE_TABS.overview);
+  const openWorkspace = (id, tab = WORKSPACE_TABS.overview) => { setWorkspaceTab(tab); setWorkspaceId(id); };
   const [lifecycle, setLifecycle] = useState(null); // tenant row being (de)activated
   const [showOnboard, setShowOnboard] = useState(true);
   const searchRef = useRef(null);
@@ -373,7 +375,7 @@ export default function TenantManagement() {
                   const category = catalog?.deactivation_categories.find((c) => c.key === t.deactivation_category)?.label;
                   return (
                     <TableRow key={t.id} hover sx={{ opacity: t.status === 'INACTIVE' ? 0.75 : 1, cursor: 'pointer' }}
-                      onClick={() => setWorkspaceId(t.id)}>
+                      onClick={() => openWorkspace(t.id)}>
                       <TableCell>#{t.id}</TableCell>
                       <TableCell>
                         <Typography variant="body2" fontWeight={600}>{t.name}</Typography>
@@ -413,10 +415,16 @@ export default function TenantManagement() {
                           variant={t.status === 'INACTIVE' ? 'outlined' : 'filled'} />
                       </TableCell>
                       <TableCell align="right" sx={{ whiteSpace: 'nowrap' }} onClick={(e) => e.stopPropagation()}>
-                        <Button size="small" startIcon={<ManageIcon />} onClick={() => setWorkspaceId(t.id)}
+                        <Button size="small" startIcon={<ManageIcon />} onClick={() => openWorkspace(t.id)}
                           aria-label={`Manage ${t.name}`}>
                           Manage
                         </Button>
+                        <Tooltip title="Records, audit and backups">
+                          <Button size="small" startIcon={<DataIcon />} onClick={() => openWorkspace(t.id, WORKSPACE_TABS.data)}
+                            aria-label={`View data of ${t.name}`}>
+                            Data
+                          </Button>
+                        </Tooltip>
                         <Tooltip title={t.is_platform ? 'The platform account cannot be deactivated' : ''}>
                           <span>
                             <Button size="small" color={t.status === 'ACTIVE' ? 'error' : 'success'} startIcon={<PowerIcon />}
@@ -446,7 +454,7 @@ export default function TenantManagement() {
       </Stack>
 
       {workspaceId && catalog && (
-        <ClientWorkspaceDialog catalog={catalog} tenantId={workspaceId}
+        <ClientWorkspaceDialog catalog={catalog} tenantId={workspaceId} initialTab={workspaceTab}
           onClose={() => setWorkspaceId(null)} onUpdated={updateRow} />
       )}
       {lifecycle && catalog && (lifecycle.status === 'ACTIVE'

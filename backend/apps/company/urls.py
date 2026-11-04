@@ -10,6 +10,9 @@ from .localization import LocalizationSettingsView, LocalizationCatalogView, Set
 from .numbering import DocumentSequenceListView, DocumentSequenceDetailView, DocumentSequencePeekView
 from .tax_config import TaxConfigListView, TaxConfigDetailView
 from .custom_fields import CustomFieldListView, CustomFieldDetailView
+from .pricing_rules import (
+    PricingRulesView, PricingOfferListView, PricingOfferDetailView, PricingFloorsView, PricingApproveView,
+)
 
 router = DefaultRouter()
 router.register('profile', CompanyViewSet, basename='company')
@@ -33,6 +36,11 @@ urlpatterns = [
     path('tax-config/<uuid:pk>/', TaxConfigDetailView.as_view(), name='tax-config-detail'),
     path('custom-fields/', CustomFieldListView.as_view(), name='custom-fields'),
     path('custom-fields/<int:pk>/', CustomFieldDetailView.as_view(), name='custom-field-detail'),
+    path('pricing-rules/', PricingRulesView.as_view(), name='pricing-rules'),
+    path('pricing-rules/offers/', PricingOfferListView.as_view(), name='pricing-offers'),
+    path('pricing-rules/offers/<uuid:pk>/', PricingOfferDetailView.as_view(), name='pricing-offer-detail'),
+    path('pricing-rules/floors/', PricingFloorsView.as_view(), name='pricing-floors'),
+    path('pricing-rules/approve/', PricingApproveView.as_view(), name='pricing-approve'),
     path('branch-context/', branch_context, name='branch-context'),
     path('business-settings/', BusinessSettingsView.as_view(), name='business-settings'),
     path('', include(router.urls)),

@@ -95,6 +95,7 @@ const menuItems = [
       { text: 'Suppliers', path: '/purchase/suppliers' },
       { text: 'Purchase Orders', path: '/purchase/orders' },
       { text: 'Lens Purchase Order', path: '/purchase/lens-orders' },
+      { text: 'Barcode Printing', path: '/purchase/barcode-printing' },
       { text: 'Stock Receive', path: '/purchase/receive' },
       { text: 'Purchase Return', path: '/purchase/returns' }
     ]

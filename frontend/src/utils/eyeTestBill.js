@@ -1,7 +1,8 @@
 // Eye test fee rules + the printed Clinical Record & Invoice.
 //
 // Mirrors backend/apps/sales/eye_test_fees.py: the fee is procedure + medicine − medical aid;
-// a FREE EYE TEST takes no payment; a paid test is settled at the test in Cash or GPay (UPI),
+// a FREE EYE TEST takes no payment; a paid test is settled at the test in Cash or GPay (UPI,
+// into a linked bank),
 // or deferred ("Pay during frame/lens purchase") — then it stays PENDING until New Sale puts it
 // on the patient's next bill as an EYE_TEST_FEE service line, which marks it BILLED.
 // Pure (no imports) so Node's test runner can load it; printing lives in printEyeTestBill.js.
@@ -63,6 +64,8 @@ export function feePayload(d = {}) {
     fee_deferred: !free && Boolean(d.payLater),
     fee_paid_amount: free || d.payLater ? 0 : num(d.customerPaidAmount),
     fee_payment_mode: free || d.payLater ? '' : (d.paymentMode || 'CASH'),
+    // GPay lands in the linked bank (Bank Master default unless changed); blank = UPI mapping.
+    fee_bank_account: !free && !d.payLater && d.paymentMode === 'UPI' ? (d.feeBankAccount || null) : null,
   };
 }
 

@@ -8,7 +8,8 @@ from django.db.models.signals import post_save, post_delete
 
 from . import integration
 
-# (model label, source keys booked from it, parent attribute for item models)
+# (model label, source keys booked from it, parent attribute for item models[, filter])
+# A filter(instance) returning False skips queueing that save (hot models with rare postings).
 WATCHED = [
     ('sales.Invoice', ('sales.invoice',), None),
     ('sales.InvoiceItem', ('sales.invoice',), 'invoice_id'),
@@ -23,12 +24,19 @@ WATCHED = [
     ('inventory.StockAdjustment', ('inventory.stock_adjustment',), None),
     # A PO's own receive writes StockLedger rows after the PO is saved; re-check the PO then.
     ('inventory.StockLedger', ('purchasing.purchase_order',), 'reference_id'),
+    # Only products carrying opening stock; deleting one keeps its opening entry (the stock
+    # was on the books, and its sales have since credited Inventory) — so saves only.
+    ('products.Product', ('products.opening_stock',), None, lambda p: (p.opening_stock or 0) > 0),
 ]
 
+SAVE_ONLY = {'products.Product'}
 
-def _make_receiver(source_keys, parent_attr):
+
+def _make_receiver(source_keys, parent_attr, wanted=None):
     def receiver(sender, instance, raw=False, **kwargs):
         if raw:  # fixture loading
+            return
+        if wanted is not None and not wanted(instance):
             return
         pk = getattr(instance, parent_attr) if parent_attr else instance.pk
         for key in source_keys:
@@ -41,9 +49,14 @@ _receivers = []
 
 def connect():
     from django.apps import apps
-    for label, keys, parent_attr in WATCHED:
+    for label, keys, parent_attr, *wanted in WATCHED:
         model = apps.get_model(label)
-        receiver = _make_receiver(keys, parent_attr)
+        receiver = _make_receiver(keys, parent_attr, wanted[0] if wanted else None)
         _receivers.append(receiver)  # signals hold weak references
         post_save.connect(receiver, sender=model, dispatch_uid=f"accounting:{label}:save")
-        post_delete.connect(receiver, sender=model, dispatch_uid=f"accounting:{label}:delete")
+        if label not in SAVE_ONLY:
+            post_delete.connect(receiver, sender=model, dispatch_uid=f"accounting:{label}:delete")
+    # Each new supplier / wholesale dealer gets its own AP / AR sub-ledger (party_ledgers.py).
+    from .party_ledgers import PARTIES, on_party_saved
+    for kind, cfg in PARTIES.items():
+        post_save.connect(on_party_saved, sender=apps.get_model(cfg[0]), dispatch_uid=f"accounting:party-ledger:{kind}")

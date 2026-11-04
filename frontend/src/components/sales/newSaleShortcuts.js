@@ -16,6 +16,7 @@ export const NEW_SALE_SHORTCUTS = [
   { id: 'customerName', keys: ['F1'], group: 'Customer & document', label: 'Go to Customer Name' },
   { id: 'patient', keys: ['F3'], group: 'Customer & document', label: 'Search patient — type a name, Test No or Patient ID, then ↑/↓ and Enter to pick' },
   { id: 'testNo', keys: ['Alt+T'], group: 'Customer & document', label: 'Go to Test No (loads that eye test)' },
+  { id: 'testLookup', keys: ['Alt+K'], group: 'Customer & document', label: "Browse eye tests — a day's tests with sale status; pick one to load it" },
   { id: 'docOrder', keys: ['Alt+O'], group: 'Customer & document', label: 'Switch to Order' },
   { id: 'docInvoice', keys: ['Alt+I'], group: 'Customer & document', label: 'Switch to Invoice' },
   { id: 'docQuotation', keys: ['Alt+Q'], group: 'Customer & document', label: 'Switch to Quotation' },
@@ -54,5 +55,5 @@ export const NEW_SALE_SHORTCUTS = [
 ];
 
 export const useNewSaleShortcuts = makeShortcutHook(NEW_SALE_SHORTCUTS, [
-  'Ctrl+U', 'Ctrl+M', 'Ctrl+P', 'Ctrl+/', 'Alt+T', 'Alt+O', 'Alt+I', 'Alt+Q', 'Alt+R', 'Alt+H', 'Alt+G', 'Alt+P', 'Alt+L', 'Alt+A', 'Alt+U', 'Alt+E',
+  'Ctrl+U', 'Ctrl+M', 'Ctrl+P', 'Ctrl+/', 'Alt+T', 'Alt+K', 'Alt+O', 'Alt+I', 'Alt+Q', 'Alt+R', 'Alt+H', 'Alt+G', 'Alt+P', 'Alt+L', 'Alt+A', 'Alt+U', 'Alt+E',
 ], { pageWide: true }); // New Sale is the whole page: F1 etc. must never reach Chrome from the sidebar / toolbar

@@ -326,3 +326,31 @@ class DocumentNumberClaim(TenantOwnedModel):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=['tenant', 'doc_type', 'client_token'], name='uniq_doc_number_claim')]
+
+
+class PricingOffer(BaseUUIDModel):
+    """Settings → Pricing Rules & Offers: a clearance / special-offer exception to the
+    selling-below-cost lock, for one product or a whole category. While it is running (active,
+    inside its optional dates, and the Offers & Clearance module switched on) the item may be sold
+    down to `offer_price` — or at any price when `offer_price` is blank. Rules: pricing_rules.py."""
+    SCOPES = (('PRODUCT', 'Product'), ('CATEGORY', 'Category'))
+    scope = models.CharField(max_length=10, choices=SCOPES, default='PRODUCT')
+    product = models.ForeignKey('products.Product', on_delete=models.CASCADE, null=True, blank=True,
+                                related_name='pricing_offers')
+    category = models.ForeignKey('masters.ProductCategory', on_delete=models.CASCADE, null=True, blank=True,
+                                 related_name='pricing_offers')
+    # Lowest price per stock unit the item may be sold at; null = no floor at all.
+    offer_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    tag = models.CharField(max_length=60, default='Clearance Stock')
+    notes = models.CharField(max_length=255, blank=True, default='')
+    start_date = models.DateField(null=True, blank=True)
+    end_date = models.DateField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_by = models.CharField(max_length=150, blank=True, default='')
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        target = self.product_id if self.scope == 'PRODUCT' else self.category_id
+        return f"{self.tag} ({self.scope} {target})"

@@ -30,7 +30,7 @@ test('expected status: free, paid, or pending when deferred with something to pa
 test('payload: free sends no charges, deferred sends no payment', () => {
   assert.deepEqual(feePayload({ testType: 'FREE EYE TEST', procedureCharge: '200', customerPaidAmount: '200' }), {
     is_free_test: true, procedure_charge: 0, medical_aid_charge: 0, medicine_charge: 0,
-    fee_deferred: false, fee_paid_amount: 0, fee_payment_mode: '',
+    fee_deferred: false, fee_paid_amount: 0, fee_payment_mode: '', fee_bank_account: null,
   });
   const later = feePayload({ ...paid, payLater: true });
   assert.equal(later.fee_deferred, true);
@@ -39,6 +39,8 @@ test('payload: free sends no charges, deferred sends no payment', () => {
   assert.equal(later.procedure_charge, 250);
   assert.equal(feePayload(paid).fee_payment_mode, 'UPI');
   assert.equal(feePayload(paid).fee_paid_amount, 200);
+  assert.equal(feePayload({ ...paid, feeBankAccount: 'b1' }).fee_bank_account, 'b1');
+  assert.equal(feePayload({ ...paid, paymentMode: 'CASH', feeBankAccount: 'b1' }).fee_bank_account, null);
 });
 
 test('New Sale line for a pending exam', () => {

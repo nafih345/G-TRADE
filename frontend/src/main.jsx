@@ -7,6 +7,7 @@ import { installBranchInterceptor } from './utils/apiClient'
 import { installAlertOverride } from './utils/notify'
 import { resolveApiBaseUrl, installBackendHealthWatch } from './utils/backendStatus'
 import { installSessionGuard } from './utils/sessionGuard'
+import { installMasterCacheInvalidation } from './utils/masterDataCache'
 import './index.css'
 
 // Every alert(...) in the app shows as an in-page notice at the bottom of the screen
@@ -34,6 +35,11 @@ installSessionGuard()
 // backend running on a dead database shows as a banner instead of as empty screens that
 // look identical to a business with no data yet.
 installBackendHealthWatch()
+
+// Supplier / Category / Brand / Unit lists are cached across screens and reloads
+// (utils/masterDataCache.js); any write to one of them marks it stale. AuthContext warms them
+// as soon as a session exists.
+installMasterCacheInvalidation()
 
 const queryClient = new QueryClient({
   defaultOptions: {

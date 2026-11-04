@@ -8,6 +8,9 @@ on from the next slot; it never replays every missed day.
 
 Environments without a long-lived process can call `manage.py run_scheduled_backups` from cron
 instead (or as well — the claim makes overlapping callers safe).
+
+Per-client schedules (TenantBackupSchedule, set in the platform console) run in the same tick,
+each claimed the same way and timed in that client's own business time zone.
 """
 import datetime
 import logging
@@ -19,7 +22,7 @@ from django.db import connections
 from django.utils import timezone
 
 from ..audit import log_event
-from ..models import BackupSchedule
+from ..models import BackupSchedule, TenantBackupSchedule
 from . import service
 
 logger = logging.getLogger('django')
@@ -29,7 +32,11 @@ _started = False
 _start_lock = threading.Lock()
 
 
-def business_timezone():
+def business_timezone(tenant_id=None):
+    if tenant_id is not None:
+        from apps.common import tenancy
+        with tenancy.use_tenant(tenant_id):
+            return business_timezone()
     try:
         from apps.company.localization import get_preference
         name = get_preference('time_zone') or 'UTC'
@@ -111,18 +118,57 @@ def run_due(now=None):
     return record
 
 
+def refresh_client_next_run(schedule):
+    name, tz = business_timezone(schedule.client_tenant_id)
+    schedule.timezone = name
+    schedule.next_run_at = compute_next_run(schedule, tz=tz) if schedule.enabled else None
+    TenantBackupSchedule.objects.filter(pk=schedule.pk).update(timezone=name, next_run_at=schedule.next_run_at)
+    return schedule
+
+
+def run_due_client_backups(now=None):
+    """Run every per-client schedule that is due (one claim each). Returns the records started."""
+    from apps.common.models import Tenant
+    now = now or timezone.now()
+    started = []
+    due = TenantBackupSchedule.objects.filter(enabled=True, next_run_at__lte=now)
+    for schedule in due:
+        tenant = Tenant.objects.filter(pk=schedule.client_tenant_id).first()
+        _, tz = business_timezone(schedule.client_tenant_id)
+        following = compute_next_run(schedule, after=now, tz=tz)
+        claimed = TenantBackupSchedule.objects.filter(
+            pk=schedule.pk, enabled=True, next_run_at=schedule.next_run_at).update(
+            next_run_at=following, last_run_at=now, last_run_status='RUNNING')
+        if not claimed:
+            continue
+        if tenant is None or not tenant.is_effectively_active:
+            # A deactivated client keeps its existing backups but takes no new ones.
+            TenantBackupSchedule.objects.filter(pk=schedule.pk).update(last_run_status='SKIPPED')
+            continue
+        try:
+            record = service.start_client_backup(tenant, schedule.sections, 'SCHEDULED',
+                                                 actor_name='Scheduler', run_async=False)
+        except service.BackupBusy:
+            TenantBackupSchedule.objects.filter(pk=schedule.pk).update(last_run_status='SKIPPED')
+            continue
+        TenantBackupSchedule.objects.filter(pk=schedule.pk).update(last_run_status=record.status)
+        if record.status == 'SUCCESS':
+            service.apply_client_retention(tenant.pk, schedule.retention_count)
+        started.append(record)
+    return started
+
+
 def _loop():
     # Let the server finish booting (and migrations land) before the first check.
     stop = threading.Event()
     stop.wait(30)
     while True:
-        try:
-            service.recover_stale()
-            run_due()
-        except Exception:
-            logger.exception('Scheduled backup tick failed')
-        finally:
-            connections.close_all()
+        for step in (service.recover_stale, run_due, run_due_client_backups):
+            try:
+                step()  # one failing step (say, the whole-DB schedule) must not starve the others
+            except Exception:
+                logger.exception('Scheduled backup tick failed (%s)', step.__name__)
+        connections.close_all()
         stop.wait(TICK_SECONDS)
 
 

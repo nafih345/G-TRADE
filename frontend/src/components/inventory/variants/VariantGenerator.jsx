@@ -98,11 +98,13 @@ function AxisRow({ axis, index, usedKeys, onChange, onRemove, autoFocus }) {
 }
 
 export default function VariantGenerator({
-  axes, setAxes, onGenerate, onClearGenerated, onAddRows, hasGenerated, attributeOrder, focusToken
+  axes, setAxes, onGenerate, onClearGenerated, onAddRows, hasGenerated, attributeOrder, focusToken,
+  repeat, setRepeat, canGenerateBase
 }) {
   const [preview, setPreview] = useState(false);
-  const [repeat, setRepeat] = useState('1');
   const count = combinationCount(axes);
+  const times = Math.max(1, Math.min(500, parseInt(repeat, 10) || 1));
+  const rowsToMake = (count || (canGenerateBase ? 1 : 0)) * times;
   const combos = useMemo(() => (preview ? cartesian(axes).slice(0, MAX_PREVIEW) : []), [preview, axes]);
   const usedKeys = axes.map(a => a.key);
 
@@ -134,10 +136,11 @@ export default function VariantGenerator({
         <Box sx={{ flex: 1 }} />
         <Typography variant="body2" fontWeight={700} color={count ? 'primary.main' : 'text.secondary'}>
           {count ? `${count} combination${count === 1 ? '' : 's'}` : 'Pick values to see combinations'}
+          {rowsToMake && times > 1 ? ` × ${times} = ${rowsToMake} rows` : ''}
         </Typography>
         <Button size="small" startIcon={<PreviewIcon />} disabled={!count} onClick={() => setPreview(p => !p)}>{preview ? 'Hide preview' : 'Preview variants'}</Button>
         <Button size="small" color="inherit" startIcon={<ClearIcon />} disabled={!hasGenerated} onClick={onClearGenerated}>Clear generated</Button>
-        <Button size="small" variant="contained" startIcon={<GenerateIcon />} disabled={!count} onClick={onGenerate} sx={{ fontWeight: 800 }}>
+        <Button size="small" variant="contained" startIcon={<GenerateIcon />} disabled={!count && !canGenerateBase} onClick={onGenerate} sx={{ fontWeight: 800 }}>
           {hasGenerated ? 'Regenerate variants' : 'Generate variants'} (Ctrl+Enter)
         </Button>
       </Stack>
@@ -153,11 +156,14 @@ export default function VariantGenerator({
         <Typography variant="body2" color="text.secondary">Add multiple times:</Typography>
         <TextField
           size="small" value={repeat} onChange={(e) => setRepeat(e.target.value.replace(/[^0-9]/g, '').slice(0, 3))}
-          inputProps={{ inputMode: 'numeric', 'aria-label': 'Number of blank rows to add', style: { width: 44, textAlign: 'right' } }}
+          inputProps={{ inputMode: 'numeric', 'aria-label': 'Number of times to add each item', style: { width: 44, textAlign: 'right' } }}
         />
-        <Button size="small" startIcon={<AddRowsIcon />} onClick={() => onAddRows(Math.max(1, Math.min(500, parseInt(repeat, 10) || 1)))}>
-          Add blank row{repeat === '1' ? '' : 's'}
+        <Button size="small" startIcon={<AddRowsIcon />} onClick={() => onAddRows(times)}>
+          Add {times} row{times === 1 ? '' : 's'}
         </Button>
+        <Typography variant="caption" color="text.secondary">
+          Generate makes each combination this many times; new rows copy the product details above.
+        </Typography>
       </Stack>
     </Stack>
   );

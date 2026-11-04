@@ -4,6 +4,13 @@
 #
 # The ping hits `/`, which answers without touching the database, so Neon's compute can still
 # suspend when nobody is using the app (Neon's free compute hours are limited).
+# CAUTION (measured 2026-11-04): GitHub runs `schedule:` workflows best-effort and throttles
+# frequent crons heavily — runs of this */10 cron actually arrive 4-8 hours apart, so on its
+# own it does NOT keep Render awake. Use an external monitor for the real 10-minute ping
+# (UptimeRobot / cron-job.org, GET https://g-trade-backend.onrender.com/ every 5-10 min); this
+# workflow is only a backstop. While the app is open, the frontend's installKeepAwake()
+# (utils/backendStatus.js) pings too.
+#
 # One always-on free Render service uses ~744 of the account's 750 free instance hours a month.
 # Delete this file to stop it.
 name: Keep backend awake

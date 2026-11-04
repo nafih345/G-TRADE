@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import QuickDatePickerField from '../components/common/QuickDatePickerField';
 import PurchaseEntryView from '../components/purchasing/PurchaseEntryView';
+import PurchaseLabelQueueView from '../components/purchasing/PurchaseLabelQueueView';
 import LensPurchaseOrderView from '../components/purchasing/LensPurchaseOrderView';
 import { printPurchaseReceipt } from '../utils/printPurchase';
 import { printBill } from '../billing/printBill';
@@ -39,13 +40,35 @@ import {
   CloudUpload as CloudUploadIcon,
   Edit as EditIcon,
   Print as PrintIcon,
-  Visibility as LensIcon
+  Visibility as LensIcon,
+  QrCode2 as BarcodeIcon
 } from '@mui/icons-material';
 
 import axios from 'axios';
+import { getMasterSnapshot, loadMaster } from '../utils/masterDataCache';
 
-// Last successful /api/purchase/suppliers/ response, used to paint the directory instantly.
+// Pre-cache key of the last supplier list; read once as a seed until the shared master cache
+// (utils/masterDataCache.js) has its own copy.
 const SUPPLIER_CACHE_KEY = 'optical_suppliers_backend_cache';
+
+// Backend fields are snake_case; the rest of this page's UI (table cells, the Add Supplier
+// dialog, Autocomplete options) reads camelCase — without this mapping, Contact Person/Payment
+// Terms/Balance/Supplier Code all silently render blank for any supplier loaded from the
+// database rather than just-created in this session.
+const toSupplierRow = (s) => ({
+  id: s.id,
+  supplierCode: s.supplier_code || '',
+  name: s.name,
+  contactPerson: s.contact_person || '',
+  phone: s.phone || '',
+  email: s.email || '',
+  gstin: s.gstin || '',
+  address: s.address || '',
+  city: s.city || '',
+  paymentTerms: s.payment_terms || 'Net 30',
+  accountNumber: s.account_number || '',
+  balance: parseFloat(s.outstanding_balance || 0)
+});
 
 export default function Purchases() {
   const location = useLocation();
@@ -58,6 +81,7 @@ export default function Purchases() {
     if (pathname.includes('/purchase/receive') || pathname.includes('/purchase/stock-receive')) return 'receive';
     if (pathname.includes('/purchase/returns')) return 'returns';
     if (pathname.includes('/purchase/lens-orders')) return 'lens';
+    if (pathname.includes('/purchase/barcode-printing')) return 'labels';
     return 'entry';
   };
 
@@ -81,6 +105,7 @@ export default function Purchases() {
     if (newValue === 'receive') navigate('/purchase/receive');
     if (newValue === 'returns') navigate('/purchase/returns');
     if (newValue === 'lens') navigate('/purchase/lens-orders');
+    if (newValue === 'labels') navigate('/purchase/barcode-printing');
   };
 
   const goToNewPurchaseEntry = (supplierId, poId) => {
@@ -242,10 +267,12 @@ export default function Purchases() {
       return localSupps.filter(s => !isSampleOrCorrupt(s));
     };
 
-    // Last successful backend list, so the directory paints instantly on open instead of
-    // waiting on the API (slow on a cold Render instance). Own key: the legacy wipe above
-    // matches 'SUP-10', which every real supplier code starts with.
+    // Last successful backend list, so the directory and the Purchase Entry supplier picker
+    // paint instantly on open instead of waiting on the API (slow on a cold Render instance).
+    // Own key: the legacy wipe above matches 'SUP-10', which every real supplier code starts with.
     const readCachedBackendSuppliers = () => {
+      const snapshot = getMasterSnapshot('suppliers');
+      if (snapshot) return snapshot.filter(s => !isSampleOrCorrupt(s)).map(toSupplierRow);
       try {
         const cached = JSON.parse(localStorage.getItem(SUPPLIER_CACHE_KEY) || '[]');
         return Array.isArray(cached) ? cached : [];
@@ -262,7 +289,7 @@ export default function Purchases() {
       setSuppliersLoading(false);
     }
 
-    const fetchPurchaseData = async () => {
+    const fetchPurchaseData = async ({ force = false } = {}) => {
       const localSupps = readLocalSuppliers();
 
       // Force clean localStorage from any sample or corrupt data
@@ -273,32 +300,12 @@ export default function Purchases() {
       } catch (e) {}
 
       try {
-        const res = await axios.get('/api/purchase/suppliers/');
-        // DRF pagination wraps this as {results: [...]}, not a bare array.
-        const rawBackend = res.data?.results || res.data || [];
+        // Shared cache: one request for every screen, reused for a short while, and marked stale
+        // by any supplier create/edit/delete.
+        const rawBackend = await loadMaster('suppliers', { force });
         if (Array.isArray(rawBackend) && rawBackend.length > 0) {
-          // Backend fields are snake_case; the rest of this page's UI (table cells, the Add
-          // Supplier dialog, Autocomplete options) reads camelCase — without this mapping,
-          // Contact Person/Payment Terms/Balance/Supplier Code all silently render blank for
-          // any supplier loaded from the database rather than just-created in this session.
-          const cleanBackend = rawBackend
-            .filter(s => !isSampleOrCorrupt(s))
-            .map(s => ({
-              id: s.id,
-              supplierCode: s.supplier_code || '',
-              name: s.name,
-              contactPerson: s.contact_person || '',
-              phone: s.phone || '',
-              email: s.email || '',
-              gstin: s.gstin || '',
-              address: s.address || '',
-              city: s.city || '',
-              paymentTerms: s.payment_terms || 'Net 30',
-              accountNumber: s.account_number || '',
-              balance: parseFloat(s.outstanding_balance || 0)
-            }));
-          setSuppliers(cleanBackend);
-          try { localStorage.setItem(SUPPLIER_CACHE_KEY, JSON.stringify(cleanBackend)); } catch (e) {}
+          setSuppliers(rawBackend.filter(s => !isSampleOrCorrupt(s)).map(toSupplierRow));
+          try { localStorage.removeItem(SUPPLIER_CACHE_KEY); } catch (e) {}
         } else {
           try { localStorage.removeItem(SUPPLIER_CACHE_KEY); } catch (e) {}
           setSuppliers(localSupps);
@@ -311,8 +318,9 @@ export default function Purchases() {
       }
     };
     fetchPurchaseData();
-    window.addEventListener('optical_suppliers_updated', fetchPurchaseData);
-    return () => window.removeEventListener('optical_suppliers_updated', fetchPurchaseData);
+    const onSuppliersUpdated = () => fetchPurchaseData({ force: true });
+    window.addEventListener('optical_suppliers_updated', onSuppliersUpdated);
+    return () => window.removeEventListener('optical_suppliers_updated', onSuppliersUpdated);
     // Re-fetch whenever the user switches back to a tab that displays suppliers, not just on
     // first mount — otherwise switching tabs within the SPA (no full page reload) leaves the
     // list frozen at whatever it saw on the very first load, even after suppliers are added.
@@ -893,6 +901,7 @@ export default function Purchases() {
           <Tab value="receive" label="Stock Receive (GRN)" icon={<ReceiveIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab value="returns" label="Purchase Returns (RTV)" icon={<ReturnIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab value="lens" label="Lens Purchase Order" icon={<LensIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
+          <Tab value="labels" label="Barcode Printing" icon={<BarcodeIcon />} iconPosition="start" sx={{ fontWeight: 700 }} data-testid="purchase-tab-labels" />
         </Tabs>
       </Card>
 
@@ -900,6 +909,7 @@ export default function Purchases() {
       {activeTab === 'entry' && (
         <PurchaseEntryView
           suppliers={cleanSuppList}
+          suppliersLoading={suppliersLoading && cleanSuppList.length === 0}
           products={products}
           initialSupplierId={entryPrefillSupplierId}
           initialPurchaseOrderId={entryPrefillPoId}
@@ -940,6 +950,9 @@ export default function Purchases() {
           }}
         />
       )}
+
+      {/* BARCODE PRINTING — queue of saved entries with unprinted labels, resumable */}
+      {activeTab === 'labels' && <PurchaseLabelQueueView />}
 
       {/* LENS PURCHASE ORDERS (lab orders mapped to customer sales orders) */}
       {activeTab === 'lens' && (

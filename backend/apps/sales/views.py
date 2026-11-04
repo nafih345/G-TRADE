@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from django.db import IntegrityError, transaction
 from django.db.models import DecimalField as ModelDecimalField, Prefetch, Q, prefetch_related_objects
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework import viewsets, permissions, serializers
 from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
@@ -28,6 +29,7 @@ from .patient_utils import (
 from .eye_test_fees import derive_fee_fields, fee_exam_ids, sync_invoice_eye_test_fees
 from .sales_report import build_sales_report, report_queryset
 from .eye_test_report import build_billing_reference
+from .eye_test_lookup import LOOKUP_LIMIT, discard_blockers, lookup_rows
 from apps.inventory.models import StockLedger
 from apps.inventory.stock_utils import adjust_branch_stock_many
 from apps.common.branch_mixins import BranchScopedViewSetMixin
@@ -58,11 +60,15 @@ class EyeExaminationSerializer(ModelSerializer):
     # Input only — the stored outcome is fee_status (see eye_test_fees.derive_fee_fields).
     fee_deferred = serializers.BooleanField(write_only=True, required=False)
     fee_invoice_number = SerializerMethodField()
+    fee_bank_account_name = serializers.CharField(source='fee_bank_account.name', read_only=True, default=None)
 
     class Meta:
         model = EyeExamination
         fields = '__all__'
         read_only_fields = ('fee_amount', 'fee_status', 'fee_invoice')
+
+    def validate_fee_bank_account(self, value):
+        return validate_bank_account(value)
 
     def get_fee_invoice_number(self, obj):
         return obj.fee_invoice.invoice_number if obj.fee_invoice_id and obj.fee_invoice else None
@@ -507,7 +513,7 @@ class EyeExaminationViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         # ?test_no=1003 — exact lookup (New Sale's Test No field), so a single visit can be found
         # without paging through every exam.
-        qs = super().get_queryset().select_related('fee_invoice')
+        qs = super().get_queryset().select_related('fee_invoice', 'fee_bank_account')
         params = self.request.query_params
         test_no = (params.get('test_no') or '').strip()
         if test_no:
@@ -617,6 +623,34 @@ class EyeExaminationViewSet(viewsets.ModelViewSet):
         data['patient_code'] = exam.customer.patient_code if exam.customer_id and exam.customer else None
         return Response({'exam': data, 'billing': build_billing_reference(exam)})
 
+    @action(detail=False, methods=['get'])
+    def lookup(self, request):
+        # New Sale's Test No lookup: the tests taken in [from, to) — the client sends its own
+        # local-day bounds as ISO datetimes, since the server runs on UTC — with each one's
+        # sale status (eye_test_lookup.py).
+        params = request.query_params
+        start = parse_datetime((params.get('from') or '').strip())
+        end = parse_datetime((params.get('to') or '').strip())
+        if not start or not end:
+            return Response({'detail': 'from and to (ISO datetimes) are required.'}, status=400)
+        exams = (EyeExamination.objects.filter(examination_date__gte=start, examination_date__lt=end)
+                 .select_related('customer').order_by('-examination_date')[:LOOKUP_LIMIT + 1])
+        exams = list(exams)
+        return Response({'results': lookup_rows(exams[:LOOKUP_LIMIT]), 'truncated': len(exams) > LOOKUP_LIMIT})
+
+    @action(detail=True, methods=['delete'])
+    def discard(self, request, pk=None):
+        # Remove a test the patient never bought against (New Sale's lookup). Unlike a plain
+        # DELETE it refuses a test that a bill depends on or whose fee was collected — deleting
+        # that one would orphan the bill's link or reverse real cash out of the books.
+        exam = self.get_object()
+        reasons = discard_blockers(exam)
+        if reasons:
+            return Response({'detail': f"Test No {exam.test_no} can't be deleted: " + '; '.join(reasons) + '.'},
+                            status=409)
+        exam.delete()  # soft delete; the Test No stays used, so the series never repeats it
+        return Response(status=204)
+
 class AppointmentViewSet(viewsets.ModelViewSet):
     queryset = Appointment.objects.all()
     serializer_class = AppointmentSerializer
@@ -714,6 +748,7 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
                     raise
                 invoice_number = self._mint_invoice_number(doc_type)
         self._save_items(invoice)
+        self._enforce_prices(invoice)
         if fee_exam_ids(self.request.data.get('items') or []):
             sync_invoice_eye_test_fees(invoice)
         if self._commits_stock(invoice):
@@ -766,6 +801,7 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
             # by the net difference, so an edit never double-deducts or strands stock.
             invoice.items.all().delete()
             self._save_items(invoice)
+            self._enforce_prices(invoice)
             self._reconcile_inventory(invoice, stock_before)
         elif not was_committed and self._commits_stock(invoice):
             # Status-only PATCH that turns this into a committed sale (e.g. DRAFT -> PAID).
@@ -1015,6 +1051,13 @@ class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
             )
             for raw, lens_fields in zip(raw_items, lens)
         ])
+
+    def _enforce_prices(self, invoice):
+        """Settings → Pricing Rules & Offers: refuse (400 `below_cost`, whole save rolled back) a
+        line sold under its cost / minimum-margin floor, unless a manager approved it."""
+        from apps.company.pricing_rules import enforce_line_prices
+        enforce_line_prices(self.request, self.request.data.get('items') or [],
+                            invoice.net_amount, invoice.tax_amount, invoice.invoice_number)
 
     def _update_inventory(self, invoice):
         # Deduct stock from the invoice's branch (falls back to the default branch for rows

@@ -1,6 +1,7 @@
 import React, { createContext, useState, useContext, useEffect } from 'react';
 import axios from 'axios';
 import { SESSION_ENDED_EVENT, TOKEN_REFRESHED_EVENT } from '../utils/sessionGuard';
+import { prefetchMasters } from '../utils/masterDataCache';
 
 const AuthContext = createContext(null);
 
@@ -63,6 +64,9 @@ export const AuthProvider = ({ children }) => {
       return;
     }
     axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+    // Fetch the master lists every form needs (suppliers, categories, brands, units) now, so
+    // pickers are already filled when a form opens.
+    prefetchMasters();
     let saved = null;
     try { saved = JSON.parse(localStorage.getItem('user_profile') || 'null'); } catch { /* ignore */ }
     if (saved) {

@@ -320,6 +320,7 @@ export default function OpticalServices() {
     // Eye test fee — see utils/eyeTestBill.js (payLater = "Pay during frame/lens purchase").
     payLater: false,
     paymentMode: 'CASH',
+    feeBankAccount: '',
     // Pay Now / No Payment / Pay After Sale, and whether the Payment Details screen confirmed it.
     paymentChoice: '',
     paymentConfirmed: false
@@ -672,6 +673,7 @@ export default function OpticalServices() {
       customerPaidAmount: '0',
       payLater: false,
       paymentMode: 'CASH',
+      feeBankAccount: '',
       paymentChoice: '',
       paymentConfirmed: false,
       testType: 'FREE EYE TEST',
@@ -1046,7 +1048,7 @@ export default function OpticalServices() {
       testNo: visitTestNo || nextTestNoPreview || '',
       primary: '', icdCode: '', remarks: '', procedure: '', medicine: '', advice: '', nextReview: '', nextReviewDate: '',
       procedureCharge: '0', medicineCharge: '0', medicalAidCharge: '0', customerPaidAmount: '0',
-      payLater: false, paymentMode: 'CASH', paymentChoice: '', paymentConfirmed: false
+      payLater: false, paymentMode: 'CASH', feeBankAccount: '', paymentChoice: '', paymentConfirmed: false
     }));
   };
 

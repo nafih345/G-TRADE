@@ -37,7 +37,7 @@ import { VARIANT_SHORTCUTS, useVariantShortcuts } from './variantShortcuts';
 import {
   attributeMeta, baseSkuFromName, buildVariantSku, cartesian, combinationCount, defaultAttributesForCategory,
   downloadBlob, makeRow, mergeGenerated, newRid, rowFromSaved, rowToPayload, serverErrorsToRows,
-  titleCase, validateRows, variantLabel
+  titleCase, validateRows, variantLabel, attributeOptions, autoVariantName, INHERITED_FIELDS, assignCopies
 } from './variantUtils';
 import {
   opticalCategories, opticalBrands, LS_KEYS, readList, DEFAULT_SUBCATEGORIES, DEFAULT_GROUPS
@@ -78,10 +78,11 @@ const DEFAULT_COLVIS = {
 
 const blankParent = () => ({
   name: '', base_sku: '', description: '', long_description: '', category: '', sub_category: '', group: '',
-  brand: '', model_number: '', unit: '', hsn_code: '', tax_percent: '', is_active: true,
+  brand: '', model_number: '', unit: '', hsn_code: '', tax_percent: 0, is_active: true,
 });
+// Tax defaults to 0 % and "MRP includes tax" starts unticked; the user opts in to either.
 const blankDefaults = () => ({
-  quantity: '', cost_price: '', cost_includes_tax: false, mrp: '', mrp_includes_tax: true, sales_price: '', opening_stock: '',
+  quantity: '', cost_price: '', cost_includes_tax: false, mrp: '', mrp_includes_tax: false, sales_price: '', opening_stock: '',
 });
 
 const readJson = (key, fallback) => {
@@ -135,6 +136,7 @@ export default function ProductVariantMaster({
   const [serverErrors, setServerErrors] = useState({});
   const [groupErrors, setGroupErrors] = useState({});
   const [skuPreview, setSkuPreview] = useState({});
+  const [barcodePreview, setBarcodePreview] = useState({});
   const [dirty, setDirty] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -144,6 +146,8 @@ export default function ProductVariantMaster({
   const [genFocusToken, setGenFocusToken] = useState(0);
   const [detailsOpen, setDetailsOpen] = useState(true);
   const [activeRow, setActiveRow] = useState(-1);
+  // "Add multiple times": how many rows Generate / Add rows create per combination.
+  const [repeat, setRepeat] = useState('1');
   const [draft, setDraft] = useState(null);
 
   const [taxOptions, setTaxOptions] = useState(TAX_DEFAULTS);
@@ -191,7 +195,7 @@ export default function ProductVariantMaster({
   const resetAll = useCallback(() => {
     setParent(blankParent()); setDefaults(blankDefaults()); setGroupId(null); setAxes([]); setRows([]);
     setRemovedIds([]); setSelected(new Set()); setFilter(''); setSort(null); setServerErrors({}); setGroupErrors({});
-    setSkuPreview({}); setDirty(false); setLoadedTemplate(null); setActiveRow(-1); tokenRef.current = null;
+    setSkuPreview({}); setBarcodePreview({}); setDirty(false); setLoadedTemplate(null); setActiveRow(-1); setRepeat('1'); tokenRef.current = null;
   }, []);
 
   const applyGroup = useCallback((data) => {
@@ -325,7 +329,7 @@ export default function ProductVariantMaster({
   // offered first. Read through a ref only when a dropdown opens, so typing in the grid doesn't
   // rebuild `columns` (which would re-render every row).
   const cascadeRef = useRef({});
-  cascadeRef.current = { hierarchy, rows, parent };
+  cascadeRef.current = { hierarchy, rows, parent, axes, attrKeys };
   const linkedFor = useCallback((field, category) => {
     const cat = String(category || '').trim().toLowerCase();
     if (!cat) return [];
@@ -338,11 +342,29 @@ export default function ProductVariantMaster({
     });
     return vals;
   }, []);
+  // Everything the catalogue and the screen already use for a field, under any category, so a
+  // list with no master of its own (Model No.) still offers values on every row.
+  const usedAnywhere = useCallback((field) => {
+    const { hierarchy: h, rows: rs, parent: p } = cascadeRef.current;
+    const vals = [];
+    Object.values(h || {}).forEach(c => (c?.[field] || []).forEach(v => vals.push(v)));
+    [p, ...rs].forEach(r => { if (r[field]) vals.push(r[field]); });
+    return vals;
+  }, []);
   const cascadeOptions = useCallback((field, all) => (row) => {
     const category = row.category || cascadeRef.current.parent.category;
     const linked = linkedFor(field, category);
-    return linked.length ? [{ label: `Used with ${category}`, items: linked }, { label: 'All', items: all }] : [{ items: all }];
-  }, [linkedFor]);
+    const every = [...all, ...usedAnywhere(field)];
+    return linked.length ? [{ label: `Used with ${category}`, items: linked }, { label: 'All', items: every }] : [{ items: every }];
+  }, [linkedFor, usedAnywhere]);
+  // Attribute columns (Colour, Size, …): values picked in the generator or used on screen first,
+  // then the attribute's option list.
+  const attrColumnOptions = useCallback((key) => () => {
+    const { rows: rs, axes: ax } = cascadeRef.current;
+    const here = [...(ax.find(a => a.key === key)?.values || []), ...rs.map(r => r.attributes?.[key]).filter(Boolean)];
+    const all = attributeOptions(key);
+    return here.length ? [{ label: 'In this product', items: here }, { label: 'All', items: all }] : [{ items: all }];
+  }, []);
   const headerOptions = useCallback((field, all) => {
     const linked = linkedFor(field, parent.category);
     return linked.length ? Array.from(new Set([...linked, ...all])) : all;
@@ -358,22 +380,22 @@ export default function ProductVariantMaster({
       colVis.group && { key: 'group', label: 'Group', width: 120, readOnly: purchaseLocked, placeholder: () => parent.group, options: cascadeOptions('group', groupOptions) },
       colVis.brand && { key: 'brand', label: 'Brand', width: 110, readOnly: purchaseLocked, placeholder: () => parent.brand, options: cascadeOptions('brand', brandOptions) },
       colVis.model_number && { key: 'model_number', label: 'Model No.', width: 110, readOnly: purchaseLocked, placeholder: () => parent.model_number, options: cascadeOptions('model_number', modelNumberOptions) },
-      ...attrKeys.map(k => ({ key: `attr:${k}`, attr: k, label: attributeMeta(k).label || titleCase(k), width: 100, readOnly: purchaseLocked })),
+      ...attrKeys.map(k => ({ key: `attr:${k}`, attr: k, label: attributeMeta(k).label || titleCase(k), width: 100, readOnly: purchaseLocked, options: attrColumnOptions(k) })),
       isPurchase
         ? { key: 'quantity', label: 'Purchase Qty', width: 90, numeric: true, align: 'right' }
         : { key: 'opening_stock', label: 'Opening Qty', width: 90, numeric: true, align: 'right', readOnly: (r) => Boolean(r.id) },
       colVis.cost_price && { key: 'cost_price', label: isPurchase ? 'Cost Price' : 'Cost Price', width: 90, numeric: true, align: 'right' },
       colVis.mrp && { key: 'mrp', label: 'MRP', width: 90, numeric: true, align: 'right' },
       { key: 'sales_price', label: 'Sales Price', width: 95, numeric: true, align: 'right' },
-      colVis.tax_percent && { key: 'tax_percent', label: 'Tax %', width: 70, numeric: true, align: 'right', readOnly: purchaseLocked, placeholder: () => (parent.tax_percent === '' ? '' : String(parent.tax_percent)) },
+      colVis.tax_percent && { key: 'tax_percent', label: 'Tax %', width: 70, numeric: true, align: 'right', readOnly: purchaseLocked, placeholder: () => (parent.tax_percent === '' ? '' : String(parent.tax_percent)), options: () => [{ items: taxOptions.map(String) }] },
       colVis.hsn_code && { key: 'hsn_code', label: 'HSN', width: 95, readOnly: purchaseLocked, placeholder: () => parent.hsn_code },
       { key: 'sku', label: 'SKU', width: 160, readOnly: purchaseLocked, placeholder: (r) => skuPreview[r._rid] || (baseSku ? buildVariantSku(baseSku, r.attributes, attrKeys) : 'auto') },
-      colVis.barcode && { key: 'barcode', label: 'Barcode', width: 140, readOnly: purchaseLocked, placeholder: () => (autoBarcode ? 'auto (EAN-13)' : '') },
+      colVis.barcode && { key: 'barcode', label: 'Barcode', width: 140, readOnly: purchaseLocked, placeholder: (r) => (autoBarcode ? (barcodePreview[r._rid] ? `${barcodePreview[r._rid]} (on save)` : 'auto') : '') },
       colVis.stock && { key: 'stock', label: 'Stock', width: 70, align: 'right', display: (r) => (r.id ? (r.stock ?? 0) : '—') },
     ];
     return cols.filter(Boolean);
-  }, [parent, attrKeys, colVis, isPurchase, purchaseLocked, skuPreview, baseSku, autoBarcode,
-    categoryOptions, subCategoryOptions, groupOptions, brandOptions, modelNumberOptions, cascadeOptions]);
+  }, [parent, attrKeys, colVis, isPurchase, purchaseLocked, skuPreview, barcodePreview, baseSku, autoBarcode,
+    categoryOptions, subCategoryOptions, groupOptions, brandOptions, modelNumberOptions, cascadeOptions, attrColumnOptions, taxOptions]);
 
   // ------------------------------------------------------------------ row editing
 
@@ -384,7 +406,11 @@ export default function ProductVariantMaster({
     setRows(prev => prev.map(r => {
       if (r._rid !== rid) return r;
       if (field.startsWith('attr:')) {
-        return { ...r, attributes: { ...r.attributes, [field.slice(5)]: value }, _edited: true };
+        const attributes = { ...r.attributes, [field.slice(5)]: value };
+        const { parent: p, attrKeys: order } = cascadeRef.current;
+        // A name still equal to the auto one ("Nafi Black / M") follows the new attribute value.
+        const name = r.name && r.name === autoVariantName(p.name, r.attributes, order) ? autoVariantName(p.name, attributes, order) : r.name;
+        return { ...r, attributes, name, _edited: true };
       }
       return { ...r, [field]: value, _edited: true };
     }));
@@ -392,19 +418,21 @@ export default function ProductVariantMaster({
     setDirty(true);
   }, []);
 
+  // New rows are filled with the header details plus the purchase / pricing defaults.
   const rowDefaults = useCallback(() => ({
+    ...Object.fromEntries(INHERITED_FIELDS.map(f => [f, parent[f] ?? ''])),
     quantity: defaults.quantity, cost_price: defaults.cost_price, mrp: defaults.mrp,
     sales_price: defaults.sales_price || defaults.mrp,
-  }), [defaults]);
+  }), [defaults, parent]);
 
   const addBlankRows = useCallback((n = 1) => {
     const extra = isPurchase ? {} : { opening_stock: defaults.opening_stock };
-    const added = Array.from({ length: n }, () => makeRow(rowDefaults(), {}, { ...extra, _edited: true }));
+    const added = Array.from({ length: n }, () => makeRow(rowDefaults(), {}, { ...extra, name: autoVariantName(parent.name, {}), _edited: true }));
     setRows(prev => [...prev, ...added]);
     setDirty(true);
     setFilter(''); setSort(null);
     setTimeout(() => gridRef.current?.focusRow(rows.length), 60);
-  }, [rowDefaults, isPurchase, defaults.opening_stock, rows.length]);
+  }, [rowDefaults, isPurchase, defaults.opening_stock, rows.length, parent.name]);
 
   // Excel-style duplicate: each row is cloned with everything entered in it and inserted right
   // below its source. Only what must stay unique is cleared — the saved-product link, SKU and
@@ -487,11 +515,19 @@ export default function ProductVariantMaster({
 
   // ------------------------------------------------------------------ generation
 
+  const repeatCount = Math.max(1, Math.min(500, parseInt(repeat, 10) || 1));
   const generate = async () => {
-    const combos = cartesian(axes);
-    if (!combos.length) { notify('Pick at least one value for an attribute first.', 'warning'); return; }
+    let combos = cartesian(axes);
+    if (!combos.length) {
+      // No attribute values: "Add multiple times" still repeats the product itself.
+      if (!parent.name.trim()) { notify('Enter the Product Name or pick at least one attribute value first.', 'warning'); return; }
+      combos = [{}];
+    }
     const extra = isPurchase ? {} : { opening_stock: defaults.opening_stock };
-    const merged = mergeGenerated(rows, combos, { ...rowDefaults(), ...extra });
+    const merged = mergeGenerated(rows, combos, { ...rowDefaults(), ...extra }, {
+      copies: repeatCount,
+      extraFor: (c) => ({ name: autoVariantName(parent.name, c, attrKeys) }),
+    });
     if (merged.editedDropped > 0) {
       const ok = await askConfirm({
         title: 'Regenerate variants?',
@@ -518,13 +554,27 @@ export default function ProductVariantMaster({
   };
 
   // Category picks the starting attributes when none are chosen yet.
+  // Unsaved rows still holding the old header value (or the old auto name) take the new one.
+  const followParent = (field, value) => {
+    const old = parent[field];
+    if (field === 'name') {
+      setRows(prev => prev.map(r => {
+        if (r.id || r.name !== autoVariantName(old, r.attributes, attrKeys)) return r;
+        return { ...r, name: autoVariantName(value, r.attributes, attrKeys) };
+      }));
+    } else if (INHERITED_FIELDS.includes(field)) {
+      setRows(prev => prev.map(r => (!r.id && String(r[field] ?? '') === String(old ?? '') ? { ...r, [field]: value } : r)));
+    }
+  };
+
   const setCategory = (category) => {
+    followParent('category', category);
     setParent(p => ({ ...p, category }));
     setDirty(true);
     if (!axes.length && !rows.length && category) setAxes(defaultAttributesForCategory(category).map(key => ({ key, values: [] })));
   };
 
-  const setParentField = (field) => (value) => { setParent(p => ({ ...p, [field]: value })); setGroupErrors(g => ({ ...g, [field]: undefined })); setDirty(true); };
+  const setParentField = (field) => (value) => { followParent(field, value); setParent(p => ({ ...p, [field]: value })); setGroupErrors(g => ({ ...g, [field]: undefined })); setDirty(true); };
   const setDefault = (field) => (value) => setDefaults(d => ({ ...d, [field]: value }));
 
   // ------------------------------------------------------------------ payload / save
@@ -544,25 +594,36 @@ export default function ProductVariantMaster({
     context,
     group_id: groupId || undefined,
     group: { ...parent, attribute_keys: attrKeys },
-    variants: list.map(payloadRow),
+    variants: (() => {
+      // Repeats of one combination are separate items told apart by a copy number (1, 2, …).
+      const copies = assignCopies(rows);
+      return list.map(r => ({ ...payloadRow(r), copy: copies.get(r._rid) || 1 }));
+    })(),
     auto_sku: true,
     auto_barcode: autoBarcode,
     ...extra,
   });
 
-  // Live server check (SKU / barcode clashes with the database, generated SKU preview).
-  const checkKey = useDebounce(JSON.stringify([rows.map(r => [r._rid, r.sku, r.barcode, r.name, r.attributes, r.mrp, r.sales_price, r.tax_percent]), parent, groupId]), 800);
+  // Live server check (SKU / barcode clashes with the database, generated SKU and the
+  // barcodes new rows will get from the series).
+  const checkKey = useDebounce(JSON.stringify([rows.map(r => [r._rid, r.sku, r.barcode, r.name, r.attributes, r.mrp, r.sales_price, r.tax_percent]), parent, groupId, autoBarcode]), 800);
   useEffect(() => {
     if (!open) return undefined;
     const list = isPurchase ? rows.filter(r => !r.id) : rows;
-    if (!list.length || list.length > DRY_RUN_MAX_ROWS) { setSkuPreview({}); return undefined; }
+    if (!list.length || list.length > DRY_RUN_MAX_ROWS) { setSkuPreview({}); setBarcodePreview({}); return undefined; }
     const ctrl = new AbortController();
     setChecking(true);
     axios.post(`${API}bulk-save/`, buildPayload(list, { dry_run: true }), { signal: ctrl.signal })
       .then(res => {
         const prev = {};
-        (res.data.variants || []).forEach(v => { if (list[v.index]) prev[list[v.index]._rid] = v.sku; });
-        setSkuPreview(prev); setServerErrors({}); setGroupErrors({});
+        const codes = {};
+        (res.data.variants || []).forEach(v => {
+          const r = list[v.index];
+          if (!r) return;
+          prev[r._rid] = v.sku;
+          if (v.barcode_preview) codes[r._rid] = v.barcode_preview;
+        });
+        setSkuPreview(prev); setBarcodePreview(codes); setServerErrors({}); setGroupErrors({});
       })
       .catch(e => {
         if (axios.isCancel(e) || !e.response) return;
@@ -762,7 +823,7 @@ export default function ProductVariantMaster({
     if (Array.isArray(c.axes)) setAxes(c.axes.map(a => ({ key: a.key, label: a.label, values: a.values || [] })));
     if (c.columns) setColVis(v => ({ ...v, ...c.columns }));
     if (c.defaults) {
-      setDefaults(d => ({ ...d, cost_includes_tax: Boolean(c.defaults.cost_includes_tax), mrp_includes_tax: c.defaults.mrp_includes_tax !== false }));
+      setDefaults(d => ({ ...d, cost_includes_tax: Boolean(c.defaults.cost_includes_tax), mrp_includes_tax: Boolean(c.defaults.mrp_includes_tax) }));
       if (typeof c.defaults.auto_barcode === 'boolean') setAutoBarcode(c.defaults.auto_barcode);
     }
     setLoadedTemplate(t);
@@ -1095,6 +1156,9 @@ export default function ProductVariantMaster({
                       onGenerate={generate}
                       onClearGenerated={clearGenerated}
                       onAddRows={addBlankRows}
+                      repeat={repeat}
+                      setRepeat={setRepeat}
+                      canGenerateBase={Boolean(parent.name.trim())}
                       hasGenerated={hasGenerated}
                       attributeOrder={attrKeys}
                       focusToken={genFocusToken}

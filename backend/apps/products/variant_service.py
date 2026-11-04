@@ -15,7 +15,7 @@ from decimal import Decimal, InvalidOperation
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 
-from .barcode_utils import reserve_product_barcodes
+from .barcode_utils import BarcodeConfigError, peek_product_barcodes, reserve_product_barcodes
 from .models import (
     BarcodeHistory, BulkSaveReceipt, Product, ProductBarcode, ProductVariantGroup,
 )
@@ -66,12 +66,21 @@ def normalise_attributes(attrs):
     return out
 
 
-def variant_key(attrs):
-    """Order-independent, case-insensitive identity of an attribute combination."""
+def variant_key(attrs, copy=1):
+    """Order-independent, case-insensitive identity of an attribute combination.
+
+    `copy` > 1 marks a repeat of the same combination ("Add multiple times"): its own
+    product with its own SKU and barcode, stored as "<key>#<copy>" so the one-key-per-group
+    constraint still holds."""
     norm = normalise_attributes(attrs)
-    if not norm:
-        return '__base__'
-    return '|'.join(f"{k}={norm[k].lower()}" for k in sorted(norm))[:255]
+    key = '|'.join(f"{k}={norm[k].lower()}" for k in sorted(norm))[:248] if norm else '__base__'
+    return f'{key}#{copy}' if copy and copy > 1 else key
+
+
+def copy_from_key(key):
+    """The repeat number stored in a variant key ("color=black#3" → 3); 1 for the original."""
+    m = re.search(r'#(\d+)$', key or '')
+    return int(m.group(1)) if m else 1
 
 
 def attr_code(value):
@@ -215,13 +224,18 @@ def _validate(payload):
     for idx, raw in enumerate(variants_in):
         err = {}
         attrs = _row_attrs(raw)
+        try:
+            copy = max(1, int(raw.get('copy') or 1))
+        except (TypeError, ValueError):
+            copy = 1
         row = {
             'index': idx,
             'id': raw.get('id') or None,
             'name': _clean(raw.get('name'), 255),
             'long_name': _clean(raw.get('long_name')),
             'attributes': attrs,
-            'key': variant_key(attrs),
+            'key': variant_key(attrs, copy),
+            'copy': copy,
             'sku': _clean(raw.get('sku'), 150),
             'barcode': _clean(raw.get('barcode'), 150),
             'category_name': _clean(raw.get('category'), 150) or group['category_name'],
@@ -453,9 +467,21 @@ def save_variants(payload, *, user=None, branch=None, changed_by='Administrator'
             raise VariantValidationError(f'{len(missing)} row(s) need attention before saving.', missing)
 
     if dry_run:
+        # The barcodes new rows would get from the series, in row order — a preview only;
+        # nothing is reserved until the real save.
+        preview = {}
+        if payload.get('auto_barcode'):
+            missing = [r for r in rows if not r['barcode'] and not (r['id'] and existing[str(r['id'])].barcode)]
+            avoid = {r['barcode'] for r in rows if r['barcode']}
+            try:
+                codes = peek_product_barcodes(len(missing), avoid=avoid)
+            except BarcodeConfigError:
+                codes = []
+            preview = {r['index']: code for r, code in zip(missing, codes)}
         return {
             'dry_run': True, 'grouped': grouped, 'base_sku': base,
-            'variants': [{'index': r['index'], 'sku': r['sku'], 'name': r['name'], 'key': r['key']} for r in rows],
+            'variants': [{'index': r['index'], 'sku': r['sku'], 'name': r['name'], 'key': r['key'],
+                          'barcode_preview': preview.get(r['index'], '')} for r in rows],
         }
 
     from apps.masters.models import Brand, ProductCategory, Unit
@@ -596,6 +622,7 @@ def serialize_variant(p):
         'sku': p.sku,
         'barcode': p.barcode or '',
         'attributes': p.variant_attributes or normalise_attributes({'color': p.color, 'size': p.size}),
+        'copy': copy_from_key(p.variant_key),
         'color': p.color or '',
         'size': p.size or '',
         'category': p.category_name or '',

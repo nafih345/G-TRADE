@@ -16,6 +16,7 @@ from django.utils import timezone
 from .accounting_catalog import payment_role, is_credit_method
 from .services import money
 from .banks import bank_line_kwargs
+from .party_ledgers import party_account
 
 ZERO = Decimal('0.00')
 
@@ -152,7 +153,7 @@ def build_sales_payment(pay, previous=None):
 
 def build_eye_test_fee(exam, previous=None):
     """An eye test fee collected at the test (sales.EyeExamination, fee_status PAID): money in
-    via Cash or GPay (UPI), booked straight to service revenue. Free tests take nothing, and a
+    via Cash or GPay (UPI) — GPay into the picked bank — booked straight to service revenue. Free tests take nothing, and a
     deferred (PENDING / BILLED) fee reaches the books as a service line on the sale bill instead
     — so only PAID posts here; switching away from PAID (or deleting the exam) reverses it."""
     amount = money(exam.fee_paid_amount)
@@ -166,7 +167,9 @@ def build_eye_test_fee(exam, previous=None):
         'source_number': f"EYE-{exam.test_no}" if exam.test_no else '', 'reference_type': 'EYE_TEST',
         'narration': f"Eye test fee — Test No {exam.test_no or '—'} — {who}",
         'lines': [
-            _line('PAYMENT_UPI' if upi else 'CASH', debit=amount, memo='GPay (UPI)' if upi else 'Cash'),
+            _line(debit=amount, memo='GPay (UPI)' if upi else 'Cash',
+                  **(bank_line_kwargs('PAYMENT_UPI', exam.fee_bank_account if exam.fee_bank_account_id else None)
+                     if upi else {'role': 'CASH'})),
             # 'Service revenue' memo = the Ledger's "services & eye tests" flag.
             _line('SERVICE_REVENUE', credit=amount, memo='Service revenue'),
         ],
@@ -176,6 +179,12 @@ def build_eye_test_fee(exam, previous=None):
 # ---------------------------------------------------------------------------
 # Wholesale (sales.WholesaleInvoice / WholesalePaymentCollection / WholesaleReturn)
 # ---------------------------------------------------------------------------
+
+def _dealer_receivable(dealer):
+    """Line kwargs for a dealer's receivable: its own AR sub-ledger, else the control role."""
+    acc = party_account(dealer)
+    return {'account': acc} if acc is not None else {'role': 'WHOLESALE_RECEIVABLE'}
+
 
 def _wholesale_tax(inv):
     summary = (inv.details or {}).get('summary') or {}
@@ -194,7 +203,7 @@ def build_wholesale_invoice(inv, previous=None):
         'source_number': inv.invoice_number, 'reference_type': 'WHOLESALE',
         'narration': f"Wholesale Invoice {inv.invoice_number} — {dealer}".strip(' —'),
         'lines': [
-            _line('WHOLESALE_RECEIVABLE', debit=total, memo='Dealer invoice total'),
+            _line(debit=total, memo='Dealer invoice total', **_dealer_receivable(inv.dealer if inv.dealer_id else None)),
             _line('WHOLESALE_SALES', credit=total - tax, memo='Wholesale revenue'),
             _line('GST_OUTPUT', credit=tax, memo='Output GST'),
         ],
@@ -213,8 +222,8 @@ def build_wholesale_collection(col, previous=None):
         'lines': [
             _line(debit=amount, memo=col.payment_method or '',
                   **bank_line_kwargs(payment_role(col.payment_method), col.bank_account if col.bank_account_id else None)),
-            _line('WHOLESALE_RECEIVABLE', credit=amount,
-                  memo=f"Settles {col.invoice_number}" if col.invoice_number else 'On account'),
+            _line(credit=amount, memo=f"Settles {col.invoice_number}" if col.invoice_number else 'On account',
+                  **_dealer_receivable(col.dealer if col.dealer_id else None)),
         ],
     }
 
@@ -236,7 +245,7 @@ def build_wholesale_return(ret, previous=None):
         'lines': [
             _line('SALES_RETURNS', debit=amount - tax_share, memo=ret.reason or 'Sales return'),
             _line('GST_OUTPUT', debit=tax_share, memo='Output GST reversed'),
-            _line('WHOLESALE_RECEIVABLE', credit=amount, memo='Credit note to dealer'),
+            _line(credit=amount, memo='Credit note to dealer', **_dealer_receivable(ret.dealer if ret.dealer_id else None)),
         ],
     }
 
@@ -246,10 +255,8 @@ def build_wholesale_return(ret, previous=None):
 # ---------------------------------------------------------------------------
 
 def _payable(supplier):
-    acc = getattr(supplier, 'ledger_account', None) if supplier else None
-    if acc is not None and not acc.is_deleted and acc.status == 'Active':
-        return {'account': acc}
-    return {'role': 'SUPPLIER_PAYABLE'}
+    acc = party_account(supplier)
+    return {'account': acc} if acc is not None else {'role': 'SUPPLIER_PAYABLE'}
 
 
 def _purchase_tax(pi):
@@ -338,8 +345,33 @@ def build_purchase_order(po, previous=None):
 
 
 # ---------------------------------------------------------------------------
-# Inventory (inventory.StockAdjustment)
+# Inventory (products.Product opening stock / inventory.StockAdjustment)
 # ---------------------------------------------------------------------------
+
+def build_product_opening_stock(product, previous=None):
+    """Opening stock typed on a new product (Add New Product / Add Multiple Items) is stock
+    the books never bought: Dr Inventory / Cr Opening balance equity at cost. The quantity and
+    cost of the first booking are kept, so later sales, purchases (which refresh cost_price)
+    and archiving don't re-value it. Purchase Entry creates products with opening_stock 0 —
+    their stock is booked by the purchase. Excel imports (bulk insert, no signals) are not
+    auto-posted: an import is the opening load, entered once via opening balances."""
+    meta = (previous.metadata or {}) if previous else {}
+    qty = int(meta['qty']) if 'qty' in meta else int(product.opening_stock or 0)
+    unit_cost = Decimal(str(meta['unit_cost'])) if 'unit_cost' in meta else money(product.cost_price)
+    value = money(unit_cost * qty)
+    if qty <= 0 or value <= 0:
+        return None
+    return {
+        'date': _date(product.created_at), 'branch': None, 'voucher_type_code': 'OB',
+        'source_number': (product.sku or '')[:80], 'reference_type': 'OPENING_STOCK',
+        'narration': f"Opening stock {qty} × {product.name} ({product.sku})"[:500],
+        'metadata': {'qty': qty, 'unit_cost': str(unit_cost), 'valuation': 'LAST_PURCHASE_COST'},
+        'lines': [
+            _line('INVENTORY', debit=value, memo=f"{qty} × {product.name} opening stock"),
+            _line('OPENING_EQUITY', credit=value, memo='Opening stock introduced'),
+        ],
+    }
+
 
 WHOLESALE_SALE_PREFIX = 'wholesale pos sale'
 

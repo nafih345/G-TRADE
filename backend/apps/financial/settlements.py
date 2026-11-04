@@ -32,6 +32,7 @@ from .accounting_catalog import payment_role
 from .cheques import CHEQUE_METHOD, ChequeBook, ChequeInputSerializer
 from .mapping import resolve_role
 from .models import ChartOfAccount, JournalEntry, JournalSequence, PostingFailure
+from .party_ledgers import party_account
 from .services import AccountingError, audit, create_journal, money
 
 ZERO = Decimal('0.00')
@@ -178,7 +179,8 @@ def open_bills(kind, party_ids=None, bill_ids=None, lock=False, date_from=None, 
 
     if kind == 'dealer':
         from apps.sales.models import WholesaleInvoice, WholesaleReturn
-        qs = WholesaleInvoice.objects.all()
+        qs = WholesaleInvoice.objects.select_related('dealer__ledger_account__account_group',
+                                                     'dealer__ledger_account__parent_account')
         if party_ids is not None:
             qs = qs.filter(dealer_id__in=party_ids)
         if bill_ids is not None:
@@ -195,7 +197,6 @@ def open_bills(kind, party_ids=None, bill_ids=None, lock=False, date_from=None, 
             for r in WholesaleReturn.objects.filter(invoice_number__in=[i.invoice_number for i in invoices]):
                 if 'replace' not in (r.action_taken or '').lower():
                     credited[r.invoice_number] = credited.get(r.invoice_number, ZERO) + money(r.return_amount)
-        acc = accounts.role('WHOLESALE_RECEIVABLE') if invoices else None
         for inv in invoices:
             paid = money(inv.paid_amount) + credited.get(inv.invoice_number, ZERO)
             due = money(inv.grand_total) - paid
@@ -203,7 +204,7 @@ def open_bills(kind, party_ids=None, bill_ids=None, lock=False, date_from=None, 
                 continue
             out.setdefault(inv.dealer_id, []).append(
                 _bill('wholesale_invoice', inv, inv.invoice_number, inv.invoice_date, inv.due_date,
-                      inv.grand_total, paid, due, acc))
+                      inv.grand_total, paid, due, dealer_receivable(inv.dealer, accounts)))
         return out
 
     if kind == 'supplier':
@@ -248,10 +249,11 @@ def _dated(qs, field, date_from, date_to):
 
 
 def supplier_payable(supplier, accounts=None):
-    acc = getattr(supplier, 'ledger_account', None) if supplier else None
-    if acc is not None and not acc.is_deleted and acc.status == 'Active':
-        return acc
-    return (accounts or _Accounts()).role('SUPPLIER_PAYABLE')
+    return party_account(supplier) or (accounts or _Accounts()).role('SUPPLIER_PAYABLE')
+
+
+def dealer_receivable(dealer, accounts=None):
+    return party_account(dealer) or (accounts or _Accounts()).role('WHOLESALE_RECEIVABLE')
 
 
 # ---------------------------------------------------------------------------

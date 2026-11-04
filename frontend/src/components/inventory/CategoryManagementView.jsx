@@ -28,6 +28,7 @@ import {
   NavigateNext as NavigateNextIcon
 } from '@mui/icons-material';
 import axios from 'axios';
+import { loadMaster } from '../../utils/masterDataCache';
 
 const OPTICAL_CATEGORY_MASTER_DEFAULTS = {
   'frames': {
@@ -252,8 +253,8 @@ export default function CategoryManagementView({ products = [] }) {
 
     // Fetch Master Categories
     try {
-      const cRes = await axios.get('/api/masters/categories/');
-      const rawCats = cRes.data?.results || cRes.data || [];
+      // Every page (not just the first 20), and the shared cache the pickers paint from.
+      const rawCats = await loadMaster('categories', { force: true });
       if (Array.isArray(rawCats)) {
         fetchedCategories = rawCats.map(c => {
           const defaults = getValidCategoryDefaults(c.name);

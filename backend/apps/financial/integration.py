@@ -39,6 +39,7 @@ REGISTRY = {
     'purchasing.purchase_payment': ('purchasing.PurchaseInvoice', rules.build_purchase_payment, 'purchase_date', 'invoice_number'),
     'purchasing.purchase_order': ('purchasing.PurchaseOrder', rules.build_purchase_order, 'order_date', 'order_number'),
     'inventory.stock_adjustment': ('inventory.StockAdjustment', rules.build_stock_adjustment, 'created_at', 'reason'),
+    'products.opening_stock': ('products.Product', rules.build_product_opening_stock, 'created_at', 'sku'),
 }
 assert set(REGISTRY) == set(SOURCES)
 
@@ -388,10 +389,17 @@ def subledger_reconciliation():
     rows.append({'name': 'Retail receivables', 'account': acc.code if acc else None, 'ledger': str(gl) if gl is not None else None,
                  'subledger': str(money(outstanding)), 'subledger_source': 'Invoices: net − paid'})
 
-    acc, gl = _role_account_balance('WHOLESALE_RECEIVABLE')
-    dealers = money(Dealer.objects.aggregate(s=Sum('outstanding_balance'))['s'] or 0) if hasattr(Dealer, 'outstanding_balance') else None
-    rows.append({'name': 'Wholesale receivables', 'account': acc.code if acc else None, 'ledger': str(gl) if gl is not None else None,
-                 'subledger': str(dealers) if dealers is not None else None, 'subledger_source': 'Dealer outstanding balances'})
+    receivable_ids = set(Dealer.objects.exclude(ledger_account=None).values_list('ledger_account_id', flat=True))
+    try:
+        receivable_ids.add(resolve_role('WHOLESALE_RECEIVABLE').pk)
+    except AccountingError:
+        pass
+    agg = LedgerEntry.objects.filter(account_id__in=receivable_ids, journal_entry__status__in=JournalEntry.LEDGER_STATUSES,
+                                     journal_entry__is_deleted=False).aggregate(dr=Sum('debit'), cr=Sum('credit'))
+    dealers = money(Dealer.objects.aggregate(s=Sum('outstanding_balance'))['s'] or 0)
+    rows.append({'name': 'Wholesale receivables', 'account': 'AR + dealer sub-ledgers',
+                 'ledger': str(money((agg['dr'] or 0) - (agg['cr'] or 0))),
+                 'subledger': str(dealers), 'subledger_source': 'Dealer outstanding balances'})
 
     payable_ids = set(Supplier.objects.exclude(ledger_account=None).values_list('ledger_account_id', flat=True))
     try:

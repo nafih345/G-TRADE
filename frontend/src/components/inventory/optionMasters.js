@@ -4,6 +4,7 @@
 
 import axios from 'axios';
 import { readList, writeList } from './productAttributeOptions';
+import { MASTER_SOURCES, getMasterSnapshot, loadMaster } from '../../utils/masterDataCache';
 
 export const genCode = (name, len = 3) =>
   (name || 'GEN').replace(/[^a-zA-Z0-9]/g, '').slice(0, len).toUpperCase().padEnd(len, 'X')
@@ -14,19 +15,26 @@ const hideDefault = (key, name) => {
 };
 
 // Loads a backend master into an option list ({name: id} records + names), dropping
-// built-in fallback names the user hid.
+// built-in fallback names the user hid. Paints at once from the shared master cache
+// (utils/masterDataCache.js) and then again when the background revalidate returns.
+const MASTER_NAME_BY_URL = Object.fromEntries(Object.entries(MASTER_SOURCES).map(([n, u]) => [u, n]));
+
 export const loadBackendMaster = (url, defaults, hiddenKey, setOptions, setRecords) => {
   const hidden = new Set(hiddenKey ? readList(hiddenKey, []) : []);
-  return axios.get(url)
-    .then(r => {
-      const rows = (r.data?.results || r.data || []).filter(x => x?.name);
-      const records = {};
-      rows.forEach(x => { records[x.name] = x.id; });
-      setRecords(records);
-      setOptions(Array.from(new Set([...rows.map(x => x.name), ...defaults.filter(d => !hidden.has(d))])));
-    }).catch(() => {
-      setOptions(defaults.filter(d => !hidden.has(d)));
-    });
+  const apply = (data) => {
+    const rows = (data || []).filter(x => x?.name);
+    const records = {};
+    rows.forEach(x => { records[x.name] = x.id; });
+    setRecords(records);
+    setOptions(Array.from(new Set([...rows.map(x => x.name), ...defaults.filter(d => !hidden.has(d))])));
+  };
+  const name = MASTER_NAME_BY_URL[url];
+  const cached = name ? getMasterSnapshot(name) : null;
+  if (cached) apply(cached);
+  const request = name ? loadMaster(name) : axios.get(url).then(r => r.data?.results || r.data || []);
+  return request.then(apply).catch(() => {
+    if (!cached) setOptions(defaults.filter(d => !hidden.has(d)));
+  });
 };
 
 // Backend masters (Category / Brand / Unit). Products reference these by FK, so a

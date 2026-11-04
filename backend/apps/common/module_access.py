@@ -128,6 +128,10 @@ WRITE_RULES = sorted((
     ('/api/company/branch-stock/', ('inventory', 'sales', 'purchase', 'wholesale')),
     ('/api/company/stock-transfers/', ('inventory',)),
     ('/api/company/document-sequences/', ANY),
+    # Pricing Rules & Offers: the views allow only Administrators / Managers to change them (a
+    # Manager's Settings access is view-only), and any till may ask a manager to approve a price.
+    ('/api/company/pricing-rules/approve/', ANY),
+    ('/api/company/pricing-rules/', ('settings', 'sales', 'inventory')),
     ('/api/company/', ('settings',)),
     ('/api/billing/', ('settings',)),
 ), key=lambda r: -len(r[0]))
@@ -135,7 +139,7 @@ WRITE_RULES = sorted((
 _SAFE = ('GET', 'HEAD', 'OPTIONS')
 # POST endpoints that only read (a request body too large for a query string), so any screen —
 # barcode printing from Sales, Purchase or Inventory — may call them like a GET.
-READ_ONLY_POSTS = ('/api/products/label-data/',)
+READ_ONLY_POSTS = ('/api/products/label-data/', '/api/company/pricing-rules/floors/')
 
 
 # ---- package / module normalisation ---------------------------------------------------------

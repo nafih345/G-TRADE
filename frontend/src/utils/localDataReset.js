@@ -6,6 +6,8 @@
 // marker that /api/health/ reports as `data_reset_epoch`; the first time a browser sees a new
 // one it removes the keys below and reloads. Settings, branches and the login session are
 // left alone.
+import { clearMasterCache } from './masterDataCache';
+
 const EPOCH_KEY = 'optical_data_reset_epoch';
 
 const TRANSACTIONAL_KEYS = [
@@ -25,6 +27,7 @@ export function clearLocalDataIfReset(serverEpoch) {
   try {
     if (localStorage.getItem(EPOCH_KEY) === serverEpoch) return false;
     TRANSACTIONAL_KEYS.forEach((key) => localStorage.removeItem(key));
+    clearMasterCache();
     localStorage.setItem(EPOCH_KEY, serverEpoch);
     return true;
   } catch {

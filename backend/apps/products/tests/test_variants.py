@@ -121,6 +121,34 @@ class BulkSaveTests(APITestCase):
         self.assertNotIn('2000000000015', codes)
         self.assertTrue(all(len(c) == 13 for c in codes))
 
+    def test_repeated_combination_makes_separate_items_with_sequential_barcodes(self):
+        from apps.products.models import BarcodeSeriesConfig
+        config = BarcodeSeriesConfig.load()
+        config.prefix_pattern, config.total_length, config.check_digit, config.last_number = '', 0, 'NONE', 1000
+        config.save()
+        five = [{'attributes': {'color': 'Black', 'size': 'Medium'}, 'copy': n, 'quantity': 20} for n in range(1, 6)]
+        body = {'context': 'purchase', 'auto_barcode': True, 'group': {'name': 'NAfi'}, 'variants': five}
+
+        preview = self.save({**body, 'dry_run': True}, 200)
+        self.assertEqual([v['barcode_preview'] for v in preview.data['variants']], ['1001', '1002', '1003', '1004', '1005'])
+        config.refresh_from_db()
+        self.assertEqual(config.last_number, 1000)  # a preview reserves nothing
+
+        res = self.save(body, 201)
+        self.assertEqual(res.data['created'], 5)
+        saved = sorted(res.data['variants'], key=lambda v: v['index'])
+        self.assertEqual([v['barcode'] for v in saved], ['1001', '1002', '1003', '1004', '1005'])
+        self.assertEqual(len({v['sku'] for v in saved}), 5)
+        group = ProductVariantGroup.objects.get(name='NAfi')
+        self.assertEqual(sorted(group.variants.values_list('variant_key', flat=True)),
+                         sorted(['color=black|size=medium'] + [f'color=black|size=medium#{n}' for n in range(2, 6)]))
+        loaded = self.client.get(f'{URL}{group.id}/').data['variants']
+        self.assertEqual(sorted(v['copy'] for v in loaded), [1, 2, 3, 4, 5])
+
+        # the same copy number twice is still a duplicate
+        dup = self.save({'group': {'name': 'Dup2'}, 'variants': [five[1], five[1]]}, 400)
+        self.assertIn('attributes', dup.data['row_errors']['1'])
+
     def test_inventory_opening_stock_goes_through_stock_helper(self):
         self.save({'context': 'inventory', 'group': {}, 'variants': [{'name': 'Case', 'opening_stock': 7}]}, 201)
         self.assertEqual(Product.objects.get(name='Case').stock, 7)

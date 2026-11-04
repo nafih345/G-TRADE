@@ -26,6 +26,7 @@ import {
   Business as SupplierIcon
 } from '@mui/icons-material';
 import axios from 'axios';
+import { loadMaster } from '../../utils/masterDataCache';
 
 export default function BrandManagementView({ products = [] }) {
   const [brands, setBrands] = useState([]);
@@ -112,8 +113,8 @@ export default function BrandManagementView({ products = [] }) {
 
     // Fetch Master Brands from Database API
     try {
-      const bRes = await axios.get('/api/masters/brands/');
-      const rawBrands = bRes.data?.results || bRes.data || [];
+      // Every page (not just the first 20), and the shared cache the pickers paint from.
+      const rawBrands = await loadMaster('brands', { force: true });
       if (Array.isArray(rawBrands)) {
         fetchedBrands = rawBrands.map(b => ({
           id: String(b.id),

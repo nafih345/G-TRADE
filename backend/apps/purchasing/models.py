@@ -223,8 +223,59 @@ class PurchaseInvoiceItem(BaseUUIDModel):
 
     line_total = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal('0.0'))
 
+    # Barcode labels confirmed printed for this line (units 1..labels_printed). Only the label
+    # print jobs in apps/purchasing/label_printing.py move it; an edit that recreates the lines
+    # carries it over (PurchaseInvoiceSerializer.update).
+    labels_printed = models.PositiveIntegerField(default=0)
+    # Position in the entry. The lines are bulk-created together (same created_at, random UUIDs),
+    # so without it their order is whatever the database returns. Legacy rows are all 0.
+    line_no = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ['line_no', 'id']
+
     def __str__(self):
         return f"{self.product.name} ({self.quantity}pcs) - Inv {self.purchase_invoice.invoice_number}"
+
+    @property
+    def label_total(self):
+        return max(0, int((self.quantity or 0) + (self.free_quantity or 0)))
+
+
+class PurchaseLabelPrintJob(BaseUUIDModel):
+    """One batch of barcode labels sent to the printer from Purchase Entry → Barcode Printing.
+
+    The browser can't tell how many labels the printer actually produced, so a PRINT job stays
+    SENT until the user confirms how far it got (all / stopped after label N / none); only then do
+    the lines' labels_printed counters move. While a PRINT job is SENT no other PRINT job can start
+    on the same entry, so a confirmation can never double-count. REPRINT jobs re-issue units that
+    are already counted and never change the counters.
+
+    lines: [{item, product_name, barcode, from_unit, to_unit}] in print order."""
+    KIND_CHOICES = [('PRINT', 'Print'), ('REPRINT', 'Reprint')]
+    STATUS_CHOICES = [
+        ('SENT', 'Sent — awaiting confirmation'),
+        ('COMPLETED', 'All printed'),
+        ('PARTIAL', 'Partly printed'),
+        ('FAILED', 'Nothing printed'),
+    ]
+
+    purchase_invoice = models.ForeignKey(PurchaseInvoice, on_delete=models.CASCADE, related_name='label_print_jobs')
+    kind = models.CharField(max_length=10, choices=KIND_CHOICES, default='PRINT')
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='SENT', db_index=True)
+    lines = models.JSONField(default=list, blank=True)
+    labels_sent = models.PositiveIntegerField(default=0)
+    labels_printed = models.PositiveIntegerField(default=0)
+    template_name = models.CharField(max_length=150, blank=True, default='')
+    printed_by = models.CharField(max_length=150, blank=True, default='')
+    confirmed_by = models.CharField(max_length=150, blank=True, default='')
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.kind} {self.labels_sent} labels - {self.purchase_invoice_id} ({self.status})"
 
 
 # ==========================================

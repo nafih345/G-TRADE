@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { 
   Box, Card, CardContent, Typography, Grid, TextField, 
   MenuItem, Button, Checkbox, FormControlLabel, Paper, 
@@ -33,6 +33,7 @@ import {
 } from '../../utils/eyeTestBill';
 import { printEyeTestBill, printEyeTestReceipt } from '../../utils/printEyeTestBill';
 import EyeTestReportDialog from './EyeTestReportDialog';
+import PaymentModeDetails from '../common/PaymentModeDetails';
 
 // Common medical aid / insurance schemes offered as quick picks on the charges bar. The field
 // is free-solo, so staff can still type any scheme not listed here.
@@ -181,6 +182,7 @@ export default function SingleScreenEyeTestForm({
     setPaymentOpen(false);
     setPrintOptionsOpen(true);
   };
+  const setFeeBank = useCallback((id) => setDiagnosis(prev => ({ ...prev, feeBankAccount: id })), [setDiagnosis]);
   const openPayment = (mode) => {
     // Show the choice the screen implies as the selected one, so confirming keeps it.
     setDiagnosis(prev => ({ ...prev, ...applyPaymentChoice(paymentChoiceOf(prev)) }));
@@ -1410,6 +1412,13 @@ export default function SingleScreenEyeTestForm({
                   <ToggleButton key={m.value} value={m.value} sx={{ fontWeight: 800, textTransform: 'none' }}>{m.label}</ToggleButton>
                 ))}
               </ToggleButtonGroup>
+              {/* GPay shows the linked bank, pre-selected from Bank Master's default. */}
+              <PaymentModeDetails
+                method={diagnosis?.paymentMode || 'CASH'}
+                bankAccount={diagnosis?.feeBankAccount || ''}
+                onBankAccountChange={setFeeBank}
+                sx={{ mt: 1 }}
+              />
             </Box>
           )}
           {paymentChoice === NO_PAYMENT && (

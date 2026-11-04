@@ -148,10 +148,12 @@ class WholesaleTests(Booked):
             ret = WholesaleReturn.objects.create(return_number='WR-1', invoice_number='W-1', dealer=self.dealer,
                                                  return_date=TODAY, reason='Damaged', return_amount=D('118'))
         self.assertEqual(lines_of(live('sales', 'wholesale_invoice', inv.pk).get()),
-                         {'1005': D('1180'), '4002': D('-1000'), '2020': D('-180')})
+                         {'AR-DL-1': D('1180'), '4002': D('-1000'), '2020': D('-180')})
         self.assertEqual(lines_of(live('sales', 'wholesale_return', ret.pk).get()),
-                         {'4090': D('100'), '2020': D('18'), '1005': D('-118')})
-        self.assertEqual(balance('1005'), D('562'))  # 1180 − 500 cash − 118 credit note; "Credit Sale" moves no money
+                         {'4090': D('100'), '2020': D('18'), 'AR-DL-1': D('-118')})
+        # The dealer's own AR sub-ledger: 1180 − 500 cash − 118 credit note; "Credit Sale" moves no money
+        self.assertEqual(balance('AR-DL-1'), D('562'))
+        self.assertEqual(balance('1005'), D('0'))
         self.assertEqual(balance('2020'), D('162'))
         self.assertTrue(ledger_is_balanced())
 

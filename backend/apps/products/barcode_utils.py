@@ -163,6 +163,28 @@ def taken_barcodes(codes):
     return taken
 
 
+def peek_product_barcodes(count=1, avoid=None):
+    """The next `count` free codes reserve_product_barcodes would hand out, WITHOUT moving
+    the counter — for showing upcoming barcodes before a save. Another save in between can
+    take them, so the real codes always come from reserve_product_barcodes."""
+    if count <= 0:
+        return []
+    config = BarcodeSeriesConfig.load()
+    prefix, seq_digits = series_layout(config.prefix_pattern, config.total_length, config.check_digit)
+    variable = config.total_length == VARIABLE_LENGTH
+    avoid = set(avoid or ())
+    out, number = [], config.last_number + 1
+    for _attempt in range(10):
+        need = count - len(out)
+        batch = [format_series_code(prefix, seq_digits, config.check_digit, number + i, variable) for i in range(need)]
+        number += need
+        taken = taken_barcodes(batch) | avoid
+        out.extend(c for c in batch if c not in taken and c not in out)
+        if len(out) >= count:
+            break
+    return out[:count]
+
+
 def reserve_product_barcodes(count=1, avoid=None):
     """Atomically reserves `count` new barcodes from the configured series, skipping
     any code already used by a product (Product.barcode / ProductBarcode) or listed

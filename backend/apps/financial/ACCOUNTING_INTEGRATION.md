@@ -31,19 +31,41 @@ post_save / post_delete (financial/signals.py)
 |---|---|---|
 | `sales.invoice` | `document_type=INVOICE`, status not DRAFT/CANCELLED, not deleted | Dr Receivable (net), Dr Discount allowed; Cr Retail/Wholesale sales + Service revenue (split by line subtotal), Cr GST output. Stocked lines: Dr COGS / Cr Inventory at cost (cost snapshot kept in `metadata.unit_costs`) |
 | `sales.payment` | not voided/deleted, amount ≠ 0 | Dr Cash / Bank / Card / UPI (by method); Cr Receivable when its bill is a live invoice, else **Customer advances**. Negative amount = refund (sides swap). Re-checked whenever its invoice changes. |
-| `sales.wholesale_invoice` | not cancelled/draft/deleted | Dr Wholesale receivable; Cr Wholesale sales + GST output (`details.summary.totalGst`) |
-| `sales.wholesale_collection` | amount > 0, method not "Credit Sale" | Dr Cash/Bank; Cr Wholesale receivable |
-| `sales.wholesale_return` | not a "Replacement" | Dr Sales returns + GST output (pro-rata of the original invoice); Cr Wholesale receivable |
+| `sales.eye_test_fee` | EyeExamination `fee_status=PAID` | Dr Cash / UPI; Cr Service revenue (free / pay-after-sale fees reach the books on the sale bill) |
+| `sales.wholesale_invoice` | not cancelled/draft/deleted | Dr dealer's own AR sub-ledger (else Wholesale receivable); Cr Wholesale sales + GST output (`details.summary.totalGst`) |
+| `sales.wholesale_collection` | amount > 0, method not "Credit Sale" | Dr Cash/Bank; Cr dealer's AR sub-ledger |
+| `sales.wholesale_return` | not a "Replacement" | Dr Sales returns + GST output (pro-rata of the original invoice); Cr dealer's AR sub-ledger |
 | `purchasing.purchase_invoice` | status CONFIRMED | Dr Inventory (total − tax − round off), Dr GST input, ± Round off; Cr supplier's own sub-ledger (`Supplier.ledger_account`, else Supplier payables) |
 | `purchasing.purchase_payment` | paid amount > 0 (cash purchase = fully paid) | Dr Supplier payable; Cr Cash/Bank |
 | `purchasing.purchase_order` | RECEIVED **and** the PO itself moved stock | Dr Inventory + GST input; Cr Supplier payable. A PO marked converted is booked by its Purchase Entry instead. |
+| `products.opening_stock` | new product with `opening_stock` > 0 and cost > 0 (Add New Product / Add Multiple Items) | Dr Inventory / Cr Opening balance equity at cost; qty + cost of the first booking kept in metadata, so later sales / cost refreshes / archiving don't re-value it. Excel imports (bulk insert) are not auto-posted — treat an import as the opening load and post it via opening balances. Go-live = migration 0012 day |
 | `inventory.stock_adjustment` | value (qty × cost) > 0 | ADD: Dr Inventory / Cr Stock gain. SUB: Dr Stock loss / Cr Inventory — or Dr **COGS** when the reason starts with "Wholesale POS sale" (that is how the Wholesale POS removes sold stock) |
 | `financial.voucher` | manual RV / PV / CV / JV | as entered; RV must debit cash/bank, PV credit cash/bank, CV cash/bank only |
 | `financial.opening_balance` | *Post opening balances* tool | account vs Opening balance equity |
 
-Orders and quotations never recognise revenue; money taken against them sits in Customer
+Wholesale orders, quotations and delivery challans are commitments, not transactions: they
+post nothing — the tax invoice books revenue, GST and the dealer's receivable, and its stock
+movement books COGS. Orders and quotations never recognise revenue; money taken against them sits in Customer
 advances until the bill becomes an invoice. Inventory valuation is **last purchase cost**
 (`Product.cost_price`, refreshed by every Purchase Entry).
+
+## Party sub-ledgers (`party_ledgers.py`)
+
+* Every **supplier** gets its own Accounts Payable ledger `AP-<supplier_code>` (group Sundry
+  Creditors) and every **wholesale dealer** its own Accounts Receivable ledger `AR-<dealer_code>`
+  (group Sundry Debtors), created by a post_save hook when the party is created — any screen or
+  import. Each is nested under its control account (`parent_account` = the SUPPLIER_PAYABLE /
+  WHOLESALE_RECEIVABLE mapping). Renaming the party renames the ledger.
+* The party's opening balance is copied to the ledger as a *typed* opening balance (posted only
+  via *Post opening balances*).
+* Retail customers have no per-customer COA head on purpose (thousands of walk-in patients):
+  their dues are tracked bill by bill against 1004 (Customer Outstanding, bill-to-bill RV).
+* Parties created before this existed keep posting to the control account until moved:
+  `manage.py accounting link-party-ledgers [--party dealer|supplier]` (dry run) then `--commit` —
+  creates the ledger and re-books the party's posted documents onto it (reverse + re-post).
+* Reports that sum receivables / payables (Customer & Supplier Outstanding control balances,
+  sub-ledger reconciliation) include control + party sub-ledgers.
+* Creating staff / admin users never touches the COA or GL.
 
 ## Configuration
 

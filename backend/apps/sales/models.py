@@ -452,6 +452,9 @@ class EyeExamination(BaseUUIDModel):
     fee_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     fee_paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     fee_payment_mode = models.CharField(max_length=10, blank=True, default='')
+    # GPay (UPI) only: the bank the UPI ID settles into (Bank Master default unless changed).
+    # Blank posts to the PAYMENT_UPI role mapping.
+    fee_bank_account = models.ForeignKey('financial.ChartOfAccount', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     fee_status = models.CharField(max_length=10, blank=True, default='', db_index=True)
     fee_invoice = models.ForeignKey('sales.Invoice', on_delete=models.SET_NULL, null=True, blank=True, related_name='eye_test_fees')
 
@@ -548,6 +551,12 @@ class Dealer(BaseUUIDModel):
     category = models.CharField(max_length=50, default='Optical Shop')
     sales_executive = models.CharField(max_length=100, blank=True, null=True)
     status = models.CharField(max_length=20, default='Active')
+    # The dealer's own Accounts Receivable sub-ledger (financial.party_ledgers), provisioned
+    # when the dealer is created. Wholesale invoices / collections / returns post to it; a
+    # dealer without one (created before sub-ledgers existed) posts to the 1005 control account.
+    ledger_account = models.ForeignKey(
+        'financial.ChartOfAccount', on_delete=models.SET_NULL, null=True, blank=True, related_name='dealers'
+    )
 
     class Meta:
         constraints = [

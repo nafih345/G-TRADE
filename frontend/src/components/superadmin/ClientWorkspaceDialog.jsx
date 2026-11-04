@@ -1,5 +1,5 @@
 // One client's workspace in the platform console: Overview (profile, seats, status), Modules &
-// Permissions, Users, Branches and History. Every save answers with the full client detail, which
+// Permissions, Users, Branches, Data & Audit (read-only records), Backups and History. Every save answers with the full client detail, which
 // replaces what is shown here and is passed up (onUpdated) to refresh the list row.
 import React, { useCallback, useEffect, useState } from 'react';
 import axios from 'axios';
@@ -14,6 +14,8 @@ import ModuleAccessEditor from './ModuleAccessEditor';
 import RolePermissionsEditor from './RolePermissionsEditor';
 import ClientUsersPanel from './ClientUsersPanel';
 import ClientBranchesPanel from './ClientBranchesPanel';
+import ClientDataPanel from './ClientDataPanel';
+import ClientBackupsPanel from './ClientBackupsPanel';
 import { DeactivateDialog, ReactivateDialog } from './LifecycleDialogs';
 import {
   API, STATUS_META, fmtDate, fmtDateTime, isReauth, packageLabel, splitErrors,
@@ -35,10 +37,24 @@ const ACTION_LABELS = {
   PASSWORD_RESET: 'Password reset',
   BRANCH_ADDED: 'Branch added',
   BRANCH_UPDATED: 'Branch updated',
+  DATA_VIEWED: 'Data viewed',
+  DATA_EXPORTED: 'Data exported (CSV)',
+  BACKUP_REQUESTED: 'Backup requested',
+  BACKUP_COMPLETED: 'Backup completed',
+  BACKUP_FAILED: 'Backup failed',
+  BACKUP_DOWNLOADED: 'Backup downloaded',
+  BACKUP_DELETED: 'Backup deleted',
+  BACKUP_RETENTION_DELETED: 'Backup removed by retention',
+  BACKUP_SCHEDULE_CHANGED: 'Backup schedule changed',
 };
+
+// Tab order; History stays last.
+export const WORKSPACE_TABS = { overview: 0, modules: 1, users: 2, branches: 3, data: 4, backups: 5, history: 6 };
 
 const describe = (row, catalog) => {
   const d = row.details || {};
+  if (d.backup) return `${d.backup} · ${d.sections}${d.rows != null ? ` · ${d.rows} records` : ''}${d.error ? ` · ${d.error}` : ''}`;
+  if (d.dataset) return `${d.label || d.dataset}${d.rows != null ? ` · ${d.rows} rows` : ''}`;
   if (d.username) return `${d.username}${d.role ? ` · ${d.role.replace(/_/g, ' ')}` : ''}`;
   if (d.branch) return `${d.branch} (${d.code})`;
   if (d.package) return `${packageLabel(catalog, d.package)} · ${d.max_users} seats`;
@@ -46,6 +62,8 @@ const describe = (row, catalog) => {
     return Object.entries(d.changes).map(([k, v]) => {
       if (k === 'modules') return `modules: ${(v.to || []).join(', ')}`;
       if (k === 'role_permissions') return 'role permissions';
+      if (k === 'sections') return `scope: ${(v || []).length ? v.join(', ') : 'full client'}`;
+      if (typeof v !== 'object' || v === null) return `${k.replace(/_/g, ' ')}: ${v}`;
       if (k === 'package') return `package: ${packageLabel(catalog, v.from)} → ${packageLabel(catalog, v.to)}`;
       return `${k.replace(/_/g, ' ')}: ${v.from ?? '—'} → ${v.to ?? '—'}`;
     }).join(' · ');
@@ -271,6 +289,8 @@ export default function ClientWorkspaceDialog({ catalog, tenantId, initialTab = 
           <Tab label="Modules & Permissions" />
           <Tab label={data ? `Users (${data.users.length})` : 'Users'} />
           <Tab label={data ? `Branches (${data.branches.length})` : 'Branches'} />
+          <Tab label="Data & Audit" />
+          <Tab label="Backups" />
           <Tab label="History" />
         </Tabs>
       </DialogTitle>
@@ -281,7 +301,9 @@ export default function ClientWorkspaceDialog({ catalog, tenantId, initialTab = 
         {data && tab === 1 && <ModulesTab catalog={catalog} tenant={data} onSave={save} saving={saving} />}
         {data && tab === 2 && <ClientUsersPanel catalog={catalog} tenant={data} onChanged={changed} />}
         {data && tab === 3 && <ClientBranchesPanel tenant={data} onChanged={changed} />}
-        {data && tab === 4 && <HistoryTab catalog={catalog} tenantId={tenantId} version={version} />}
+        {data && tab === 4 && <ClientDataPanel tenant={data} />}
+        {data && tab === 5 && <ClientBackupsPanel tenant={data} />}
+        {data && tab === 6 && <HistoryTab catalog={catalog} tenantId={tenantId} version={version} />}
       </DialogContent>
       <DialogActions><Button onClick={onClose}>Close</Button></DialogActions>
 

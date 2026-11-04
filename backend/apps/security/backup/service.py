@@ -5,11 +5,16 @@ their BackupRecord / RestoreJob row, which the screen polls. One OperationLock r
 across every worker process: a second backup, or a backup during a restore, is refused rather than
 queued. A heartbeat thread keeps the row fresh; a job whose heartbeat stops (the process died) is
 marked failed by recover_stale() and its lock released.
+
+Per-client backups (platform console, client_tenant_id set) go through the same produce / verify
+path with a tenant_scope.TenantScope, under a lock of their own per client ('T<id>'), so one
+client's backup never waits on another's. Every whole-database query here excludes them.
 """
 import contextlib
 import hashlib
 import logging
 import os
+import re
 import secrets
 import threading
 from datetime import timedelta
@@ -40,11 +45,11 @@ class BackupBusy(archive.BackupError):
 
 # ---- the operation lock ------------------------------------------------------------------------
 
-def _acquire(holder):
-    OperationLock.objects.get_or_create(name=LOCK_NAME)
+def _acquire(holder, name=LOCK_NAME):
+    OperationLock.objects.get_or_create(name=name)
     now = timezone.now()
     free = Q(holder='') | Q(heartbeat_at__lt=now - STALE_AFTER) | Q(heartbeat_at__isnull=True)
-    claimed = OperationLock.objects.filter(Q(name=LOCK_NAME) & free).update(
+    claimed = OperationLock.objects.filter(Q(name=name) & free).update(
         holder=holder, acquired_at=now, heartbeat_at=now)
     if claimed:
         with _active_lock:
@@ -53,7 +58,7 @@ def _acquire(holder):
 
 
 def _release(holder):
-    OperationLock.objects.filter(name=LOCK_NAME, holder=holder).update(holder='', heartbeat_at=None)
+    OperationLock.objects.filter(holder=holder).update(holder='', heartbeat_at=None)
     with _active_lock:
         _active.discard(holder)
 
@@ -85,7 +90,7 @@ class _Heartbeat:
         now = timezone.now()
         try:
             self.model.objects.filter(pk=self.pk).update(heartbeat_at=now)
-            OperationLock.objects.filter(name=LOCK_NAME, holder=self.holder).update(heartbeat_at=now)
+            OperationLock.objects.filter(holder=self.holder).update(heartbeat_at=now)
         except Exception:  # SQLite write lock held by the restore — the in-process registry covers it
             pass
 
@@ -163,6 +168,67 @@ def start_backup(backup_type, *, user=None, actor_name='', request=None, run_asy
     return record
 
 
+def _client_identity(now, tenant, sections):
+    suffix = secrets.token_hex(2).upper()
+    code = re.sub(r'[^A-Za-z0-9]+', '-', tenant.code or '').strip('-')[:40] or f'client{tenant.pk}'
+    part = 'Full' if not sections else '-'.join(s.capitalize() for s in sections)[:60]
+    ident = f'BKP-T{tenant.pk}-{now:%Y%m%d-%H%M%S}-{suffix}'
+    filename = f'GreensolERP_{code}_{part}_{now:%Y%m%d_%H%M%S}_{suffix}.zip'
+    return ident, filename
+
+
+def client_lock_name(tenant_id):
+    return f'T{tenant_id}'
+
+
+def start_client_backup(tenant, sections=(), backup_type='MANUAL', *, user=None, actor_name='', run_async=True):
+    """Queue a backup of one client's data (all of it, or `sections`). Raises BackupBusy while
+    another backup of that client runs, or a whole-database restore."""
+    from . import tenant_scope
+    recover_stale()
+    sections = tenant_scope.normalize_sections(sections)
+    if restore_in_progress():
+        raise BackupBusy('A database restore is running. Try again when it finishes.')
+    now = timezone.now()
+    ident, filename = _client_identity(now, tenant, sections)
+    record = BackupRecord.objects.create(
+        backup_identifier=ident, filename=filename, backup_type=backup_type,
+        storage_location=storage.configured_store().location, status='QUEUED',
+        client_tenant_id=tenant.pk, sections=sections, initiated_by_id=getattr(user, 'pk', None),
+        initiated_by_name=(actor_name or getattr(user, 'username', '') or 'System')[:150])
+    holder = f'backup:{record.pk}'
+    if not _acquire(holder, client_lock_name(tenant.pk)):
+        record.delete()
+        raise BackupBusy(f'A backup of {tenant.name} is already running. Try again when it finishes.')
+    if run_async:
+        _spawn(_run_backup_job, record.pk, holder)
+    else:
+        _run_backup_job(record.pk, holder)
+    record.refresh_from_db()
+    return record
+
+
+def _scope_for(record):
+    if record.client_tenant_id is None:
+        return None
+    from apps.common.models import Tenant
+    from . import tenant_scope
+    return tenant_scope.TenantScope(Tenant.objects.get(pk=record.client_tenant_id), record.sections)
+
+
+def _client_log(record, action, **details):
+    """Per-client backups are also recorded in that client's history (platform console)."""
+    if record.client_tenant_id is None:
+        return
+    with contextlib.suppress(Exception):
+        from apps.common.models import Tenant
+        from apps.common.tenant_onboarding import log_event as tenant_log
+        from . import tenant_scope
+        tenant_log(Tenant.objects.get(pk=record.client_tenant_id), action, record.initiated_by_name,
+                   backup=record.backup_identifier, sections=tenant_scope.sections_label(record.sections),
+                   backup_type=record.backup_type, **details)
+
+
 def _run_backup_job(record_id, holder):
     try:
         _produce(BackupRecord.objects.get(pk=record_id), holder)
@@ -185,9 +251,10 @@ def _produce(record, holder):
     store = storage.store_for(record)
     tmp = storage.new_temp_path()
     try:
+        scope = _scope_for(record)
         with _Heartbeat(BackupRecord, record.pk, holder):
             with open(tmp, 'wb') as fh:
-                manifest = archive.write_archive(fh, backup_identifier=record.backup_identifier)
+                manifest = archive.write_archive(fh, backup_identifier=record.backup_identifier, scope=scope)
             size = os.path.getsize(tmp)
             checksum = _sha256(tmp)
             store.save(record, tmp)
@@ -197,10 +264,14 @@ def _produce(record, holder):
                 if _sha256(stored) != checksum:
                     raise archive.BackupError('The stored backup does not match what was written.')
                 archive.validate_archive(stored)
+        summary = archive.manifest_summary(manifest)
+        if scope:
+            summary['table_rows'] = {e['model']: e['rows'] for e in manifest['entries'].values() if e['rows']}
         BackupRecord.objects.filter(pk=record.pk).update(
             status='SUCCESS', verified=True, file_size=size, checksum=checksum,
-            manifest=archive.manifest_summary(manifest), completed_at=timezone.now(), error_summary='')
+            manifest=summary, completed_at=timezone.now(), error_summary='')
         record.refresh_from_db()
+        _client_log(record, 'BACKUP_COMPLETED', size=size, rows=manifest['total_rows'])
         log_event('BACKUP_COMPLETED', 'BACKUP',
                   f'{record.get_backup_type_display()} backup {record.backup_identifier} completed and verified',
                   actor_name=record.initiated_by_name,
@@ -216,6 +287,7 @@ def _produce(record, holder):
         log_event('BACKUP_FAILED', 'BACKUP', f'Backup {record.backup_identifier} failed',
                   actor_name=record.initiated_by_name, severity='ERROR',
                   details={'backup_id': str(record.pk), 'error': message})
+        _client_log(record, 'BACKUP_FAILED', error=message)
     finally:
         with contextlib.suppress(OSError):
             os.remove(tmp)
@@ -238,7 +310,10 @@ def import_upload(uploaded, *, user, request=None):
         checksum = _sha256(tmp)
         result = archive.validate_archive(tmp)
         manifest = result['manifest']
-        duplicate = BackupRecord.objects.filter(checksum=checksum, status='SUCCESS').first()
+        if archive.is_scoped(manifest):
+            raise archive.BackupError('This is a per-client backup (an export of one business from the platform '
+                                      'console). It cannot be restored over the whole database.')
+        duplicate = _available().filter(checksum=checksum).first()
         if duplicate:
             return duplicate, result, True
         record = _new_record('UPLOADED', user)
@@ -268,7 +343,12 @@ def import_upload(uploaded, *, user, request=None):
 # ---- deleting / retention ----------------------------------------------------------------------
 
 def _available():
-    return BackupRecord.objects.filter(status='SUCCESS', verified=True)
+    """Verified whole-database backups."""
+    return BackupRecord.objects.filter(status='SUCCESS', verified=True, client_tenant_id__isnull=True)
+
+
+def whole_db_records():
+    return BackupRecord.objects.filter(client_tenant_id__isnull=True)
 
 
 def deletion_blocker(record):
@@ -279,6 +359,8 @@ def deletion_blocker(record):
         return 'This backup has already been deleted.'
     if RestoreJob.objects.filter(backup=record, status__in=('QUEUED', 'RUNNING')).exists():
         return 'This backup is being restored.'
+    if record.client_tenant_id is not None:
+        return ''  # an export of one client; the keep-the-newest rule protects restorable backups only
     if record.available and not _available().exclude(pk=record.pk).exists():
         return 'This is the only verified backup — create another before deleting it.'
     return ''
@@ -323,6 +405,8 @@ def start_restore(record, *, user, request=None, keep_session=None):
     """Queue a restore. `keep_session` (the operator's sign-in) survives the sign-out-everyone at the
     end, so the operator's screen can still read the result."""
     recover_stale()
+    if record.client_tenant_id is not None:
+        raise archive.BackupError('A per-client backup cannot be restored over the whole database.')
     if not record.available:
         raise archive.BackupError('Only a successful, verified backup can be restored.')
     if not storage.store_for(record).exists(record):
@@ -449,15 +533,29 @@ def recover_stale():
                                   'a single transaction, so no data was changed.'):
                 log_event('RESTORE_FAILED', 'RESTORE', 'A restore was interrupted — no data was changed',
                           actor_name=job.initiated_by_name, severity='ERROR', details={'job_id': str(job.pk)})
-        OperationLock.objects.filter(name=LOCK_NAME).exclude(holder='').filter(
+        OperationLock.objects.exclude(holder='').filter(
             Q(heartbeat_at__lt=cutoff) | Q(heartbeat_at__isnull=True)).exclude(holder__in=live).update(
             holder='', heartbeat_at=None)
     except Exception:  # pragma: no cover - never break the status endpoints over housekeeping
         logger.exception('Backup stale-job recovery failed')
 
 
+def apply_client_retention(tenant_id, keep):
+    """Keep the newest `keep` automatic backups of one client. Returns the number deleted."""
+    deleted = 0
+    qs = BackupRecord.objects.filter(status='SUCCESS', verified=True, client_tenant_id=tenant_id,
+                                     backup_type='SCHEDULED').order_by('-created_at')
+    for record in qs[keep:]:
+        _purge(record, 'Retention policy', 'BACKUP_RETENTION_DELETED')
+        _client_log(record, 'BACKUP_RETENTION_DELETED')
+        deleted += 1
+    return deleted
+
+
 def storage_used_bytes():
-    return _available().aggregate(total=Sum('file_size'))['total'] or 0
+    """Every stored archive, whole-database and per-client: they share the same storage."""
+    return (BackupRecord.objects.filter(status='SUCCESS', verified=True)
+            .aggregate(total=Sum('file_size'))['total'] or 0)
 
 
 def expected_interval(schedule):
@@ -472,9 +570,9 @@ def health():
     now = timezone.now()
     # An uploaded archive is a copy of some other moment's data, not a backup of this system.
     last_success = _available().exclude(backup_type='UPLOADED').order_by('-completed_at').first()
-    last_finished = (BackupRecord.objects.filter(status__in=('SUCCESS', 'FAILED'))
+    last_finished = (whole_db_records().filter(status__in=('SUCCESS', 'FAILED'))
                      .exclude(backup_type='UPLOADED').order_by('-completed_at').first())
-    running = BackupRecord.objects.filter(status__in=('QUEUED', 'RUNNING')).order_by('-created_at').first()
+    running = whole_db_records().filter(status__in=('QUEUED', 'RUNNING')).order_by('-created_at').first()
     restoring = RestoreJob.objects.filter(status__in=('QUEUED', 'RUNNING')).order_by('-created_at').first()
     used = storage_used_bytes()
     capacity = storage.capacity_bytes()
@@ -537,6 +635,13 @@ def record_summary(record, *, detail=False):
         'initiated_by': record.initiated_by_name, 'error_summary': record.error_summary,
         'can_delete': not deletion_blocker(record) if detail else None,
     }
+    if record.client_tenant_id is not None:
+        from .tenant_scope import sections_label
+        out.update({'client_tenant_id': record.client_tenant_id, 'sections': record.sections,
+                    'sections_label': sections_label(record.sections),
+                    'total_rows': (record.manifest or {}).get('total_rows'),
+                    'table_count': (record.manifest or {}).get('table_count'),
+                    'table_rows': (record.manifest or {}).get('table_rows') if detail else None})
     if detail:
         out.update({'checksum': record.checksum, 'manifest': record.manifest,
                     'started_at': record.started_at.isoformat() if record.started_at else None,

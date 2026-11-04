@@ -21,6 +21,7 @@ import {
   UploadFile as ImportIcon
 } from '@mui/icons-material';
 import axios from 'axios';
+import { getMasterSnapshot, loadMaster } from '../utils/masterDataCache';
 import CategoryManagementView from '../components/inventory/CategoryManagementView';
 import BrandManagementView from '../components/inventory/BrandManagementView';
 import LensManagementView from '../components/inventory/LensManagementView';
@@ -109,20 +110,15 @@ export default function Products() {
     };
 
     // Paint instantly from whatever supplier names are already cached locally.
-    const localSuppList = readLocalSuppliers();
+    const cachedNames = (getMasterSnapshot('suppliers') || []).map(s => s.name).filter(Boolean);
+    const localSuppList = [...readLocalSuppliers(), ...cachedNames];
     if (localSuppList.length) setDbSuppliers(Array.from(new Set(localSuppList)).filter(Boolean));
 
     const fetchRegisteredSuppliers = async () => {
       let suppList = readLocalSuppliers();
 
       try {
-        let res;
-        try {
-          res = await axios.get('/api/purchase/suppliers/');
-        } catch (e1) {
-          res = await axios.get('/api/purchasing/suppliers/');
-        }
-        const raw = res.data?.results || res.data || [];
+        const raw = await loadMaster('suppliers');
         if (Array.isArray(raw)) {
           const apiNames = raw.map(s => s.name || s.company_name || s.company).filter(Boolean);
           suppList = [...suppList, ...apiNames];

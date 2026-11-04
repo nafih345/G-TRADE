@@ -17,6 +17,10 @@ record of itself. Uploaded media files are not part of the database and are not 
 
 Restore replaces every included table inside ONE transaction: if anything fails — a bad row, a
 constraint, the process dying — the database is left exactly as it was.
+
+A per-client archive (write_archive with a tenant_scope.TenantScope) has the same layout with only
+that tenant's rows and a manifest `scope` block. It is an export: restore_archive refuses it, as
+replacing whole tables with one client's rows would wipe every other client.
 """
 import base64
 import datetime
@@ -116,8 +120,9 @@ class _HashingWriter:
 
 # ---- dump --------------------------------------------------------------------------------------
 
-def write_archive(fileobj, *, backup_identifier, using=DEFAULT_DB_ALIAS, heartbeat=None):
-    """Write a complete archive of the database to `fileobj`; returns the manifest dict.
+def write_archive(fileobj, *, backup_identifier, using=DEFAULT_DB_ALIAS, heartbeat=None, scope=None):
+    """Write a complete archive of the database (or of `scope`: one tenant) to `fileobj`;
+    returns the manifest dict.
 
     All tables are read inside one transaction (REPEATABLE READ on PostgreSQL) so the archive is a
     consistent snapshot even while the shop keeps billing."""
@@ -130,7 +135,7 @@ def write_archive(fileobj, *, backup_identifier, using=DEFAULT_DB_ALIAS, heartbe
                 with connection.cursor() as cursor:
                     cursor.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
             migrations = applied_migrations(using)
-            for model in backup_models():
+            for model in (scope.models() if scope else backup_models()):
                 fields = list(model._meta.concrete_fields)
                 attnames = [f.attname for f in fields]
                 encoders = [(i, enc) for i, enc in ((i, _encoder(f)) for i, f in enumerate(fields)) if enc]
@@ -140,7 +145,8 @@ def write_archive(fileobj, *, backup_identifier, using=DEFAULT_DB_ALIAS, heartbe
                     out = _HashingWriter(raw)
                     header = {'model': model._meta.label_lower, 'fields': attnames}
                     out.write((json.dumps(header) + '\n').encode('utf-8'))
-                    qs = model._base_manager.using(using).order_by('pk').values_list(*attnames)
+                    qs = scope.queryset(model, using) if scope else model._base_manager.using(using)
+                    qs = qs.order_by('pk').values_list(*attnames)
                     for values in qs.iterator(chunk_size=2000):
                         if encoders:
                             values = list(values)
@@ -168,6 +174,8 @@ def write_archive(fileobj, *, backup_identifier, using=DEFAULT_DB_ALIAS, heartbe
             'total_rows': total_rows,
             'entries': entries,
         }
+        if scope:
+            manifest['scope'] = scope.manifest()
         zf.writestr(MANIFEST, json.dumps(manifest, indent=2))
     return manifest
 
@@ -187,7 +195,11 @@ def manifest_summary(manifest):
     """The part of a manifest worth keeping on the BackupRecord (no per-file hashes)."""
     return {k: manifest.get(k) for k in ('format_version', 'application', 'backup_identifier', 'created_at',
                                           'database_engine', 'django_version', 'table_count', 'total_rows',
-                                          'excluded')}
+                                          'excluded', 'scope')}
+
+
+def is_scoped(manifest):
+    return bool((manifest or {}).get('scope'))
 
 
 # ---- validation --------------------------------------------------------------------------------
@@ -344,6 +356,9 @@ def restore_archive(path, *, using=DEFAULT_DB_ALIAS, heartbeat=None):
     tables = 0
     with open_archive(path) as zf:
         manifest = read_manifest(zf)
+        if is_scoped(manifest):
+            raise BackupError('This is a per-client backup (an export of one business). It cannot be restored '
+                              'over the whole database.')
         with transaction.atomic(using=using):
             # FKs are DEFERRABLE INITIALLY DEFERRED on both engines, so delete-all-then-insert in
             # any order is consistent by commit time; check_constraints() below verifies early.

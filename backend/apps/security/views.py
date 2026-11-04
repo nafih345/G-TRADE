@@ -22,7 +22,7 @@ from apps.common.pagination import PageSizePagination
 from . import login_protection, policy, totp
 from .audit import log_event
 from .backup import archive, scheduler, service, storage
-from .models import BackupRecord, BackupSchedule, RestoreJob, SecurityAuditLog, SecuritySettings, UserTwoFactor
+from .models import BackupSchedule, RestoreJob, SecurityAuditLog, SecuritySettings, UserTwoFactor
 
 ADMIN_ROLES = {'SUPER_ADMIN', 'ADMINISTRATOR'}   # view status, run / download backups, edit schedule
 OWNER_ROLES = {'SUPER_ADMIN'}                    # security policy, restore, upload, delete backups
@@ -353,7 +353,7 @@ class BackupHistoryView(APIView):
 
     def get(self, request):
         service.recover_stale()
-        qs = BackupRecord.objects.all()
+        qs = service.whole_db_records()
         kind = (request.query_params.get('type') or '').upper()
         if kind:
             qs = qs.filter(backup_type=kind)
@@ -383,10 +383,10 @@ class BackupDetailView(APIView):
 
     def get(self, request, pk):
         service.recover_stale()
-        return Response(service.record_summary(get_object_or_404(BackupRecord, pk=pk), detail=True))
+        return Response(service.record_summary(get_object_or_404(service.whole_db_records(), pk=pk), detail=True))
 
     def delete(self, request, pk):
-        record = get_object_or_404(BackupRecord, pk=pk)
+        record = get_object_or_404(service.whole_db_records(), pk=pk)
         try:
             service.delete_backup(record, user=request.user, request=request)
         except archive.BackupError as exc:
@@ -401,7 +401,7 @@ class BackupDownloadLinkView(APIView):
     permission_classes = [AdminOnly, SingleTenantInstall]
 
     def post(self, request, pk):
-        record = get_object_or_404(BackupRecord, pk=pk)
+        record = get_object_or_404(service.whole_db_records(), pk=pk)
         if not record.available or not storage.store_for(record).exists(record):
             return Response({'detail': 'This backup is not available for download.'}, status=status.HTTP_409_CONFLICT)
         token = signing.dumps({'b': str(record.pk), 'u': str(request.user.pk)}, salt=DOWNLOAD_SALT, compress=True)
@@ -427,7 +427,7 @@ class BackupDownloadView(APIView):
         user = get_user_model().objects.filter(pk=claims.get('u'), is_active=True).first()
         if user is None or user_role(user) not in ADMIN_ROLES:
             return Response({'detail': 'You are not allowed to download backups.'}, status=status.HTTP_403_FORBIDDEN)
-        record = get_object_or_404(BackupRecord, pk=pk)
+        record = get_object_or_404(service.whole_db_records(), pk=pk)
         if not record.available:
             return Response({'detail': 'This backup is not available for download.'}, status=status.HTTP_409_CONFLICT)
         store = storage.store_for(record)
@@ -488,7 +488,7 @@ class RestoreStartView(APIView):
         errors = {}
         if str(data.get('confirmation') or '').strip() != 'RESTORE':
             errors['confirmation'] = 'Type RESTORE to confirm.'
-        record = BackupRecord.objects.filter(pk=data.get('backup_id')).first() if _is_uuid(data.get('backup_id')) else None
+        record = service.whole_db_records().filter(pk=data.get('backup_id')).first() if _is_uuid(data.get('backup_id')) else None
         if record is None:
             errors['backup_id'] = 'Choose a backup to restore.'
         login_protection.ensure_not_locked(request.user.username, request)

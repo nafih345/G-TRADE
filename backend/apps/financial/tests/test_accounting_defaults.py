@@ -40,10 +40,10 @@ class PurchaseBooksAfterWipeTests(TestCase):
     def test_mappings_wiped_purchase_still_posts_to_the_right_heads(self):
         wipe_financial_setup()
         pi = self.purchase()
-        # Stock at cost, GST input credit, round off — against the generic supplier payable
-        # (this supplier has no own sub-ledger).
+        # Stock at cost, GST input credit, round off — against the supplier's own AP sub-ledger
+        # (created with the supplier, untouched by the wipe of mappings).
         self.assertEqual(lines_of(live('purchasing', 'purchase_invoice', pi.pk).get()),
-                         {'1003': D('1000'), '1020': D('90'), '5070': D('0.40'), '2001': D('-1090.40')})
+                         {'1003': D('1000'), '1020': D('90'), '5070': D('0.40'), 'AP-SUP-1': D('-1090.40')})
         self.assertEqual(set(AccountMapping.objects.values_list('role', flat=True)), set(ROLES))
         self.assertFalse(PostingFailure.objects.filter(status='OPEN').exists())
         self.assertTrue(ledger_is_balanced())

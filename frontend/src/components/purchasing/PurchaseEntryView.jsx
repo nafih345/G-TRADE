@@ -5,7 +5,7 @@ import {
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
   Paper, IconButton, Stack, Divider, Chip, Autocomplete, Alert, Tooltip,
   Dialog, DialogTitle, DialogContent, DialogActions, Badge,
-  Menu, Checkbox, FormControlLabel
+  Menu, Checkbox, FormControlLabel, Skeleton
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -40,6 +40,7 @@ import { CASH_PAID, CASH_UNPAID, needsBank } from '../../utils/paymentModes';
 import ProductMasterDialog from '../inventory/ProductMasterDialog';
 import ProductVariantMaster from '../inventory/variants/ProductVariantMaster';
 import BarcodePrintDialog from '../inventory/BarcodePrintDialog';
+import PurchaseBarcodePrinting from './PurchaseBarcodePrinting';
 import { useDebounce } from '../../hooks/useDebounce';
 import useBarcodeScanner from '../../hooks/useBarcodeScanner';
 import { printPurchaseReceipt } from '../../utils/printPurchase';
@@ -207,7 +208,7 @@ const rowFromInvoiceItem = (it) => {
   };
 };
 
-export default function PurchaseEntryView({ suppliers = [], products = [], initialSupplierId = '', initialPurchaseOrderId = '', initialLensPoId = '', editInvoiceId = '', onSaveComplete, onRequestAddSupplier }) {
+export default function PurchaseEntryView({ suppliers = [], suppliersLoading = false, products = [], initialSupplierId = '', initialPurchaseOrderId = '', initialLensPoId = '', editInvoiceId = '', onSaveComplete, onRequestAddSupplier }) {
   const supplierInputRef = useRef(null);
   const dateInputRef = useRef(null);
   const productSearchRef = useRef(null);
@@ -267,6 +268,9 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
   // Grid
   const [rows, setRows] = useState([]);
   const [labelPrintOpen, setLabelPrintOpen] = useState(false);
+  // Barcode Printing section: the entry being edited, else the last one saved / picked there.
+  const [labelInvoiceId, setLabelInvoiceId] = useState('');
+  const [labelRefresh, setLabelRefresh] = useState(0);
 
   // Summary / Payment
   const [otherCharges, setOtherCharges] = useState(0);
@@ -515,6 +519,7 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
       if (cancelled) return;
       const inv = res.data || {};
       setEditingId(inv.id || editInvoiceId);
+      setLabelInvoiceId(inv.id || editInvoiceId);
       setEditingLabel(inv.invoice_number || '');
       setInvoiceNumber(inv.invoice_number || genInvoiceNumber());
       setSupplierInvoiceNumber(inv.supplier_invoice_number || '');
@@ -960,6 +965,8 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
       }
 
       syncLegacyStores(saved);
+      setLabelInvoiceId(saved.id);
+      setLabelRefresh((n) => n + 1);
 
       if (linkedPO && saveStatus !== 'DRAFT') {
         axios.post(`/api/purchase/orders/${linkedPO.id}/mark-converted/`).then(fetchOpenPOs).catch(() => {});
@@ -1093,11 +1100,20 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
               options={allSuppliers}
               getOptionLabel={(o) => o.name || o.company_name || ''}
               value={selectedSupplier || null}
+              loading={suppliersLoading}
+              loadingText="Loading suppliers…"
               autoHighlight
               onChange={(e, val) => { setSelectedSupplierId(val ? val.id : ''); if (val) focusNextAfterRender(document.activeElement, 60); }}
               renderInput={(params) => (
                 <TextField {...params} label="Supplier" size="small" inputRef={supplierInputRef}
-                  InputProps={{ ...params.InputProps, endAdornment: (
+                  InputLabelProps={{ ...params.InputLabelProps, ...(suppliersLoading ? { shrink: true } : {}) }}
+                  InputProps={{ ...params.InputProps,
+                    // First load with nothing cached yet: a shimmer instead of a blank field that
+                    // later fills in by itself. The input stays focusable meanwhile (F3).
+                    startAdornment: suppliersLoading && !params.inputProps.value
+                      ? <Skeleton variant="text" animation="wave" sx={{ flex: 1, minWidth: 80, mr: 1 }} aria-label="Loading suppliers" />
+                      : params.InputProps.startAdornment,
+                    endAdornment: (
                     <>
                       <Tooltip title="Add Supplier (F4)">
                         <IconButton size="small" tabIndex={-1} onClick={() => onRequestAddSupplier?.()}><AddIcon fontSize="small" /></IconButton>
@@ -1714,6 +1730,9 @@ export default function PurchaseEntryView({ suppliers = [], products = [], initi
           </Grid>
         </Grid>
       </Card>
+
+      {/* 5b. Barcode Printing — tracked, resumable label printing for a saved entry */}
+      <PurchaseBarcodePrinting invoiceId={labelInvoiceId} refreshKey={labelRefresh} onInvoiceChange={setLabelInvoiceId} />
 
       {/* 6. Sticky Action Bar */}
       <Box sx={{ position: 'sticky', bottom: 0, mt: 2, py: 1.5, px: 2, bgcolor: 'background.paper', borderTop: '1px solid', borderColor: 'divider', display: 'flex', justifyContent: 'flex-end', gap: 1.5, zIndex: 10 }}>

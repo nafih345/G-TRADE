@@ -12,6 +12,8 @@ import { CASH_PAID, CASH_UNPAID, needsBank } from '../../utils/paymentModes';
 import { eyeTestFeeLine, isEyeTestFeeLine } from '../../utils/eyeTestBill';
 import PaymentModeDetails from '../common/PaymentModeDetails';
 import { getBusinessPrefs } from '../../utils/localeFormat';
+import { PRICING_FLOORS_API, findPriceViolations, violationText, offerUnitPrice } from '../../utils/pricingRules';
+import PriceApprovalDialog from './PriceApprovalDialog';
 import {
   PAIR, PIECE, BOTH, RE, LE, BASE_OPTIONS, isPairSellable, isSpectacleLensCategory, lensPricing, unitPrice,
   priceBasis, physicalQty, unitWord, qtyLabel, stockHint, formatDioptre, eyeEntered,
@@ -49,9 +51,11 @@ import {
   ReceiptLong as BillIcon,
   CheckCircle as DoneIcon,
   AddCircleOutline as NewSaleIcon,
-  Edit as EditIcon
+  Edit as EditIcon,
+  GppMaybe as PriceLockIcon
 } from '@mui/icons-material';
 import PrintInvoiceModal from './PrintInvoiceModal';
+import TestNoLookupDialog from './TestNoLookupDialog';
 import ServiceMasterDialog from './ServiceMasterDialog';
 import ProductMasterDialog from '../inventory/ProductMasterDialog';
 import { navScopeProps, enterOpensSelectProps, focusField, focusRelative } from '../../pages/wholesale/keyboardNav';
@@ -120,7 +124,7 @@ const productHaystack = (p) => {
 
 // Compact always-on in-cell editor for the billing grid — every row's cells are live inputs,
 // no "edit mode" toggle. onBlur tidies the row (coerce numbers, dash-fill blanks).
-const GridCellInput = ({ value, onChange, onBlur, type = 'text', width = 88, align = 'left' }) => (
+const GridCellInput = ({ value, onChange, onBlur, type = 'text', width = 88, align = 'left', field }) => (
   <TextField
     size="small"
     variant="standard"
@@ -129,7 +133,7 @@ const GridCellInput = ({ value, onChange, onBlur, type = 'text', width = 88, ali
     onChange={(e) => onChange(e.target.value)}
     onBlur={onBlur}
     onFocus={(e) => e.target.select()}
-    inputProps={type === 'number' ? { min: 0 } : undefined}
+    inputProps={{ ...(type === 'number' ? { min: 0 } : {}), ...(field ? { 'data-grid-field': field } : {}) }}
     sx={{
       width,
       '& input': { fontSize: '0.75rem', py: 0.3, textAlign: align, fontWeight: 700 },
@@ -138,6 +142,26 @@ const GridCellInput = ({ value, onChange, onBlur, type = 'text', width = 88, ali
     }}
   />
 );
+
+// Stock badge on the billing grid's search-match rows: green with the quantity when available,
+// red "0 · Out of Stock" when not, a plain dash when there's no stock figure (services).
+const StockBadge = ({ stock }) => {
+  if (stock == null || stock === '') return <Box component="span" sx={{ color: 'text.disabled' }}>—</Box>;
+  const n = parseFloat(stock);
+  const inStock = Number.isFinite(n) && n > 0;
+  return (
+    <Chip
+      size="small"
+      label={inStock ? `Stock: ${stock}` : `${Number.isFinite(n) ? stock : 0} · Out of Stock`}
+      sx={{
+        fontWeight: 900, height: 22, fontSize: '0.7rem', whiteSpace: 'nowrap',
+        bgcolor: inStock ? '#dcfce7' : '#fee2e2',
+        color: inStock ? '#15803d' : '#b91c1c',
+        border: `1px solid ${inStock ? '#86efac' : '#fca5a5'}`,
+      }}
+    />
+  );
+};
 
 // A line's discount can be entered two ways: as a % of the line's gross, or as a flat rupee
 // amount off. `discMode` picks which, `discValue` holds whatever the user typed in that mode —
@@ -668,6 +692,7 @@ export default function NewSaleWizard({
   const [docType, setDocType] = useState('Invoice');
   const [billNo, setBillNo] = useState(() => generateDocNumber('Invoice'));
   const [testNo, setTestNo] = useState('');
+  const [testLookupOpen, setTestLookupOpen] = useState(false);
   
   const [selectedCustomerId, setSelectedCustomerId] = useState('');
   const [customerInput, setCustomerInput] = useState({ ...EMPTY_CUSTOMER });
@@ -806,6 +831,11 @@ export default function NewSaleWizard({
   const [couponCode, setCouponCode] = useState('');
   const [couponDisc, setCouponDisc] = useState(0);
   const [overallDisc, setOverallDisc] = useState(0);
+  // Settings → Pricing Rules & Offers: the floors of this bill's products ({productId: info}, only
+  // while the below-cost lock is on) and the manager-approval dialog ({lines, resolve} while open).
+  const [priceFloors, setPriceFloors] = useState({ settings: null, floors: {}, canOverride: false });
+  const [priceApproval, setPriceApproval] = useState(null);
+  const floorsFetched = useRef(new Set());
   const [outRx, setOutRx] = useState('');
   
   const [multiPay, setMultiPay] = useState({ ...EMPTY_MULTI_PAY });
@@ -1461,6 +1491,7 @@ export default function NewSaleWizard({
     });
     setSelectedProductDetail(null);
     setProductSearchText('');
+    return newItem.id;
   };
 
   // Hardware barcode scanner: looks up the product and adds it directly to the
@@ -1996,11 +2027,24 @@ export default function NewSaleWizard({
     ...searchMatches.map(p => buildEntryFromProduct(p)),
     ...serviceMatches.map(s => buildEntryFromService(s)),
   ];
+  // Stock is a browsing aid: the grid's Stock column exists only while search matches are listed
+  // and is filled only on those match rows — once an item is picked it's gone from the line.
+  const showStockCol = matchEntries.length > 0;
+  const gridCols = showStockCol ? 16 : 15;
   const activeMatch = matchIndex >= 0 && matchIndex < matchEntries.length ? matchIndex : -1;
+  // Picking a match (click or Enter) drops the line into the bill and puts the cursor straight in
+  // that line's Qty cell, so the count can be typed without reaching for the mouse.
   const addMatch = (src) => {
-    handleAddItem(src);
+    const rowId = handleAddItem(src);
     setMatchIndex(-1);
+    if (rowId) focusGridQtySoon(rowId);
   };
+  const focusGridQtySoon = (rowId) => setTimeout(() => {
+    const el = posRootRef.current?.querySelector(`[data-item-row="${rowId}"] [data-grid-field="qty"]`);
+    if (!el) return;
+    el.scrollIntoView({ block: 'nearest' });
+    el.focus();
+  }, 30);
   const handleSearchKeyDown = (e) => {
     const count = matchEntries.length;
     if (e.key === 'ArrowDown' && count) {
@@ -2062,6 +2106,7 @@ export default function NewSaleWizard({
       return true;
     },
     testNo: () => focusNsField('testNo'),
+    testLookup: () => { if (formLocked) return false; setTestLookupOpen(true); return true; },
     docOrder: () => handleDocTypeChange('Order'),
     docInvoice: () => handleDocTypeChange('Invoice'),
     docQuotation: () => handleDocTypeChange('Quotation'),
@@ -2167,6 +2212,27 @@ export default function NewSaleWizard({
   
   const totalDiscount = round2(itemDiscounts + couponDisc + overallDisc);
 
+  // Lines priced under their cost / minimum margin / offer price. The server makes the same check
+  // and refuses the save without a manager's approval; this only flags them as they are typed.
+  const productIdsKey = [...new Set(itemsList.map(r => r.productId).filter(Boolean))].sort().join(',');
+  useEffect(() => {
+    const missing = (productIdsKey ? productIdsKey.split(',') : []).filter(id => !floorsFetched.current.has(id));
+    if (!missing.length && priceFloors.settings) return;
+    axios.post(PRICING_FLOORS_API, { products: missing })
+      .then(res => {
+        missing.forEach(id => floorsFetched.current.add(id));
+        setPriceFloors(prev => ({ settings: res.data.settings, canOverride: !!res.data.can_override,
+          floors: { ...prev.floors, ...res.data.floors } }));
+      })
+      .catch(() => { /* the server still checks on save */ });
+  }, [productIdsKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const priceViolations = useMemo(
+    () => findPriceViolations(itemsList, priceFloors.floors, (parseFloat(couponDisc) || 0) + (parseFloat(overallDisc) || 0)),
+    [itemsList, priceFloors.floors, couponDisc, overallDisc]
+  );
+  const violationRows = itemsList.filter(r => priceViolations[r.id]);
+  const requestPriceApproval = (lines) => new Promise(resolve => setPriceApproval({ lines, resolve }));
+
   // Split advance: Advance Paid (= Total Paid) is always Cash + Card + UPI + Bank. It can be typed
   // as a total (applyAdvanceTotal spreads it over the boxes) or built up in the pay-mode table,
   // but it is never a second figure added on top of them. Balance Due = Net Payable − Advance
@@ -2271,14 +2337,25 @@ export default function NewSaleWizard({
     savingRef.current = true;
     setIsSaving(true);
     try {
-      await saveCompletedSale();
+      // Below-cost lines can't go to payment without a manager's approval.
+      let priceExtra = {};
+      if (violationRows.length) {
+        const approved = await requestPriceApproval(violationRows.map(r => ({ name: r.item, text: violationText(priceViolations[r.id]) })));
+        if (!approved) {
+          notify(`The ${docType.toLowerCase()} was NOT saved — a price is below the cost price. Change it or get a manager's approval.`);
+          return;
+        }
+        const { approvedBy, ...fields } = approved; // eslint-disable-line no-unused-vars
+        priceExtra = fields;
+      }
+      await saveCompletedSale(priceExtra);
     } finally {
       savingRef.current = false;
       setIsSaving(false);
     }
   };
 
-  const saveCompletedSale = async () => {
+  const saveCompletedSale = async (priceExtra = {}) => {
 
     // Resolve-or-create the real backend Customer this sale belongs to — same pattern as
     // handleSavePatient/Appointments.jsx, so a walk-in typed directly here still lands in the
@@ -2363,6 +2440,8 @@ export default function NewSaleWizard({
             power: i.power || '',
             quantity: i.qty,
             unit_price: i.price,
+            // The line's own discount — the server's below-cost check prices the line net of it.
+            discount: i.disc || 0,
             tax_rate: i.taxPercent,
             tax_amount: i.tax,
             subtotal: i.total,
@@ -2376,21 +2455,43 @@ export default function NewSaleWizard({
           ? (editingDoc.isBackend ? axios.patch(`/api/sales/invoices/${editingDoc.id}/`, { ...payload, ...extra }) : null)
           : axios.post('/api/sales/invoices/', { ...payload, ...extra }));
         let res;
-        try {
-          res = await send();
-        } catch (err) {
-          // Negative stock is switched off and a line is short: say which, and let a Super Admin /
-          // Administrator post it anyway (the server checks the role).
-          if (err?.response?.data?.code !== 'insufficient_stock') throw err;
-          const ok = window.confirm(
-            `${err.response.data.detail}\n\nOK: override and post anyway (Super Admin / Administrator only).\n`
-            + 'Cancel: go back and change the quantities.'
-          );
-          if (!ok) {
-            notify(`The ${docType.toLowerCase()} was NOT saved — not enough stock.`);
-            return;
+        let extra = { ...priceExtra };
+        for (let attempt = 0; ; attempt += 1) {
+          try {
+            res = await send(extra);
+            break;
+          } catch (err) {
+            const code = err?.response?.data?.code;
+            if (attempt >= 2 || (code !== 'insufficient_stock' && code !== 'below_cost')) throw err;
+            if (code === 'below_cost') {
+              // The server found a line under its floor the grid didn't flag (rules changed since
+              // the lines were added): a manager approves it, or the bill goes back for a new price.
+              const lines = (err.response.data.violations || []).map(v => ({
+                name: v.name,
+                text: violationText({ netUnit: v.net_unit, floorUnit: v.floor_unit, costUnit: v.cost_unit,
+                  offer: v.offer, marginApplied: v.margin_applied }),
+              }));
+              const approved = await requestPriceApproval(lines);
+              if (!approved) {
+                notify(`The ${docType.toLowerCase()} was NOT saved — a price is below the cost price.`);
+                return;
+              }
+              const { approvedBy, ...fields } = approved; // eslint-disable-line no-unused-vars
+              extra = { ...extra, ...fields };
+              continue;
+            }
+            // Negative stock is switched off and a line is short: say which, and let a Super Admin /
+            // Administrator post it anyway (the server checks the role).
+            const ok = window.confirm(
+              `${err.response.data.detail}\n\nOK: override and post anyway (Super Admin / Administrator only).\n`
+              + 'Cancel: go back and change the quantities.'
+            );
+            if (!ok) {
+              notify(`The ${docType.toLowerCase()} was NOT saved — not enough stock.`);
+              return;
+            }
+            extra = { ...extra, override_negative_stock: true };
           }
-          res = await send({ override_negative_stock: true });
         }
         if (res) {
           backendInvoiceId = res.data.id;
@@ -2642,6 +2743,22 @@ export default function NewSaleWizard({
                   inputRef={firstFieldRef}
                   value={testNo} onChange={(e) => handleTestNoChange(e.target.value)}
                   inputProps={{ 'data-ns-field': 'testNo', style: { fontWeight: 800, fontSize: '0.85rem' } }}
+                  InputProps={{
+                    endAdornment: (
+                      <InputAdornment position="end">
+                        <Tooltip title="Browse eye tests (Alt+K)">
+                          <IconButton size="small" edge="end" onClick={() => setTestLookupOpen(true)} aria-label="Browse eye tests">
+                            <SearchIcon fontSize="small" />
+                          </IconButton>
+                        </Tooltip>
+                      </InputAdornment>
+                    ),
+                  }}
+                />
+                <TestNoLookupDialog
+                  open={testLookupOpen}
+                  onClose={() => setTestLookupOpen(false)}
+                  onSelect={(row) => handleTestNoChange(String(row.test_no || ''))}
                 />
               </Grid>
 
@@ -3341,7 +3458,6 @@ export default function NewSaleWizard({
                 {(selectedProductDetail.category || selectedProductDetail.type) && (
                   <Chip size="small" label={`Category: ${(selectedProductDetail.category || selectedProductDetail.type).toString().toUpperCase()}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
                 )}
-                <Chip size="small" label={`Stock: ${liveStock(selectedProductDetail.id, selectedProductDetail.stock) ?? '—'}`} color={parseInt(liveStock(selectedProductDetail.id, selectedProductDetail.stock)) > 0 ? 'success' : 'error'} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
                 <Chip size="small" label={`Price: ₹${selectedProductDetail.price || selectedProductDetail.sellingPrice || 0}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
                 {selectedProductDetail.barcode && (
                   <Chip size="small" label={`Barcode: ${selectedProductDetail.barcode}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
@@ -3384,6 +3500,7 @@ export default function NewSaleWizard({
                   <TableRow>
                     <TableCell sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Barcode</TableCell>
                     <TableCell sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Item Description</TableCell>
+                    {showStockCol && <TableCell align="center" sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Stock</TableCell>}
                     <TableCell sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Model No</TableCell>
                     <TableCell sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Color</TableCell>
                     <TableCell sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Size</TableCell>
@@ -3402,7 +3519,7 @@ export default function NewSaleWizard({
                 <TableBody>
                   {itemsList.length === 0 && !previewLine && searchMatches.length === 0 && serviceMatches.length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={15} align="center" sx={{ py: 4 }}>
+                      <TableCell colSpan={gridCols} align="center" sx={{ py: 4 }}>
                         <Typography variant="body2" color="text.secondary" fontWeight={600}>
                           Billing grid is blank. Search Products, Lenses &amp; Services in the Optical DB selector above — matches appear here — or enter details to add.
                         </Typography>
@@ -3412,7 +3529,7 @@ export default function NewSaleWizard({
 
                   {searchMatches.length > 0 && (
                     <TableRow sx={{ bgcolor: '#e0f2fe' }}>
-                      <TableCell colSpan={15} sx={{ py: 0.4, fontWeight: 900, fontSize: '0.68rem', letterSpacing: 0.5, color: '#0f172a' }}>
+                      <TableCell colSpan={gridCols} sx={{ py: 0.4, fontWeight: 900, fontSize: '0.68rem', letterSpacing: 0.5, color: '#0f172a' }}>
                         📦 PRODUCTS &amp; 👓 LENSES
                       </TableCell>
                     </TableRow>
@@ -3441,11 +3558,6 @@ export default function NewSaleWizard({
                           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6, flexWrap: 'wrap' }}>
                             <Chip label="MATCH" size="small" color="info" variant="outlined" sx={{ fontWeight: 900, height: 18, fontSize: '0.6rem' }} />
                             {src.item}
-                            {stock != null && (
-                              <Box component="span" sx={{ fontSize: '0.65rem', fontWeight: 800, color: parseInt(stock) > 0 ? 'success.main' : 'error.main' }}>
-                                Stock: {stock}
-                              </Box>
-                            )}
                           </Box>
                           {(src.supplier || src.rack) && (
                             <Box sx={{ fontSize: '0.62rem', fontWeight: 700, color: 'text.secondary', mt: 0.2 }}>
@@ -3455,6 +3567,7 @@ export default function NewSaleWizard({
                             </Box>
                           )}
                         </TableCell>
+                        <TableCell align="center"><StockBadge stock={stock} /></TableCell>
                         <TableCell sx={{ fontSize: '0.8rem' }}>{src.modelNo || '—'}</TableCell>
                         <TableCell sx={{ fontSize: '0.8rem' }}>{src.color || '—'}</TableCell>
                         <TableCell sx={{ fontSize: '0.8rem' }}>{src.size || '—'}</TableCell>
@@ -3488,7 +3601,7 @@ export default function NewSaleWizard({
 
                   {serviceMatches.length > 0 && (
                     <TableRow sx={{ bgcolor: '#fef3c7' }}>
-                      <TableCell colSpan={15} sx={{ py: 0.4, fontWeight: 900, fontSize: '0.68rem', letterSpacing: 0.5, color: '#0f172a' }}>
+                      <TableCell colSpan={gridCols} sx={{ py: 0.4, fontWeight: 900, fontSize: '0.68rem', letterSpacing: 0.5, color: '#0f172a' }}>
                         🔧 SERVICES
                       </TableCell>
                     </TableRow>
@@ -3519,6 +3632,7 @@ export default function NewSaleWizard({
                             {src.item}
                           </Box>
                         </TableCell>
+                        <TableCell align="center"><StockBadge stock={null} /></TableCell>
                         <TableCell sx={{ fontSize: '0.8rem' }}>—</TableCell>
                         <TableCell sx={{ fontSize: '0.8rem' }}>—</TableCell>
                         <TableCell sx={{ fontSize: '0.8rem' }}>—</TableCell>
@@ -3553,11 +3667,6 @@ export default function NewSaleWizard({
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6, flexWrap: 'wrap' }}>
                           <Chip label="PREVIEW" size="small" color="info" sx={{ fontWeight: 900, height: 18, fontSize: '0.6rem' }} />
                           {previewSource.item}
-                          {liveStock(previewSource.productId, previewSource.stock) != null && (
-                            <Box component="span" sx={{ fontSize: '0.65rem', fontWeight: 800, color: parseInt(liveStock(previewSource.productId, previewSource.stock)) > 0 ? 'success.main' : 'error.main' }}>
-                              Stock: {liveStock(previewSource.productId, previewSource.stock)}
-                            </Box>
-                          )}
                         </Box>
                         {(previewSource.supplier || previewSource.rack) && (
                           <Box sx={{ fontSize: '0.62rem', fontWeight: 700, color: 'text.secondary', mt: 0.2 }}>
@@ -3567,6 +3676,7 @@ export default function NewSaleWizard({
                           </Box>
                         )}
                       </TableCell>
+                      {showStockCol && <TableCell />}
                       <TableCell sx={{ fontSize: '0.8rem' }}>{previewSource.modelNo || '—'}</TableCell>
                       <TableCell sx={{ fontSize: '0.8rem' }}>{previewSource.color || '—'}</TableCell>
                       <TableCell sx={{ fontSize: '0.8rem' }}>{previewSource.size || '—'}</TableCell>
@@ -3593,7 +3703,7 @@ export default function NewSaleWizard({
                       <TableCell align="right" sx={{ fontWeight: 900, color: 'primary.main', fontSize: '0.85rem' }}>₹{previewLine.total.toFixed(2)}</TableCell>
                       <TableCell align="center">
                         <Tooltip title="Add to bill">
-                          <IconButton size="small" color="success" onClick={() => handleAddItem(previewSource)}>
+                          <IconButton size="small" color="success" onClick={() => { const id = handleAddItem(previewSource); if (id) focusGridQtySoon(id); }}>
                             <AddIcon fontSize="small" />
                           </IconButton>
                         </Tooltip>
@@ -3615,21 +3725,32 @@ export default function NewSaleWizard({
                       const cellInput = (field, opts = {}) => (
                         <GridCellInput value={row[field]} onChange={set(field)} onBlur={tidy} {...opts} />
                       );
+                      const belowCost = priceViolations[row.id];
+                      const floorInfo = row.productId ? priceFloors.floors[row.productId] : null;
+                      const offerPrice = floorInfo?.offer ? offerUnitPrice(row, floorInfo) : null;
                       return (
-                      <TableRow key={row.id} data-item-row={row.id} hover sx={{ '&:nth-of-type(even)': { bgcolor: '#f8fafc' }, ...(isSvcRow ? { bgcolor: '#fffbeb' } : {}) }}>
+                      <TableRow key={row.id} data-item-row={row.id} data-below-cost={belowCost ? 'true' : undefined} hover sx={{ '&:nth-of-type(even)': { bgcolor: '#f8fafc' }, ...(isSvcRow ? { bgcolor: '#fffbeb' } : {}), ...(belowCost ? { bgcolor: '#fef2f2 !important', boxShadow: 'inset 4px 0 0 #dc2626' } : {}) }}>
                         <TableCell sx={{ fontWeight: 800, color: isSvcRow ? '#b45309' : 'primary.main', fontSize: '0.8rem' }}>{row.barcode}</TableCell>
                         <TableCell sx={{ fontWeight: 700, fontSize: '0.8rem' }}>
                           {row.item}
-                          {!isSvcRow && (row.supplier || row.rack || row.stock != null) && (
+                          {!isSvcRow && (row.supplier || row.rack) && (
                             <Box sx={{ fontSize: '0.62rem', fontWeight: 700, color: 'text.secondary', mt: 0.2 }}>
                               {row.supplier ? `Supplier: ${row.supplier}` : ''}
                               {row.supplier && row.rack ? '  ·  ' : ''}
                               {row.rack ? `Rack: ${row.rack}` : ''}
-                              {(row.supplier || row.rack) && row.stock != null ? '  ·  ' : ''}
-                              {row.stock != null ? `Stock: ${row.stock}` : ''}
                             </Box>
                           )}
+                          {floorInfo?.offer && (
+                            <Tooltip title={offerPrice != null && Number(row.price) !== offerPrice
+                              ? `${floorInfo.offer.tag}: may sell down to ₹${offerPrice.toFixed(2)} — click to apply`
+                              : `${floorInfo.offer.tag}: ${offerPrice != null ? `offer price ₹${offerPrice.toFixed(2)}` : 'may sell at any price'}`}>
+                              <Chip size="small" icon={<DiscountIcon />} label={floorInfo.offer.tag} color="success" variant="outlined"
+                                onClick={offerPrice != null ? () => { set('price')(offerPrice); } : undefined}
+                                sx={{ mt: 0.3, height: 18, fontSize: '0.6rem', fontWeight: 800, '& .MuiChip-icon': { fontSize: 12 } }} />
+                            </Tooltip>
+                          )}
                         </TableCell>
+                        {showStockCol && <TableCell />}
                         <TableCell sx={{ fontSize: '0.8rem' }}>{row.modelNo}</TableCell>
                         <TableCell sx={{ fontSize: '0.8rem' }}>{row.color}</TableCell>
                         <TableCell sx={{ fontSize: '0.8rem' }}>{row.size}</TableCell>
@@ -3650,19 +3771,26 @@ export default function NewSaleWizard({
                           ) : row.power}
                         </TableCell>
                         <TableCell align="center" sx={{ fontWeight: 900, fontSize: '0.85rem' }}>
-                          {cellInput('qty', { type: 'number', width: 44, align: 'center' })}
+                          {cellInput('qty', { type: 'number', width: 44, align: 'center', field: 'qty' })}
                           {row.lens && (
                             <Box component="span" data-lens-qty={row.id} sx={{ display: 'block', fontSize: '0.6rem', fontWeight: 800, color: '#1e3a8a', whiteSpace: 'nowrap' }}>
                               {unitWord(row.lens.sellingUnit, row.qty)} · {physicalQty(row.lens.sellingUnit, row.qty)} {physicalQty(row.lens.sellingUnit, row.qty) === 1 ? 'lens' : 'lenses'}
                             </Box>
                           )}
                         </TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>
+                        <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem', ...(belowCost ? { '& input': { color: '#dc2626', fontWeight: 900 }, '& .MuiInput-underline:before, & .MuiInput-underline:after': { borderBottomColor: '#dc2626' } } : {}) }}>
                           {cellInput('price', { type: 'number', width: 64, align: 'right' })}
                           {row.lens && (
                             <Box component="span" sx={{ display: 'block', fontSize: '0.6rem', fontWeight: 800, color: '#1e3a8a', whiteSpace: 'nowrap' }}>
                               per {unitWord(row.lens.sellingUnit)}
                             </Box>
+                          )}
+                          {belowCost && (
+                            <Tooltip title={violationText(belowCost)}>
+                              <Box component="span" data-price-floor={row.id} sx={{ display: 'block', fontSize: '0.6rem', fontWeight: 900, color: '#dc2626', whiteSpace: 'nowrap' }}>
+                                Min ₹{belowCost.floorUnit.toFixed(2)}
+                              </Box>
+                            </Tooltip>
                           )}
                         </TableCell>
                         <TableCell align="right" sx={{ color: 'error.main', fontSize: '0.8rem' }}>
@@ -3700,7 +3828,21 @@ export default function NewSaleWizard({
                 </TableBody>
               </Table>
             </TableContainer>
+            {violationRows.length > 0 && (
+              <Alert severity="error" icon={<PriceLockIcon />} data-price-lock-banner sx={{ m: 1.5, borderRadius: 2, fontWeight: 600 }}>
+                <b>Selling price cannot be less than the cost price.</b>{' '}
+                {violationRows.map(r => `${r.item}: ${violationText(priceViolations[r.id])}`).join(' · ')}.
+                {' '}Change the price — or a manager must approve it when you complete the sale.
+              </Alert>
+            )}
           </Card>
+
+          <PriceApprovalDialog
+            open={!!priceApproval}
+            lines={priceApproval?.lines || []}
+            canSelfApprove={priceFloors.canOverride}
+            onResolve={(value) => { priceApproval?.resolve(value); setPriceApproval(null); }}
+          />
 
           {/* Popup editor — same live row data as the inline ✏️, just in a window */}
           <Dialog open={!!editDialogRow} onClose={closeEditDialog} maxWidth={editDialogRow?.lens ? 'md' : 'sm'} fullWidth PaperProps={{ sx: { borderRadius: 3 } }}>

@@ -15,7 +15,10 @@
     "test:lens-po": "node --test src/utils/__tests__/lensPurchaseOrders.test.js",
     "test:eye-test": "node --test src/utils/__tests__/eyeTestBill.test.js",
     "test:eye-report": "node --test src/utils/__tests__/eyeTestReport.test.js",
-    "test:cheques": "node --test src/utils/__tests__/cheques.test.js"
+    "test:cheques": "node --test src/utils/__tests__/cheques.test.js",
+    "test:purchase-labels": "node --test src/utils/__tests__/purchaseLabels.test.js",
+    "test:pricing": "node --test src/utils/__tests__/pricingRules.test.js",
+    "test:master-cache": "node --test src/utils/__tests__/masterDataCache.test.js"
   },
   "dependencies": {
     "@emotion/react": "^11.11.4",

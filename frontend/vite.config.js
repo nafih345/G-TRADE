@@ -42,6 +42,9 @@ export default defineConfig(({ mode, command }) => {
     },
     server: {
       port: 5173,
+      // Browsers resolve any *.localhost name to this machine (and Vite allows it), so the
+      // address bar reads the app's name instead of a bare "localhost".
+      open: 'http://greensol-optical-erp.localhost:5173/',
       proxy: {
         '/api': {
           target: apiTarget,

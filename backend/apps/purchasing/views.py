@@ -13,6 +13,7 @@ from apps.inventory.stock_utils import adjust_branch_stock, adjust_branch_stock_
 from apps.products.models import Product
 from apps.common.branch_mixins import BranchScopedViewSetMixin
 from apps.financial.banks import validate_bank_account
+from apps.common.request_actor import actor_from_request
 
 class SupplierSerializer(ModelSerializer):
     # Free text, not EmailField: email is informational here, and strict validation rejected
@@ -104,8 +105,9 @@ class SupplierViewSet(viewsets.ModelViewSet):
         except IntegrityError:
             # Lost a race with a concurrent save of the same name (uniq_live_supplier_name_ci).
             raise serializers.ValidationError({'name': [f"A supplier named '{serializer.validated_data.get('name')}' already exists."]})
-        supplier.ledger_account = get_or_create_supplier_ledger_account(supplier)
-        supplier.save(update_fields=['ledger_account'])
+        # The AP sub-ledger is provisioned by the post_save hook (financial.party_ledgers);
+        # this only covers a hook that failed to run.
+        get_or_create_supplier_ledger_account(supplier)
 
 class PurchaseOrderViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
     queryset = PurchaseOrder.objects.all()
@@ -192,6 +194,8 @@ class PurchaseInvoiceItemSerializer(ModelSerializer):
     class Meta:
         model = PurchaseInvoiceItem
         fields = '__all__'
+        # labels_printed only moves through the label print jobs (label_printing.py).
+        read_only_fields = ['labels_printed', 'line_no']
         extra_kwargs = {'purchase_invoice': {'required': False}}
 
 
@@ -246,7 +250,7 @@ class PurchaseInvoiceSerializer(ModelSerializer):
         # One INSERT for all lines. bulk_create skips the items' post_save, which only queues
         # this invoice for accounting — and the header save above has already queued it.
         PurchaseInvoiceItem.objects.bulk_create(
-            [PurchaseInvoiceItem(purchase_invoice=invoice, **item_data) for item_data in items_data])
+            [PurchaseInvoiceItem(purchase_invoice=invoice, line_no=n, **item_data) for n, item_data in enumerate(items_data, 1)])
         return invoice
 
     def update(self, instance, validated_data):
@@ -256,9 +260,13 @@ class PurchaseInvoiceSerializer(ModelSerializer):
         instance.save()
 
         if items_data is not None:
+            from .label_printing import carry_over_label_progress
+            old_items = list(instance.items.all())
             instance.items.all().delete()
-            PurchaseInvoiceItem.objects.bulk_create(
-                [PurchaseInvoiceItem(purchase_invoice=instance, **item_data) for item_data in items_data])
+            new_items = PurchaseInvoiceItem.objects.bulk_create(
+                [PurchaseInvoiceItem(purchase_invoice=instance, line_no=n, **item_data) for n, item_data in enumerate(items_data, 1)])
+            # The lines are recreated on every edit: keep their printed-label counts.
+            carry_over_label_progress(instance, old_items, new_items)
 
         return instance
 
@@ -419,6 +427,36 @@ class PurchaseInvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
             supplier = invoice.supplier
             supplier.outstanding_balance = (supplier.outstanding_balance or 0) + invoice.balance_amount
             supplier.save()
+
+    # ---- Barcode Printing (label_printing.py) -------------------------------------------
+
+    @action(detail=False, methods=['get'], url_path='label-queue')
+    def label_queue(self, request):
+        from .label_printing import label_queue
+        return Response(label_queue(self.get_queryset()))
+
+    @action(detail=True, methods=['get'], url_path='label-status')
+    def label_status(self, request, pk=None):
+        from .label_printing import label_status
+        return Response(label_status(self.get_object()))
+
+    @action(detail=True, methods=['post'], url_path='label-jobs')
+    def label_jobs(self, request, pk=None):
+        from .label_printing import LabelPrintError, start_job
+        try:
+            job = start_job(self.get_object(), request.data, actor_from_request(request))
+        except LabelPrintError as e:
+            return Response({'detail': str(e)}, status=e.status)
+        return Response(job, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], url_path=r'label-jobs/(?P<job_id>[^/.]+)/confirm')
+    def confirm_label_job(self, request, pk=None, job_id=None):
+        from .label_printing import LabelPrintError, confirm_job
+        try:
+            result = confirm_job(self.get_object(), job_id, request.data, actor_from_request(request))
+        except LabelPrintError as e:
+            return Response({'detail': str(e)}, status=e.status)
+        return Response(result)
 
     @action(detail=False, methods=['get'], url_path='last-rate')
     def last_rate(self, request):

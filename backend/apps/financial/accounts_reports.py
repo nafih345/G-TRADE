@@ -296,6 +296,9 @@ def _control_balances(side, branch_ids):
     if side == 'payable':
         from apps.purchasing.models import Supplier
         ids |= set(Supplier.objects.exclude(ledger_account__isnull=True).values_list('ledger_account_id', flat=True))
+    else:
+        from apps.sales.models import Dealer
+        ids |= set(Dealer.objects.exclude(ledger_account__isnull=True).values_list('ledger_account_id', flat=True))
     qs = LedgerEntry.objects.filter(account_id__in=ids, journal_entry__status__in=JournalEntry.LEDGER_STATUSES,
                                     journal_entry__is_deleted=False)
     if branch_ids is not None:

@@ -193,6 +193,12 @@ class BackupRecord(models.Model):
     error_summary = models.CharField(max_length=500, blank=True, default='')
     deleted_at = models.DateTimeField(null=True, blank=True)
     deleted_by_name = models.CharField(max_length=150, blank=True, default='')
+    # Set for a per-client backup (platform console): only that tenant's rows, limited to
+    # `sections` (backup/tenant_scope.SECTIONS) when given, else every section. Such a record is
+    # never listed, restored or retained by the whole-database screens. Not an FK: this app is
+    # global and outlives restores.
+    client_tenant_id = models.PositiveIntegerField(null=True, blank=True, db_index=True)
+    sections = models.JSONField(default=list, blank=True)
 
     class Meta:
         ordering = ['-created_at']
@@ -205,6 +211,36 @@ class BackupRecord(models.Model):
     @property
     def available(self):
         return self.status == 'SUCCESS' and self.verified
+
+
+class TenantBackupSchedule(models.Model):
+    """Automatic backups of one client (tenant), set from the platform console. Same timing rules
+    as BackupSchedule, computed in that client's business time zone."""
+    FREQUENCIES = BackupSchedule.FREQUENCIES
+
+    client_tenant_id = models.PositiveIntegerField(unique=True)
+    enabled = models.BooleanField(default=False)
+    frequency = models.CharField(max_length=10, choices=FREQUENCIES, default='DAILY')
+    backup_time = models.TimeField(default=datetime.time(2, 0))
+    weekday = models.PositiveSmallIntegerField(default=6)
+    day_of_month = models.PositiveSmallIntegerField(default=1)
+    retention_count = models.PositiveSmallIntegerField(default=15)
+    sections = models.JSONField(default=list, blank=True)  # [] = full client backup
+    timezone = models.CharField(max_length=64, blank=True, default='')
+    next_run_at = models.DateTimeField(null=True, blank=True)
+    last_run_at = models.DateTimeField(null=True, blank=True)
+    last_run_status = models.CharField(max_length=10, blank=True, default='')
+    updated_by_name = models.CharField(max_length=150, blank=True, default='')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(condition=models.Q(weekday__lte=6), name='tenant_backup_schedule_weekday'),
+            models.CheckConstraint(condition=models.Q(day_of_month__gte=1, day_of_month__lte=28),
+                                   name='tenant_backup_schedule_dom'),
+            models.CheckConstraint(condition=models.Q(retention_count__gte=1, retention_count__lte=365),
+                                   name='tenant_backup_schedule_retention'),
+        ]
 
 
 class BackupChunk(models.Model):

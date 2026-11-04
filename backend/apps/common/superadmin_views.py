@@ -14,6 +14,8 @@
     POST  /api/superadmin/tenants/<id>/users/<uid>/reset-password/
     POST  /api/superadmin/tenants/<id>/branches/        add a branch
     PATCH /api/superadmin/tenants/<id>/branches/<bid>/  edit / (de)activate / make default
+    …/data/…, …/backups/…, …/backup-schedule/           client data inspection and per-client
+                                                        backups (superadmin_data_views)
 
 Platform owner only (IsPlatformAdmin); every write also needs a recent password confirmation
 when the security policy asks for one (security.policy.SENSITIVE_WRITES). Tenant itself is not
@@ -36,6 +38,7 @@ from rest_framework.response import Response
 from apps.common import module_access, tenancy
 from apps.common.models import Tenant
 from apps.common.permissions import IsPlatformAdmin
+from apps.common.superadmin_data_views import TenantDataBackupMixin
 from apps.common.superadmin_serializers import (
     DEACTIVATION_CATEGORIES, ClientBranchSerializer, ClientUserCreateSerializer, ClientUserUpdateSerializer,
     DeactivateSerializer, PasswordResetSerializer, ReactivateSerializer, TenantOnboardSerializer,
@@ -133,7 +136,7 @@ def _save_branch_access(tenant, username, data):
             access.branches.set(branches)
 
 
-class TenantAdminViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
+class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
     permission_classes = [permissions.IsAuthenticated, IsPlatformAdmin]
     serializer_class = TenantSerializer
     pagination_class = None  # a handful of clients; the page shows them all

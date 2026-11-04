@@ -29,9 +29,9 @@ PAY_MODES = (PAY_CASH, PAY_UPI)
 
 CHARGE_FIELDS = ('procedure_charge', 'medical_aid_charge', 'medicine_charge')
 # Request keys that mean "this save is (re)stating the fee" — any other PATCH leaves it alone.
-FEE_INPUT_KEYS = ('is_free_test', 'fee_deferred', 'fee_paid_amount', 'fee_payment_mode') + CHARGE_FIELDS
+FEE_INPUT_KEYS = ('is_free_test', 'fee_deferred', 'fee_paid_amount', 'fee_payment_mode', 'fee_bank_account') + CHARGE_FIELDS
 # Columns an edit may not touch once a bill carries the fee.
-FEE_COLUMNS = CHARGE_FIELDS + ('is_free_test', 'fee_amount', 'fee_paid_amount', 'fee_payment_mode', 'fee_status')
+FEE_COLUMNS = CHARGE_FIELDS + ('is_free_test', 'fee_amount', 'fee_paid_amount', 'fee_payment_mode', 'fee_bank_account', 'fee_status')
 
 _CENT = Decimal('0.01')
 
@@ -68,17 +68,20 @@ def derive_fee_fields(data, instance=None):
 
     if free:
         return {**{key: Decimal('0.00') for key in CHARGE_FIELDS}, 'is_free_test': True, 'fee_amount': amount,
-                'fee_paid_amount': Decimal('0.00'), 'fee_payment_mode': '', 'fee_status': FEE_FREE}
+                'fee_paid_amount': Decimal('0.00'), 'fee_payment_mode': '', 'fee_bank_account': None, 'fee_status': FEE_FREE}
     if deferred and amount > 0:
         return {**charges, 'is_free_test': False, 'fee_amount': amount,
-                'fee_paid_amount': Decimal('0.00'), 'fee_payment_mode': '', 'fee_status': FEE_PENDING}
+                'fee_paid_amount': Decimal('0.00'), 'fee_payment_mode': '', 'fee_bank_account': None, 'fee_status': FEE_PENDING}
 
     mode = str(current('fee_payment_mode', '') or '').upper() or PAY_CASH
     if mode not in PAY_MODES:
         raise serializers.ValidationError({'fee_payment_mode': 'Payment mode must be Cash or GPay (UPI).'})
     return {**charges, 'is_free_test': False, 'fee_amount': amount,
             'fee_paid_amount': _money(current('fee_paid_amount', 0)),
-            'fee_payment_mode': mode, 'fee_status': FEE_PAID}
+            'fee_payment_mode': mode,
+            # Only GPay lands in a bank; Cash never keeps one.
+            'fee_bank_account': current('fee_bank_account', None) if mode == PAY_UPI else None,
+            'fee_status': FEE_PAID}
 
 
 def fee_exam_ids(items):

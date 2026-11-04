@@ -16,3 +16,8 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS(f'Scheduled backup {record.backup_identifier} completed.'))
         else:
             self.stderr.write(f'Scheduled backup {record.backup_identifier} failed: {record.error_summary}')
+        for client in scheduler.run_due_client_backups():
+            if client.status == 'SUCCESS':
+                self.stdout.write(self.style.SUCCESS(f'Client backup {client.backup_identifier} completed.'))
+            else:
+                self.stderr.write(f'Client backup {client.backup_identifier} failed: {client.error_summary}')
