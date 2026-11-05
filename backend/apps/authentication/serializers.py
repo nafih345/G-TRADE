@@ -14,7 +14,8 @@ class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ('id', 'username', 'email', 'first_name', 'last_name', 'role', 'role_display', 'phone', 'is_active',
-                  'tenant', 'is_platform_admin', 'module_access')
+                  'tenant', 'is_platform_admin', 'module_access',
+                  'settings_features')
         read_only_fields = ('id', 'is_active', 'tenant')
 
     # {module: 'full'|'view'|'none'} from the tenant's subscription and this role's levels
@@ -25,9 +26,16 @@ class UserSerializer(serializers.ModelSerializer):
         from apps.common.permissions import is_platform_admin
         return is_platform_admin(obj)
 
+    # Settings page sections this user may open (Tenant.settings_features ∩ Settings access).
+    settings_features = serializers.SerializerMethodField()
+
     def get_module_access(self, obj):
         from apps.common.module_access import effective_access
         return effective_access(obj)
+
+    def get_settings_features(self, obj):
+        from apps.common.module_access import settings_features_for
+        return settings_features_for(obj)
 
 
 def ensure_login_role(user):

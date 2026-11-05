@@ -92,3 +92,12 @@ export const dependencyNote = (catalog, modules, key, on) => {
     : modules.filter((k) => k !== key && !next.includes(k));
   return extra.map(label);
 };
+
+// Settings page sections (its ?tab= ids) the user may open: profile.settings_features, from the
+// tenant's section pick (Client Management) and the role's Settings access. Profiles cached before
+// the field existed have none: every section until the background refresh fills it in (the server
+// still refuses writes to a disabled section).
+export const canOpenSettingsSection = (user, section) => {
+  const sections = user?.settings_features;
+  return !Array.isArray(sections) || sections.includes(section);
+};

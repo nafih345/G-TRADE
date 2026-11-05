@@ -8,6 +8,9 @@ The platform console (apps/common/superadmin_views.py) sets, per tenant:
   * `role_permissions` — per role, per module: 'full' (use and change), 'view' (read only) or
     'none'. Missing entries fall back to DEFAULT_ROLE_LEVELS.
 
+  * `settings_features` — with Settings on, which of its sections (SETTINGS_FEATURES) the client
+    gets; the others are hidden and their endpoints refuse writes from Settings.
+
 effective_access(user) folds both into {module: level}; the profile API sends it to the browser
 (sidebar + route guard) and check_api_access() enforces it on every API write: a POST / PUT /
 PATCH / DELETE under a module's endpoints needs 'full' on one of the modules that write there
@@ -36,6 +39,29 @@ MODULES = (
     ('settings', 'Settings', 'Store profile, billing, tax, numbering and bank master.', 'core'),
 )
 MODULE_KEYS = tuple(m[0] for m in MODULES)
+
+# The Settings module's sections (the tabs of the Settings page). With Settings on, the platform
+# admin picks which of them the client gets (Tenant.settings_features; None = every section, the
+# shape of tenants created before the choice existed). Keys are the page's ?tab= ids.
+# (key, label, description, write prefixes the section owns)
+SETTINGS_FEATURES = (
+    ('store', 'Store & Clinic Profile', 'Store identity, contact details, logo and clinic information.',
+     ('/api/company/store-profile/', '/api/company/profile/')),
+    ('localization', 'Business & Localization', 'Currency, tax, numbering sequences and custom fields.',
+     ('/api/company/localization/', '/api/company/tax-config/', '/api/company/custom-fields/')),
+    ('security', 'System Security & Backup', 'Session policy, backups, schedule and recovery.',
+     ('/api/security/settings/', '/api/backups/')),
+    ('business', 'Business Settings', 'Multi-branch management.', ('/api/company/business-settings/',)),
+    ('bill-designer', 'Bill & Invoice Designer', 'Bill / invoice print templates and branding.', ('/api/billing/',)),
+    ('barcode-labels', 'Barcode Labels', 'Scanner preferences and barcode label design.',
+     ('/api/products/label-templates/', '/api/products/label-settings/')),
+    ('banks', 'Bank Master', 'Bank accounts used by bank / UPI payments.', ('/api/financial/banks/',)),
+    ('pricing', 'Pricing Rules & Offers', 'Below-cost lock, minimum margin and clearance offers.',
+     ('/api/company/pricing-rules/',)),
+)
+SETTINGS_FEATURE_KEYS = tuple(f[0] for f in SETTINGS_FEATURES)
+# Longest prefix first: path → the section that owns it.
+_FEATURE_PREFIXES = sorted(((prefix, f[0]) for f in SETTINGS_FEATURES for prefix in f[3]), key=lambda r: -len(r[0]))
 MODULE_LABELS = {m[0]: m[1] for m in MODULES}
 OPERATIONAL = tuple(m[0] for m in MODULES if m[3] == 'operations')
 CORE = tuple(m[0] for m in MODULES if m[3] == 'core')
@@ -134,6 +160,9 @@ WRITE_RULES = sorted((
     ('/api/company/pricing-rules/', ('settings', 'sales', 'inventory')),
     ('/api/company/', ('settings',)),
     ('/api/billing/', ('settings',)),
+    # Store-wide security policy and backups (per-user 2FA / re-auth / heartbeat stay ungated).
+    ('/api/security/settings/', ('settings',)),
+    ('/api/backups/', ('settings',)),
 ), key=lambda r: -len(r[0]))
 
 _SAFE = ('GET', 'HEAD', 'OPTIONS')
@@ -207,6 +236,51 @@ def normalize_role_permissions(raw):
     return out
 
 
+def normalize_settings_features(raw):
+    """Stored settings_features: None (every section) or a list of known keys in catalog order."""
+    if raw is None:
+        return None
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError('Settings sections must be a list.')
+    unknown = [f for f in raw if f not in SETTINGS_FEATURE_KEYS]
+    if unknown:
+        raise ValueError(f'Unknown Settings section(s): {", ".join(map(str, unknown))}.')
+    chosen = [f for f in SETTINGS_FEATURE_KEYS if f in raw]
+    if not chosen:
+        raise ValueError('Switch on at least one Settings section, or turn the Settings module off.')
+    return chosen
+
+
+def enabled_settings_features(config):
+    """Sections the tenant has (empty when the Settings module itself is off)."""
+    if 'settings' not in config['modules']:
+        return []
+    chosen = config.get('settings_features')
+    return list(SETTINGS_FEATURE_KEYS) if chosen is None else [f for f in SETTINGS_FEATURE_KEYS if f in chosen]
+
+
+def settings_features_for(user, config=None):
+    """Settings sections a signed-in user may open: the tenant's sections, if the role can open
+    Settings at all."""
+    from apps.common.permissions import is_platform_admin
+    if is_platform_admin(user):
+        return list(SETTINGS_FEATURE_KEYS)
+    if config is None:
+        if not getattr(user, 'tenant_id', None):
+            return []
+        config = tenant_access_config(user.tenant_id)
+    if effective_access(user, config).get('settings', NONE) == NONE:
+        return []
+    return enabled_settings_features(config)
+
+
+def _feature_for(path):
+    for prefix, feature in _FEATURE_PREFIXES:
+        if path.startswith(prefix):
+            return feature
+    return None
+
+
 def role_levels(role, overrides=None):
     """Configured levels for one role (before the tenant's subscription is applied)."""
     base = dict(DEFAULT_ROLE_LEVELS.get(role) or _levels())
@@ -227,10 +301,11 @@ def tenant_access_config(tenant_id):
     from apps.common.models import Tenant
 
     def load():
-        row = Tenant.objects.filter(pk=tenant_id).values('modules', 'role_permissions').first()
+        row = Tenant.objects.filter(pk=tenant_id).values('modules', 'role_permissions', 'settings_features').first()
         if row is None:
-            return {'modules': [], 'role_permissions': {}}
-        return {'modules': list(row['modules'] or []), 'role_permissions': dict(row['role_permissions'] or {})}
+            return {'modules': [], 'role_permissions': {}, 'settings_features': []}
+        return {'modules': list(row['modules'] or []), 'role_permissions': dict(row['role_permissions'] or {}),
+                'settings_features': row['settings_features']}
 
     return hot_cache.get_or_load(f'tenant:access:{tenant_id}', load)
 
@@ -276,6 +351,17 @@ def check_api_access(request):
         # Views without authentication (AllowAny branch endpoints): the subscription alone.
         access = {m: (FULL if m in config['modules'] else NONE) for m in MODULE_KEYS}
     candidates = MODULE_KEYS if writers == ANY else writers
+    # A Settings section switched off for the tenant no longer lets Settings write there (another
+    # module sharing the endpoint — Financial on Bank Master — still may).
+    feature = _feature_for(request.path)
+    if feature and 'settings' in candidates and feature not in enabled_settings_features(config):
+        candidates = tuple(m for m in candidates if m != 'settings')
+        if not candidates:
+            label = next(f[1] for f in SETTINGS_FEATURES if f[0] == feature)
+            raise exceptions.PermissionDenied({
+                'detail': f'Settings → {label} is not part of this business’s plan. '
+                          'Ask the platform administrator to enable it.',
+                'code': 'module_disabled'})
     if any(access.get(m) == FULL for m in candidates):
         return
     names = ', '.join(MODULE_LABELS[m] for m in candidates)
@@ -311,6 +397,7 @@ def catalog():
         'modules': [{'key': k, 'label': l, 'description': d, 'group': g} for k, l, d, g in MODULES],
         'packages': [{'key': k, 'label': l, 'description': d, 'modules': list(m) if m else None}
                      for k, l, d, m in PACKAGES],
+        'settings_features': [{'key': k, 'label': l, 'description': d} for k, l, d, _p in SETTINGS_FEATURES],
         'requires': {k: list(v) for k, v in REQUIRES.items()},
         'integrated': {k: list(v) for k, v in INTEGRATED.items()},
         'levels': list(LEVELS),

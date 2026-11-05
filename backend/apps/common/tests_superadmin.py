@@ -194,6 +194,33 @@ class ClientManagementTests(SuperAdminFixture):
         self.assertEqual((access['sales'], access['optical'], access['reports'], access['financial']),
                          ('full', 'view', 'none', 'none'))
 
+    def test_settings_sections(self):
+        tenant = self._new_client(settings_features=['banks', 'store'])
+        self.assertEqual(tenant.settings_features, ['store', 'banks'])  # catalog order
+        owner = self._login('cityadmin', 'Gl4sses-Dubai-77')
+        self.assertEqual(owner.login_payload['user']['settings_features'], ['store', 'banks'])
+        # A section switched off refuses Settings writes; an enabled one doesn't.
+        res = owner.patch('/api/company/business-settings/', {'multi_branch_enabled': True}, format='json')
+        self.assertEqual((res.status_code, res.data['code']), (403, 'module_disabled'))
+        self.assertIn('Business Settings', res.data['detail'])
+        self.assertNotEqual(owner.patch('/api/company/store-profile/', {}, format='json').status_code, 403)
+
+        # Null = every section (tenants from before the choice); an empty pick is refused.
+        res = self.api.patch(f'{URL}{tenant.pk}/', {'settings_features': []}, format='json')
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('settings_features', res.data)
+        res = self.api.patch(f'{URL}{tenant.pk}/', {'settings_features': None}, format='json')
+        self.assertEqual((res.status_code, res.data['settings_features']), (200, None))
+        self.assertEqual(owner.get('/api/auth/profile/').data['settings_features'][:2], ['store', 'localization'])
+        self.assertNotEqual(owner.patch('/api/company/business-settings/', {'multi_branch_enabled': False},
+                                        format='json').status_code, 403)
+
+        # Settings module off: no sections at all.
+        self.api.patch(f'{URL}{tenant.pk}/', {'package': 'CUSTOM', 'modules': ['optical']}, format='json')
+        self.assertEqual(owner.get('/api/auth/profile/').data['settings_features'], [])
+        self.assertEqual(self.api.patch(f'{URL}{self.t1.pk}/', {'settings_features': ['store']},
+                                        format='json').status_code, 400)
+
     def test_seat_limit_and_users(self):
         tenant = self._new_client(max_users=2)
         branch_id = self.api.get(f'{URL}{tenant.pk}/').data['branches'][0]['id']

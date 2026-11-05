@@ -35,10 +35,11 @@ const EMPTY_FORM = {
   tenant_name: '', admin_username: '', password: '', admin_email: '', contact_phone: '', branch_name: '',
   max_users: '5',
 };
-const FORM_FIELDS = [...Object.keys(EMPTY_FORM), 'modules'];
+const FORM_FIELDS = [...Object.keys(EMPTY_FORM), 'modules', 'settings_features'];
 const REQUIRED = { tenant_name: 'Shop / client name', admin_username: 'Admin username', password: 'Password' };
 const fullSuite = (catalog) => ({
   package: 'FULL_SUITE', modules: [...catalog.packages.find((p) => p.key === 'FULL_SUITE').modules],
+  settings_features: null,
 });
 
 function OnboardForm({ catalog, onCreated }) {
@@ -81,6 +82,7 @@ function OnboardForm({ catalog, onCreated }) {
       const { data } = await axios.post(API, {
         ...form, tenant_name: form.tenant_name.trim(), admin_username: form.admin_username.trim(),
         max_users: seats, package: subscription.package, modules: subscription.modules,
+        ...(subscription.modules.includes('settings') ? { settings_features: subscription.settings_features } : {}),
       });
       onCreated({ tenant: data, password: form.password });
       reset();
@@ -167,7 +169,7 @@ function OnboardForm({ catalog, onCreated }) {
           Pick a package or switch modules one by one. Role permissions, more users and more branches are set
           from the client’s workspace (Manage) after creating it.
         </Typography>
-        {errors.modules && <Alert severity="error" sx={{ mb: 1.5 }}>{errors.modules}</Alert>}
+        {(errors.modules || errors.settings_features) && <Alert severity="error" sx={{ mb: 1.5 }}>{errors.modules || errors.settings_features}</Alert>}
         <ModuleAccessEditor catalog={catalog} value={subscription} disabled={saving}
           onChange={(v) => { setSubscription(v); setErrors((x) => ({ ...x, modules: undefined })); }} />
         <Stack direction="row" spacing={1.5} justifyContent="flex-end" sx={{ mt: 2 }}>

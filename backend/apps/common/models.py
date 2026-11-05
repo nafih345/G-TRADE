@@ -30,6 +30,9 @@ class Tenant(models.Model):
     package = models.CharField(max_length=20, default='FULL_SUITE')
     modules = models.JSONField(default=_all_modules, blank=True)
     role_permissions = models.JSONField(default=dict, blank=True)
+    # With the Settings module on: which of its sections the client gets (SETTINGS_FEATURES
+    # keys). Null = every section.
+    settings_features = models.JSONField(null=True, blank=True, default=None)
     # Seat limit: how many *active* user accounts the client may have (its owner included).
     max_users = models.PositiveIntegerField(default=5)
 

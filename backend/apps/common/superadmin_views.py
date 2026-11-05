@@ -207,7 +207,8 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
             tenant, admin = onboard_tenant(
                 name=v['tenant_name'], admin_username=v['admin_username'], password=v['password'],
                 admin_email=v['admin_email'], contact_phone=v['contact_phone'], branch_name=v['branch_name'],
-                package=v['package'], modules=v['modules'], max_users=v['max_users'], actor=request.user)
+                package=v['package'], modules=v['modules'], settings_features=v['settings_features'],
+                max_users=v['max_users'], actor=request.user)
         except OnboardingError as e:
             return _bad(e.field, e.message)
         except IntegrityError:
@@ -241,7 +242,7 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
                         settings_row.multi_branch_enabled = multi_branch
                         settings_row.save()
             if changes:
-                action_name = ('MODULES_CHANGED' if {'package', 'modules'} & set(changes)
+                action_name = ('MODULES_CHANGED' if {'package', 'modules', 'settings_features'} & set(changes)
                                else 'PERMISSIONS_CHANGED' if 'role_permissions' in changes
                                else 'SEATS_CHANGED' if 'max_users' in changes else 'PROFILE_UPDATED')
                 log_event(tenant, action_name, request.user, changes=changes)

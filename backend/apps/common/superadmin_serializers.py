@@ -40,6 +40,8 @@ class TenantOnboardSerializer(serializers.Serializer):
     branch_name = serializers.CharField(max_length=100, required=False, allow_blank=True, default='')
     package = serializers.CharField(required=False, default=module_access.FULL_SUITE)
     modules = ModulesField(required=False, default=list)
+    settings_features = serializers.ListField(child=serializers.CharField(), required=False, allow_null=True,
+                                              default=None)
     max_users = serializers.IntegerField(required=False, default=5, min_value=1, max_value=10000)
 
     def validate(self, attrs):
@@ -52,6 +54,10 @@ class TenantOnboardSerializer(serializers.Serializer):
             attrs['package'], attrs['modules'] = module_access.normalize_modules(attrs['package'], attrs['modules'])
         except ValueError as e:
             errors['modules'] = [str(e)]
+        try:
+            attrs['settings_features'] = module_access.normalize_settings_features(attrs.get('settings_features'))
+        except ValueError as e:
+            errors['settings_features'] = [str(e)]
         pw = _password_errors(attrs['password'], attrs['admin_username'], attrs.get('admin_email'))
         if pw:
             errors['password'] = pw
@@ -80,7 +86,7 @@ class TenantSerializer(serializers.ModelSerializer):
         model = Tenant
         fields = ('id', 'name', 'code', 'is_active', 'status', 'is_platform', 'created_at',
                   'contact_email', 'contact_phone', 'primary_admin', 'user_count', 'active_user_count',
-                  'max_users', 'branch_count', 'package', 'modules',
+                  'max_users', 'branch_count', 'package', 'modules', 'settings_features',
                   'deactivation_category', 'deactivation_reason', 'deactivation_effective_date',
                   'deactivation_until', 'deactivated_at', 'deactivated_by')
         read_only_fields = fields
@@ -106,6 +112,7 @@ class TenantUpdateSerializer(serializers.Serializer):
     contact_phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
     package = serializers.CharField(required=False)
     modules = ModulesField(required=False)
+    settings_features = serializers.ListField(child=serializers.CharField(), required=False, allow_null=True)
     max_users = serializers.IntegerField(required=False, min_value=1, max_value=10000)
     role_permissions = serializers.DictField(required=False)
     multi_branch_enabled = serializers.BooleanField(required=False)
@@ -124,6 +131,12 @@ class TenantUpdateSerializer(serializers.Serializer):
         except ValueError as e:
             raise serializers.ValidationError(str(e))
 
+    def validate_settings_features(self, value):
+        try:
+            return module_access.normalize_settings_features(value)
+        except ValueError as e:
+            raise serializers.ValidationError(str(e))
+
     def validate_max_users(self, value):
         from apps.common.tenant_onboarding import active_user_count
         used = active_user_count(self.instance)
@@ -134,6 +147,9 @@ class TenantUpdateSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         from apps.common import tenancy
+        if 'settings_features' in attrs and self.instance.pk == tenancy.DEFAULT_TENANT_ID:
+            raise serializers.ValidationError(
+                {'settings_features': ['The platform account always has every Settings section.']})
         if 'package' in attrs or 'modules' in attrs:
             if self.instance.pk == tenancy.DEFAULT_TENANT_ID:
                 raise serializers.ValidationError({'modules': ['The platform account always has every module.']})

@@ -29,6 +29,8 @@ import SystemSecuritySettings from '../components/settings/security/SystemSecuri
 import PricingRulesSettings from '../components/settings/pricing/PricingRulesSettings';
 import { GREEN, greenButtonSx } from '../components/settings/store/storeUi';
 import { STORE_PROFILE_EVENT } from '../utils/storeProfile';
+import { useAuth } from '../context/AuthContext';
+import { canOpenSettingsSection } from '../utils/moduleAccess';
 
 // Deep-link ids for /settings?tab=<id> (e.g. the barcode print dialog's
 // "Label Settings" button). Index = tab position. Business & Localization also takes
@@ -65,10 +67,15 @@ function syncLegacyMainBranch(p) {
 
 export default function Settings() {
   const location = useLocation();
-  const tabFromUrl = () => {
-    const id = new URLSearchParams(location.search).get('tab');
-    return Math.max(0, TAB_IDS.indexOf(TAB_ALIASES[id] || id));
+  const { user } = useAuth();
+  // Sections this client has (Client Management → Settings sections); the rest are not rendered.
+  const visibleTabs = TAB_IDS.map((id, i) => (canOpenSettingsSection(user, id) ? i : -1)).filter((i) => i >= 0);
+  const firstVisible = visibleTabs[0] ?? -1;
+  const tabIndex = (id) => {
+    const i = TAB_IDS.indexOf(TAB_ALIASES[id] || id);
+    return visibleTabs.includes(i) ? i : firstVisible;
   };
+  const tabFromUrl = () => tabIndex(new URLSearchParams(location.search).get('tab'));
   const sectionFromUrl = new URLSearchParams(location.search).get('section') || 'general';
   const [activeTab, setActiveTab] = useState(tabFromUrl);
   const storeRef = useRef(null);
@@ -94,7 +101,10 @@ export default function Settings() {
     if (formTab?.state.dirty) { setPendingTab(val); return; }
     setActiveTab(val);
   };
-  const openTabById = (id) => changeTab(Math.max(0, TAB_IDS.indexOf(TAB_ALIASES[id] || id)));
+  const openTabById = (id) => changeTab(tabIndex(id));
+  // The profile refresh can take a section away while it is open.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { if (!visibleTabs.includes(activeTab)) setActiveTab(firstVisible); }, [visibleTabs.join(), activeTab]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { if (location.search) changeTab(tabFromUrl()); }, [location.search]);
   const { multiBranchEnabled, refresh: refreshBranchContext } = useBranch();
@@ -207,7 +217,7 @@ export default function Settings() {
           </Typography>
         </Box>
         {/* Pricing Rules & Offers saves from its own "Save Rules" button. */}
-        {activeTab !== PRICING_TAB && <Button
+        {activeTab >= 0 && activeTab !== PRICING_TAB && <Button
           variant="contained"
           startIcon={<SaveIcon />}
           onClick={handleHeaderSave}
@@ -231,7 +241,7 @@ export default function Settings() {
       {/* Tabs */}
       <Card sx={{ mb: 3, borderRadius: 3 }}>
         <Tabs
-          value={activeTab}
+          value={visibleTabs.includes(activeTab) ? activeTab : false}
           onChange={(e, val) => changeTab(val)}
           variant="scrollable"
           scrollButtons="auto"
@@ -243,16 +253,22 @@ export default function Settings() {
             '& .MuiTab-root.Mui-selected': { color: GREEN },
           }}
         >
-          <Tab label="Store & Clinic Profile" icon={<StoreIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
-          <Tab label="Business & Localization" icon={<LocalizationIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
-          <Tab label="System Security & Backup" icon={<SecurityIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
-          <Tab label="Business Settings" icon={<BranchTreeIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
-          <Tab label="Bill & Invoice Designer" icon={<DesignerIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
-          <Tab label="Barcode Labels" icon={<LabelIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
-          <Tab label="Bank Master" icon={<BankIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
-          <Tab label="Pricing Rules & Offers" icon={<PricingIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
+          {visibleTabs.includes(0) && <Tab value={0} label="Store & Clinic Profile" icon={<StoreIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />}
+          {visibleTabs.includes(1) && <Tab value={1} label="Business & Localization" icon={<LocalizationIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />}
+          {visibleTabs.includes(2) && <Tab value={2} label="System Security & Backup" icon={<SecurityIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />}
+          {visibleTabs.includes(3) && <Tab value={3} label="Business Settings" icon={<BranchTreeIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />}
+          {visibleTabs.includes(4) && <Tab value={4} label="Bill & Invoice Designer" icon={<DesignerIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />}
+          {visibleTabs.includes(5) && <Tab value={5} label="Barcode Labels" icon={<LabelIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />}
+          {visibleTabs.includes(6) && <Tab value={6} label="Bank Master" icon={<BankIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />}
+          {visibleTabs.includes(7) && <Tab value={7} label="Pricing Rules & Offers" icon={<PricingIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />}
         </Tabs>
       </Card>
+
+      {firstVisible < 0 && (
+        <Alert severity="info" sx={{ borderRadius: 3 }}>
+          No Settings sections are enabled for this business. Ask the platform administrator to enable them.
+        </Alert>
+      )}
 
       {/* TAB 4: BILL & INVOICE DESIGNER */}
       {activeTab === 4 && <BillDesignerDashboard />}

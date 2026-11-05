@@ -70,7 +70,7 @@ def check_seat_available(tenant, adding=1):
 
 def onboard_tenant(*, name, admin_username, password, admin_email='', contact_phone='',
                    branch_name='', code=None, package=module_access.FULL_SUITE, modules=None,
-                   max_users=5, actor=''):
+                   settings_features=None, max_users=5, actor=''):
     """Create the tenant and its Super Admin in one transaction; returns (tenant, admin)."""
     from apps.company.models import Branch, Company
 
@@ -90,6 +90,10 @@ def onboard_tenant(*, name, admin_username, password, admin_email='', contact_ph
         package, modules = module_access.normalize_modules(package, modules)
     except ValueError as e:
         raise OnboardingError('modules', str(e))
+    try:
+        settings_features = module_access.normalize_settings_features(settings_features)
+    except ValueError as e:
+        raise OnboardingError('settings_features', str(e))
     if not isinstance(max_users, int) or max_users < 1:
         raise OnboardingError('max_users', 'Allow at least one user (the client’s admin).')
     check_available(name, admin_username, code)
@@ -97,7 +101,8 @@ def onboard_tenant(*, name, admin_username, password, admin_email='', contact_ph
     with transaction.atomic():
         tenant = Tenant.objects.create(name=name, code=code or _free_code(name),
                                        contact_email=admin_email, contact_phone=contact_phone,
-                                       package=package, modules=modules, max_users=max_users)
+                                       package=package, modules=modules, settings_features=settings_features,
+                                       max_users=max_users)
         # role SUPER_ADMIN is the tenant's own top role; never is_superuser / is_staff — those
         # open Django admin, which is not tenant-scoped, and is_superuser also marks the
         # platform owner (see apps.common.permissions.IsPlatformAdmin).

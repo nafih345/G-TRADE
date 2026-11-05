@@ -62,6 +62,7 @@ const describe = (row, catalog) => {
     return Object.entries(d.changes).map(([k, v]) => {
       if (k === 'modules') return `modules: ${(v.to || []).join(', ')}`;
       if (k === 'role_permissions') return 'role permissions';
+      if (k === 'settings_features') return `settings sections: ${v.to ? v.to.join(', ') : 'all'}`;
       if (k === 'sections') return `scope: ${(v || []).length ? v.join(', ') : 'full client'}`;
       if (typeof v !== 'object' || v === null) return `${k.replace(/_/g, ' ')}: ${v}`;
       if (k === 'package') return `package: ${packageLabel(catalog, v.from)} → ${packageLabel(catalog, v.to)}`;
@@ -150,16 +151,23 @@ function Overview({ tenant, onSave, saving, onLifecycle }) {
   );
 }
 
+const subscriptionOf = (t) => ({ package: t.package, modules: t.modules, settings_features: t.settings_features ?? null });
+
 function ModulesTab({ catalog, tenant, onSave, saving }) {
-  const [value, setValue] = useState({ package: tenant.package, modules: tenant.modules });
-  useEffect(() => { setValue({ package: tenant.package, modules: tenant.modules }); }, [tenant.package, tenant.modules]);
-  const dirty = value.package !== tenant.package || value.modules.join() !== tenant.modules.join();
+  const [value, setValue] = useState(() => subscriptionOf(tenant));
+  const sectionsKey = (tenant.settings_features ?? []).join();
+  useEffect(() => { setValue(subscriptionOf(tenant)); }, [tenant.package, tenant.modules, sectionsKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const dirty = value.package !== tenant.package || value.modules.join() !== tenant.modules.join()
+    || JSON.stringify(value.settings_features ?? null) !== JSON.stringify(tenant.settings_features ?? null);
   const [error, setError] = useState('');
 
   const save = async () => {
     setError('');
-    const fieldErrors = await onSave({ package: value.package, modules: value.modules }, ['modules']);
-    if (fieldErrors?.modules) setError(fieldErrors.modules);
+    // Settings off: the section pick is kept as it was (it only applies while Settings is on).
+    const body = { package: value.package, modules: value.modules };
+    if (value.modules.includes('settings')) body.settings_features = value.settings_features;
+    const fieldErrors = await onSave(body, ['modules', 'settings_features']);
+    if (fieldErrors?.modules || fieldErrors?.settings_features) setError(fieldErrors.modules || fieldErrors.settings_features);
   };
 
   return (
@@ -170,7 +178,7 @@ function ModulesTab({ catalog, tenant, onSave, saving }) {
         <ModuleAccessEditor catalog={catalog} value={value} onChange={setValue} disabled={tenant.is_platform || saving} />
         {!tenant.is_platform && (
           <Stack direction="row" spacing={1} justifyContent="flex-end" sx={{ mt: 1.5 }}>
-            <Button disabled={!dirty || saving} onClick={() => setValue({ package: tenant.package, modules: tenant.modules })}>Discard</Button>
+            <Button disabled={!dirty || saving} onClick={() => setValue(subscriptionOf(tenant))}>Discard</Button>
             <Button variant="contained" disabled={!dirty || saving} onClick={save}
               startIcon={saving ? <CircularProgress size={16} color="inherit" /> : <SaveIcon />}>Save modules</Button>
           </Stack>
