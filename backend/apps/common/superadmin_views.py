@@ -319,8 +319,7 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
             return _bad(None, f'{tenant.name} is deactivated. Reactivate it before opening its workspace.')
         tokens = issue_tokens(request.user, request, workspace_tenant_id=tenant.pk)
         log_event(tenant, 'WORKSPACE_OPENED', request.user, session_id=tokens['session_id'])
-        with tenancy.use_tenant(tenant.pk):
-            user = login_user_payload(request.user)
+        user = login_user_payload(request.user, tenant_id=tenant.pk)
         user['tenant_name'] = tenant.name
         return Response({**tokens, 'user': user,
                          'workspace': {'tenant_id': tenant.pk, 'tenant_name': tenant.name,

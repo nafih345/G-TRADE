@@ -23,9 +23,17 @@ def is_platform_admin(user):
 
 
 def request_tenant_id(user):
-    """The tenant a signed-in user's request acts in: the token's (scoped by the middleware),
-    falling back to the user's own. The two only differ inside a platform workspace."""
-    return tenancy.current_tenant_id() or getattr(user, 'tenant_id', None)
+    """The tenant a signed-in user's request acts in: the user's own, except for the platform
+    owner inside a client's workspace (the request is then scoped to that client).
+
+    The ambient tenant is never trusted for anyone else — at sign-in it can be a leftover token's
+    or the test runner's anonymous tenant, which once put another tenant's modules in the
+    sign-in payload."""
+    own = getattr(user, 'tenant_id', None)
+    current = tenancy.current_tenant_id()
+    if current is not None and current != own and is_platform_owner(user):
+        return current
+    return own
 
 
 class IsPlatformAdmin(permissions.BasePermission):

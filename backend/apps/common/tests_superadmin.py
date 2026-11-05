@@ -117,8 +117,10 @@ class SuperAdminTenantTests(SuperAdminFixture):
         self.assertEqual(res.data['deactivation_reason'], DEACTIVATE['reason'])
         self.assertEqual(res.data['deactivated_by'], 'platform')
         self.assertIn(client.get('/api/auth/profile/').status_code, (401, 403))
-        # Views that skip authentication (AllowAny) get no tenant scope from the stale token.
-        self.assertEqual(_rows(client.get('/api/company/branches/')), [])
+        # Views without their own authentication (AllowAny) now authenticate the stale token too
+        # and refuse it outright; before, they answered with an empty, unscoped list.
+        res = client.get('/api/company/branches/')
+        self.assertIn(res.status_code, (401, 403), res.content)
         res = APIClient().post('/api/auth/login/', {'username': 'otheradmin', 'password': PASSWORD}, format='json')
         self.assertEqual(res.data['code'], 'tenant_inactive')
 

@@ -73,8 +73,13 @@ def ensure_login_tenant(user):
         })
 
 
-def login_user_payload(user):
-    data = UserSerializer(user).data
+def login_user_payload(user, tenant_id=None):
+    """The signed-in user as the frontend caches it, computed in the tenant the new tokens are
+    for (the user's own, or `tenant_id` for a platform workspace) — not whatever tenant the
+    sign-in request itself happened to carry."""
+    from apps.common import tenancy
+    with tenancy.use_tenant(tenant_id or user.tenant_id):
+        data = UserSerializer(user).data
     if user.is_superuser:
         data['role'] = 'SUPER_ADMIN'
         data['role_display'] = 'Super Admin'
