@@ -23,6 +23,7 @@ import ImportUploadPanel from './ImportUploadPanel';
 import ImportProgressCard from './ImportProgressCard';
 import VirtualizedProductGrid from './VirtualizedProductGrid';
 import FailedRecordsPanel from './FailedRecordsPanel';
+import ImportPreviewReview from './ImportPreviewReview';
 
 const ACTIVE_BATCH_KEY = 'excel_import_active_batch';
 const RUNNING_STATUSES = ['ANALYZING', 'PENDING', 'PROCESSING'];
@@ -50,7 +51,7 @@ export default function ExcelImportManager() {
     setActiveBatchIdState(id);
     try { id ? localStorage.setItem(ACTIVE_BATCH_KEY, id) : localStorage.removeItem(ACTIVE_BATCH_KEY); } catch (e) {}
   };
-  const [previewBatch, setPreviewBatch] = useState(null); // { id, batch_number }
+  const [previewBatch, setPreviewBatch] = useState(null); // a batch summary (id, batch_number, status...)
   const [errorsBatch, setErrorsBatch] = useState(null); // { id, batch_number }
 
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
@@ -82,19 +83,39 @@ export default function ExcelImportManager() {
     try { localStorage.removeItem(ACTIVE_BATCH_KEY); } catch (e) {}
     refetchHistory();
     queryClient.invalidateQueries({ queryKey: ['product-grid'] });
-    setPreviewBatch({ id: batch.id, batch_number: batch.batch_number });
+    setPreviewBatch(batch);
     setAlertMsg({
       severity: batch.status === 'FAILED' ? 'error' : (batch.status === 'PARTIAL' ? 'warning' : 'success'),
       text: `Import ${batch.batch_number} finished: ${batch.imported_rows} imported, ${batch.updated_rows || 0} updated, ${batch.duplicate_rows} duplicates, ${batch.failed_rows} failed, of ${batch.total_rows} rows.`
+        + ((batch.updated_rows || 0) > 0 ? ' Existing products kept their stock; review the file quantities in Stock Overview → Excel Imports.' : '')
     });
+  };
+
+  // Stage two: the file has been read, nothing is written yet. The user reviews it under Data Preview.
+  const handleAwaitingReview = (batch) => {
+    setPreviewBatch(batch);
+    setActiveTab('preview');
+    refetchHistory();
+  };
+
+  const handleReviewConfirmed = () => {
+    queryClient.invalidateQueries({ queryKey: ['import-status', previewBatch?.id] });
+    setPreviewBatch((b) => (b ? { ...b, status: 'PENDING' } : b));
+    setActiveTab('upload');
+    refetchHistory();
   };
 
   const handleReviewCancelled = async () => {
     // History first: while it still lists the batch, the effect above would reopen it.
     await refetchHistory();
     setActiveBatchId(null);
+    setPreviewBatch(null);
     setAlertMsg({ severity: 'info', text: 'Import cancelled. Nothing was imported.' });
   };
+
+  // The history list is the live copy of a batch's status; previewBatch may be older.
+  const shownPreview = previewBatch && (batches.find((b) => b.id === previewBatch.id) || previewBatch);
+  const reviewing = shownPreview?.status === AWAITING_REVIEW;
 
   const handleDownloadSample = () => window.open('/api/import/download-template/', '_blank');
 
@@ -161,12 +182,21 @@ export default function ExcelImportManager() {
             batchId={activeBatchId}
             onDone={handleImportDone}
             onMissing={() => setActiveBatchId(null)}
-            onCancelled={handleReviewCancelled}
+            onAwaitingReview={handleAwaitingReview}
           />
         </>
       )}
 
-      {activeTab === 'preview' && (
+      {activeTab === 'preview' && reviewing && (
+        <ImportPreviewReview
+          key={shownPreview.id}
+          batch={shownPreview}
+          onConfirmed={handleReviewConfirmed}
+          onCancelled={handleReviewCancelled}
+        />
+      )}
+
+      {activeTab === 'preview' && !reviewing && (
         <Card variant="outlined" sx={{ p: 3, borderRadius: 3 }}>
           <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, flexWrap: 'wrap', gap: 1 }}>
             <Typography variant="h6" fontWeight={800}>Complete Data Preview</Typography>
@@ -176,7 +206,11 @@ export default function ExcelImportManager() {
               onChange={(e) => setPreviewBatch(batches.find(b => b.id === e.target.value) || null)}
             >
               {batches.map(b => (
-                <MenuItem key={b.id} value={b.id}>{b.batch_number} ({b.imported_rows + (b.updated_rows || 0)} rows)</MenuItem>
+                <MenuItem key={b.id} value={b.id}>
+                  {b.batch_number} ({b.status === AWAITING_REVIEW
+                    ? `waiting for review, ${b.preview_summary?.valid || 0} rows`
+                    : `${b.imported_rows + (b.updated_rows || 0)} rows`})
+                </MenuItem>
               ))}
             </TextField>
           </Box>
@@ -205,18 +239,20 @@ export default function ExcelImportManager() {
                   <TableCell sx={{ color: '#fff', fontWeight: 800 }}>File Name</TableCell>
                   <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Uploaded By</TableCell>
                   <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Upload Date</TableCell>
+                  <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Completed</TableCell>
                   <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Status</TableCell>
                   <TableCell align="right" sx={{ color: '#fff', fontWeight: 800 }}>Total Rows</TableCell>
                   <TableCell align="right" sx={{ color: '#fff', fontWeight: 800 }}>Imported</TableCell>
                   <TableCell align="right" sx={{ color: '#fff', fontWeight: 800 }}>Updated</TableCell>
                   <TableCell align="right" sx={{ color: '#fff', fontWeight: 800 }}>Duplicates</TableCell>
                   <TableCell align="right" sx={{ color: '#fff', fontWeight: 800 }}>Failed</TableCell>
+                  <TableCell align="right" sx={{ color: '#fff', fontWeight: 800 }}>Skipped</TableCell>
                   <TableCell align="center" sx={{ color: '#fff', fontWeight: 800 }}>Actions</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
                 {batches.length === 0 ? (
-                  <TableRow><TableCell colSpan={11} align="center" sx={{ py: 5 }}>
+                  <TableRow><TableCell colSpan={13} align="center" sx={{ py: 5 }}>
                     <Typography variant="body2" color="text.secondary">No import batches yet.</Typography>
                   </TableCell></TableRow>
                 ) : batches.map(b => (
@@ -225,6 +261,7 @@ export default function ExcelImportManager() {
                     <TableCell sx={{ fontWeight: 700 }}>{b.file_name}</TableCell>
                     <TableCell>{b.uploaded_by}</TableCell>
                     <TableCell sx={{ fontSize: '0.82rem' }}>{b.uploaded_date}</TableCell>
+                    <TableCell sx={{ fontSize: '0.82rem' }}>{b.completed_at ? new Date(b.completed_at).toLocaleString() : '—'}</TableCell>
                     <TableCell>
                       <Chip
                         label={b.status} size="small" sx={{ fontWeight: 800 }}
@@ -236,9 +273,10 @@ export default function ExcelImportManager() {
                     <TableCell align="right" sx={{ fontWeight: 700, color: 'info.main' }}>{b.updated_rows || 0}</TableCell>
                     <TableCell align="right" sx={{ fontWeight: 700, color: 'warning.main' }}>{b.duplicate_rows}</TableCell>
                     <TableCell align="right" sx={{ fontWeight: 700, color: 'error.main' }}>{b.failed_rows}</TableCell>
+                    <TableCell align="right" sx={{ fontWeight: 700 }} title="Duplicates + failed rows, never imported">{b.skipped_rows ?? (b.duplicate_rows + b.failed_rows)}</TableCell>
                     <TableCell align="center">
                       <Stack direction="row" spacing={1} justifyContent="center">
-                        <IconButton size="small" color="primary" title="Preview Rows" onClick={() => { setPreviewBatch({ id: b.id, batch_number: b.batch_number }); setActiveTab('preview'); }}>
+                        <IconButton size="small" color="primary" title={b.status === AWAITING_REVIEW ? 'Review & Start Import' : 'Preview Rows'} onClick={() => { setPreviewBatch(b); setActiveTab('preview'); }}>
                           <ViewIcon fontSize="small" />
                         </IconButton>
                         {b.failed_rows > 0 && (

@@ -5,8 +5,8 @@ from apps.common.models import BaseUUIDModel, TenantOwnedModel
 
 class ImportBatch(TenantOwnedModel):
     STATUS_CHOICES = [
-        ('ANALYZING', 'Working Out Barcodes'),
-        ('AWAITING_CONFIRMATION', 'Waiting For Barcode Review'),
+        ('ANALYZING', 'Preparing Preview'),
+        ('AWAITING_CONFIRMATION', 'Waiting For Review'),
         ('PENDING', 'Pending Validation'),
         ('PROCESSING', 'Importing In Background'),
         ('VALIDATED', 'Validated Ready'),
@@ -44,6 +44,8 @@ class ImportBatch(TenantOwnedModel):
     # Fill rows missing a barcode, after a preview the user confirms. Off, they stay blank.
     auto_barcode = models.BooleanField(default=False)
     barcode_summary = models.JSONField(default=dict, blank=True) # What the preview found + the series rule it used
+    preview_summary = models.JSONField(default=dict, blank=True) # Row counts per ImportPreviewRow kind
+    completed_at = models.DateTimeField(blank=True, null=True)
 
     total_rows = models.IntegerField(default=0)
     processed_rows = models.IntegerField(default=0) # Rows streamed & classified so far (drives live progress)
@@ -92,6 +94,46 @@ class ImportBarcodeRow(TenantOwnedModel):
 
     def __str__(self):
         return f"Row {self.row_number}: {self.slot_code}"
+
+
+class ImportPreviewRow(TenantOwnedModel):
+    """One non-blank sheet row as the preview judged it, before anything is written.
+
+    kind says what the import will do with it. Once the import ends only the UPDATE rows
+    stay (without their cells): they hold the sheet's quantity for an existing product,
+    which the import never writes over; Stock Overview offers it for review instead."""
+    KINDS = [
+        ('NEW', 'New Product'),
+        ('UPDATE', 'Updates Existing Product'),
+        ('DUPLICATE', 'Duplicate, Skipped'),
+        ('ERROR', 'Invalid, Skipped'),
+    ]
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    batch = models.ForeignKey(ImportBatch, on_delete=models.CASCADE, related_name='preview_rows')
+    row_index = models.IntegerField() # Same count as Product.import_row
+    sheet_name = models.CharField(max_length=100, default='Sheet 1')
+    row_number = models.IntegerField()
+    kind = models.CharField(max_length=10, choices=KINDS)
+    product_code = models.CharField(max_length=150, blank=True, default='')
+    product_name = models.CharField(max_length=255, blank=True, default='')
+    error_type = models.CharField(max_length=40, blank=True, default='')
+    message = models.TextField(blank=True, default='')
+    file_stock = models.IntegerField(blank=True, null=True) # The sheet's quantity; None when it gave none
+    existing_stock = models.IntegerField(blank=True, null=True) # UPDATE: the product's stock at preview time
+    cells = models.JSONField(default=dict, blank=True) # The sheet's own cells, keyed by column_headers
+    # Stock Overview's import review of an UPDATE row: APPLIED (the sheet's quantity went in
+    # as adjustment_number) or KEPT (the current stock stays). Blank = not decided yet.
+    review_status = models.CharField(max_length=10, blank=True, default='')
+    adjustment_number = models.CharField(max_length=30, blank=True, default='')
+    reviewed_by = models.CharField(max_length=150, blank=True, default='')
+    reviewed_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['batch', 'kind', 'row_index'], name='import_preview_kind_idx')]
+        constraints = [models.UniqueConstraint(fields=['batch', 'row_index'], name='uniq_import_preview_row')]
+
+    def __str__(self):
+        return f"Row {self.row_number}: {self.kind}"
 
 
 class ImportErrorLog(models.Model):
@@ -181,6 +223,16 @@ class BulkSaveReceipt(TenantOwnedModel):
         ]
 
 
+# Where a product's stock came from, for Stock Overview's source filter. Blank = a regular
+# product (Product Master / Purchase Entry); the others are stamped by the loader that made it.
+STOCK_SOURCES = (
+    ('OPENING_STOCK', 'Opening Stock'),
+    ('EXCEL_IMPORT', 'Excel Import'),
+    ('PURCHASE', 'Purchase Entry'),
+    ('MANUAL_ADJUSTMENT', 'Manual Adjustment'),
+)
+
+
 class Product(BaseUUIDModel):
     name = models.CharField(max_length=255)
     sku = models.CharField(max_length=150)
@@ -218,6 +270,7 @@ class Product(BaseUUIDModel):
     maximum_stock = models.IntegerField(default=100)
     opening_stock = models.IntegerField(default=0)
     stock = models.IntegerField(default=0)
+    stock_source = models.CharField(max_length=20, choices=STOCK_SOURCES, blank=True, default='', db_default='', db_index=True)
 
     # Link to Batch & Active state for Archiving/Deletion
     import_batch = models.ForeignKey(ImportBatch, on_delete=models.SET_NULL, null=True, blank=True, related_name='products')

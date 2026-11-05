@@ -14,7 +14,7 @@ import { makeShortcutHook } from '../../pages/wholesale/posShortcuts';
 export const NEW_SALE_SHORTCUTS = [
   // Customer & document
   { id: 'customerName', keys: ['F1'], group: 'Customer & document', label: 'Go to Customer Name' },
-  { id: 'patient', keys: ['F3'], group: 'Customer & document', label: 'Search patient — type a name, Test No or Patient ID, then ↑/↓ and Enter to pick' },
+  { id: 'patient', keys: ['F3'], group: 'Customer & document', label: 'Search patient / customer — type a name, phone, Test No, Patient ID or Customer ID, then ↑/↓ and Enter to pick' },
   { id: 'testNo', keys: ['Alt+T'], group: 'Customer & document', label: 'Go to Test No (loads that eye test)' },
   { id: 'testLookup', keys: ['Alt+K'], group: 'Customer & document', label: "Browse eye tests — a day's tests with sale status; pick one to load it" },
   { id: 'docOrder', keys: ['Alt+O'], group: 'Customer & document', label: 'Switch to Order' },

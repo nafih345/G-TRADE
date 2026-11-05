@@ -38,3 +38,43 @@ class HotCacheTests(TestCase):
         settings_obj.save()
         request, _ = self.resolve()
         self.assertTrue(request.multi_branch_enabled)
+
+
+class HealthDatabaseInstanceTests(TestCase):
+    """/api/health/ names the database's contents so browsers can drop caches from another one."""
+
+    def setUp(self):
+        import config.urls as root_urls
+        self.root_urls = root_urls
+        root_urls._db_instance = None
+        self.addCleanup(setattr, root_urls, '_db_instance', None)
+
+    def test_instance_is_stable_and_follows_first_migration(self):
+        from django.db.migrations.recorder import MigrationRecorder
+        first = self.client.get('/api/health/').json()['db_instance']
+        self.assertRegex(first, r'^[0-9a-f]{16}$')
+        with CaptureQueriesContext(connection) as ctx:
+            again = self.client.get('/api/health/').json()['db_instance']
+        self.assertEqual(again, first)
+        self.assertFalse(any('django_migrations' in q['sql'] for q in ctx.captured_queries),
+                         'identity is read once per process')
+
+        # A different database = a different first migration row.
+        self.root_urls._db_instance = None
+        row = MigrationRecorder.Migration.objects.order_by('applied', 'id').first()
+        MigrationRecorder.Migration.objects.filter(pk=row.pk).update(applied=row.applied.replace(year=2001))
+        self.assertNotEqual(self.client.get('/api/health/').json()['db_instance'], first)
+
+    def test_expected_database_name_mismatch_degrades_health(self):
+        from django.conf import settings as dj_settings
+        actual = str(dj_settings.DATABASES['default']['NAME'])
+        with self.settings(EXPECTED_DATABASE_NAME=actual):
+            body = self.client.get('/api/health/').json()
+        self.assertEqual(body['database'], 'connected')
+        with self.settings(EXPECTED_DATABASE_NAME='neondb-elsewhere'):
+            response = self.client.get('/api/health/')
+        body = response.json()
+        self.assertEqual(response.status_code, 200, 'never fails the platform health check')
+        self.assertEqual(body['status'], 'degraded')
+        self.assertTrue(body['database'].startswith('error: connected to database'))
+        self.assertIn("'neondb-elsewhere'", body['database'])

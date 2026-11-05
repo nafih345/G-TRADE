@@ -1,13 +1,18 @@
 from rest_framework import viewsets, permissions
 from rest_framework.serializers import ModelSerializer, SerializerMethodField
 from .models import ProductCategory, Brand, Unit, Tax, StorageRack
+from .product_modes import category_mode, brand_mode, brand_usage
 
 class ProductCategorySerializer(ModelSerializer):
     products_count = SerializerMethodField()
+    resolved_mode = SerializerMethodField()
 
     class Meta:
         model = ProductCategory
         fields = '__all__'
+
+    def get_resolved_mode(self, obj):
+        return category_mode(obj)
 
     def get_products_count(self, obj):
         # Products linked by FK, or whose free-text category_name names/contains this category's
@@ -39,10 +44,17 @@ class ProductCategorySerializer(ModelSerializer):
 
 class BrandSerializer(ModelSerializer):
     products_count = SerializerMethodField()
+    resolved_mode = SerializerMethodField()
 
     class Meta:
         model = Brand
         fields = '__all__'
+
+    def get_resolved_mode(self, obj):
+        try:
+            return brand_mode(obj, brand_usage(self.context))
+        except Exception:
+            return obj.product_mode or 'FRAME'
 
     def get_products_count(self, obj):
         try:

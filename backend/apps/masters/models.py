@@ -1,6 +1,11 @@
 from django.db import models
 from apps.common.models import BaseUUIDModel
 
+# Which "Add New Product" mode (Frame / General vs Lens) a Category or Brand belongs to — the
+# product dialog lists only the current mode's entries. Blank = not tagged yet: the serializers
+# report a resolved_mode inferred from the name / the products using it (see product_modes.py).
+PRODUCT_MODES = [('FRAME', 'Frame / General'), ('LENS', 'Lens'), ('BOTH', 'Frame & Lens')]
+
 class ProductCategory(BaseUUIDModel):
     name = models.CharField(max_length=100)
     code = models.CharField(max_length=50)
@@ -9,6 +14,7 @@ class ProductCategory(BaseUUIDModel):
     hsn_code = models.CharField(max_length=50, default='90031100')
     status = models.CharField(max_length=20, default='Active')
     display_order = models.IntegerField(default=1)
+    product_mode = models.CharField(max_length=10, choices=PRODUCT_MODES, blank=True, default='')
 
     class Meta:
         constraints = [
@@ -22,6 +28,7 @@ class ProductCategory(BaseUUIDModel):
 class Brand(BaseUUIDModel):
     name = models.CharField(max_length=100)
     code = models.CharField(max_length=50)
+    product_mode = models.CharField(max_length=10, choices=PRODUCT_MODES, blank=True, default='')
 
     class Meta:
         constraints = [

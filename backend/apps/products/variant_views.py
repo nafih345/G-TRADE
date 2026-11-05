@@ -30,7 +30,7 @@ from apps.common.branch_context import get_active_branch
 from .import_engine import detect_ext, field_getter, open_row_stream, resolve_field_headers
 from .models import Product, ProductVariantGroup, ProductVariantTemplate
 from .variant_service import (
-    CONTEXT_INVENTORY, MAX_ROWS_PER_REQUEST, VariantValidationError, save_variants,
+    CONTEXT_INVENTORY, CONTEXT_PURCHASE, MAX_ROWS_PER_REQUEST, VariantValidationError, save_variants,
     serialize_group, serialize_variant,
 )
 
@@ -259,6 +259,9 @@ class ProductVariantGroupViewSet(viewsets.ReadOnlyModelViewSet):
                     if not any(values.values()):
                         continue
                     values['row_number'] = row_number
+                    # The row exactly as the sheet has it, aligned to `headers`, so the preview
+                    # can show the file's own columns rather than only the mapped fields.
+                    values['raw'] = ['' if row.get(h) is None else str(row.get(h)).strip() for h in headers]
                     raw_rows.append(values)
                     if len(raw_rows) > MAX_ROWS_PER_REQUEST:
                         return Response({'detail': f'More than {MAX_ROWS_PER_REQUEST} rows. Split the file, or use Excel Import Manager for large catalogues.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -280,6 +283,7 @@ class ProductVariantGroupViewSet(viewsets.ReadOnlyModelViewSet):
         for g in groups:
             _annotate_errors(g)
         return Response({
+            'headers': headers,
             'mapping': {f: resolved.get(f) for f in IMPORT_ALIASES},
             'unmapped_headers': [h for h in headers if h and h not in resolved.values()],
             'groups': groups,
@@ -393,7 +397,9 @@ def _groups_from_rows(raw_rows, context):
             'tax_percent': r.get('tax_percent'),
             'opening_stock': r.get('opening_stock') if context == CONTEXT_INVENTORY else '',
         }
-        g['variants'].append({'row_number': r['row_number'], 'data': data, 'errors': {}})
+        if context == CONTEXT_PURCHASE:
+            data['quantity'] = r.get('opening_stock')  # the sheet's Qty column is the purchase qty here
+        g['variants'].append({'row_number': r['row_number'], 'data': data, 'errors': {}, 'raw': r.get('raw') or []})
     for g in groups.values():
         g['context'] = context
     return list(groups.values())

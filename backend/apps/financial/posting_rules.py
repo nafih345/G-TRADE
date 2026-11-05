@@ -355,6 +355,8 @@ def build_product_opening_stock(product, previous=None):
     and archiving don't re-value it. Purchase Entry creates products with opening_stock 0 —
     their stock is booked by the purchase. Excel imports (bulk insert, no signals) are not
     auto-posted: an import is the opening load, entered once via opening balances."""
+    if getattr(product, 'stock_source', '') == 'OPENING_STOCK' and previous is None:
+        return None  # booked with its Opening Stock batch (build_opening_stock_batch)
     meta = (previous.metadata or {}) if previous else {}
     qty = int(meta['qty']) if 'qty' in meta else int(product.opening_stock or 0)
     unit_cost = Decimal(str(meta['unit_cost'])) if 'unit_cost' in meta else money(product.cost_price)
@@ -368,6 +370,26 @@ def build_product_opening_stock(product, previous=None):
         'metadata': {'qty': qty, 'unit_cost': str(unit_cost), 'valuation': 'LAST_PURCHASE_COST'},
         'lines': [
             _line('INVENTORY', debit=value, memo=f"{qty} × {product.name} opening stock"),
+            _line('OPENING_EQUITY', credit=value, memo='Opening stock introduced'),
+        ],
+    }
+
+
+def build_opening_stock_batch(batch, previous=None):
+    """Inventory → Opening Stock: the legacy stock a new shop brings in, one entry for the whole
+    save — Dr Inventory / Cr Opening balance equity at the cost typed per item. The batch's
+    totals are fixed when it is saved, so the entry never re-values."""
+    value = money(batch.total_value)
+    if batch.is_deleted or value <= 0:
+        return None
+    return {
+        'date': _date(batch.created_at), 'branch': None, 'voucher_type_code': 'OB',
+        'source_number': batch.batch_number, 'reference_type': 'OPENING_STOCK',
+        'narration': f"Opening stock {batch.batch_number}: {batch.product_count} items, "
+                     f"{batch.total_quantity} units"[:500],
+        'metadata': {'qty': batch.total_quantity, 'items': batch.product_count, 'method': batch.method},
+        'lines': [
+            _line('INVENTORY', debit=value, memo=f"Opening stock {batch.batch_number}"),
             _line('OPENING_EQUITY', credit=value, memo='Opening stock introduced'),
         ],
     }

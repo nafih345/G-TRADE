@@ -45,6 +45,8 @@ export const SOURCE_LABELS = {
   'purchasing.purchase_payment': 'Purchase payment',
   'purchasing.purchase_order': 'Purchase order',
   'inventory.stock_adjustment': 'Stock adjustment',
+  'inventory.opening_stock': 'Opening stock',
+  'products.opening_stock': 'Product opening stock',
   'financial.voucher': 'Manual voucher',
   'financial.opening_balance': 'Opening balance',
 };

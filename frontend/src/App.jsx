@@ -31,6 +31,7 @@ const Appointments = lazy(() => import('./pages/Appointments'));
 const PatientHistory = lazy(() => import('./pages/PatientHistory'));
 const Purchases = lazy(() => import('./pages/Purchases'));
 const StockOverview = lazy(() => import('./pages/StockOverview'));
+const OpeningStock = lazy(() => import('./pages/OpeningStock'));
 const Administration = lazy(() => import('./pages/Administration'));
 const Reports = lazy(() => import('./pages/Reports'));
 const Settings = lazy(() => import('./pages/Settings'));
@@ -262,6 +263,7 @@ function MainLayout() {
                 <Route path="/inventory/lenses" element={<Products />} />
                 <Route path="/inventory/lens" element={<Products />} />
                 <Route path="/inventory/stock-overview" element={<StockOverview />} />
+                <Route path="/inventory/opening-stock" element={<OpeningStock />} />
 
                 {/* Purchase Sub-Routes */}
                 <Route path="/purchase" element={<Purchases />} />
@@ -309,6 +311,7 @@ function MainLayout() {
                 <Route path="/financial/cashbook" element={<FinancialManagement />} />
                 <Route path="/financial/bankbook" element={<FinancialManagement />} />
                 <Route path="/financial/cheques" element={<FinancialManagement />} />
+                <Route path="/financial/statements" element={<FinancialManagement />} />
                 <Route path="/financial/trial-balance" element={<FinancialManagement />} />
                 <Route path="/financial/profit-loss" element={<FinancialManagement />} />
                 <Route path="/financial/balance-sheet" element={<FinancialManagement />} />

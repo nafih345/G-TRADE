@@ -237,10 +237,10 @@ class PurchaseFlowTests(APITestCase):
 
 
 class ImportTests(APITestCase):
-    def _sheet(self, rows):
+    def _sheet(self, rows, headers=None):
         wb = Workbook()
         ws = wb.active
-        ws.append(['Product Name', 'Base SKU', 'Colour', 'Size', 'Barcode', 'MRP', 'Sales Price', 'Tax %'])
+        ws.append(headers or ['Product Name', 'Base SKU', 'Colour', 'Size', 'Barcode', 'MRP', 'Sales Price', 'Tax %'])
         for r in rows:
             ws.append(r)
         buf = io.BytesIO()
@@ -269,6 +269,19 @@ class ImportTests(APITestCase):
         self.assertEqual({e['row_number'] for e in commit.data['errors']}, {3, 4, 5})
         self.assertTrue(Product.objects.filter(sku='IMP-BLK-M').exists())
         self.assertEqual(Product.objects.get(barcode='999').name, 'Owner')
+
+    def test_preview_returns_the_sheet_as_is_and_purchase_qty(self):
+        headers = ['Product Name', 'Colour', 'Qty', 'Cost', 'Rack No', 'Supplier Ref']
+        sheet = self._sheet([['Raw Frame', 'Black', 4, 650, 'R-12', 'SR/9'],
+                             ['Raw Frame', 'Brown', 2, 650, '', 'SR/10']], headers)
+        res = self.client.post(f'{URL}import-preview/', {'file': sheet, 'context': 'purchase'}, format='multipart')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual(res.data['headers'], headers)
+        v = res.data['groups'][0]['variants']
+        self.assertEqual(v[0]['raw'], ['Raw Frame', 'Black', '4', '650', 'R-12', 'SR/9'])
+        self.assertEqual(v[1]['raw'][4], '')
+        self.assertEqual((v[0]['data']['quantity'], v[0]['data']['opening_stock']), ('4', ''))
+        self.assertIn('Rack No', res.data['unmapped_headers'])
 
     def test_template_and_export_download(self):
         self.assertEqual(self.client.get(f'{URL}import-template/').status_code, 200)

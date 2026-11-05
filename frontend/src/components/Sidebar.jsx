@@ -82,6 +82,7 @@ const menuItems = [
       { text: 'Brands', path: '/inventory/brands' },
       { text: 'Lens Catalog Matrix', path: '/inventory/lenses' },
       { text: 'Stock Overview', path: '/inventory/stock-overview' },
+      { text: 'Opening Stock', path: '/inventory/opening-stock' },
       { text: 'Stock Transfer', path: '/inventory/stock-transfer', multiBranchOnly: true }
     ]
   },
@@ -127,6 +128,7 @@ const menuItems = [
       { text: 'Trial Balance', path: '/financial/trial-balance' },
       { text: 'Profit & Loss', path: '/financial/profit-loss' },
       { text: 'Balance Sheet', path: '/financial/balance-sheet' },
+      { text: 'Statements', path: '/financial/statements' },
       { text: 'Financial Reports', path: '/financial/reports' },
       { text: 'Accounting Integration', path: '/financial/integration' }
     ]

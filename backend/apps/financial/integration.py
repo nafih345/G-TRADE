@@ -40,6 +40,7 @@ REGISTRY = {
     'purchasing.purchase_order': ('purchasing.PurchaseOrder', rules.build_purchase_order, 'order_date', 'order_number'),
     'inventory.stock_adjustment': ('inventory.StockAdjustment', rules.build_stock_adjustment, 'created_at', 'reason'),
     'products.opening_stock': ('products.Product', rules.build_product_opening_stock, 'created_at', 'sku'),
+    'inventory.opening_stock': ('inventory.OpeningStockBatch', rules.build_opening_stock_batch, 'created_at', 'batch_number'),
 }
 assert set(REGISTRY) == set(SOURCES)
 

@@ -112,7 +112,14 @@ class PartialSheetTests(ImportCase):
     def test_replace_clears_blank_cells_but_not_missing_columns(self):
         self.run_sheets({'S': [['Code', 'Stock', 'MRP'], ['SKU00001', None, 300]]}, strategy='REPLACE')
         p = Product.objects.get()
-        self.assertEqual((p.stock, p.retail_price, p.cost_price, p.brand_name), (0, 300, 100, 'RayBan'))
+        # Stock is the one column REPLACE leaves alone: it moves only by a ledgered adjustment.
+        self.assertEqual((p.stock, p.retail_price, p.cost_price, p.brand_name), (7, 300, 100, 'RayBan'))
+
+    def test_update_never_overwrites_existing_stock(self):
+        b = self.run_sheets({'S': [['Code', 'Stock', 'MRP'], ['SKU00001', 40, 300]]})
+        self.assertEqual(b.updated_rows, 1, b.remarks)
+        p = Product.objects.get()
+        self.assertEqual((p.stock, p.retail_price), (7, 300))
 
 
 class ValueIntegrityTests(ImportCase):

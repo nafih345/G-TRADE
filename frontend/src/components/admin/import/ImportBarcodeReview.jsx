@@ -36,11 +36,12 @@ function sequenceMessage(summary) {
 }
 
 /**
- * The stop between upload and import when "Auto-generate missing barcodes" is on. The codes
+ * The barcode part of the preview when "Auto-generate missing barcodes" is on. The codes
  * shown are provisional, hence grey. Clearing a row closes the gap: every later row moves
- * up one number, so a page is always re-read from the server after a change.
+ * up one number, so a page is always re-read from the server after a change. `embedded`
+ * drops the card, title and Confirm/Cancel buttons: ImportPreviewReview owns those.
  */
-export default function ImportBarcodeReview({ batch, onConfirmed, onCancelled }) {
+export default function ImportBarcodeReview({ batch, onConfirmed, onCancelled, embedded = false }) {
   const queryClient = useQueryClient();
   const [page, setPage] = useState(0);
   const [search, setSearch] = useState('');
@@ -82,8 +83,8 @@ export default function ImportBarcodeReview({ batch, onConfirmed, onCancelled })
   const missing = summary?.missing || 0;
 
   return (
-    <Card variant="outlined" sx={{ p: 3, borderRadius: 3, mb: 3 }}>
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }} flexWrap="wrap" gap={1}>
+    <Card variant={embedded ? 'elevation' : 'outlined'} elevation={0} sx={embedded ? { p: 0 } : { p: 3, borderRadius: 3, mb: 3 }}>
+      {!embedded && <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }} flexWrap="wrap" gap={1}>
         <Box>
           <Typography variant="h6" fontWeight={800}>Review Barcodes — {batch.batch_number}</Typography>
           <Typography variant="body2" color="text.secondary">
@@ -91,7 +92,7 @@ export default function ImportBarcodeReview({ batch, onConfirmed, onCancelled })
           </Typography>
         </Box>
         <Chip label="WAITING FOR YOU" color="warning" sx={{ fontWeight: 800 }} />
-      </Stack>
+      </Stack>}
 
       {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>{error}</Alert>}
 
@@ -185,14 +186,14 @@ export default function ImportBarcodeReview({ batch, onConfirmed, onCancelled })
         </>
       )}
 
-      <Stack direction="row" spacing={1.5} justifyContent="flex-end" sx={{ mt: 1.5 }}>
+      {!embedded && <Stack direction="row" spacing={1.5} justifyContent="flex-end" sx={{ mt: 1.5 }}>
         <Button disabled={busy} onClick={() => cancel.mutate()} sx={{ textTransform: 'none', fontWeight: 700 }}>
           Cancel Import
         </Button>
         <Button variant="contained" disabled={busy || !summary} onClick={() => confirm.mutate()} sx={{ fontWeight: 800, px: 3 }}>
           {confirm.isPending ? 'Starting...' : 'Confirm & Start Import'}
         </Button>
-      </Stack>
+      </Stack>}
     </Card>
   );
 }

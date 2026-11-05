@@ -9,6 +9,10 @@
                                                        supplier, prices, minimum stock, rack, bin, UOM
   POST  /api/inventory/stock-overview/<id>/adjust/     set the counted quantity (ledgered)
   GET   /api/inventory/stock-overview/<id>/history/    the product's stock movements
+  GET   /api/inventory/stock-overview/import-batches/  finished Excel imports, with what is left to review
+  GET   /api/inventory/stock-overview/import-review/?batch=&section=new|existing|pending
+                                                       one import's products, kept apart from the grid
+  POST  /api/inventory/stock-overview/import-review/   {batch, row_ids|all, decision: apply|keep}
 
 Nothing here keeps its own stock: rows are Product records (each variant is its own Product,
 so nothing is counted twice), quantities are Product.stock, and a quantity change is a
@@ -16,7 +20,13 @@ StockAdjustment pushed through apps.inventory.stock_utils.adjust_branch_stock �
 purchases and sales use — so BranchStock, Product.stock and the StockLedger stay consistent.
 
 List filters: q (words; each must match some identifying field), code (exact scan), brand,
-category, rack, supplier (Supplier id), variant_group, status (in|low|out), ordering.
+category, rack, supplier (Supplier id), variant_group, status (in|low|out), import_batch,
+source (alias source_type: ALL|OPENING_STOCK|EXCEL_IMPORT|PURCHASE — Product.stock_source; PURCHASE
+means regular stock, i.e. neither of the other two), ordering.
+
+An Excel import never writes over an existing product's stock (see apps.products.import_engine).
+The sheet's quantity waits on its ImportPreviewRow; the import review applies it as an ordinary
+adjustment, or keeps the current figure, one decision per row.
 """
 import csv
 import io
@@ -40,7 +50,9 @@ from rest_framework.response import Response
 from apps.common.request_actor import actor_from_request, get_actor, reset_actor, set_actor
 from apps.common.sequences import bump_sequence
 from apps.products.barcode_utils import find_barcode_owner
-from apps.products.models import BarcodeHistory, Product, ProductBarcode, ProductVariantGroup
+from apps.products.models import (
+    BarcodeHistory, ImportBatch, ImportPreviewRow, Product, ProductBarcode, ProductVariantGroup,
+)
 from apps.purchasing.models import PurchaseInvoice, PurchaseInvoiceItem, PurchaseOrder, Supplier
 
 from .models import StockAdjustment, StockAdjustmentSequence, StockLedger
@@ -130,6 +142,17 @@ ORDERING = {
 }
 
 
+# Stock Overview's source filter over Product.stock_source. "Regular / Purchases" is everything
+# not brought in by an Opening Stock load or an Excel import.
+LOADED_SOURCES = ('OPENING_STOCK', 'EXCEL_IMPORT')
+SOURCE_FILTERS = {
+    'OPENING_STOCK': Q(stock_source='OPENING_STOCK'),
+    'EXCEL_IMPORT': Q(stock_source='EXCEL_IMPORT'),
+    'PURCHASE': ~Q(stock_source__in=LOADED_SOURCES),
+}
+SOURCE_FILTERS['REGULAR'] = SOURCE_FILTERS['PURCHASE']
+
+
 def _last_purchase_items():
     return (PurchaseInvoiceItem.objects
             .filter(product=OuterRef('pk'), purchase_invoice__is_deleted=False)
@@ -169,7 +192,7 @@ def _is_uuid(value):
         return False
 
 
-def apply_filters(qs, params):
+def apply_filters(qs, params, *, skip_source=False):
     q = (params.get('q') or params.get('search') or '').strip()
     for word in q.split()[:8]:
         qs = qs.filter(_search_q(word))
@@ -195,10 +218,21 @@ def apply_filters(qs, params):
         qs = qs.filter(variant_group__isnull=False)
     elif group:
         qs = qs.filter(variant_group_id=group) if _is_uuid(group) else qs.none()
+    batch = (params.get('import_batch') or '').strip()
+    if batch:
+        qs = qs.filter(import_batch_id=batch) if _is_uuid(batch) else qs.none()
     status_key = (params.get('status') or '').strip().lower()
     if status_key in STATUS_FILTERS:
         qs = qs.filter(STATUS_FILTERS[status_key])
+    if not skip_source:
+        source = source_param(params)
+        if source in SOURCE_FILTERS:
+            qs = qs.filter(SOURCE_FILTERS[source])
     return qs
+
+
+def source_param(params):
+    return (params.get('source') or params.get('source_type') or '').strip().upper()
 
 
 def apply_ordering(qs, params):
@@ -284,6 +318,7 @@ def serialize_row(p, caps):
         'own_supplier_name': p.supplier_name or '',
         'last_purchase_date': p.last_purchase_date.isoformat() if getattr(p, 'last_purchase_date', None) else None,
         'status': stock_status(p),
+        'stock_source': p.stock_source or '',
         'updated_at': p.updated_at.isoformat() if p.updated_at else None,
     }
 
@@ -494,9 +529,8 @@ class StockOverviewPagination(PageNumberPagination):
 # ---------------------------------------------------------------------------------------------
 # ViewSet
 # ---------------------------------------------------------------------------------------------
-class StockOverviewViewSet(viewsets.GenericViewSet):
-    permission_classes = [StockOverviewPermission]
-    pagination_class = StockOverviewPagination
+class RequestActorMixin:
+    """Ledger rows a request writes carry the signed-in user (apps.common.request_actor)."""
 
     def initial(self, request, *args, **kwargs):
         super().initial(request, *args, **kwargs)
@@ -509,6 +543,11 @@ class StockOverviewViewSet(viewsets.GenericViewSet):
             reset_actor(token)
             self._actor_token = None
         return super().finalize_response(request, response, *args, **kwargs)
+
+
+class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
+    permission_classes = [StockOverviewPermission]
+    pagination_class = StockOverviewPagination
 
     def get_queryset(self):
         return base_queryset()
@@ -556,8 +595,13 @@ class StockOverviewViewSet(viewsets.GenericViewSet):
             selling_value=Coalesce(Sum(ExpressionWrapper(F('stock') * F('retail_price'), output_field=money),
                                        filter=positive), Value(Decimal('0')), output_field=money),
         )
+        # Per-source counts under every other filter, for the source switch's badges.
+        src = (apply_filters(Product.objects.filter(is_active=True), request.query_params, skip_source=True)
+               .aggregate(ALL=Count('id'), **{k: Count('id', filter=SOURCE_FILTERS[k])
+                                              for k in ('OPENING_STOCK', 'EXCEL_IMPORT', 'PURCHASE')}))
         caps = self._caps()
         return Response({
+            'source_counts': src,
             'total_products': agg['total_products'],
             'total_quantity': int(agg['total_quantity'] or 0),
             'low_stock': agg['low_stock'],
@@ -610,7 +654,9 @@ class StockOverviewViewSet(viewsets.GenericViewSet):
         ('stock', 'Current Stock'), ('minimum_stock', 'Minimum Stock'), ('uom', 'UOM'),
         ('status_label', 'Stock Status'), ('cost_price', 'Purchase Cost'), ('retail_price', 'Selling Price'),
         ('mrp', 'MRP'), ('supplier_name', 'Supplier'), ('last_purchase_date', 'Last Purchase Date'),
+        ('source_label', 'Stock Source'),
     ]
+    SOURCE_LABELS = {'OPENING_STOCK': 'Opening Stock', 'EXCEL_IMPORT': 'Excel Import'}
     STATUS_LABELS = {'in': 'In Stock', 'low': 'Low Stock', 'out': 'Out of Stock'}
 
     @action(detail=False, methods=['get'])
@@ -626,6 +672,7 @@ class StockOverviewViewSet(viewsets.GenericViewSet):
             for p in qs[:EXPORT_ROW_LIMIT].iterator(chunk_size=2000):
                 r = serialize_row(p, caps)
                 r['status_label'] = self.STATUS_LABELS[r['status']]
+                r['source_label'] = self.SOURCE_LABELS.get(r['stock_source'], 'Regular')
                 yield [r.get(key) for key, _ in columns]
 
         if fmt == 'csv':
@@ -834,7 +881,10 @@ class StockOverviewViewSet(viewsets.GenericViewSet):
         if errors:
             return Response({'detail': 'Please correct the highlighted values.', 'errors': errors},
                             status=status.HTTP_400_BAD_REQUEST)
+        return self._record_adjustment(request, pk, new_qty, expected, reason, reference, token)
 
+    def _record_adjustment(self, request, pk, new_qty, expected, reason, reference, token):
+        """Sets the product's stock to new_qty through a StockAdjustment. Returns the Response."""
         # Retried submit (double click, network retry): answer with what the first one did.
         if token:
             done = StockAdjustment.all_objects.filter(client_token=token).first()
@@ -887,6 +937,7 @@ class StockOverviewViewSet(viewsets.GenericViewSet):
                 'notes': reason,
                 'performed_by': actor,
                 'unit_cost': product.cost_price,
+                'source_type': 'MANUAL_ADJUSTMENT',
             })
             product.refresh_from_db(fields=['stock'])
             if product.stock != new_qty:
@@ -923,6 +974,133 @@ class StockOverviewViewSet(viewsets.GenericViewSet):
         resp = paginator.get_paginated_response(describe_ledger_rows(page, product))
         resp.data['product'] = serialize_row(base_queryset().get(pk=product.pk), self._caps())
         return resp
+
+
+    # -- Excel import review ---------------------------------------------------------------------
+    @action(detail=False, methods=['get'], url_path='import-batches')
+    def import_batches(self, request):
+        batches = (ImportBatch.objects.filter(status__in=('SUCCESS', 'PARTIAL'), is_deleted=False)
+                   .defer('file_data').order_by(F('completed_at').desc(nulls_last=True), '-uploaded_date')[:30])
+        return Response([{**_review_counts(b), **_batch_json(b)} for b in batches])
+
+    @action(detail=False, methods=['get', 'post'], url_path='import-review')
+    def import_review(self, request):
+        batch = _review_batch(request.query_params.get('batch') or request.data.get('batch'))
+        if request.method == 'POST':
+            return self._decide_import_rows(request, batch)
+
+        section = (request.query_params.get('section') or 'existing').strip().lower()
+        paginator = HistoryPagination()
+        if section == 'new':
+            existing_rows = ImportPreviewRow.objects.filter(batch=batch, kind='UPDATE').values('row_index')
+            qs = (Product.objects.filter(import_batch=batch, is_active=True)
+                  .exclude(import_row__in=Subquery(existing_rows)).order_by('import_row', 'pk'))
+            page = paginator.paginate_queryset(qs, request, view=self)
+            rows = [{'product_id': str(p.pk), 'row_index': p.import_row, 'sku': p.sku, 'barcode': p.barcode,
+                     'name': p.name, 'brand': p.brand_name, 'category': p.category_name,
+                     'imported_quantity': p.opening_stock, 'current_stock': p.stock} for p in page]
+        else:
+            qs = _existing_rows(batch)
+            if section == 'pending':
+                qs = qs.filter(_PENDING)
+            page = paginator.paginate_queryset(qs.order_by('row_index'), request, view=self)
+            products = {p.import_row: p for p in Product.objects.filter(
+                import_batch=batch, is_active=True, import_row__in=[r.row_index for r in page])}
+            rows = [_existing_json(r, products.get(r.row_index)) for r in page]
+        resp = paginator.get_paginated_response(rows)
+        resp.data['batch'] = {**_review_counts(batch), **_batch_json(batch)}
+        return resp
+
+    def _decide_import_rows(self, request, batch):
+        """apply: the sheet's quantity becomes the stock, as a ledgered adjustment. keep: it doesn't."""
+        decision = str(request.data.get('decision') or '').lower()
+        if decision not in ('apply', 'keep'):
+            return Response({'detail': 'decision must be apply or keep.'}, status=status.HTTP_400_BAD_REQUEST)
+        if decision == 'apply':
+            self._require('adjust_stock', 'Your role cannot adjust stock.')
+        rows = _existing_rows(batch).filter(_PENDING)
+        if not request.data.get('all'):
+            ids = [i for i in (request.data.get('row_ids') or []) if _is_uuid(i)]
+            rows = rows.filter(id__in=ids)
+        rows = list(rows.order_by('row_index')[:500])
+        products = {p.import_row: p for p in Product.objects.filter(
+            import_batch=batch, is_active=True, import_row__in=[r.row_index for r in rows])}
+        actor = actor_from_request(request) or get_actor() or ''
+        done, failed = [], []
+        for r in rows:
+            product = products.get(r.row_index)
+            if product is None:
+                failed.append({'id': str(r.id), 'detail': 'The product is no longer part of this import.'})
+                continue
+            number = ''
+            if decision == 'apply':
+                res = self._record_adjustment(
+                    request, product.pk, r.file_stock, r.current_stock,
+                    f'Stock from Excel import {batch.batch_number} (row {r.row_number})', batch.batch_number,
+                    f'imp-{batch.pk.hex[:12]}-{r.row_index}')
+                if res.status_code >= 400:
+                    failed.append({'id': str(r.id), 'detail': res.data.get('detail')})
+                    continue
+                number = res.data['adjustment']['adjustment_number']
+            ImportPreviewRow.objects.filter(pk=r.pk, review_status='').update(
+                review_status='APPLIED' if decision == 'apply' else 'KEPT', adjustment_number=number,
+                reviewed_by=actor[:150], reviewed_at=timezone.now())
+            done.append(str(r.id))
+        return Response({'done': done, 'failed': failed, 'batch': {**_review_counts(batch), **_batch_json(batch)}})
+
+
+# An existing product's sheet quantity still waiting for a decision: it differs from the stock now.
+_PENDING = Q(review_status='', file_stock__isnull=False, current_stock__isnull=False) & ~Q(file_stock=F('current_stock'))
+
+
+def _existing_rows(batch):
+    """The batch's UPDATE rows, each with its product's live stock. A product a later import
+    took over is no longer this batch's to review, so it has no current_stock."""
+    stock = Product.objects.filter(import_batch=batch, is_active=True, import_row=OuterRef('row_index')).values('stock')
+    return ImportPreviewRow.objects.filter(batch=batch, kind='UPDATE').annotate(current_stock=Subquery(stock[:1]))
+
+
+def _review_batch(batch_id):
+    if not _is_uuid(batch_id):
+        raise NotFound('Import batch not found.')
+    batch = ImportBatch.objects.defer('file_data').filter(pk=batch_id, is_deleted=False).first()
+    if batch is None:
+        raise NotFound('Import batch not found.')
+    return batch
+
+
+def _batch_json(b):
+    return {
+        'id': str(b.pk), 'batch_number': b.batch_number, 'file_name': b.original_file_name or b.file_name,
+        'status': b.status, 'uploaded_by': b.uploaded_by,
+        'completed_at': (b.completed_at or b.updated_at).isoformat() if (b.completed_at or b.updated_at) else None,
+        'imported_rows': b.imported_rows, 'updated_rows': b.updated_rows,
+        'skipped_rows': (b.duplicate_rows or 0) + (b.failed_rows or 0),
+    }
+
+
+def _review_counts(batch):
+    agg = _existing_rows(batch).aggregate(existing=Count('id', filter=Q(current_stock__isnull=False)),
+                                          pending=Count('id', filter=_PENDING))
+    new = (Product.objects.filter(import_batch=batch, is_active=True)
+           .exclude(import_row__in=Subquery(ImportPreviewRow.objects.filter(batch=batch, kind='UPDATE')
+                                            .values('row_index'))).count())
+    return {'new_products': new, 'existing_products': agg['existing'], 'pending_stock': agg['pending']}
+
+
+def _existing_json(r, p):
+    return {
+        'id': str(r.id), 'row_number': r.row_number, 'sheet_name': r.sheet_name,
+        'product_id': str(p.pk) if p else None, 'sku': p.sku if p else r.product_code,
+        'barcode': p.barcode if p else None, 'name': p.name if p else r.product_name,
+        'stock_at_preview': r.existing_stock, 'file_quantity': r.file_stock, 'current_stock': r.current_stock,
+        'difference': (r.file_stock - r.current_stock) if r.file_stock is not None and r.current_stock is not None
+        else None,
+        'review_status': r.review_status or ('NO_CHANGE' if r.file_stock is None or r.file_stock == r.current_stock
+                                             else 'PENDING'),
+        'adjustment_number': r.adjustment_number, 'reviewed_by': r.reviewed_by,
+        'reviewed_at': r.reviewed_at.isoformat() if r.reviewed_at else None,
+    }
 
 
 def _adjustment_json(adj):

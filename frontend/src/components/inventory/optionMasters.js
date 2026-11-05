@@ -17,15 +17,18 @@ const hideDefault = (key, name) => {
 // Loads a backend master into an option list ({name: id} records + names), dropping
 // built-in fallback names the user hid. Paints at once from the shared master cache
 // (utils/masterDataCache.js) and then again when the background revalidate returns.
+// setModes (optional) receives {name: Frame/Lens mode} — see product_mode in masters/models.py.
 const MASTER_NAME_BY_URL = Object.fromEntries(Object.entries(MASTER_SOURCES).map(([n, u]) => [u, n]));
 
-export const loadBackendMaster = (url, defaults, hiddenKey, setOptions, setRecords) => {
+export const loadBackendMaster = (url, defaults, hiddenKey, setOptions, setRecords, setModes) => {
   const hidden = new Set(hiddenKey ? readList(hiddenKey, []) : []);
   const apply = (data) => {
     const rows = (data || []).filter(x => x?.name);
     const records = {};
-    rows.forEach(x => { records[x.name] = x.id; });
+    const modes = {};
+    rows.forEach(x => { records[x.name] = x.id; modes[x.name] = x.product_mode || x.resolved_mode || ''; });
     setRecords(records);
+    setModes?.(modes);
     setOptions(Array.from(new Set([...rows.map(x => x.name), ...defaults.filter(d => !hidden.has(d))])));
   };
   const name = MASTER_NAME_BY_URL[url];
@@ -38,12 +41,13 @@ export const loadBackendMaster = (url, defaults, hiddenKey, setOptions, setRecor
 };
 
 // Backend masters (Category / Brand / Unit). Products reference these by FK, so a
-// rename shows up on every product and a delete just clears the link.
-export const backendMaster = (url, hiddenKey, records, setRecords, setOptions) => ({
+// rename shows up on every product and a delete just clears the link. postFields(name) adds
+// fields to the rows this creates (e.g. the Product Master dialog's product_mode).
+export const backendMaster = (url, hiddenKey, records, setRecords, setOptions, postFields = () => ({})) => ({
   persist: async (name) => {
     setOptions(o => Array.from(new Set([name, ...o])));
     try {
-      const r = await axios.post(url, { name, code: genCode(name) });
+      const r = await axios.post(url, { name, code: genCode(name), ...postFields(name) });
       if (r.data?.id) setRecords(m => ({ ...m, [name]: r.data.id }));
     } catch {}
   },
@@ -53,7 +57,7 @@ export const backendMaster = (url, hiddenKey, records, setRecords, setOptions) =
       await axios.patch(`${url}${id}/`, { name: to });
     } else {
       // Built-in name with no DB row yet — create the new one, hide the old.
-      const r = await axios.post(url, { name: to, code: genCode(to) });
+      const r = await axios.post(url, { name: to, code: genCode(to), ...postFields(to, from) });
       if (r.data?.id) setRecords(m => ({ ...m, [to]: r.data.id }));
     }
     hideDefault(hiddenKey, from);

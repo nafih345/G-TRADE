@@ -92,6 +92,11 @@ export default function Purchases() {
   const [entryEditId, setEntryEditId] = useState('');
   // Non-empty while the Purchase Entry form is converting a Lens Purchase Order.
   const [entryLensPoId, setEntryLensPoId] = useState('');
+  // Sales > Orders > Lenses → "Create Purchase Entry / Order from Supplier": {id, at} of the
+  // customer order whose lenses the entry's Lens PO editor opens pre-filled with.
+  const [entryLensSalesOrder, setEntryLensSalesOrder] = useState(null);
+  // Sales > Orders > Lenses → "Receive Lenses": {receivePoId, search, at} for the Lens PO tab.
+  const [lensDashFocus, setLensDashFocus] = useState(null);
 
   useEffect(() => {
     setActiveTab(getTabFromPath(location.pathname));
@@ -133,10 +138,35 @@ export default function Purchases() {
     setEntryPrefillSupplierId('');
     setEntryPrefillPoId('');
     setEntryEditId('');
+    setEntryLensSalesOrder(null);
     setEntryLensPoId(lensPoId);
     setActiveTab('entry');
     navigate('/purchase/entry');
   };
+
+  // Work handed over from Sales > Orders > Lenses through router state; consumed once, then
+  // cleared so a refresh / back doesn't repeat it.
+  useEffect(() => {
+    const st = location.state || {};
+    if (st.lensForSalesOrder) {
+      setEntryPrefillSupplierId('');
+      setEntryPrefillPoId('');
+      setEntryEditId('');
+      setEntryLensPoId('');
+      setEntryLensSalesOrder({ id: st.lensForSalesOrder, at: Date.now() });
+      setActiveTab('entry');
+    } else if (st.convertLensPo) {
+      goToConvertLensPO(st.convertLensPo);
+      return;
+    } else if (st.receiveLensPo) {
+      setLensDashFocus({ receivePoId: st.receiveLensPo, search: st.search || '', at: Date.now() });
+      setActiveTab('lens');
+    } else {
+      return;
+    }
+    navigate(location.pathname, { replace: true, state: null });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.state]);
 
   // Database State (Starts 100% Blank as requested)
   const [suppliers, setSuppliers] = useState([]);
@@ -914,6 +944,7 @@ export default function Purchases() {
           initialSupplierId={entryPrefillSupplierId}
           initialPurchaseOrderId={entryPrefillPoId}
           initialLensPoId={entryLensPoId}
+          initialLensSalesOrder={entryLensSalesOrder}
           editInvoiceId={entryEditId}
           onRequestAddSupplier={openAddSupplier}
           onSaveComplete={(invoice) => {
@@ -921,6 +952,7 @@ export default function Purchases() {
             setEntryPrefillPoId('');
             setEntryEditId('');
             setEntryLensPoId('');
+            setEntryLensSalesOrder(null);
             fetchPurchaseOrders();
             fetchPurchaseEntries();
             const supplierName = invoice.supplierName || 'Supplier';
@@ -960,6 +992,7 @@ export default function Purchases() {
           suppliers={cleanSuppList}
           onConvertToInvoice={goToConvertLensPO}
           onOpenInvoice={goToEditPurchaseEntry}
+          focus={lensDashFocus}
         />
       )}
 

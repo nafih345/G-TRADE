@@ -1,5 +1,6 @@
 from django.db import models
 from apps.common.models import BaseUUIDModel, TenantOwnedModel
+from apps.products.models import STOCK_SOURCES
 
 class StockLedger(BaseUUIDModel):
     TRANSACTION_TYPES = [
@@ -27,6 +28,9 @@ class StockLedger(BaseUUIDModel):
     # Human document number (PE-…, INV-…, ADJ-…) so history is readable without a join.
     reference_number = models.CharField(max_length=100, blank=True, default='')
     unit_cost = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
+    # What kind of load moved the stock (Opening Stock, adjustment…). Blank on movements that
+    # predate it and on ordinary sales / purchases, which reference their own document.
+    source_type = models.CharField(max_length=30, choices=STOCK_SOURCES, blank=True, default='', db_default='')
 
     class Meta:
         indexes = [
@@ -82,6 +86,33 @@ class StockAdjustmentSequence(TenantOwnedModel):
 
     def __str__(self):
         return f"{self.prefix} -> {self.last_number}"
+
+
+class OpeningStockBatch(BaseUUIDModel):
+    """One Inventory → Opening Stock save (manual grid or Excel sheet): the legacy stock a newly
+    onboarded shop brings in. Each row became a new Product tagged stock_source=OPENING_STOCK whose
+    StockLedger 'IN' row references this batch; the batch's total cost is booked as ONE journal
+    (Dr Inventory / Cr Opening balance equity, source inventory.opening_stock)."""
+    METHODS = [('MANUAL', 'Manual entry'), ('IMPORT', 'Excel import')]
+
+    batch_number = models.CharField(max_length=30, db_index=True)
+    method = models.CharField(max_length=10, choices=METHODS)
+    file_name = models.CharField(max_length=255, blank=True, default='')
+    branch = models.ForeignKey('company.Branch', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    product_count = models.IntegerField(default=0)
+    total_quantity = models.IntegerField(default=0)
+    total_value = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    performed_by = models.CharField(max_length=150, blank=True, default='')
+    client_token = models.CharField(max_length=64, blank=True, null=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'client_token'], name='inventory_openingstockbatch_client_token_tenant'),
+        ]
+
+    def __str__(self):
+        return f"{self.batch_number} ({self.product_count} items)"
 
 
 class WarehouseTransfer(BaseUUIDModel):

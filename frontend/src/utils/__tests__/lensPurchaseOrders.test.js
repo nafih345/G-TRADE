@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   SINGLE_PAIR, SPLIT_PAIR, SINGLE_PIECE, lpoQtyLabel, poQtyLabel, rxCells, rxSummary, sameRx,
-  pieceFromRequirement, draftItemErrors, itemPayload, buildOrderSheetHtml,
+  pieceFromRequirement, draftItemErrors, itemPayload, buildOrderSheetHtml, lensItemsFromRequirements,
 } from '../lensPurchaseOrders.js';
 
 const reqA = { sales_order: 'so-a', sales_order_number: 'SO-101', customer_name: 'Customer A', product: 'hmc', eye: 'RE',
@@ -99,4 +99,28 @@ test('order form numbers lenses in sequence and totals like an invoice', () => {
   assert.ok(html.includes('>1346.00<'), 'grand total');
   assert.ok(html.includes('1 Pair + 1 Piece (3 Lenses)'));
   assert.ok(!buildOrderSheetHtml(po, { showPrices: false }).includes('Grand Total'));
+});
+
+test('lensItemsFromRequirements: a customer order lenses become ready-to-submit PO lines', () => {
+  const order = { sales_order: 'so-1', sales_order_number: 'ORD-7', customer_name: 'Asha', product: 'hmc', product_name: 'HMC 1.56', lens_index: '1.56', outstanding: 1 };
+  const products = [{ id: 'hmc', name: 'HMC 1.56', cost_price: '400', tax_rate: '12' }];
+  const pair = lensItemsFromRequirements([{ ...order, eye: 'RE', rx: { sph: '-2.50' } }, { ...order, eye: 'LE', rx: { sph: '-1.75' } }], products);
+  assert.equal(pair.length, 1);
+  assert.equal(pair[0].order_type, SINGLE_PAIR);
+  assert.deepEqual(pair[0].pieces.map((p) => [p.eye, p.rx.sph, p.sales_order]), [['RE', '-2.50', 'so-1'], ['LE', '-1.75', 'so-1']]);
+  assert.equal(pair[0].unit_price, 400);
+  assert.equal(pair[0].tax_percent, 12);
+  assert.equal(pair[0].lens_index, '1.56');
+  assert.deepEqual(draftItemErrors(pair[0]), []);
+
+  const single = lensItemsFromRequirements([{ ...order, eye: 'LE', rx: { sph: '-1.00' } }], products);
+  assert.equal(single.length, 1);
+  assert.equal(single[0].order_type, SINGLE_PIECE);
+  assert.equal(single[0].pricing_unit, 'PAIR'); // pair cost → the server bills half a pair
+  assert.deepEqual(draftItemErrors(single[0]), []);
+
+  // A lens line with no product in the master: kept, but the model still has to be picked.
+  const custom = lensItemsFromRequirements([{ ...order, product: null, sales_order_item: 'line-1', eye: 'RE', rx: { sph: '-1.00' } }], products);
+  assert.equal(custom[0].product, '');
+  assert.ok(draftItemErrors(custom[0]).includes('Select the lens model.'));
 });

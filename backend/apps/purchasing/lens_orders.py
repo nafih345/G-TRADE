@@ -9,6 +9,8 @@ with every physical lens mapped to the customer order it was made for.
     /api/purchase/lens-orders/<id>/cancel/              nothing received, no live invoice
     /api/purchase/lens-orders/<id>/invoice-draft/       Purchase Entry lines for the received lenses
     /api/purchase/lens-orders/pending-requirements/     sales-order lenses still to be ordered
+    /api/purchase/lens-orders/sales-queue/              Sales > Orders > Lenses: one row per customer order
+    /api/purchase/lens-orders/reserved-stock/           stocked lenses held for not-yet-billed orders
 
 A "lens requirement" is one eye of one lens line on a sales Order / Invoice: a PAIR line needs
 RE + LE, a PIECE line its own eye, times the line quantity. New Sale edits recreate an order's
@@ -55,11 +57,26 @@ RECEIVING_STATES = ('RECEIVED',) + DISCREPANCY
 # Sales-order lab stages this module may set (Invoice.fulfillment_status; the full list lives in
 # the frontend's OrdersManagerView / UpdateDocumentDialog). Only ever moved forward, and only
 # while the order is still in one of these early stages — never over a later manual stage.
+# New Sale saves a lens order at STAGE_PENDING_PURCHASE; STAGE_READY follows once the received
+# lenses are in stock through their Purchase Entry (and so held for this order, see reserved_stock).
+STAGE_PENDING_PURCHASE = 'Pending Supplier Purchase'
 STAGE_LENS_ORDERED = 'In Lab Processing'
 STAGE_WAITING = 'Awaiting Remaining Lens'
 STAGE_ARRIVED = 'Lens Arrived'
-_EARLY_STAGE_RANK = {'': 0, 'order received': 0, 'in lab processing': 1,
-                     'awaiting remaining lens': 2, 'lens arrived': 3}
+STAGE_READY = 'Ready for Delivery'
+_EARLY_STAGE_RANK = {'': 0, 'order received': 0, 'pending supplier purchase': 0, 'in lab processing': 1,
+                     'awaiting remaining lens': 2, 'lens arrived': 3, 'ready for delivery': 4}
+
+# Sales > Orders > Lenses queue status of one customer order (see order_queue_row).
+QUEUE_STATUSES = {
+    'PENDING_PURCHASE': 'Pending Supplier Purchase',
+    'PURCHASE_PLACED': 'Purchase Placed',
+    'PARTIALLY_RECEIVED': 'Partially Received',
+    'RECEIVED_NOT_STOCKED': 'Received — Purchase Entry Pending',
+    'READY': 'Received / Ready for Delivery',
+    'IN_STOCK': 'In Stock — Ready',
+    'DELIVERED': 'Delivered',
+}
 
 TWO = Decimal('0.01')
 
@@ -149,6 +166,19 @@ def order_requirements(order):
             reqs[key] = {'count': qty, 'item': item, 'lens_index': str(details.get('lens_index') or '').strip(),
                          'rx': rx if any(rx.values()) else _exam_rx(order.customer_id, eye)}
     return reqs
+
+
+def po_stocked(po):
+    """The PO's lenses are in stock: converted into a live, non-draft Purchase Entry."""
+    inv = po.purchase_invoice
+    return inv is not None and not inv.is_deleted and inv.status not in ('DRAFT', 'CANCELLED')
+
+
+def stock_units(product, pieces):
+    """Stock units one order's lenses of a product take: pieces, or whole pairs rounded up."""
+    if str(((product.extra_data if product else None) or {}).get('lens_stock_unit') or '').upper() == PIECE:
+        return pieces
+    return math.ceil(pieces / 2)
 
 
 def live_pieces():
@@ -522,14 +552,15 @@ def refresh_statuses(po):
 
 
 def sync_sales_order(order, po):
-    """Move one linked sales order's lab stage from its lens pieces: every lens it needs has
-    arrived -> Lens Arrived (ready for fitting); some -> Awaiting Remaining Lens; ordered at a
-    lab -> In Lab Processing. Forward only, and never over a stage staff set past these."""
+    """Move one linked sales order's lab stage from its lens pieces: every lens it needs is in
+    stock through a Purchase Entry -> Ready for Delivery; arrived -> Lens Arrived (ready for
+    fitting); some -> Awaiting Remaining Lens; ordered at a lab -> In Lab Processing. Forward
+    only, and never over a stage staff set past these."""
     order = Invoice.all_objects.prefetch_related('items').get(pk=order.pk)
     reqs = order_requirements(order)
     if not reqs:
         return
-    pieces = list(live_pieces().filter(sales_order=order).select_related('item'))
+    pieces = list(live_pieces().filter(sales_order=order).select_related('item__order__purchase_invoice'))
     received = Counter((p.item.product_id, p.eye) for p in pieces if p.receiving_status == 'RECEIVED')
     received_by_eye = Counter(p.eye for p in pieces if p.receiving_status == 'RECEIVED')
 
@@ -539,7 +570,9 @@ def sync_sales_order(order, po):
 
     all_in = all(covered(k, r) for k, r in reqs.items())
     any_in = any(p.receiving_status == 'RECEIVED' for p in pieces)
-    target = STAGE_ARRIVED if all_in else STAGE_WAITING if any_in else STAGE_LENS_ORDERED if pieces else None
+    stocked = all_in and all(po_stocked(p.item.order) for p in pieces if p.receiving_status == 'RECEIVED')
+    target = (STAGE_READY if stocked else STAGE_ARRIVED if all_in else STAGE_WAITING if any_in
+              else STAGE_LENS_ORDERED if pieces else None)
 
     fitting = 'READY_FOR_FITTING' if all_in else 'WAITING'
     LensPurchaseOrderPiece.objects.filter(pk__in=[p.pk for p in pieces if p.receiving_status == 'RECEIVED']) \
@@ -588,6 +621,120 @@ def link_purchase_invoice(po, invoice):
     po.purchase_invoice = invoice
     _log(po, 'CONVERTED', f'Purchase Entry {invoice.invoice_number} ({invoice.status})')
     po.save(update_fields=['purchase_invoice', 'history', 'updated_at'])
+    # The lenses are in stock now: their customer orders become Ready for Delivery.
+    if po_stocked(po):
+        _sync_orders(po)
+        po.save(update_fields=['history'])
+
+
+# ---------------------------------------------------------------------------
+# Sales > Orders > Lenses queue and reserved stock
+# ---------------------------------------------------------------------------
+
+def _order_delivered(order):
+    return bool(order.delivered_at) or (order.fulfillment_status or '').strip().lower().startswith('delivered')
+
+
+def order_queue_row(order, pieces):
+    """One customer order for the Lenses queue: each lens requirement with what has been
+    ordered / received / stocked for it, and the order's overall queue status."""
+    lenses, pos = [], {}
+    totals = Counter()
+    for (pid, eye), req in order_requirements(order).items():
+        mine = [p for p in pieces if p.eye == eye and (pid is None or p.item.product_id == pid)]
+        got = [p for p in mine if p.receiving_status == 'RECEIVED']
+        in_stock = [p for p in got if po_stocked(p.item.order)]
+        item = req['item']
+        need = req['count']
+        row = {
+            'sales_order_item': str(item.pk), 'product': str(pid) if pid else None,
+            'product_name': item.product.name if item.product else (item.description or 'Lens'),
+            'description': item.description or '', 'selling_unit': item.selling_unit or PAIR,
+            'lens_index': req['lens_index'], 'eye': eye, 'eye_label': EYE_LABEL[eye],
+            'rx': req['rx'], 'rx_summary': rx_summary(req['rx']), 'required': need,
+            'ordered': min(need, len(mine)), 'received': min(need, len(got)), 'stocked': min(need, len(in_stock)),
+            'stock_available': float(item.product.stock or 0) if item.product else None,
+            'pos': sorted({p.item.order.po_number for p in mine}),
+        }
+        for key in ('required', 'ordered', 'received', 'stocked'):
+            totals[key] += row[key]
+        lenses.append(row)
+        for p in mine:
+            po = p.item.order
+            inv = po.purchase_invoice if po_stocked(po) else None
+            pos[po.pk] = {'id': str(po.pk), 'po_number': po.po_number, 'status': po.status,
+                          'status_label': po.get_status_display(),
+                          'supplier_name': po.supplier.name if po.supplier_id else '',
+                          'purchase_invoice': str(inv.pk) if inv else None,
+                          'purchase_invoice_number': inv.invoice_number if inv else ''}
+
+    if _order_delivered(order):
+        code = 'DELIVERED'
+    elif totals['ordered'] < totals['required']:
+        # Nothing ordered yet and the lenses are already on the shelf: sold from stock.
+        code = 'IN_STOCK' if not totals['ordered'] and _covered_by_stock(order, lenses) else 'PENDING_PURCHASE'
+    elif not totals['received']:
+        code = 'PURCHASE_PLACED'
+    elif totals['received'] < totals['required']:
+        code = 'PARTIALLY_RECEIVED'
+    elif totals['stocked'] < totals['required']:
+        code = 'RECEIVED_NOT_STOCKED'
+    else:
+        code = 'READY'
+    customer = order.customer
+    return {
+        'id': str(order.pk), 'invoice_number': order.invoice_number, 'document_type': order.document_type,
+        'invoice_date': order.invoice_date, 'fulfillment_status': order.fulfillment_status or '',
+        'payment_status': order.status, 'net_amount': str(order.net_amount or 0),
+        'paid_amount': str(order.paid_amount or 0),
+        'customer': str(order.customer_id) if order.customer_id else None,
+        'customer_name': order.customer_name or (customer.name if customer else ''),
+        'customer_phone': customer.phone if customer else '',
+        'patient_code': customer.patient_code if customer else '',
+        'test_no': getattr(order, 'test_no', '') or '',
+        'queue_status': code, 'queue_status_label': QUEUE_STATUSES[code],
+        'billed': (order.document_type or '').upper() == 'INVOICE',
+        'lenses': lenses, 'purchase_orders': list(pos.values()), 'totals': dict(totals),
+    }
+
+
+def _covered_by_stock(order, lenses):
+    if not lenses or any(not r['product'] or r['stock_available'] is None for r in lenses):
+        return False
+    need = Counter()
+    for r in lenses:
+        need[r['product']] += r['required']
+    stock = {r['product']: r['stock_available'] for r in lenses}
+    products = {str(it.product_id): it.product for it in order.items.all() if it.product_id}
+    return all(stock[pid] >= stock_units(products.get(pid), n) for pid, n in need.items())
+
+
+def reserved_stock(exclude_order=None):
+    """Lenses in stock (received and brought in by a Purchase Entry) for customer orders not yet
+    billed: those units belong to that customer, not the shelf. Billing the order (Order ->
+    Invoice) deducts them as usual, which ends the reservation."""
+    pieces = live_pieces().filter(
+        receiving_status='RECEIVED', sales_order__document_type__iexact='ORDER',
+        sales_order__is_deleted=False, sales_order__delivered_at__isnull=True,
+    ).exclude(sales_order__status__iexact='CANCELLED').exclude(
+        sales_order__fulfillment_status__istartswith='delivered',
+    ).select_related('item__product', 'item__order__purchase_invoice', 'sales_order')
+    if exclude_order:
+        pieces = pieces.exclude(sales_order_id=exclude_order)
+    groups = {}
+    for p in pieces:
+        if not po_stocked(p.item.order):
+            continue
+        g = groups.setdefault((p.item.product_id, p.sales_order_id),
+                              {'product': p.item.product, 'order': p.sales_order, 'pieces': 0})
+        g['pieces'] += 1
+    return [{
+        'product': str(g['product'].pk), 'product_name': g['product'].name, 'pieces': g['pieces'],
+        'units': stock_units(g['product'], g['pieces']), 'sales_order': str(g['order'].pk),
+        'sales_order_number': g['order'].invoice_number,
+        'customer': str(g['order'].customer_id) if g['order'].customer_id else None,
+        'customer_name': g['order'].customer_name or '',
+    } for g in groups.values()]
 
 
 def invoice_draft_lines(po):
@@ -840,6 +987,46 @@ class LensPurchaseOrderViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
         return Response({'existing': None, 'id': str(po.pk), 'po_number': po.po_number, 'supplier': str(po.supplier_id),
                          'branch': str(po.branch_id) if po.branch_id else None, 'lines': lines,
                          'pieces_total': total, 'pieces_received': received})
+
+    @action(detail=False, methods=['get'], url_path='sales-queue')
+    def sales_queue(self, request):
+        """Sales > Orders > Lenses: customer orders with lens lines, plus invoices whose lenses were
+        bought on a lens PO (an order billed in place) until they are handed over.
+        ?customer= ?search= ?status=CODE,CODE ?include_delivered=1"""
+        p = request.query_params
+        lens_q = Q(items__selling_unit__in=(PAIR, PIECE)) | Q(items__item_type__iexact='LENS')
+        ordered_ids = live_pieces().values('sales_order_id')
+        orders = Invoice.objects.exclude(status__iexact='CANCELLED').filter(lens_q).filter(
+            Q(document_type__iexact='ORDER') | Q(document_type__iexact='INVOICE', pk__in=ordered_ids))
+        if not p.get('include_delivered'):
+            orders = orders.filter(delivered_at__isnull=True).exclude(fulfillment_status__istartswith='delivered')
+        if getattr(request, 'multi_branch_enabled', False):
+            active = get_active_branch(request)
+            if active is not None:
+                orders = orders.filter(branch_id=active.id)
+        if p.get('customer'):
+            orders = orders.filter(customer_id=p['customer'])
+        if p.get('search'):
+            s = p['search'].strip()
+            orders = orders.filter(Q(invoice_number__icontains=s) | Q(customer_name__icontains=s)
+                                   | Q(customer__name__icontains=s) | Q(customer__patient_code__icontains=s)
+                                   | Q(customer__phone__icontains=s))
+        orders = list(orders.distinct().select_related('customer').prefetch_related('items__product')
+                      .order_by('-invoice_date', '-created_at')[:300])
+        by_order = {}
+        for piece in live_pieces().filter(sales_order_id__in=[o.pk for o in orders]).select_related(
+                'item__product', 'item__order__purchase_invoice', 'item__order__supplier'):
+            by_order.setdefault(piece.sales_order_id, []).append(piece)
+        rows = [order_queue_row(o, by_order.get(o.pk, [])) for o in orders]
+        wanted = {c.strip().upper() for c in (p.get('status') or '').split(',') if c.strip()}
+        if wanted:
+            rows = [r for r in rows if r['queue_status'] in wanted]
+        return Response(rows)
+
+    @action(detail=False, methods=['get'], url_path='reserved-stock')
+    def reserved_stock_view(self, request):
+        """?exclude_order= leaves out the order being billed (its own lenses aren't held from it)."""
+        return Response(reserved_stock(exclude_order=request.query_params.get('exclude_order') or None))
 
     @action(detail=False, methods=['get'], url_path='pending-requirements')
     def pending_requirements(self, request):

@@ -54,3 +54,77 @@ export const readList = (key, fallback) => {
 export const writeList = (key, list) => {
   try { localStorage.setItem(key, JSON.stringify(list)); } catch {}
 };
+
+// ── Add New Product: Frame / General vs Lens mode ─────────────────────────────────────────
+// The Product Master dialog lists only the current mode's options. Category and Brand rows
+// carry product_mode (FRAME / LENS / BOTH) on the backend — resolved_mode fills in untagged
+// rows from the name / the products using them (backend/apps/masters/product_modes.py). The
+// local lists below are kept per mode, so a lens coating never shows up for a frame.
+export const PRODUCT_MODES = { FRAME: 'FRAME', LENS: 'LENS' };
+export const DEFAULT_CATEGORY_FOR_MODE = { FRAME: 'Frames', LENS: 'Prescription Lenses' };
+
+// Mirrors _LENS_BRAND in backend/apps/masters/product_modes.py.
+const LENS_BRAND_RE = /essilor|zeiss|hoya|crizal|kodak|nikon|rodenstock|varilux|shamir|seiko|younger|vision ?rx|gkb|tokai|indo|\blens/i;
+// Mirrors isSpectacleLensCategory in utils/lensUnits.js (kept local to avoid a cycle).
+const isLensCategoryName = (name) => {
+  const t = String(name || '').toLowerCase();
+  if (!t || /contact|solution|clean|case|cloth|drop|kit|accessor|frame|sunglass/.test(t)) return false;
+  return /\blens(es)?\b|ophthalmic/.test(t);
+};
+
+/** Mode of a category / brand name with no backend tag (built-in fallback names). */
+export const inferCategoryMode = (name) => (isLensCategoryName(name) ? 'LENS' : 'FRAME');
+export const inferBrandMode = (name) => (LENS_BRAND_RE.test(String(name || '')) ? 'LENS' : 'FRAME');
+export const inMode = (tag, mode) => tag === 'BOTH' || tag === mode;
+
+export const DEFAULT_FRAME_SUBCATEGORIES = ['Full Rim', 'Half Rim / Supra', 'Rimless', 'Kids', 'Sports', 'Fashion'];
+export const DEFAULT_FRAME_GROUPS = ['Optical Frame', 'Sunglass', 'Reading Glass', 'Contact Lens', 'Accessory', 'Solution & Care'];
+export const DEFAULT_FRAME_MATERIALS = ['Acetate', 'TR90', 'Metal', 'Titanium', 'Stainless Steel', 'Aluminium', 'Ultem'];
+export const DEFAULT_FRAME_SHAPES = ['Rectangle', 'Round', 'Square', 'Oval', 'Aviator', 'Cat Eye', 'Wayfarer', 'Geometric', 'Butterfly'];
+
+export const DEFAULT_LENS_SUBCATEGORIES = ['Stock Lens', 'RX / Lab Lens', 'Blue Cut', 'Photochromic', 'Polarized', 'Tinted'];
+export const DEFAULT_LENS_GROUPS = ['Ophthalmic Lens', 'Stock Lens', 'Lab Lens', 'Premium Lens'];
+export const DEFAULT_LENS_MATERIALS = ['CR39', 'Polycarbonate', 'Trivex', 'Hi-Index Plastic', 'Glass'];
+export const DEFAULT_POWER_RANGES = [
+  'SPH 0 to ±4.00 / CYL to -2.00', 'SPH 0 to ±6.00 / CYL to -2.00',
+  'SPH ±6.25 to ±8.00 / CYL to -4.00', 'SPH ±8.25 to ±12.00 / CYL to -6.00', 'ADD +0.75 to +3.50'
+];
+
+// Every lens-only built-in value — left out when a frame list is first seeded from the older
+// shared list (LS_KEYS.subCategory etc., still used by Add Multiple Items), which may hold
+// lens entries saved there.
+const LENS_ONLY_VALUES = new Set([
+  ...DEFAULT_LENS_SUBCATEGORIES, ...DEFAULT_LENS_GROUPS, ...DEFAULT_LENS_MATERIALS,
+  ...DEFAULT_REFRACTIVE, ...DEFAULT_LENS_DESIGNS, ...DEFAULT_COATINGS, ...DEFAULT_POWER_RANGES,
+  'Computer / Blue Cut'
+].map(v => v.toLowerCase()));
+
+// field → { key, defaults, legacyKey? } for each mode. A field missing from a mode is not shown in it.
+export const MODE_LISTS = {
+  FRAME: {
+    subCategory: { key: 'optical_attr_frame_subcategories', defaults: DEFAULT_FRAME_SUBCATEGORIES, legacyKey: LS_KEYS.subCategory },
+    group: { key: 'optical_attr_frame_groups', defaults: DEFAULT_FRAME_GROUPS, legacyKey: LS_KEYS.group },
+    material: { key: 'optical_attr_frame_materials', defaults: DEFAULT_FRAME_MATERIALS, legacyKey: LS_KEYS.material },
+    size: { key: LS_KEYS.size, defaults: DEFAULT_SIZES },
+    color: { key: LS_KEYS.color, defaults: DEFAULT_COLORS },
+    frameShape: { key: 'optical_attr_frame_shapes', defaults: DEFAULT_FRAME_SHAPES },
+  },
+  LENS: {
+    subCategory: { key: 'optical_attr_lens_subcategories', defaults: DEFAULT_LENS_SUBCATEGORIES },
+    group: { key: 'optical_attr_lens_groups', defaults: DEFAULT_LENS_GROUPS },
+    material: { key: 'optical_attr_lens_materials', defaults: DEFAULT_LENS_MATERIALS },
+    refractive: { key: LS_KEYS.refractive, defaults: DEFAULT_REFRACTIVE },
+    lensDesign: { key: LS_KEYS.lensDesign, defaults: DEFAULT_LENS_DESIGNS },
+    coating: { key: LS_KEYS.coating, defaults: DEFAULT_COATINGS },
+    powerRange: { key: 'optical_attr_power_ranges', defaults: DEFAULT_POWER_RANGES },
+  },
+};
+
+/** { field: options[] } for one mode, read from localStorage. */
+export const readModeLists = (mode) => Object.fromEntries(
+  Object.entries(MODE_LISTS[mode]).map(([field, { key, defaults, legacyKey }]) => {
+    const legacy = legacyKey ? readList(legacyKey, null) : null;
+    const seed = legacy ? legacy.filter(v => !LENS_ONLY_VALUES.has(String(v).toLowerCase())) : defaults;
+    return [field, readList(key, seed)];
+  })
+);

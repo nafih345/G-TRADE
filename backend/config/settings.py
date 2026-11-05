@@ -311,6 +311,13 @@ if IS_CLOUD and str(DATABASES['default'].get('ENGINE', '')).endswith('sqlite3'):
         "Set DATABASE_URL on the service to the Postgres connection string."
     )
 
+# The database name this deployment is meant to use (e.g. `neondb`). Optional. On 2026-10-30
+# the service's DATABASE_URL was repointed from `neondb` to a fresh `Uae client` database on
+# the same Neon host; every screen came up empty and nothing said why. When this is set and the
+# connected database has another name, /api/health/ reports degraded with the reason, which the
+# app's red status banner shows to every user. It never stops the service.
+EXPECTED_DATABASE_NAME = (os.environ.get('EXPECTED_DATABASE_NAME') or '').strip() or None
+
 # Pooled connections with health checks: use the backend that skips the per-request `SELECT 1`
 # on a connection that was used moments ago (one round trip saved on every request — see
 # apps/common/db_backends/postgresql/base.py).

@@ -237,6 +237,7 @@ def _audit_fields(product, ledger):
         'performed_by': (ledger.get('performed_by') or get_actor() or '')[:150],
         'reference_number': (ledger.get('reference_number') or '')[:100],
         'unit_cost': ledger.get('unit_cost'),
+        'source_type': ledger.get('source_type') or '',
     }
 
 

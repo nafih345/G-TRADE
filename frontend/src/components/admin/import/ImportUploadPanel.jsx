@@ -42,9 +42,10 @@ export default function ImportUploadPanel({ onImportStarted }) {
     <Card variant="outlined" sx={{ p: 3, borderRadius: 3, mb: 3 }}>
       <Typography variant="h6" fontWeight={800} sx={{ mb: 0.5 }}>Import Products from Excel / CSV</Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Supports unlimited rows — the file is streamed and imported in the background in
-        chunks, so this page stays responsive no matter how large the file is. Columns can be in any
-        order and are matched by their headings; every visible sheet with product columns is imported.
+        Two steps: the file is uploaded and read into a Data Preview first, where every row shows whether it
+        will be imported, skipped as a duplicate or rejected as invalid. Nothing is written until you press
+        Start Import there. Columns can be in any order and are matched by their headings; every visible
+        sheet with product columns is read.
       </Typography>
 
       {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>{error}</Alert>}
@@ -69,7 +70,7 @@ export default function ImportUploadPanel({ onImportStarted }) {
         <Button variant="contained" onClick={handleUpload} disabled={uploading || !file} sx={{ fontWeight: 800, px: 3 }}>
           {uploading
             ? (uploadPct < 100 ? `Uploading ${uploadPct}%...` : 'Starting...')
-            : (autoBarcode ? 'Preview Barcodes' : 'Start Import')}
+            : 'Upload & Preview'}
         </Button>
       </Stack>
 
@@ -80,7 +81,7 @@ export default function ImportUploadPanel({ onImportStarted }) {
       />
       <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
         {autoBarcode
-          ? 'Barcodes in your file are used as they are. Missing ones continue the same series, and you can review them before anything is imported.'
+          ? 'Barcodes in your file are used as they are. Missing ones continue the same series; the preview lists them before anything is imported.'
           : 'Barcodes in your file are used as they are. Rows without one are imported with the barcode left blank.'}
       </Typography>
 
@@ -90,7 +91,7 @@ export default function ImportUploadPanel({ onImportStarted }) {
       {file && !uploading && (
         <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1.5 }}>
           {(file.size / (1024 * 1024)).toFixed(1)} MB selected. Once the upload finishes you can leave this page;
-          the import keeps running on the server.
+          the preview is prepared on the server and waits for you under Data Preview.
         </Typography>
       )}
     </Card>

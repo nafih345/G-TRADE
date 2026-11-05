@@ -10,6 +10,12 @@ Every data row in the file ends up in exactly one bucket, so the batch counters
 always add up: total_rows = imported + updated + duplicate + failed. A row that
 can't be written fails on its own (with its reason in ImportErrorLog); it never
 takes the rest of its chunk down with it. Fully blank rows aren't data.
+
+Nothing is written before the user has seen the whole file: an upload first runs
+_analyze_file, a dry run that records every row as ImportPreviewRow, and waits in
+AWAITING_CONFIRMATION until /confirm/. A row repeating an earlier one in the same
+file is always skipped. An existing product's stock is never overwritten: the
+sheet's quantity stays on its preview row for review in Stock Overview.
 """
 import csv
 import datetime
@@ -28,7 +34,7 @@ from django.db import InterfaceError, OperationalError, transaction, close_old_c
 from django.utils import timezone
 from openpyxl import load_workbook
 
-from .models import Product, ImportBatch, ImportBarcodeRow, ImportErrorLog
+from .models import Product, ImportBatch, ImportBarcodeRow, ImportErrorLog, ImportPreviewRow
 from .views import infer_category_name
 from .barcode_utils import (
     advance_series_past, detect_file_sequence, next_sequence_codes, settings_sequence, taken_barcodes,
@@ -80,6 +86,7 @@ EXACT_ONLY_ALIASES = {'code', 'name', 'item', 'product', 'tag', 'sp', 'cp', 'pri
 # The fields that can tell one product from another; a sheet without any isn't a product list.
 IDENTITY_FIELDS = {'sku', 'base_sku', 'model_no', 'name', 'name_local', 'product_name', 'barcode'}
 # Product column -> the sheet fields that feed it, for telling which columns a row may overwrite.
+# Stock is here for new products only: an update never writes it (see _classify).
 PRODUCT_FIELD_SOURCES = {
     'name': ('name', 'name_local'),
     'category_name': ('category',),
@@ -485,7 +492,8 @@ def _classify(row_index, row_dict, resolved, strategy, state):
     A product is identified by its Code. The same Code on rows that differ in barcode,
     name, colour or size is several products (shops list each colour of a frame under
     one model code), each kept under its own derived SKU. Only a true repeat is a
-    duplicate. Derived SKUs are hashed from the row, so re-importing finds the same ones.
+    duplicate, and it is skipped whatever the strategy: the first row wins. Derived SKUs
+    are hashed from the row, so re-importing finds the same ones.
     """
     if _is_blank_row(row_dict):
         return None
@@ -500,6 +508,7 @@ def _classify(row_index, row_dict, resolved, strategy, state):
     cost_price = safe_float(get('cost_price') or 0, None)
     selling_price = safe_float(get('selling_price') or get('cost_price') or 0, None)
     stock = safe_int(get('stock') or 0, None)
+    file_stock = stock if get('stock') else None
 
     if not sku and not name and not barcode:
         return dict(kind='error', sku='', name='', field_name='Validation', error_type='MISSING_IDENTIFIER',
@@ -539,7 +548,7 @@ def _classify(row_index, row_dict, resolved, strategy, state):
     supplier = get('supplier')
     plan = dict(
         kind='create', sku=target, barcode=barcode, counter='imported', replace=False, revive=False,
-        new_file_row=target not in state.file_rows,
+        repeat=repeat, file_stock=file_stock, new_file_row=target not in state.file_rows,
         new_barcode=bool(barcode) and barcode not in state.barcodes,
         payload=dict(
             name=name,
@@ -556,10 +565,11 @@ def _classify(row_index, row_dict, resolved, strategy, state):
         ),
         # What an update may overwrite. UPDATE changes only what this row fills in;
         # REPLACE also clears cells left blank; a column the sheet doesn't have is
-        # neither, so a two-column price list can't wipe stock, cost or brand.
+        # neither, so a two-column price list can't wipe cost or brand. Never stock:
+        # an existing product's quantity moves only through a ledgered adjustment.
         overwrite={'extra_data', 'import_row'} | {
             field for field, sources in PRODUCT_FIELD_SOURCES.items()
-            if any((s in resolved) if strategy == 'REPLACE' else get(s) for s in sources)
+            if field != 'stock' and any((s in resolved) if strategy == 'REPLACE' else get(s) for s in sources)
         },
     )
 
@@ -568,7 +578,9 @@ def _classify(row_index, row_dict, resolved, strategy, state):
         # The old row was deleted, so to the shop this is a new product. Reusing the row
         # is what its unique sku forces, and it keeps any history pointing at it.
         plan.update(kind='update', revive=True)
-    elif repeat or is_deleted is not None:
+    elif repeat:
+        plan.update(kind='skip', counter='duplicate', new_barcode=False)
+    elif is_deleted is not None:
         if strategy == 'SKIP':
             plan.update(kind='skip', counter='duplicate', new_barcode=False)
         elif strategy == 'DUPLICATE':
@@ -576,9 +588,7 @@ def _classify(row_index, row_dict, resolved, strategy, state):
                         new_file_row=False)
             plan['payload']['name'] = f"{name} (Duplicate)"[:255]
         else:
-            # A repeat within the file updates the product the earlier row made, but it
-            # isn't one more product, so it counts as a duplicate rather than an update.
-            plan.update(kind='update', counter='duplicate' if repeat else 'updated', replace=strategy == 'REPLACE')
+            plan.update(kind='update', counter='updated', replace=strategy == 'REPLACE')
 
     if plan['new_file_row']:
         state.file_rows[target] = signature
@@ -605,7 +615,7 @@ def _apply_plans(batch, plans, state):
 
         new_products = [
             Product(sku=p['sku'], barcode=p['barcode'] or None, opening_stock=p['payload']['stock'],
-                    import_batch=batch, is_active=True, **p['payload'])
+                    import_batch=batch, is_active=True, stock_source='EXCEL_IMPORT', **p['payload'])
             for p in creates
         ]
         if new_products:
@@ -626,9 +636,8 @@ def _apply_plans(batch, plans, state):
                     o.extra_data = {**old_extra, **p['payload']['extra_data']}
                 if p['barcode']:
                     o.barcode = p['barcode']
-                if (p['replace'] or p['revive']) and 'stock' in p['overwrite']:
-                    o.opening_stock = o.stock
                 if p['revive']:
+                    o.opening_stock = o.stock
                     o.is_deleted = False
                     o.is_active = True
                 o.import_batch = batch
@@ -824,38 +833,94 @@ def _sheet_barcode(resolved, row_dict):
     return _clean_code(field_getter(resolved, row_dict)('barcode'))[:150]
 
 
-def _analyze_barcodes(batch, file_path, ext):
+PREVIEW_KINDS = {'create': 'NEW', 'update': 'UPDATE', 'skip': 'DUPLICATE', 'error': 'ERROR'}
+
+
+def _preview_message(plan, strategy, first_rows):
+    kind = plan['kind']
+    if kind == 'error':
+        return plan['message']
+    if kind == 'skip':
+        if plan['repeat']:
+            sheet, row_no = first_rows.get(plan['sku'], ('', None))
+            return f"Repeats row {row_no} of {sheet}" if row_no else "Repeats an earlier row of this file"
+        return "Already in Products (Skip Duplicates)"
+    if plan['revive']:
+        return "Restores a deleted product"
+    if kind == 'update':
+        verb = 'Replaces' if strategy == 'REPLACE' else 'Updates'
+        return f"{verb} existing product {plan['sku']}. Its stock is not changed"
+    if strategy == 'DUPLICATE' and '-DUP' in plan['sku']:
+        return "Copy of an existing product"
+    return ''
+
+
+def _analyze_file(batch, file_path, ext):
     """
-    Dry run of the import for the barcode preview: classifies every row exactly as the job
-    will, writing nothing but the preview itself, and works out which rows need a code and
-    which codes those are. Safe to repeat, so a stalled run just starts again.
+    Dry run of the import for the preview: classifies every row exactly as the job will
+    and records the verdict as an ImportPreviewRow, writing nothing else. With auto_barcode
+    it also works out which rows need a generated code and which codes those are. Safe to
+    repeat, so a stalled run just starts again.
     """
     state = ImportState(batch)
+    strategy = batch.duplicate_strategy
     row_index = total = with_barcode = keeps_existing = sheets_read = 0
     file_codes = set()
     due = {}    # sku -> its row. A repeat row with a barcode cancels it, or a number goes unused.
+    first_rows = {}    # sku -> (sheet, row_no) of the row that claimed it
+    counts = dict(NEW=0, UPDATE=0, DUPLICATE=0, ERROR=0)
+    all_headers = []
+    pending = []
     last_beat = time.time()
+
+    ImportPreviewRow.objects.filter(batch=batch).delete()
+
+    def flush():
+        # Rows that update a product show its stock as it is now, next to the sheet's.
+        skus = [r.product_code for r in pending if r.kind == 'UPDATE']
+        stock = dict(Product.all_objects.filter(sku__in=skus).values_list('sku', 'stock')) if skus else {}
+        for r in pending:
+            if r.kind == 'UPDATE':
+                r.existing_stock = stock.get(r.product_code)
+        ImportPreviewRow.objects.bulk_create(pending, batch_size=CHUNK_SIZE)
+        ImportBatch.objects.filter(pk=batch.pk).update(updated_at=timezone.now(), processed_rows=row_index)
+        pending.clear()
 
     for sheet_name, headers, stream in iter_sheet_streams(file_path, ext):
         if headers is None:
             continue
         sheets_read += 1
         resolved = resolve_field_headers(headers)
+        all_headers += [h for h in headers if h not in all_headers]
         for row_no, row_dict in stream:
             row_index += 1
             if time.time() - last_beat >= HEARTBEAT_SECONDS:
                 ImportBatch.objects.filter(pk=batch.pk).update(updated_at=timezone.now())
                 last_beat = time.time()
-
-            plan = _classify(row_index, row_dict, resolved, batch.duplicate_strategy, state)
+            plan = _classify(row_index, row_dict, resolved, strategy, state)
             if plan is None:
                 continue
             total += 1
+            kind = PREVIEW_KINDS[plan['kind']]
+            if kind == 'UPDATE' and plan['revive']:
+                kind = 'NEW'    # deleted, so to the shop it is a new product
+            counts[kind] += 1
+            name = plan['payload']['name'] if 'payload' in plan else plan['name']
+            pending.append(ImportPreviewRow(
+                batch=batch, row_index=row_index, sheet_name=sheet_name[:100], row_number=row_no, kind=kind,
+                product_code=(plan['sku'] or '')[:150], product_name=(name or '')[:255],
+                error_type=plan.get('error_type', '')[:40], message=_preview_message(plan, strategy, first_rows),
+                file_stock=plan.get('file_stock'), cells=row_dict))
+            if plan['kind'] in ('create', 'update'):
+                first_rows.setdefault(plan['sku'], (sheet_name, row_no))
+            if len(pending) >= CHUNK_SIZE:
+                flush()
+
             code = _sheet_barcode(resolved, row_dict)
             if code:
                 file_codes.add(code)
                 with_barcode += 1
-            if plan['kind'] not in ('create', 'update'):
+            if not batch.auto_barcode or plan['kind'] not in ('create', 'update'):
                 continue
             if state.wants_barcode(plan):
                 due[plan['sku']] = ImportBarcodeRow(
@@ -866,25 +931,33 @@ def _analyze_barcodes(batch, file_path, ext):
             else:
                 keeps_existing += 1
             state.barcoded_skus.add(plan['sku'])
+    flush()
 
     if not sheets_read:
         raise ValueError("No product columns found. The sheet needs a header row with at least a "
                          "Product Name, Code or Barcode column.")
 
+    barcode_summary = {}
     rows = list(due.values())
-    rule = detect_file_sequence(file_codes) or settings_sequence()
-    codes, stepped_over = next_sequence_codes(rule, len(rows), avoid=file_codes)
-    for position, (row, code) in enumerate(zip(rows, codes)):
-        row.position, row.slot_code = position, code
+    if batch.auto_barcode:
+        rule = detect_file_sequence(file_codes) or settings_sequence()
+        codes, stepped_over = next_sequence_codes(rule, len(rows), avoid=file_codes)
+        for position, (row, code) in enumerate(zip(rows, codes)):
+            row.position, row.slot_code = position, code
+        barcode_summary = dict(total=total, with_barcode=with_barcode, keeps_existing=keeps_existing,
+                               missing=len(rows), stepped_over=stepped_over, rule=rule)
 
+    valid = counts['NEW'] + counts['UPDATE']
     with transaction.atomic():
         ImportBarcodeRow.objects.filter(batch=batch).delete()
         ImportBarcodeRow.objects.bulk_create(rows, batch_size=CHUNK_SIZE)
         ImportBatch.objects.filter(pk=batch.pk, status='ANALYZING').update(
-            status='AWAITING_CONFIRMATION', updated_at=timezone.now(),
-            remarks=f"{len(rows)} of {total} rows are missing a barcode. Waiting for your review.",
-            barcode_summary=dict(total=total, with_barcode=with_barcode, keeps_existing=keeps_existing,
-                                 missing=len(rows), stepped_over=stepped_over, rule=rule))
+            status='AWAITING_CONFIRMATION', updated_at=timezone.now(), column_headers=all_headers,
+            total_rows=total, processed_rows=0,
+            remarks=(f"{valid} of {total} rows are ready to import; {counts['DUPLICATE']} duplicates and "
+                     f"{counts['ERROR']} invalid rows will be skipped. Waiting for your review."),
+            preview_summary=dict(total=total, valid=valid, **{k.lower(): v for k, v in counts.items()}),
+            barcode_summary=barcode_summary)
 
 
 def _run_analysis(batch):
@@ -894,12 +967,13 @@ def _run_analysis(batch):
         file_path, is_temp = _materialize_file(batch, ext)
         if is_temp:
             tmp_path = file_path
-        _analyze_barcodes(batch, file_path, ext)
+        _analyze_file(batch, file_path, ext)
     except TRANSIENT_DB_ERRORS as e:
         print("Barcode preview paused, database unavailable:", e)    # still ANALYZING: the watchdog retries
     except Exception as e:
         ImportBatch.objects.filter(pk=batch.pk).update(
-            status='FAILED', remarks=f"Could not read the file: {e}", file_data=None, updated_at=timezone.now())
+            status='FAILED', remarks=f"Could not read the file: {e}", file_data=None,
+            completed_at=timezone.now(), updated_at=timezone.now())
     finally:
         if tmp_path:
             try:
@@ -1123,9 +1197,14 @@ def run_import_job(batch_id):
         _log(batch, f"Import finished: {imported} imported, {updated} updated, {duplicate} duplicates, "
                     f"{failed} failed, {processing_time}s")
         batch.file_data = None  # finished; the bytes were only kept for resuming
+        batch.completed_at = timezone.now()
         batch.save(update_fields=['processing_time', 'total_rows', 'processed_rows', 'status', 'remarks', 'logs',
-                                  'file_data', 'updated_at'])
+                                  'file_data', 'completed_at', 'updated_at'])
         ImportBarcodeRow.objects.filter(batch=batch).delete()
+        # Only the existing products' sheet quantities are still needed, for the stock review.
+        previews = ImportPreviewRow.objects.filter(batch=batch)
+        previews.exclude(kind='UPDATE').delete()
+        previews.update(cells={})
     except ImportSuperseded:
         pass
     except TRANSIENT_DB_ERRORS as e:
@@ -1138,7 +1217,8 @@ def run_import_job(batch_id):
             batch.remarks = f"Import crashed: {e}"
             _log(batch, f"Import crashed: {e}")
             batch.file_data = None
-            batch.save(update_fields=['status', 'remarks', 'logs', 'file_data', 'updated_at'])
+            batch.completed_at = timezone.now()
+            batch.save(update_fields=['status', 'remarks', 'logs', 'file_data', 'completed_at', 'updated_at'])
         except Exception:
             pass
     finally:

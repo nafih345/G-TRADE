@@ -12,7 +12,7 @@ from django.db import models, connection, transaction
 from django.core.management import call_command
 from django.http import HttpResponse, StreamingHttpResponse
 from django.utils import timezone
-from .models import Product, ImportBatch, ImportBarcodeRow, ImportErrorLog
+from .models import Product, ImportBatch, ImportBarcodeRow, ImportErrorLog, ImportPreviewRow
 from . import import_engine
 
 from django.contrib.auth import get_user_model
@@ -44,6 +44,7 @@ def ensure_import_tables_exist():
             ('masters_storagerack', StorageRack),
             ('products_importbatch', ImportBatch),
             ('products_importbarcoderow', ImportBarcodeRow),
+            ('products_importpreviewrow', ImportPreviewRow),
             ('products_importerrorlog', ImportErrorLog),
             ('products_product', Product)
         ]
@@ -80,6 +81,7 @@ def _batch_summary(b):
         'original_file_name': b.original_file_name or b.file_name,
         'uploaded_by': b.uploaded_by,
         'uploaded_date': b.uploaded_date.strftime('%Y-%m-%d %H:%M:%S') if b.uploaded_date else '',
+        'completed_at': b.completed_at.isoformat() if b.completed_at else None,
         'status': b.status,
         'duplicate_strategy': b.duplicate_strategy,
         'auto_barcode': b.auto_barcode,
@@ -89,6 +91,8 @@ def _batch_summary(b):
         'updated_rows': b.updated_rows,
         'failed_rows': b.failed_rows,
         'duplicate_rows': b.duplicate_rows,
+        'skipped_rows': (b.duplicate_rows or 0) + (b.failed_rows or 0),
+        'preview_summary': b.preview_summary or {},
         'processing_time': b.processing_time,
         'version': b.version,
         'remarks': b.remarks,
@@ -102,11 +106,10 @@ def _batch_summary(b):
 @permission_classes([permissions.AllowAny])
 def start_import(request):
     """
-    Saves the uploaded file, creates an ImportBatch, and starts a background
-    thread that streams + chunk-imports it. Returns immediately — the browser
-    never waits for the import itself, only for the upload to be accepted.
-    With auto_barcode on, the thread only prepares the barcode preview; nothing
-    is imported until /confirm/.
+    Saves the uploaded file, creates an ImportBatch, and starts a background thread
+    that reads the whole file into the preview (ImportPreviewRow, plus the barcode
+    preview with auto_barcode on). Nothing is imported until /confirm/. Returns
+    immediately: the browser only waits for the upload to be accepted.
     """
     ensure_import_tables_exist()
     file_obj = request.FILES.get('file')
@@ -139,10 +142,10 @@ def start_import(request):
                 file_name=file_obj.name,
                 original_file_name=file_obj.name,
                 uploaded_by=uploaded_by,
-                status='ANALYZING' if auto_barcode else 'PENDING',
+                status='ANALYZING',
                 duplicate_strategy=duplicate_strategy,
                 auto_barcode=auto_barcode,
-                remarks='Checking the barcodes in your file...' if auto_barcode else 'Queued for background import.'
+                remarks='Reading your file for the preview...'
             )
             transaction.on_commit(lambda: import_engine.start_import_thread(batch.id))
     except Exception as e:
@@ -223,6 +226,56 @@ def get_import_rows(request, pk):
     return response
 
 
+PREVIEW_KIND_FILTERS = {
+    'valid': ('NEW', 'UPDATE'), 'new': ('NEW',), 'update': ('UPDATE',),
+    'duplicate': ('DUPLICATE',), 'error': ('ERROR',), 'skipped': ('DUPLICATE', 'ERROR'),
+}
+
+
+@api_view(['GET'])
+@authentication_classes([])
+@permission_classes([permissions.AllowAny])
+def get_import_preview(request, pk):
+    """
+    Every row of the uploaded file as the preview judged it, with the sheet's own cells
+    in its own column order. ?kind= narrows to valid/new/update/duplicate/error/skipped.
+    """
+    try:
+        batch = ImportBatch.objects.defer('file_data').get(id=pk)
+    except ImportBatch.DoesNotExist:
+        return Response({'error': 'Import batch not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    qs = batch.preview_rows.all().order_by('row_index')
+    kinds = PREVIEW_KIND_FILTERS.get(request.query_params.get('kind', '').strip().lower())
+    if kinds:
+        qs = qs.filter(kind__in=kinds)
+    search = request.query_params.get('search', '').strip()
+    if search:
+        qs = qs.filter(models.Q(product_name__icontains=search) | models.Q(product_code__icontains=search)
+                       | models.Q(message__icontains=search))
+
+    paginator = ImportRowsPagination()
+    page = paginator.paginate_queryset(qs, request)
+    rows = [{
+        'id': str(r.id),
+        'sheet_name': r.sheet_name,
+        'row_number': r.row_number,
+        'kind': r.kind,
+        'product_code': r.product_code,
+        'product_name': r.product_name,
+        'error_type': r.error_type,
+        'message': r.message,
+        'file_stock': r.file_stock,
+        'existing_stock': r.existing_stock,
+        'cells': r.cells or {},
+    } for r in page]
+    response = paginator.get_paginated_response(rows)
+    response.data['column_headers'] = batch.column_headers or []
+    response.data['summary'] = batch.preview_summary or {}
+    response.data['status'] = batch.status
+    return response
+
+
 @api_view(['GET'])
 @authentication_classes([])
 @permission_classes([permissions.AllowAny])
@@ -288,8 +341,13 @@ def set_barcode_exclusion(request, pk):
 @authentication_classes([])
 @permission_classes([permissions.AllowAny])
 def confirm_import(request, pk):
-    """The user has seen the barcode preview: start the real import. Only the first call counts."""
-    confirmed = ImportBatch.objects.filter(id=pk, status='AWAITING_CONFIRMATION').update(
+    """The user has reviewed the preview: start the real import. Only the first call counts."""
+    waiting = ImportBatch.objects.filter(id=pk, status='AWAITING_CONFIRMATION')
+    summary = waiting.values_list('preview_summary', flat=True).first()
+    if summary is not None and summary.get('valid') == 0:
+        return Response({'error': 'No row of this file can be imported. Fix the file and upload it again.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    confirmed = waiting.update(
         status='PENDING', remarks='Queued for background import.', updated_at=timezone.now())
     if not confirmed:
         return Response({'error': 'This import is not waiting for confirmation.'}, status=status.HTTP_409_CONFLICT)

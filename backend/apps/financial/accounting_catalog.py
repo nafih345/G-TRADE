@@ -75,6 +75,7 @@ SOURCES = {
     'purchasing.purchase_order': ('Purchase order received directly', 'Dr Inventory + GST input; Cr Supplier payable (only when the PO itself moved stock)'),
     'inventory.stock_adjustment': ('Stock adjustment', 'ADD: Dr Inventory / Cr Stock gain. SUB: Dr Stock loss (or COGS for a wholesale POS sale) / Cr Inventory'),
     'products.opening_stock': ('New product opening stock', 'Dr Inventory / Cr Opening balance equity at cost (Add New Product / Add Multiple Items)'),
+    'inventory.opening_stock': ('Opening stock load', 'Dr Inventory / Cr Opening balance equity: one entry per Inventory → Opening Stock save, at the cost typed for each item'),
 }
 
 # Legacy JournalEntry.reference_type -> (source_module, source_event), for adopting entries

@@ -28,16 +28,16 @@ import { navDialogProps, enterOpensSelectProps, focusField, focusRelative, focus
 export { opticalCategories, opticalBrands } from './productAttributeOptions';
 import { loadBackendMaster, backendMaster, localMaster } from './optionMasters';
 import {
-  opticalCategories, opticalBrands, LS_KEYS, readList,
-  DEFAULT_MATERIALS, DEFAULT_REFRACTIVE, DEFAULT_LENS_DESIGNS, DEFAULT_COATINGS,
-  DEFAULT_GROUPS, DEFAULT_SIZES, DEFAULT_COLORS, DEFAULT_SUBCATEGORIES
+  opticalCategories, opticalBrands, LS_KEYS,
+  MODE_LISTS, readModeLists, DEFAULT_CATEGORY_FOR_MODE, inferCategoryMode, inferBrandMode, inMode
 } from './productAttributeOptions';
+import { isSpectacleLensCategory } from '../../utils/lensUnits';
 
 const blankProduct = (overrides = {}) => ({
   name: '', code: '', modelNo: '', hsnCode: '',
   category: 'Frames', subCategory: '', group: '', brand: '',
-  size: '', color: '', material: '',
-  frameType: '', lensType: '', coating: '',
+  size: '', color: '', material: '', frameShape: '',
+  frameType: '', lensType: '', coating: '', powerRange: '',
   supplier: '', warehouse: 'Main', rack: '', stock: '',
   purchasePrice: '', mrp: '', salePrice: '', gst: '0%',
   barcode: '',
@@ -316,8 +316,25 @@ function Section({ title, icon, children }) {
 // Inventory → Products page, surfaced anywhere a new product needs to be created
 // inline (e.g. Purchase Entry). Saves to the products database and reports the
 // created product back through onCreated().
+// Frame / General vs Lens mode of a saved product: the mode it was saved in, else its category.
+const productMode = (ep) => {
+  const saved = (ep?.extra_data || {}).product_mode;
+  if (saved === 'LENS' || saved === 'FRAME') return saved;
+  return isSpectacleLensCategory(ep?.category || ep?.category_name) ? 'LENS' : 'FRAME';
+};
+
+// Switching mode clears every classification / attribute value, so nothing picked from the
+// other mode's lists rides along (name, code, prices, barcode and stock are kept).
+const CLASSIFICATION_RESET = {
+  subCategory: '', group: '', brand: '', modelNo: '',
+  size: '', color: '', material: '', frameShape: '',
+  frameType: '', lensType: '', coating: '', powerRange: '',
+  lensPriceUnit: 'PAIR', lensStockUnit: 'PAIR', lensPiecePrice: '', lensPiecePercent: '', lensPairPrice: ''
+};
+
 const productToForm = (ep) => {
-  const isLensCat = (ep.category || '') === 'Prescription Lenses';
+  const isLensCat = productMode(ep) === 'LENS';
+  const ex = ep.extra_data || {};
   return blankProduct({
   name: ep.name || '',
   code: ep.code || ep.product_code || '',
@@ -330,6 +347,8 @@ const productToForm = (ep) => {
   size: ep.size || '',
   color: ep.color || ep.colour || '',
   material: ep.material || '',
+  frameShape: isLensCat ? '' : (ep.frameShape || ex.frame_shape || ''),
+  powerRange: isLensCat ? (ep.powerRange || ex.power_range || '') : '',
   frameType: isLensCat ? (ep.frameType || ep.refractive_index || '') : '',
   lensType: isLensCat ? (ep.lensType || ep.lens_design || '') : '',
   coating: isLensCat ? (ep.coating || '') : '',
@@ -368,19 +387,19 @@ export default function ProductMasterDialog({
   const [imageFile, setImageFile] = useState(null);
   const [imagePreview, setImagePreview] = useState('');
 
+  // Frame / General vs Lens. Every classification list below shows only this mode's entries.
+  const [mode, setMode] = useState('FRAME');
+  const isLens = mode === 'LENS';
+
+  // Every Category / Brand name (all modes) + name → backend id / product_mode tag.
   const [categoryOptions, setCategoryOptions] = useState(opticalCategories);
   const [brandOptions, setBrandOptions] = useState(opticalBrands);
-  const [subCategoryOptions, setSubCategoryOptions] = useState(() => readList(LS_KEYS.subCategory, DEFAULT_SUBCATEGORIES));
-  const [groupOptions, setGroupOptions] = useState(() => readList(LS_KEYS.group, DEFAULT_GROUPS));
-  const [sizeOptions, setSizeOptions] = useState(() => readList(LS_KEYS.size, DEFAULT_SIZES));
-  const [colorOptions, setColorOptions] = useState(() => readList(LS_KEYS.color, DEFAULT_COLORS));
-  const [materialOptions, setMaterialOptions] = useState(() => readList(LS_KEYS.material, DEFAULT_MATERIALS));
-  const [refractiveOptions, setRefractiveOptions] = useState(() => readList(LS_KEYS.refractive, DEFAULT_REFRACTIVE));
-  const [lensDesignOptions, setLensDesignOptions] = useState(() => readList(LS_KEYS.lensDesign, DEFAULT_LENS_DESIGNS));
-  const [coatingOptions, setCoatingOptions] = useState(() => readList(LS_KEYS.coating, DEFAULT_COATINGS));
-  // name → backend id for the two lists that live in the masters tables.
   const [categoryRecords, setCategoryRecords] = useState({});
   const [brandRecords, setBrandRecords] = useState({});
+  const [categoryModes, setCategoryModes] = useState({});
+  const [brandModes, setBrandModes] = useState({});
+  // { FRAME: { field: options[] }, LENS: { … } } — the local (no backend master) lists.
+  const [lists, setLists] = useState(() => ({ FRAME: readModeLists('FRAME'), LENS: readModeLists('LENS') }));
 
   const set =(patch) => setP(prev => ({ ...prev, ...patch }));
 
@@ -389,24 +408,67 @@ export default function ProductMasterDialog({
     setP(isEdit
       ? productToForm(editProduct)
       : blankProduct({ supplier: defaultSupplier || '', category: defaultCategory || 'Frames' }));
+    setMode(isEdit ? productMode(editProduct) : inferCategoryMode(defaultCategory || 'Frames'));
+    setLists({ FRAME: readModeLists('FRAME'), LENS: readModeLists('LENS') });
     setImageFile(null);
     setImagePreview(isEdit ? (editProduct.image || '') : '');
 
-    loadBackendMaster('/api/masters/categories/', opticalCategories, LS_KEYS.hiddenCategories, setCategoryOptions, setCategoryRecords);
-    loadBackendMaster('/api/masters/brands/', opticalBrands, LS_KEYS.hiddenBrands, setBrandOptions, setBrandRecords);
+    loadBackendMaster('/api/masters/categories/', opticalCategories, LS_KEYS.hiddenCategories, setCategoryOptions, setCategoryRecords, setCategoryModes);
+    loadBackendMaster('/api/masters/brands/', opticalBrands, LS_KEYS.hiddenBrands, setBrandOptions, setBrandRecords, setBrandModes);
   }, [open, defaultSupplier, defaultCategory, isEdit, editProduct]);
 
-  const categoryMaster = backendMaster('/api/masters/categories/', LS_KEYS.hiddenCategories, categoryRecords, setCategoryRecords, setCategoryOptions);
-  const brandMaster = backendMaster('/api/masters/brands/', LS_KEYS.hiddenBrands, brandRecords, setBrandRecords, setBrandOptions);
+  const categoryModeOf = (name) => categoryModes[name] || inferCategoryMode(name);
+  const brandModeOf = (name) => brandModes[name] || inferBrandMode(name);
+  const categoriesFor = (m) => categoryOptions.filter(n => inMode(categoryModeOf(n), m));
+  const shownCategories = useMemo(() => categoriesFor(mode), [categoryOptions, categoryModes, mode]);
+  const shownBrands = useMemo(() => brandOptions.filter(n => inMode(brandModeOf(n), mode)), [brandOptions, brandModes, mode]);
 
-  const subCategoryMaster = localMaster(LS_KEYS.subCategory, setSubCategoryOptions);
-  const groupMaster = localMaster(LS_KEYS.group, setGroupOptions);
-  const sizeMaster = localMaster(LS_KEYS.size, setSizeOptions);
-  const colorMaster = localMaster(LS_KEYS.color, setColorOptions);
-  const materialMaster = localMaster(LS_KEYS.material, setMaterialOptions);
-  const refractiveMaster = localMaster(LS_KEYS.refractive, setRefractiveOptions);
-  const lensDesignMaster = localMaster(LS_KEYS.lensDesign, setLensDesignOptions);
-  const coatingMaster = localMaster(LS_KEYS.coating, setCoatingOptions);
+  // A Category / Brand master that tags what it creates with the current mode. Adding a name
+  // the other mode already has shares that entry (BOTH) rather than making a duplicate row.
+  const modeMaster = (url, hiddenKey, allNames, records, setRecords, setOptions, modeOf, setModes) => {
+    const sameName = (name) => allNames.find(o => o.toLowerCase() === name.toLowerCase());
+    const base = backendMaster(url, hiddenKey, records, setRecords, setOptions,
+      (name, from) => ({ product_mode: from ? modeOf(from) : (sameName(name) ? 'BOTH' : mode) }));
+    return {
+      ...base,
+      persist: async (name) => {
+        const existing = sameName(name);
+        setModes(m => ({ ...m, [existing || name]: existing ? 'BOTH' : mode }));
+        if (existing && records[existing]) {
+          try { await axios.patch(`${url}${records[existing]}/`, { product_mode: 'BOTH' }); } catch {}
+          return;
+        }
+        await base.persist(existing || name);
+      },
+      rename: async (from, to) => {
+        await base.rename(from, to);
+        setModes(m => { const next = { ...m, [to]: modeOf(from) }; delete next[from]; return next; });
+      }
+    };
+  };
+  const categoryMaster = modeMaster('/api/masters/categories/', LS_KEYS.hiddenCategories, categoryOptions, categoryRecords, setCategoryRecords, setCategoryOptions, categoryModeOf, setCategoryModes);
+  const brandMaster = modeMaster('/api/masters/brands/', LS_KEYS.hiddenBrands, brandOptions, brandRecords, setBrandRecords, setBrandOptions, brandModeOf, setBrandModes);
+
+  // A field backed by this mode's local list (see MODE_LISTS). The refractive index and lens
+  // design lists fill the older frameType / lensType form keys.
+  const FORM_KEY = { refractive: 'frameType', lensDesign: 'lensType' };
+  const listField = (field, label) => {
+    const key = FORM_KEY[field] || field;
+    const master = localMaster(MODE_LISTS[mode][field].key, (fn) =>
+      setLists(prev => ({ ...prev, [mode]: { ...prev[mode], [field]: fn(prev[mode][field]) } })));
+    return (
+      <AttributeField label={label} value={p[key]} onChange={(v) => set({ [key]: v })} options={lists[mode][field]}
+        onPersist={master.persist} onRename={master.rename} onRemove={master.remove} />
+    );
+  };
+
+  const switchMode = (next) => {
+    if (next === mode) return;
+    const cats = categoriesFor(next);
+    const def = DEFAULT_CATEGORY_FOR_MODE[next];
+    setMode(next);
+    setP(prev => ({ ...prev, ...CLASSIFICATION_RESET, category: cats.includes(def) ? def : (cats[0] || def) }));
+  };
 
   const onPickImage = (file) => {
     if (!file) return;
@@ -415,8 +477,6 @@ export default function ProductMasterDialog({
     reader.onload = () => setImagePreview(String(reader.result || ''));
     reader.readAsDataURL(file);
   };
-
-  const isLens = p.category === 'Prescription Lenses';
 
   // Lens Mode starts with the usual lens spec filled in (still editable / clearable).
   useEffect(() => {
@@ -441,6 +501,17 @@ export default function ProductMasterDialog({
       alert('Please enter a Product Name.');
       return;
     }
+    // A typed (free-text) Category / Brand that belongs to the other mode.
+    const otherMode = (value, names, modeOf) => {
+      const hit = names.find(n => n.toLowerCase() === String(value || '').trim().toLowerCase());
+      return hit && !inMode(modeOf(hit), mode) ? hit : null;
+    };
+    const badCategory = otherMode(p.category, categoryOptions, categoryModeOf);
+    const badBrand = otherMode(p.brand, brandOptions, brandModeOf);
+    if (badCategory || badBrand) {
+      notify(`${badCategory ? `Category "${badCategory}"` : `Brand "${badBrand}"`} is not a ${isLens ? 'Lens' : 'Frame / General'} entry — pick one from the list.`);
+      return;
+    }
     setSaving(true);
 
     const code = p.code.trim() || `PRD-${Math.floor(1000 + Math.random() * 9000)}`;
@@ -450,9 +521,11 @@ export default function ProductMasterDialog({
     const stock = parseInt(p.stock) || 0;
 
     const lensNum = (v) => (parseFloat(v) > 0 ? parseFloat(v) : null);
+    const prevExtra = isEdit ? (editProduct.extra_data || {}) : {};
     const extra_data = {
       // Keys this form doesn't edit (importer columns etc.) survive an edit.
-      ...(isEdit ? (editProduct.extra_data || {}) : {}),
+      ...prevExtra,
+      product_mode: mode,
       mrp,
       sale_price: salePrice,
       model_no: p.modelNo || '',
@@ -465,7 +538,13 @@ export default function ProductMasterDialog({
       lens_design: p.lensType || '',
       refractive_index: p.frameType || '',
       coating: p.coating || '',
+      frame_shape: p.frameShape || '',
+      power_range: p.powerRange || '',
       ...(isLens ? {
+        // Pair / single-lens rules key off the category name; a lens-mode category the name
+        // check doesn't recognise opts in explicitly (utils/lensUnits.js isPairSellable).
+        ...(prevExtra.lens_unit_selection === undefined && !isSpectacleLensCategory(p.category)
+          ? { lens_unit_selection: true } : {}),
         lens_price_unit: p.lensPriceUnit,
         lens_stock_unit: p.lensStockUnit,
         lens_piece_price: p.lensPriceUnit === 'PAIR' ? lensNum(p.lensPiecePrice) : null,
@@ -529,6 +608,8 @@ export default function ProductMasterDialog({
       size: p.size || '',
       color: p.color || '',
       material: p.material || '',
+      frameShape: p.frameShape || '',
+      powerRange: p.powerRange || '',
       frameType: p.frameType || '',
       lensType: p.lensType || '',
       coating: p.coating || '',
@@ -585,7 +666,7 @@ export default function ProductMasterDialog({
               <Button
                 size="small"
                 variant={!isLens ? 'contained' : 'text'}
-                onClick={() => set({ category: 'Frames' })}
+                onClick={() => switchMode('FRAME')}
                 sx={{ py: 0.2, px: 1, fontSize: '0.72rem', fontWeight: 800 }}
               >
                 Frame / General
@@ -593,7 +674,7 @@ export default function ProductMasterDialog({
               <Button
                 size="small"
                 variant={isLens ? 'contained' : 'text'}
-                onClick={() => set({ category: 'Prescription Lenses' })}
+                onClick={() => switchMode('LENS')}
                 sx={{ py: 0.2, px: 1, fontSize: '0.72rem', fontWeight: 800 }}
               >
                 🔬 Lens Mode
@@ -653,7 +734,7 @@ export default function ProductMasterDialog({
                     inputProps={{ style: { fontWeight: 800 } }}
                   />
                 </Grid>
-                <Grid item xs={12} sm={3}>
+                <Grid item xs={12} sm={isLens ? 6 : 3}>
                   <TextField
                     label="Product Code / SKU" fullWidth size="small"
                     placeholder="Auto if blank"
@@ -661,14 +742,16 @@ export default function ProductMasterDialog({
                     onChange={(e) => set({ code: e.target.value })}
                   />
                 </Grid>
-                <Grid item xs={12} sm={3}>
-                  <TextField
-                    label="Model Number" fullWidth size="small"
-                    placeholder="e.g. RB3025-001"
-                    value={p.modelNo}
-                    onChange={(e) => set({ modelNo: e.target.value })}
-                  />
-                </Grid>
+                {!isLens && (
+                  <Grid item xs={12} sm={3}>
+                    <TextField
+                      label="Model Number" fullWidth size="small"
+                      placeholder="e.g. RB3025-001"
+                      value={p.modelNo}
+                      onChange={(e) => set({ modelNo: e.target.value })}
+                    />
+                  </Grid>
+                )}
                 <Grid item xs={12} sm={6}>
                   <TextField
                     label="HSN / SAC Code" fullWidth size="small"
@@ -679,51 +762,42 @@ export default function ProductMasterDialog({
               </Grid>
             </Section>
 
-            {/* ── Classification ─────────────────────────── */}
-            <Section title="Classification" icon={<CategoryIcon fontSize="small" />}>
-              <Grid container spacing={2}>
+            {/* ── Classification (this mode's lists only; remounted on a mode switch) ── */}
+            <Section title={isLens ? 'Lens Classification' : 'Frame / General Classification'} icon={<CategoryIcon fontSize="small" />}>
+              <Grid container spacing={2} key={mode}>
                 <Grid item xs={12} sm={6} md={3}>
-                  <AttributeField label="Category" value={p.category} onChange={(v) => set({ category: v })} options={categoryOptions} onPersist={categoryMaster.persist} onRename={categoryMaster.rename} onRemove={categoryMaster.remove} />
+                  <AttributeField label={isLens ? 'Lens Category' : 'Category'} value={p.category} onChange={(v) => set({ category: v })} options={shownCategories} onPersist={categoryMaster.persist} onRename={categoryMaster.rename} onRemove={categoryMaster.remove} />
                 </Grid>
                 <Grid item xs={12} sm={6} md={3}>
-                  <AttributeField label="Sub-Category" value={p.subCategory} onChange={(v) => set({ subCategory: v })} options={subCategoryOptions} onPersist={subCategoryMaster.persist} onRename={subCategoryMaster.rename} onRemove={subCategoryMaster.remove} />
+                  {listField('subCategory', isLens ? 'Lens Type' : 'Sub-Category')}
                 </Grid>
                 <Grid item xs={12} sm={6} md={3}>
-                  <AttributeField label="Group" value={p.group} onChange={(v) => set({ group: v })} options={groupOptions} onPersist={groupMaster.persist} onRename={groupMaster.rename} onRemove={groupMaster.remove} />
+                  {listField('group', isLens ? 'Lens Group' : 'Group')}
                 </Grid>
                 <Grid item xs={12} sm={6} md={3}>
-                  <AttributeField label="Brand / Manufacturer" value={p.brand} onChange={(v) => set({ brand: v })} options={brandOptions} onPersist={brandMaster.persist} onRename={brandMaster.rename} onRemove={brandMaster.remove} />
+                  <AttributeField label={isLens ? 'Lens Brand' : 'Brand / Manufacturer'} value={p.brand} onChange={(v) => set({ brand: v })} options={shownBrands} onPersist={brandMaster.persist} onRename={brandMaster.rename} onRemove={brandMaster.remove} />
                 </Grid>
               </Grid>
             </Section>
 
-            {/* ── Variant Attributes ─────────────────────── */}
-            <Section title="Variant Attributes" icon={<SizeIcon fontSize="small" />}>
-              <Grid container spacing={2}>
-                <Grid item xs={12} sm={6} md={4}>
-                  <AttributeField label="Size" value={p.size} onChange={(v) => set({ size: v })} options={sizeOptions} onPersist={sizeMaster.persist} onRename={sizeMaster.rename} onRemove={sizeMaster.remove} />
+            {/* ── Frame attributes / Lens design & parameters ── */}
+            <Section title={isLens ? 'Lens Design & Parameters' : 'Frame Attributes'} icon={<SizeIcon fontSize="small" />}>
+              {isLens ? (
+                <Grid container spacing={2} key="LENS">
+                  <Grid item xs={12} sm={6} md={4}>{listField('lensDesign', 'Lens Design Type')}</Grid>
+                  <Grid item xs={12} sm={6} md={4}>{listField('refractive', 'Refractive Index')}</Grid>
+                  <Grid item xs={12} sm={6} md={4}>{listField('coating', 'Coating Technology')}</Grid>
+                  <Grid item xs={12} sm={6}>{listField('material', 'Lens Material')}</Grid>
+                  <Grid item xs={12} sm={6}>{listField('powerRange', 'Power Range')}</Grid>
                 </Grid>
-                <Grid item xs={12} sm={6} md={4}>
-                  <AttributeField label="Color" value={p.color} onChange={(v) => set({ color: v })} options={colorOptions} onPersist={colorMaster.persist} onRename={colorMaster.rename} onRemove={colorMaster.remove} />
+              ) : (
+                <Grid container spacing={2} key="FRAME">
+                  <Grid item xs={12} sm={6} md={3}>{listField('frameShape', 'Frame Shape')}</Grid>
+                  <Grid item xs={12} sm={6} md={3}>{listField('material', 'Material')}</Grid>
+                  <Grid item xs={12} sm={6} md={3}>{listField('color', 'Color')}</Grid>
+                  <Grid item xs={12} sm={6} md={3}>{listField('size', 'Size')}</Grid>
                 </Grid>
-                <Grid item xs={12} sm={6} md={4}>
-                  <AttributeField label="Material" value={p.material} onChange={(v) => set({ material: v })} options={materialOptions} onPersist={materialMaster.persist} onRename={materialMaster.rename} onRemove={materialMaster.remove} />
-                </Grid>
-
-                {isLens && (
-                  <>
-                    <Grid item xs={12} sm={4}>
-                      <AttributeField label="Refractive Index" value={p.frameType} onChange={(v) => set({ frameType: v })} options={refractiveOptions} onPersist={refractiveMaster.persist} onRename={refractiveMaster.rename} onRemove={refractiveMaster.remove} />
-                    </Grid>
-                    <Grid item xs={12} sm={4}>
-                      <AttributeField label="Lens Design Type" value={p.lensType} onChange={(v) => set({ lensType: v })} options={lensDesignOptions} onPersist={lensDesignMaster.persist} onRename={lensDesignMaster.rename} onRemove={lensDesignMaster.remove} />
-                    </Grid>
-                    <Grid item xs={12} sm={4}>
-                      <AttributeField label="Coating Technology" value={p.coating} onChange={(v) => set({ coating: v })} options={coatingOptions} onPersist={coatingMaster.persist} onRename={coatingMaster.rename} onRemove={coatingMaster.remove} />
-                    </Grid>
-                  </>
-                )}
-              </Grid>
+              )}
             </Section>
 
             {/* ── Pricing (MRP & Sale price as their own part) ── */}

@@ -551,7 +551,7 @@ export function LensPOEditor({ open, po, seed, suppliers, lensProducts, products
     if (!open) return;
     setHeader({
       supplier: po?.supplier || seed?.supplier || '', order_date: po?.order_date || todayStr(),
-      expected_delivery_date: po?.expected_delivery_date || '', remarks: po?.remarks || '',
+      expected_delivery_date: po?.expected_delivery_date || '', remarks: po?.remarks || seed?.remarks || '',
       submitAs: po?.status && po.status !== 'DRAFT' ? po.status : 'PENDING',
     });
     setItems((po?.items || []).map(draftFromItem).concat(seed?.items || []));
@@ -962,7 +962,9 @@ const useLensDashboardShortcuts = makeShortcutHook(LENS_DASHBOARD_SHORTCUTS, ['A
 
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export default function LensPurchaseOrderView({ suppliers: allSuppliers = [], onConvertToInvoice, onOpenInvoice }) {
+// `focus` ({receivePoId, search, at}) comes from Sales > Orders > Lenses → "Receive Lenses": the
+// list is searched for that PO and its receive dialog opens once the POs have loaded.
+export default function LensPurchaseOrderView({ suppliers: allSuppliers = [], onConvertToInvoice, onOpenInvoice, focus = null }) {
   // Only suppliers saved on the server can be a PO's vendor (browser-only rows have no UUID).
   const suppliers = useMemo(() => allSuppliers.filter((s) => UUID_RE.test(String(s.id))), [allSuppliers]);
   const [orders, setOrders] = useState([]);
@@ -995,6 +997,17 @@ export default function LensPurchaseOrderView({ suppliers: allSuppliers = [], on
       .finally(() => setLoading(false));
   }, []);
   useEffect(() => { load(); }, [load]);
+
+  const focusDoneRef = useRef(null);
+  useEffect(() => {
+    if (!focus?.at || focusDoneRef.current === focus.at) return;
+    if (focus.search) setSearch(focus.search);
+    if (loading) return;
+    focusDoneRef.current = focus.at;
+    const po = orders.find((o) => String(o.id) === String(focus.receivePoId));
+    if (po && ['PENDING', 'ORDERED', 'PARTIALLY_RECEIVED'].includes(po.status)) setReceiving(po);
+    else if (focus.receivePoId) notify('That lens purchase order can no longer receive lenses.', 'warning');
+  }, [focus, loading, orders]);
 
   const replace = (po) => {
     setOrders((prev) => (prev.some((o) => o.id === po.id) ? prev.map((o) => (o.id === po.id ? po : o)) : [po, ...prev]));

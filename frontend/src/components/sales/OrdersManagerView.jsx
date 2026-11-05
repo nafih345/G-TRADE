@@ -37,6 +37,7 @@ import {
 import { printSalesInvoiceReceipt, downloadPdfInvoice } from '../../utils/printInvoice';
 import { sendInvoiceWhatsApp } from '../../utils/whatsappInvoice';
 import UpdateDocumentDialog from './UpdateDocumentDialog';
+import LensOrdersQueue from './LensOrdersQueue';
 import {
   rowPayment, rowCustomerName, rowFrameLens, deliveryStatusOf, PAYMENT_STATUSES
 } from '../../utils/salesDocStatus';
@@ -95,9 +96,16 @@ export default function OrdersManagerView({
   onBulkUpdate,
   onFetchDocument,
   // Opens the document in Sales > New Sale with every field (customer, items, payment) editable.
-  onEditInNewSale
+  onEditInNewSale,
+  // Orders > Lenses actions (see LensOrdersQueue).
+  onCreateLensPurchase,
+  onReceiveLensPO,
+  onStockLensPO,
+  onBillLensOrder
 }) {
   const [docView, setDocView] = useState('ORDER'); // 'ORDER' | 'INVOICE' | 'QUOTATION'
+  // Inside Orders: 'FRAME' = the spectacle / lab job list, 'LENS' = the lens special-order queue.
+  const [orderCategory, setOrderCategory] = useState('FRAME');
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('All'); // lab pipeline stage (Orders)
   const [paymentFilter, setPaymentFilter] = useState('All'); // PAID | PARTIAL | UNPAID
@@ -157,8 +165,11 @@ export default function OrdersManagerView({
     QUOTATION: orders.filter(o => docTypeOf(o) === 'QUOTATION').length
   };
 
-  // Rows for the currently selected document type
-  const scopedList = orders.filter(o => docTypeOf(o) === docView);
+  // Rows for the currently selected document type. Orders > Frames leaves out lens-only orders
+  // (those are followed in Orders > Lenses).
+  const isLensOnlyOrder = (o) => { const { frame, lens } = rowFrameLens(o); return Boolean(lens) && !frame; };
+  const scopedList = orders.filter(o => docTypeOf(o) === docView && !(docView === 'ORDER' && isLensOnlyOrder(o)));
+  const showLensQueue = docView === 'ORDER' && orderCategory === 'LENS';
 
   const switchDocView = (next) => {
     setDocView(next);
@@ -257,9 +268,11 @@ export default function OrdersManagerView({
   const getStageIndex = (status) => {
     switch (status) {
       case 'Order Received': return 0;
+      case 'Pending Supplier Purchase': return 0;
       case 'In Lab Processing': return 1;
       case 'Awaiting Remaining Lens': return 1;
       case 'Lens Arrived': return 2; // set by Lens PO receiving: lenses in, ready for fitting
+      case 'Ready for Delivery': return 2; // lens in stock for this order (its Purchase Entry is saved)
       case 'Frame Mounting': return 2;
       case 'Quality Control': return 3;
       case 'Ready for Collection': return 4;
@@ -271,7 +284,10 @@ export default function OrdersManagerView({
   const handleAdvanceStatus = (orderId, currentStatus) => {
     const nextStatuses = ['Order Received', 'In Lab Processing', 'Frame Mounting', 'Quality Control', 'Ready for Collection', 'Delivered'];
     // Stages a Lens Purchase Order sets while the order's lenses arrive from the lab.
-    const lensNext = { 'Awaiting Remaining Lens': 'Lens Arrived', 'Lens Arrived': 'Frame Mounting' };
+    const lensNext = {
+      'Pending Supplier Purchase': 'In Lab Processing', 'Awaiting Remaining Lens': 'Lens Arrived',
+      'Lens Arrived': 'Frame Mounting', 'Ready for Delivery': 'Frame Mounting',
+    };
     const idx = nextStatuses.indexOf(currentStatus);
     const nextStatus = lensNext[currentStatus] || (idx < nextStatuses.length - 1 ? nextStatuses[idx + 1] : 'Delivered');
     if (selectedOrder && selectedOrder.id === orderId) {
@@ -372,6 +388,31 @@ export default function OrdersManagerView({
         })}
       </Card>
 
+      {/* Orders → Frames | Lenses */}
+      {docView === 'ORDER' && (
+        <Box sx={{ display: 'flex', gap: 1, mb: 2 }}>
+          {[['FRAME', '👓 Frames'], ['LENS', '🔬 Lenses']].map(([key, label]) => (
+            <Button
+              key={key}
+              onClick={() => { setOrderCategory(key); setSelectedIds(new Set()); }}
+              variant={orderCategory === key ? 'contained' : 'outlined'}
+              sx={{ textTransform: 'none', fontWeight: 800, borderRadius: 2.5, px: 3 }}
+            >
+              {label}
+            </Button>
+          ))}
+        </Box>
+      )}
+
+      {showLensQueue ? (
+        <LensOrdersQueue
+          onCreateLensPurchase={onCreateLensPurchase}
+          onReceiveLensPO={onReceiveLensPO}
+          onStockLensPO={onStockLensPO}
+          onBillLensOrder={onBillLensOrder}
+          onEditInNewSale={(row) => onEditInNewSale?.({ id: row.id })}
+        />
+      ) : (<>
       {/* Filter Tabs & Search Controls */}
       <Card elevation={0} sx={{ p: 2.5, border: '1px solid', borderColor: 'divider', borderRadius: 3, mb: 3 }}>
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 2 }}>
@@ -409,9 +450,11 @@ export default function OrdersManagerView({
               >
                 <MenuItem value="All">All Pipeline Statuses</MenuItem>
                 <MenuItem value="Order Received">Order Received</MenuItem>
+                <MenuItem value="Pending Supplier Purchase">Pending Supplier Purchase</MenuItem>
                 <MenuItem value="In Lab Processing">In Lab Processing</MenuItem>
                 <MenuItem value="Awaiting Remaining Lens">Awaiting Remaining Lens</MenuItem>
                 <MenuItem value="Lens Arrived">Lens Arrived (Ready for Fitting)</MenuItem>
+                <MenuItem value="Ready for Delivery">Ready for Delivery (Lens in Stock)</MenuItem>
                 <MenuItem value="Frame Mounting">Frame Mounting</MenuItem>
                 <MenuItem value="Quality Control">Quality Control (QC)</MenuItem>
                 <MenuItem value="Ready for Collection">Ready for Collection</MenuItem>
@@ -449,7 +492,7 @@ export default function OrdersManagerView({
               sx={{ minWidth: 210 }}
             >
               <MenuItem value="" disabled>Set pipeline status…</MenuItem>
-              {['Order Received', 'In Lab Processing', 'Awaiting Remaining Lens', 'Lens Arrived', 'Frame Mounting', 'Quality Control', 'Ready for Collection', 'Delivered'].map(s => (
+              {['Order Received', 'Pending Supplier Purchase', 'In Lab Processing', 'Awaiting Remaining Lens', 'Lens Arrived', 'Ready for Delivery', 'Frame Mounting', 'Quality Control', 'Ready for Collection', 'Delivered'].map(s => (
                 <MenuItem key={s} value={s}>{s}</MenuItem>
               ))}
             </TextField>
@@ -746,6 +789,7 @@ export default function OrdersManagerView({
           </TableContainer>
         )}
       </Card>
+      </>)}
 
       {/* Order Pipeline & Job Slip Modal */}
       {selectedOrder && (

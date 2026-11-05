@@ -84,3 +84,44 @@ export const formatDateTime = (iso) => {
   return Number.isNaN(d.getTime()) ? '—'
     : d.toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 };
+
+// Excel imports kept apart from the grid: each finished batch's new products, and the file
+// quantities of existing products that still need an Apply / Keep decision.
+export const fetchImportBatches = () =>
+  axios.get(`${BASE}import-batches/`).then((r) => r.data);
+
+export const fetchImportReview = (params, signal) =>
+  axios.get(`${BASE}import-review/`, { params, signal }).then((r) => r.data);
+
+// body: { batch, row_ids | all: true, decision: 'apply' | 'keep' }
+export const decideImportRows = (body) =>
+  axios.post(`${BASE}import-review/`, body).then((r) => r.data);
+
+// Inventory → Opening Stock (backend: apps/inventory/opening_stock.py). A row is
+// { name, barcode, category, brand, quantity, cost_price, mrp, row_number? }.
+const OPENING = '/api/inventory/opening-stock/';
+
+export const fetchOpeningBatches = () => axios.get(OPENING).then((r) => r.data);
+
+// The sheet as it is: { file_name, sheets: [{ name, header_row, headers, rows: [{ row_number, cells }],
+// suggested_mapping: { field: column index }, truncated }] }. Nothing is saved.
+export const parseOpeningFile = (file) => {
+  const form = new FormData();
+  form.append('file', file);
+  return axios.post(`${OPENING}parse/`, form).then((r) => r.data);
+};
+
+// → { results: [{ index, row_number, status: ok|warning|duplicate|error, duplicate, errors, warnings }], summary }
+export const validateOpeningRows = (rows) =>
+  axios.post(`${OPENING}validate/`, { rows }).then((r) => r.data);
+
+// method: 'manual' | 'import'. body: { rows, auto_barcode, client_token, file_name? } → { batch, replayed }
+export const saveOpeningStock = (method, body) =>
+  axios.post(`${OPENING}${method}/`, body).then((r) => r.data);
+
+export const STOCK_SOURCES = [
+  { value: '', label: 'All Stock', countKey: 'ALL' },
+  { value: 'OPENING_STOCK', label: 'Opening Stock', countKey: 'OPENING_STOCK' },
+  { value: 'EXCEL_IMPORT', label: 'Excel Imported', countKey: 'EXCEL_IMPORT' },
+  { value: 'PURCHASE', label: 'Purchase / Regular', countKey: 'PURCHASE' },
+];

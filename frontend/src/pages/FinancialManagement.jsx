@@ -40,7 +40,8 @@ import {
   Payments as CashbookIcon,
   EventNote as DayBookIcon,
   AccountBalance as BankBookIcon,
-  RequestQuote as ChequeIcon
+  RequestQuote as ChequeIcon,
+  Summarize as StatementsIcon
 } from '@mui/icons-material';
 import axios from 'axios';
 import ConfirmActionDialog from '../components/common/ConfirmActionDialog';
@@ -54,6 +55,7 @@ import CashbookPanel from '../components/financial/Cashbook';
 import BankBookPanel from '../components/financial/BankBook';
 import DayBookPanel from '../components/financial/DayBook';
 import ChequeRegister from '../components/financial/ChequeRegister';
+import FinancialStatements from '../components/financial/FinancialStatements';
 
 // Fixed Sub-Categories per Group (NO COGS!)
 const ACCOUNT_GROUPS = {
@@ -186,6 +188,7 @@ function FinancialManagementView() {
     if (path.includes('/financial/cashbook')) return { top: 9, sub: 'receipt' };
     if (path.includes('/financial/bankbook')) return { top: 12, sub: 'receipt' };
     if (path.includes('/financial/cheques')) return { top: 10, sub: 'receipt' };
+    if (path.includes('/financial/statements')) return { top: 13, sub: 'receipt' };
     return { top: 0, sub: 'receipt' };
   };
 
@@ -214,7 +217,8 @@ function FinancialManagementView() {
       '/financial/cashbook',
       '/financial/cheques',
       '/financial/daybook',
-      '/financial/bankbook'
+      '/financial/bankbook',
+      '/financial/statements'
     ];
     if (newTop === 2) setVoucherSubTab('receipt');
     navigate(topPaths[newTop] || '/financial/dashboard');
@@ -768,6 +772,7 @@ function FinancialManagementView() {
           <Tab value={9} icon={<CashbookIcon />} label="Cashbook" iconPosition="start" />
           <Tab value={12} icon={<BankBookIcon />} label="Bank Book" iconPosition="start" />
           <Tab value={10} icon={<ChequeIcon />} label="Cheque Register" iconPosition="start" />
+          <Tab value={13} icon={<StatementsIcon />} label="Statements" iconPosition="start" />
           <Tab value={4} icon={<TrialIcon />} label="Trial Balance" iconPosition="start" />
           <Tab value={5} icon={<ProfitIcon />} label="Profit & Loss (P&L)" iconPosition="start" />
           <Tab value={6} icon={<BalanceIcon />} label="Balance Sheet" iconPosition="start" />
@@ -1409,6 +1414,9 @@ function FinancialManagementView() {
 
       {/* 7c. CHEQUE REGISTER */}
       {topTab === 10 && <ChequeRegister />}
+
+      {/* 7d. STATEMENTS */}
+      {topTab === 13 && <FinancialStatements />}
 
       {/* 8. TRIAL BALANCE VIEW */}
       {topTab === 4 && <TrialBalancePanel onOpenLedger={openLedger} />}

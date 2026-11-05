@@ -41,6 +41,8 @@ urlpatterns = [
     path('reports/cashbook/accounts/', views.cashbook_accounts_view),
     path('reports/account-balances/', views.account_balances_view),
     path('reports/source-breakdown/', views.source_breakdown_view),
+    path('statements/', views.statement_view),
+    path('statements/options/', views.statement_options_view),
     path('integration/status/', views.integration_status_view),
     path('integration/catalog/', views.catalog_view),
     path('integration/preview/', views.preview_view),

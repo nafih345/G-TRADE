@@ -74,7 +74,7 @@ export const DELIVERY_STATUSES = {
 // Delivered) → the delivery status the counter tells the customer.
 export const deliveryStatusOf = (stage) => {
   const s = String(stage || '').trim().toLowerCase();
-  if (!s || s === 'order received' || s === 'pending' || s === 'draft') return DELIVERY_STATUSES.PENDING;
+  if (!s || s === 'order received' || s === 'pending' || s === 'draft' || s === 'pending supplier purchase') return DELIVERY_STATUSES.PENDING;
   if (s.startsWith('delivered') || s === 'collected' || s === 'completed') return DELIVERY_STATUSES.DELIVERED;
   if (s.startsWith('ready')) return DELIVERY_STATUSES.READY;
   return DELIVERY_STATUSES.PROCESSING;

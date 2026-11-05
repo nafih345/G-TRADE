@@ -10,12 +10,12 @@
 // Space selects · Enter = edit row · A = Adjust stock · H = History · P = Print barcode ·
 // in an edited row Enter = save, Esc = cancel. A USB scanner works anywhere on the page.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link as RouterLink, useNavigate } from 'react-router-dom';
+import { Link as RouterLink, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Box, Typography, Button, Breadcrumbs, Link, Card, Stack, TextField, MenuItem, InputAdornment, IconButton,
   Table, TableHead, TableRow, TableCell, TableBody, TableContainer, TablePagination, TableSortLabel, Checkbox,
   Chip, Tooltip, Menu, LinearProgress, Alert, Dialog, DialogTitle, DialogContent, DialogActions, CircularProgress,
-  ListItemIcon, ListItemText, Divider, FormControlLabel, Skeleton,
+  ListItemIcon, ListItemText, Divider, FormControlLabel, Skeleton, ToggleButton, ToggleButtonGroup,
 } from '@mui/material';
 import {
   Search as SearchIcon, Close as CloseIcon, Add as AddIcon, UploadFile as ImportIcon, QrCode2 as BarcodeIcon,
@@ -31,16 +31,18 @@ import ProductMasterDialog from '../components/inventory/ProductMasterDialog';
 import ExcelImportManager from '../components/admin/import/ExcelImportManager';
 import StockAdjustDialog from '../components/purchasing/stock/StockAdjustDialog';
 import StockHistoryDrawer from '../components/purchasing/stock/StockHistoryDrawer';
+import ImportBatchReviewPanel from '../components/purchasing/stock/ImportBatchReviewPanel';
 import {
   fetchStockPage, fetchStockSummary, fetchStockFacets, lookupCode, updateStockFields, adjustStock, newClientToken,
-  downloadStockExport, normalizeBlobError, filterParams, STATUS_META, formatMoney, formatQty, formatDate,
+  downloadStockExport, normalizeBlobError, filterParams, STATUS_META, STOCK_SOURCES, formatMoney, formatQty, formatDate,
 } from '../components/purchasing/stock/stockApi';
 import useBarcodeScanner from '../hooks/useBarcodeScanner';
 import { useDebounce } from '../hooks/useDebounce';
 import { apiErrorMessage } from '../utils/apiError';
 import { notify } from '../utils/notify';
 
-const BLANK_FILTERS = { brand: '', category: '', rack: '', supplier: '', variant_group: '', status: '' };
+const BLANK_FILTERS = { brand: '', category: '', rack: '', supplier: '', variant_group: '', status: '', import_batch: '', source: '' };
+const SOURCE_VALUES = STOCK_SOURCES.map((s) => s.value);
 const COLS_KEY = 'stock_overview_hidden_columns';
 const PAGE_SIZE_KEY = 'stock_overview_page_size';
 
@@ -134,6 +136,25 @@ const previewStatus = (stock, min) => {
 };
 const OTHER_REASON = 'Other';
 
+// Where the product's stock came from (Product.stock_source); regular stock carries no badge.
+const SOURCE_BADGE = {
+  OPENING_STOCK: { label: 'Opening Stock', color: '#92400e', bg: '#fef3c7', border: '#f59e0b' },
+  EXCEL_IMPORT: { label: 'Excel Import', color: '#1e40af', bg: '#dbeafe', border: '#93c5fd' },
+};
+function SourceBadge({ source }) {
+  const meta = SOURCE_BADGE[source];
+  if (!meta) return null;
+  return (
+    <Box component="span" title={`Stock source: ${meta.label}`}
+      sx={{
+        display: 'inline-block', mt: 0.25, px: 0.5, borderRadius: 1, fontSize: 9.5, fontWeight: 800, lineHeight: 1.4,
+        color: meta.color, bgcolor: meta.bg, border: `1px solid ${meta.border}`, whiteSpace: 'nowrap',
+      }}>
+      {meta.label}
+    </Box>
+  );
+}
+
 function SummaryCard({ icon, label, value, tone = '#6366f1', loading, hint }) {
   return (
     <Card variant="outlined" sx={{ p: 1.75, borderRadius: 3, display: 'flex', gap: 1.5, alignItems: 'center', minWidth: 0 }}>
@@ -204,6 +225,7 @@ function validateEdit(values, editable) {
 
 export default function StockOverview() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const searchRef = useRef(null);
   const tableRef = useRef(null);
 
@@ -215,7 +237,11 @@ export default function StockOverview() {
   const debouncedSearch = useDebounce(search, 300);
   const [appliedSearch, setAppliedSearch] = useState('');
   const [code, setCode] = useState(''); // exact scan filter
-  const [filters, setFilters] = useState(BLANK_FILTERS);
+  // ?source=OPENING_STOCK (the Opening Stock page links here) preselects the source switch.
+  const [filters, setFilters] = useState(() => {
+    const source = (searchParams.get('source') || '').toUpperCase();
+    return { ...BLANK_FILTERS, source: SOURCE_VALUES.includes(source) ? source : '' };
+  });
   const [ordering, setOrdering] = useState('name');
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(() => readStored(PAGE_SIZE_KEY, 50));
@@ -244,6 +270,8 @@ export default function StockOverview() {
   const [historyKey, setHistoryKey] = useState(0);
   const [printRows, setPrintRows] = useState(null);
   const [importOpen, setImportOpen] = useState(false);
+  const [importReviewKey, setImportReviewKey] = useState(0);
+  const [importBatchLabel, setImportBatchLabel] = useState('');
   const [addOpen, setAddOpen] = useState(false);
   const [suppliersForAdd, setSuppliersForAdd] = useState([]);
 
@@ -620,10 +648,13 @@ export default function StockOverview() {
         return <span title={formatMoney(row[col.key])} style={{ whiteSpace: 'nowrap' }}>{amount(row[col.key])}</span>;
       case 'last_purchase_date': return <span title={formatDate(row.last_purchase_date)}>{shortDate(row.last_purchase_date)}</span>;
       case 'name': return (
-        <Box title={row.variant_group_name ? `${row.name}\nGroup: ${row.variant_group_name}` : row.name}
-          sx={{ fontWeight: 600, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+        <>
+          <Box title={row.variant_group_name ? `${row.name}\nGroup: ${row.variant_group_name}` : row.name}
+            sx={{ fontWeight: 600, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
           {row.name}
-        </Box>
+          </Box>
+          <SourceBadge source={row.stock_source} />
+        </>
       );
       case 'variant': {
         const text = [row.color, row.size].filter(Boolean).join(' / ');
@@ -724,8 +755,40 @@ export default function StockOverview() {
         </Typography>
       )}
 
+      <ImportBatchReviewPanel
+        canAdjust={Boolean(caps.adjust_stock)}
+        refreshKey={importReviewKey}
+        onStockChanged={() => { refresh(); window.dispatchEvent(new Event('optical_stock_updated')); }}
+        onShowInGrid={(b) => {
+          if (!b) return;
+          setImportBatchLabel(b.batch_number);
+          setFilters((f) => ({ ...f, import_batch: b.id }));
+          setPage(0);
+        }}
+      />
+
       {/* Search + filters */}
       <Card variant="outlined" sx={{ p: 1.5, borderRadius: 3, mb: 1.5 }} data-nav-scope="stock-filters">
+        <Box sx={{ mb: 1.25, display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+          <Typography variant="caption" fontWeight={800} color="text.secondary">STOCK SOURCE</Typography>
+          <ToggleButtonGroup size="small" exclusive value={filters.source} aria-label="Stock source"
+            onChange={(_, v) => { if (v !== null) setFilters((f) => ({ ...f, source: v })); }}
+            sx={{ flexWrap: 'wrap', '& .MuiToggleButton-root': { textTransform: 'none', fontWeight: 700, py: 0.35, px: 1.25 } }}>
+            {STOCK_SOURCES.map((src) => {
+              const n = s?.source_counts?.[src.countKey];
+              return (
+                <ToggleButton key={src.value || 'all'} value={src.value}>
+                  {src.label}{n !== undefined ? ` (${formatQty(n)})` : ''}
+                </ToggleButton>
+              );
+            })}
+          </ToggleButtonGroup>
+          {caps.adjust_stock && (
+            <Button size="small" component={RouterLink} to="/inventory/opening-stock" startIcon={<AddIcon />} sx={{ ml: 'auto', fontWeight: 700 }}>
+              Add Opening Stock
+            </Button>
+          )}
+        </Box>
         <Stack direction="row" spacing={1.25} flexWrap="wrap" useFlexGap alignItems="center">
           <TextField
             inputRef={searchRef} size="small" value={search} sx={{ flex: '1 1 320px', minWidth: 240 }}
@@ -768,6 +831,13 @@ export default function StockOverview() {
         {code && (
           <Box sx={{ mt: 1 }}>
             <Chip icon={<ScanIcon />} color="primary" variant="outlined" label={`Scanned code: ${code}`} onDelete={() => setCode('')} />
+          </Box>
+        )}
+        {filters.import_batch && (
+          <Box sx={{ mt: 1 }}>
+            <Chip icon={<ImportIcon />} color="primary" variant="outlined"
+              label={`Only products from import ${importBatchLabel || ''}`.trim()}
+              onDelete={() => { setFilters((f) => ({ ...f, import_batch: '' })); setImportBatchLabel(''); }} />
           </Box>
         )}
       </Card>
@@ -1008,7 +1078,7 @@ export default function StockOverview() {
       <BarcodePrintDialog open={Boolean(printRows)} products={printRows || []} workflow="inventory"
         onClose={() => setPrintRows(null)} />
 
-      <Dialog open={importOpen} onClose={() => { setImportOpen(false); refresh(); loadFacets(); }} fullWidth maxWidth="xl"
+      <Dialog open={importOpen} onClose={() => { setImportOpen(false); refresh(); loadFacets(); setImportReviewKey((k) => k + 1); }} fullWidth maxWidth="xl"
         PaperProps={{ sx: { height: '92vh' } }}>
         <DialogTitle sx={{ fontWeight: 800, display: 'flex', alignItems: 'center' }}>
           Import Products from Excel

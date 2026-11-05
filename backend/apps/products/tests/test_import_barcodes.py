@@ -320,14 +320,16 @@ class RealSheetTests(BarcodeImportCase):
         b = self.confirm(self.preview(rows))
         self.assertEqual(self.barcodes_by_row(b)[-1], '8901234567005')
 
-    def test_repeat_row_that_brings_the_barcode_uses_no_number(self):
+    def test_repeat_row_that_brings_the_barcode_is_skipped(self):
         rows = partial_rows(5, 2)
         rows.append(dict(rows[5], Barcode='9000000'))     # blank first, the same product's code later
         b = self.preview(rows)
-        self.assertEqual(self.shown(b)['summary']['missing'], 1)
+        self.assertEqual(self.shown(b)['summary']['missing'], 2)
         b = self.confirm(b)
-        self.assertEqual(Product.objects.get(sku='SKU00005').barcode, '9000000')
-        self.assertEqual(Product.objects.get(sku='SKU00006').barcode, '1006')
+        self.assertEqual(b.duplicate_rows, 1, b.remarks)
+        self.assertEqual(Product.objects.get(sku='SKU00005').barcode, '1006')
+        self.assertEqual(Product.objects.get(sku='SKU00006').barcode, '1007')
+        self.assertFalse(Product.objects.filter(barcode='9000000').exists())
         self.assertAccounted(b)
 
     def test_csv_upload_previews_and_imports(self):

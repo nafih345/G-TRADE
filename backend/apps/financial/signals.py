@@ -26,10 +26,13 @@ WATCHED = [
     ('inventory.StockLedger', ('purchasing.purchase_order',), 'reference_id'),
     # Only products carrying opening stock; deleting one keeps its opening entry (the stock
     # was on the books, and its sales have since credited Inventory) — so saves only.
-    ('products.Product', ('products.opening_stock',), None, lambda p: (p.opening_stock or 0) > 0),
+    # Opening Stock page loads are booked per batch (inventory.opening_stock), not per product.
+    ('products.Product', ('products.opening_stock',), None,
+     lambda p: (p.opening_stock or 0) > 0 and p.stock_source != 'OPENING_STOCK'),
+    ('inventory.OpeningStockBatch', ('inventory.opening_stock',), None),
 ]
 
-SAVE_ONLY = {'products.Product'}
+SAVE_ONLY = {'products.Product', 'inventory.OpeningStockBatch'}
 
 
 def _make_receiver(source_keys, parent_attr, wanted=None):

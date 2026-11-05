@@ -2,6 +2,7 @@ import React, { createContext, useState, useContext, useEffect } from 'react';
 import axios from 'axios';
 import { SESSION_ENDED_EVENT, TOKEN_REFRESHED_EVENT } from '../utils/sessionGuard';
 import { prefetchMasters } from '../utils/masterDataCache';
+import { clearLocalDataIfScopeChanged } from '../utils/localDataReset';
 
 const AuthContext = createContext(null);
 
@@ -37,6 +38,14 @@ function isUsableToken(token) {
     return !payload.exp || payload.exp * 1000 > Date.now();
   } catch {
     return false;
+  }
+}
+
+function tokenTenantId(token) {
+  try {
+    return JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).tenant_id ?? null;
+  } catch {
+    return null;
   }
 }
 
@@ -127,6 +136,8 @@ export const AuthProvider = ({ children }) => {
     const isSuperAdmin = profile.role === 'SUPER_ADMIN';
     if (portal === 'super_admin' && !isSuperAdmin) return { success: false, reason: 'not_super_admin' };
 
+    // Another client signing in on this browser must not see the last one's cached records.
+    clearLocalDataIfScopeChanged('tenant', tokenTenantId(data.access));
     localStorage.setItem('access_token', data.access);
     if (data.refresh) localStorage.setItem('refresh_token', data.refresh);
     localStorage.setItem('user_profile', JSON.stringify(profile));

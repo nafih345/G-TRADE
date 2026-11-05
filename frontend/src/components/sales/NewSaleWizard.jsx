@@ -15,6 +15,9 @@ import { getBusinessPrefs } from '../../utils/localeFormat';
 import { PRICING_FLOORS_API, findPriceViolations, violationText, offerUnitPrice } from '../../utils/pricingRules';
 import PriceApprovalDialog from './PriceApprovalDialog';
 import {
+  LENS_QUEUE_API, RESERVED_LENS_API, queueStatusMeta, canBillOrder, lensQueueSummary,
+} from '../../utils/lensOrderQueue';
+import {
   PAIR, PIECE, BOTH, RE, LE, BASE_OPTIONS, isPairSellable, isSpectacleLensCategory, lensPricing, unitPrice,
   priceBasis, physicalQty, unitWord, qtyLabel, stockHint, formatDioptre, eyeEntered,
   formatEyeRx, validateLensLine, lensPowerText, rxFromGrid, lensFromSavedItem, lensToPayload,
@@ -482,7 +485,7 @@ const buildPatientDirectory = (pool) => {
 
     let entry = byKey.get(key);
     if (!entry) {
-      entry = { name, phone, age: '', gender: '', address: '', gstin: '', patientCode: code, customerId: '', testNos: [], exam: null, nameFromCustomer: false };
+      entry = { name, phone, age: '', gender: '', address: '', gstin: '', patientCode: code, customerId: '', testNos: [], exam: null, prescription: null, nameFromCustomer: false };
       byKey.set(key, entry);
     }
     if (uuid && !entry.customerId) entry.customerId = uuid;
@@ -491,40 +494,68 @@ const buildPatientDirectory = (pool) => {
     if (!exam && !entry.nameFromCustomer) { entry.name = name; entry.nameFromCustomer = true; }
     if (!entry.phone && phone) entry.phone = phone;
     ['age', 'gender', 'address', 'gstin'].forEach((f) => { if (!entry[f] && c[f]) entry[f] = c[f]; });
+    if (!exam && !entry.prescription && c.prescription && Object.keys(c.prescription).length) {
+      entry.prescription = c.prescription;
+    }
     if (exam) {
       const tno = String(c.test_no || c.testNo || '').trim();
       if (tno && !entry.testNos.includes(tno)) entry.testNos.push(tno);
       if (!entry.exam || outranks(c, entry.exam)) entry.exam = c;
     }
   });
-  return Array.from(byKey.values()).map(({ exam, nameFromCustomer, ...p }) => ({
-    ...(exam || {}),
+  // Lens power typed at Sales > Register Customer fills the Rx only when there's no eye exam.
+  // [Patient] = has an eye test on file; [Customer] = registered customer record only.
+  return Array.from(byKey.values()).map(({ exam, prescription, nameFromCustomer, ...p }) => ({
+    ...(exam || prescription || {}),
     ...p,
     id: p.customerId || p.patientCode || `${p.name}|${phoneKey(p.phone)}`,
     gender: p.gender || 'MALE',
+    entityType: exam || p.testNos.length ? 'Patient' : 'Customer',
   }));
 };
 
-// Patient search: nothing until something is typed. A number (or "P-1001") is an exact lookup
-// by Test No / Patient ID (or a full mobile number); anything else is a name prefix match.
-const searchPatients = (options, rawQuery) => {
+// Unified Patient / Customer search: nothing until something is typed.
+// A number (or "P-1001") matches Patient / Customer ID, Test No (exact or prefix) and any part of
+// the phone (3+ digits); anything else is a case-insensitive name match. Best matches come first.
+const searchPatientsAndCustomers = (options, rawQuery) => {
   const q = String(rawQuery || '').trim().toLowerCase();
   if (!q) return [];
+  const byName = (a, b) => String(a.name).localeCompare(String(b.name));
   if (/^(p-?)?\d+$/.test(q)) {
     const digits = q.replace(/\D/g, '');
     const codeOnly = q.startsWith('p');
-    return options.filter((o) =>
-      String(o.patientCode || '').replace(/\D/g, '') === digits
-      || (!codeOnly && (o.testNos || []).some((t) => String(t).replace(/\D/g, '') === digits))
-      || (!codeOnly && digits.length >= 10 && phoneKey(o.phone) === digits.slice(-10)));
+    const rank = (o) => {
+      const code = String(o.patientCode || '').replace(/\D/g, '');
+      const tests = (o.testNos || []).map((t) => String(t).replace(/\D/g, ''));
+      if (code === digits || (!codeOnly && tests.includes(digits))) return 0;
+      if (code.startsWith(digits) || (!codeOnly && tests.some((t) => t.startsWith(digits)))) return 1;
+      if (!codeOnly && digits.length >= 3 && String(o.phone || '').replace(/\D/g, '').includes(digits)) return 2;
+      return -1;
+    };
+    return options
+      .map((o) => [o, rank(o)])
+      .filter(([, r]) => r >= 0)
+      .sort((a, b) => a[1] - b[1] || byName(a[0], b[0]))
+      .map(([o]) => o);
   }
+  const nameOf = (o) => String(o.name || '').trim().toLowerCase();
   return options
-    .filter((o) => String(o.name || '').trim().toLowerCase().startsWith(q))
-    .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    .filter((o) => nameOf(o).includes(q))
+    .sort((a, b) => (nameOf(b).startsWith(q) - nameOf(a).startsWith(q)) || byName(a, b));
 };
 
-// Search-as-you-type patient picker. Blank by default — the list only opens once the user types.
-function PatientSearchField({ options, value, onSelect, label = 'Search Patient', inputRef, fieldKey, autoFocus }) {
+const ENTITY_BADGE = {
+  Patient: { color: '#1d4ed8', bg: '#dbeafe' },
+  Customer: { color: '#047857', bg: '#d1fae5' },
+};
+
+// Search-as-you-type patient / customer picker. Blank by default — the list only opens once the user types.
+function PatientSearchField({
+  options, value, onSelect, label = 'Search Patient / Customer', inputRef, fieldKey, autoFocus,
+  search = searchPatientsAndCustomers,
+  placeholder = 'Search by Name, Phone, Test No, Patient ID, or Customer ID',
+  noOptionsText = 'No matching patient or customer',
+}) {
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState(false);
   const selected = value
@@ -540,15 +571,25 @@ function PatientSearchField({ options, value, onSelect, label = 'Search Patient'
       open={open && !!query.trim()}
       onOpen={() => setOpen(true)}
       onClose={() => setOpen(false)}
-      filterOptions={(opts, state) => searchPatients(opts, state.inputValue)}
+      filterOptions={(opts, state) => search(opts, state.inputValue)}
       getOptionLabel={(o) => o?.name || ''}
       isOptionEqualToValue={(a, b) => String(a.id) === String(b.id)}
       onChange={(e, o) => onSelect(o || null)}
-      noOptionsText="No matching patient"
+      noOptionsText={noOptionsText}
       renderOption={(props, o) => (
         <li {...props} key={o.id}>
-          <Box>
-            <Typography variant="body2" fontWeight={800}>{o.name}</Typography>
+          <Box sx={{ minWidth: 0 }}>
+            <Stack direction="row" spacing={0.75} alignItems="center">
+              <Typography variant="body2" fontWeight={800} noWrap>{o.name}</Typography>
+              {o.entityType && (
+                <Box component="span" sx={{
+                  px: 0.75, py: 0.1, borderRadius: 1, fontSize: '0.65rem', fontWeight: 800, lineHeight: 1.6,
+                  color: ENTITY_BADGE[o.entityType].color, bgcolor: ENTITY_BADGE[o.entityType].bg,
+                }}>
+                  {o.entityType}
+                </Box>
+              )}
+            </Stack>
             <Typography variant="caption" color="text.secondary">
               {[o.patientCode, o.phone, o.testNos?.length ? `Test No ${o.testNos.join(', ')}` : ''].filter(Boolean).join(' · ')}
             </Typography>
@@ -557,7 +598,7 @@ function PatientSearchField({ options, value, onSelect, label = 'Search Patient'
       )}
       renderInput={(params) => (
         <TextField
-          {...params} label={label} placeholder="Name, Test No or Patient ID" autoFocus={autoFocus}
+          {...params} label={label} placeholder={placeholder} autoFocus={autoFocus}
           inputRef={inputRef}
           inputProps={{ ...params.inputProps, ...(fieldKey ? { 'data-ns-field': fieldKey } : {}), style: { fontWeight: 800, color: '#2563eb', fontSize: '0.85rem' } }}
         />
@@ -638,12 +679,21 @@ export default function NewSaleWizard({
   services = [],
   onCheckoutComplete,
   onNavigateToEyeTest,
+  // + beside Search Customer opens the parent's Register Customer dialog; the customer it saves
+  // comes back as registeredCustomer ({ customer, at }) and is loaded into this bill.
+  onRegisterCustomer,
+  registeredCustomer = null,
   // Set when Sales > Orders sends a saved Order / Invoice / Quotation here to be edited: the form
   // loads it, and "Complete" then updates that same record instead of creating a new bill.
   editDocumentId = null,
+  // With editDocumentId: open that document as this type instead ("Bill this order" on a lens
+  // order whose lenses are in stock opens the Order as the tax invoice it becomes).
+  editConvertTo = null,
   prefillTestNo = null,
   onExitEdit,
-  onCancelEdit
+  onCancelEdit,
+  // "Bill this order" on a ready lens order of the selected patient (id of the saved Order).
+  onBillLensOrder
 }) {
   // View Mode Selection: 'single-page' (Easy All-in-One Method) vs 'wizard' (5-Step Guided Wizard)
   const [viewMode, setViewMode] = useState('single-page');
@@ -824,6 +874,39 @@ export default function NewSaleWizard({
       notify(`Pending eye test fee ₹${total.toFixed(2)} (Test No ${pending.map(e => e.test_no).join(', ')}) added to this bill.`);
     }).catch(() => { /* no pending fee shown — the sale itself is unaffected */ });
   }, [selectedCustomerId, editingDoc, formLocked]);
+  // The selected patient's lens special orders (Sales > Orders > Lenses): one whose lenses are on
+  // the shelf for them is offered for billing right here. Not while editing a saved document.
+  const [patientLensOrders, setPatientLensOrders] = useState([]);
+  useEffect(() => {
+    const id = String(selectedCustomerId || '');
+    if (editingDoc || !isBackendUuid(id)) { setPatientLensOrders([]); return undefined; }
+    let alive = true;
+    axios.get(LENS_QUEUE_API, { params: { customer: id } })
+      .then(res => { if (alive) setPatientLensOrders(Array.isArray(res.data) ? res.data : []); })
+      .catch(() => { if (alive) setPatientLensOrders([]); });
+    return () => { alive = false; };
+  }, [selectedCustomerId, editingDoc, lastCompletedOrder]);
+
+  // Lenses in stock that were bought for another customer's order (not billed yet). Selling one
+  // here is allowed but flagged — it leaves that customer's order short.
+  const [reservedLenses, setReservedLenses] = useState([]);
+  useEffect(() => {
+    if (lastCompletedOrder) return undefined;
+    let alive = true;
+    axios.get(RESERVED_LENS_API)
+      .then(res => { if (alive) setReservedLenses(Array.isArray(res.data) ? res.data : []); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [lastCompletedOrder]);
+  const warnReservedLens = (productId) => {
+    if (!productId) return;
+    const held = reservedLenses.filter(r => String(r.product) === String(productId)
+      && String(r.sales_order) !== String(editingDoc?.id || '')
+      && String(r.customer || '') !== String(selectedCustomerId || ''));
+    if (!held.length) return;
+    notify(`Held stock: ${held.map(r => `${r.units} unit(s) of ${r.product_name} are reserved for ${r.sales_order_number} (${r.customer_name || 'customer'})`).join('; ')}. Selling it here leaves that order short.`, 'warning');
+  };
+
   // First field of the form — "Add New Details" focuses it so the next sale can be typed at once.
   const firstFieldRef = useRef(null);
   const [focusRequest, setFocusRequest] = useState(0);
@@ -853,6 +936,16 @@ export default function NewSaleWizard({
   // the products database by that dialog and then dropped straight into this sale's billing grid
   // via onCreated → handleLensCreated.
   const [lensDialogOpen, setLensDialogOpen] = useState(false);
+  // A new lens isn't on the shelf yet, so it is a special order: on a new tax invoice "+ NEW Lens"
+  // switches the bill to a Customer Order (patient, Rx and lines stay). Saving it books the order
+  // for the supplier purchase (Sales > Orders > Lenses); it is billed once the lens arrives.
+  const openNewLens = () => {
+    if (!editingDoc && docType === 'Invoice') {
+      handleDocTypeChange('Order');
+      notify('Switched to Customer Order — the lens will be ordered from the supplier and billed when it arrives.');
+    }
+    setLensDialogOpen(true);
+  };
 
   // A lens just saved from ProductMasterDialog — map its record onto an entry line and push it
   // into the billing grid (same computeEntryLine + handleAddItem path as any product).
@@ -1062,6 +1155,16 @@ export default function NewSaleWizard({
       notes: cust.primary_diagnosis || cust.diagnosis || cust.notes || ''
     });
   };
+
+  // Register Customer (from the + beside Search Customer) just saved someone — load them. Prefer
+  // the directory entry, which carries their latest eye exam if they already had one.
+  const loadedRegistrationRef = useRef(null);
+  useEffect(() => {
+    if (!registeredCustomer || loadedRegistrationRef.current === registeredCustomer.at) return;
+    loadedRegistrationRef.current = registeredCustomer.at;
+    const saved = registeredCustomer.customer;
+    handleSelectCustomer(customerOptions.find(o => String(o.id) === String(saved.id)) || saved);
+  }, [registeredCustomer]);
 
   // Patient search field: a pick loads that patient; clearing the field clears the patient
   // details and Rx it had filled, back to the blank default.
@@ -1310,7 +1413,8 @@ export default function NewSaleWizard({
   // Product / Lens / Services switch. 'lens' opens the full Product Master dialog in Lens Mode.
   const handleItemModeChange = (mode) => {
     setItemMode(mode);
-    setLensDialogOpen(mode === 'lens');
+    if (mode === 'lens') openNewLens();
+    else setLensDialogOpen(false);
     if (mode !== 'service') {
       setShowServiceRepair(false);
     }
@@ -1483,6 +1587,7 @@ export default function NewSaleWizard({
     };
 
     setItemsList([...itemsList, newItem]);
+    warnReservedLens(newItem.productId);
     setEntryInput({
       ...entryInput,
       productId: '', barcode: '', item: '', modelNo: '', color: '', size: '',
@@ -1977,9 +2082,17 @@ export default function NewSaleWizard({
         return;
       }
       applyDocumentToForm(doc);
+      // "Bill this order": the saved Order opens as the tax invoice it becomes; saving converts it
+      // in place (the server then takes its lenses out of stock).
+      const savedType = toWizardDocType(doc.backend?.document_type || doc.local?.documentType || doc.local?.docType);
+      if (editConvertTo && savedType !== editConvertTo) {
+        setDocType(editConvertTo);
+        setBillNo(generateDocNumber(editConvertTo));
+        notify(`${doc.backend?.invoice_number || 'The order'} opened as a ${docTypeLabel(editConvertTo)} — check the payment and press Complete to bill it.`);
+      }
     });
     return () => { cancelled = true; setLoadingEdit(false); };
-  }, [editDocumentId]);
+  }, [editDocumentId, editConvertTo]);
 
 
   // 3️⃣ PART 3 HANDLER: Coupon Code Auto-Calculation
@@ -2122,7 +2235,7 @@ export default function NewSaleWizard({
       focusNsField('search');
     },
     power: () => setPowerChecked(v => !v),
-    newLens: () => setLensDialogOpen(true),
+    newLens: () => openNewLens(),
     removeRow: () => {
       const rowEl = document.activeElement?.closest?.('[data-item-row]');
       if (!rowEl || !posRootRef.current?.contains(rowEl)) return false;
@@ -2396,6 +2509,10 @@ export default function NewSaleWizard({
     //
     // Invoice.customer is nullable, so a walk-in with no resolved customer must still reach the
     // backend — otherwise the sale (and its stock deduction) never leaves this browser.
+    // A new Order with a lens that isn't on the shelf (a New Lens, or stock short of the line)
+    // waits for the supplier purchase; anything else starts at "Order Received".
+    const needsLensPurchase = itemsList.some(r => r.lens && !(Number(r.stock) >= (Number(r.qty) || 1)));
+    const newOrderStage = needsLensPurchase ? 'Pending Supplier Purchase' : 'Order Received';
     {
       try {
         const status = docType === 'Quotation'
@@ -2405,8 +2522,8 @@ export default function NewSaleWizard({
           invoice_number: billNo,
           document_type: docType.toUpperCase(),
           // An edited Order keeps its lab-pipeline stage; only a new (or newly converted) Order
-          // starts at "Order Received".
-          fulfillment_status: docType === 'Order' && editingDoc?.docType !== 'Order' ? 'Order Received' : undefined,
+          // gets a starting stage.
+          fulfillment_status: docType === 'Order' && editingDoc?.docType !== 'Order' ? newOrderStage : undefined,
           customer: customerId || null,
           // Who the bill is for — required by the backend, and kept on the bill even when no
           // patient record could be linked.
@@ -2526,6 +2643,7 @@ export default function NewSaleWizard({
       diagnosis: rxData.notes || '',
       icdCode,
       docType,
+      fulfillmentStatus: docType === 'Order' && editingDoc?.docType !== 'Order' ? newOrderStage : undefined,
       items: itemsList,
       totalQty,
       grossTotal,
@@ -2709,6 +2827,40 @@ export default function NewSaleWizard({
         </Alert>
       )}
 
+      {/* The patient's lens special orders — a ready one is billed from here (opens the Order as
+          the tax invoice). */}
+      {!editingDoc && !loadingEdit && !lastCompletedOrder && patientLensOrders.length > 0 && (
+        <Alert
+          severity={patientLensOrders.some(canBillOrder) ? 'success' : 'info'}
+          sx={{ mb: 2, borderRadius: 2.5, border: '1px solid', borderColor: 'divider', '& .MuiAlert-message': { width: '100%' } }}
+        >
+          <Typography variant="body2" fontWeight={900} sx={{ mb: 0.5 }}>
+            🔬 Lens orders for {customerInput.name || 'this patient'}
+          </Typography>
+          <Stack spacing={0.75}>
+            {patientLensOrders.map(o => {
+              const meta = queueStatusMeta(o.queue_status);
+              return (
+                <Box key={o.id} sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                  <Typography variant="body2" fontWeight={900}>{o.invoice_number}</Typography>
+                  <Chip size="small" color={meta.color} label={o.billed ? `${meta.label} · Billed` : meta.label} sx={{ fontWeight: 800 }} />
+                  <Typography variant="caption" color="text.secondary" sx={{ flex: 1, minWidth: 200 }}>{lensQueueSummary(o)}</Typography>
+                  {canBillOrder(o) && (
+                    <Button
+                      size="small" variant="contained" color="success"
+                      onClick={() => onBillLensOrder?.(o.id)}
+                      sx={{ fontWeight: 800, textTransform: 'none' }}
+                    >
+                      Bill this order
+                    </Button>
+                  )}
+                </Box>
+              );
+            })}
+          </Stack>
+        </Alert>
+      )}
+
       {/* Both entry modes sit inside one lock container: `inert` blocks every click, keystroke
           and Tab stop inside it while a sale is saving or saved. The "Add New Details" card sits
           outside the inert box (so it stays usable) and is the only way back into the form. */}
@@ -2768,16 +2920,21 @@ export default function NewSaleWizard({
                     options={customerOptions}
                     value={selectedCustomerId}
                     onSelect={handlePatientPicked}
-                    label="Search Patient (Name / Test No / Patient ID)"
                     fieldKey="patient"
                   />
-                  <Button
-                    variant="contained" color="primary" size="small"
-                    onClick={handleSavePatient}
-                    sx={{ minWidth: 38, height: 38, px: 1, fontWeight: 900, fontSize: '1.2rem', borderRadius: 2 }}
-                  >
-                    +
-                  </Button>
+                  <Tooltip title="Register Customer">
+                    <span>
+                      <Button
+                        variant="contained" color="primary" size="small"
+                        onClick={() => onRegisterCustomer?.()}
+                        disabled={!onRegisterCustomer}
+                        aria-label="Register Customer"
+                        sx={{ minWidth: 38, height: 38, px: 1, fontWeight: 900, fontSize: '1.2rem', borderRadius: 2 }}
+                      >
+                        +
+                      </Button>
+                    </span>
+                  </Tooltip>
                 </Stack>
               </Grid>
 
@@ -3226,7 +3383,7 @@ export default function NewSaleWizard({
               <Grid item xs={12} sm={1.2} md={1.2}>
                 <Button
                   fullWidth variant="contained" size="small"
-                  onClick={() => setLensDialogOpen(true)} startIcon={<AddIcon />}
+                  onClick={openNewLens} startIcon={<AddIcon />}
                   sx={{
                     fontWeight: 900, py: 0.8, borderRadius: 2, textTransform: 'none', fontSize: '0.75rem',
                     bgcolor: '#0f172a', color: '#facc15',

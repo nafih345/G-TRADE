@@ -289,7 +289,8 @@ class ResilienceTests(ImportCase):
 
         with mock.patch.object(Product.objects, 'bulk_create', reject_bad):
             b = self.run_rows(rows + [dict(rows[3])])       # the later copy of the rejected row
-        self.assertEqual(b.failed_rows, 2, b.remarks)
+        self.assertEqual(b.failed_rows, 1, b.remarks)
+        self.assertEqual(b.duplicate_rows, 1, b.remarks)    # a repeat is skipped, never a second attempt
         self.assertEqual(b.imported_rows, 9, b.remarks)
         self.assertAccounted(b)
 
@@ -313,7 +314,9 @@ class ApiTests(ImportCase):
             upload = SimpleUploadedFile('stock.xlsx', f.read())
         with mock.patch.object(import_engine, 'start_import_thread', lambda pk: run_import_job(pk)):
             res = APIClient().post('/api/import/upload/', {'file': upload}, format='multipart')
-        self.assertEqual(res.status_code, 202, res.data)
+            self.assertEqual(res.status_code, 202, res.data)
+            self.assertEqual(Product.objects.count(), 0)    # only the preview so far
+            self.assertEqual(APIClient().post(f"/api/import/{res.data['batch_id']}/confirm/").status_code, 202)
 
         hist = APIClient().get('/api/import/history/').data[0]
         self.assertEqual(hist['status'], 'PARTIAL', hist['remarks'])

@@ -1,9 +1,8 @@
 import React, { useEffect, useRef } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import axios from 'axios';
-import { Card, Typography, Grid, LinearProgress, Chip, Stack, Box, Alert } from '@mui/material';
+import { Card, Typography, Grid, LinearProgress, Chip, Stack, Box, Alert, Button } from '@mui/material';
 
-import ImportBarcodeReview from './ImportBarcodeReview';
 
 const TERMINAL_STATUSES = ['SUCCESS', 'PARTIAL', 'FAILED'];
 const AWAITING_REVIEW = 'AWAITING_CONFIRMATION';
@@ -15,8 +14,7 @@ function formatDuration(sec) {
   return m < 60 ? `${m}m ${sec % 60}s` : `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
-export default function ImportProgressCard({ batchId, onDone, onMissing, onCancelled }) {
-  const queryClient = useQueryClient();
+export default function ImportProgressCard({ batchId, onDone, onMissing, onAwaitingReview }) {
   // First progress sample seen by this card. The rate is measured from here rather
   // than from mount time, so reopening the page mid-import doesn't credit rows
   // imported before it was opened to the last few seconds.
@@ -49,15 +47,49 @@ export default function ImportProgressCard({ batchId, onDone, onMissing, onCance
     }
   }, [batch, onDone]);
 
+  // The preview is ready: hand over to the Data Preview tab, once per batch.
+  const reviewNotifiedRef = useRef(null);
+  useEffect(() => {
+    if (batch?.status === AWAITING_REVIEW && reviewNotifiedRef.current !== batch.id) {
+      reviewNotifiedRef.current = batch.id;
+      onAwaitingReview?.(batch);
+    }
+  }, [batch, onAwaitingReview]);
+
   if (!batchId || !batch) return null;
 
   if (batch.status === AWAITING_REVIEW) {
+    const s = batch.preview_summary || {};
     return (
-      <ImportBarcodeReview
-        batch={batch}
-        onCancelled={onCancelled}
-        onConfirmed={() => queryClient.invalidateQueries({ queryKey: ['import-status', batchId] })}
-      />
+      <Card variant="outlined" sx={{ p: 3, borderRadius: 3, mb: 3 }}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" gap={1}>
+          <Box>
+            <Typography variant="h6" fontWeight={800}>Preview Ready — {batch.batch_number}</Typography>
+            <Typography variant="body2" color="text.secondary">
+              {(s.valid || 0).toLocaleString()} of {(s.total || 0).toLocaleString()} rows can be imported. Nothing is written until you start the import.
+            </Typography>
+          </Box>
+          <Button variant="contained" onClick={() => onAwaitingReview?.(batch)} sx={{ fontWeight: 800 }}>Open Data Preview</Button>
+        </Stack>
+      </Card>
+    );
+  }
+
+  if (batch.status === 'ANALYZING') {
+    return (
+      <Card variant="outlined" sx={{ p: 3, borderRadius: 3, mb: 3 }}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
+          <Typography variant="h6" fontWeight={800}>Preparing Preview — {batch.batch_number}</Typography>
+          <Chip label="READING FILE" color="info" sx={{ fontWeight: 800 }} />
+        </Stack>
+        <LinearProgress sx={{ height: 10, borderRadius: 5, mb: 1.5 }} />
+        <Typography variant="body2" color="text.secondary">
+          {(batch.processed_rows || 0).toLocaleString()} rows checked so far. Duplicates and invalid rows are being marked; nothing is imported yet.
+        </Typography>
+        {error && error.response?.status !== 404 && (
+          <Alert severity="warning" sx={{ mt: 2 }}>Lost contact with the server. The preview keeps being prepared there.</Alert>
+        )}
+      </Card>
     );
   }
 

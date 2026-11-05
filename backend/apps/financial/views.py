@@ -11,7 +11,8 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
-from . import accounts_reports, bankbook, cashbook, cheques, daybook, integration, reports, settlements, voucher_report
+from . import (accounts_reports, bankbook, cashbook, cheques, daybook, integration, reports, settlements, statements,
+               voucher_report)
 from .accounting_catalog import SOURCES, ROLES
 from .mapping import role_status, save_mapping, deactivate_mapping, accounts_in_active_mappings
 from .models import (
@@ -582,6 +583,40 @@ def account_balances_view(request):
 def source_breakdown_view(request):
     return reports.source_breakdown(_date_param(request, 'date_from'), _date_param(request, 'date_to'),
                                     request.query_params.get('branch'))
+
+
+# ---------------------------------------------------------------------------
+# Financial → Statements (statements.py): every book in one shape, on screen or as .xlsx
+# ---------------------------------------------------------------------------
+
+@_report
+def statement_options_view(request):
+    return statements.options()
+
+
+@api_view(['GET'])
+@permission_classes([FinancePermission])
+def statement_view(request):
+    """GET /financial/statements/?type=...&from_date=&to_date=&account_id=... (&format=xlsx)."""
+    p = request.query_params
+    try:
+        date_from = _date_param(request, 'from_date') or _date_param(request, 'date_from')
+        date_to = _date_param(request, 'to_date') or _date_param(request, 'date_to') or timezone.localdate()
+        branch_ids, branch_label = _cashbook_branches(request)
+        data = statements.build(p.get('type'), p, date_from=date_from, date_to=date_to, branch_ids=branch_ids)
+    except (AccountingError, ValueError) as exc:
+        return _error(exc)
+    data['branch'] = _branch_label(request, branch_label)
+    if (p.get('export') or '').lower() == 'xlsx':  # not ?format= (DRF's renderer override)
+        from django.http import HttpResponse
+        from apps.company.store_profile import get_company
+        company = get_company()
+        name = (company.display_name or company.name) if company else ''
+        resp = HttpResponse(statements.to_xlsx(data, name),
+                            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        resp['Content-Disposition'] = f'attachment; filename="{data["type"]}_{data["date_from"] or ""}_{data["date_to"] or ""}.xlsx"'
+        return resp
+    return Response(data)
 
 
 # ---------------------------------------------------------------------------

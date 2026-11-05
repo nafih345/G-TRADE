@@ -283,3 +283,51 @@ ${po?.remarks ? `<div class="remarks"><b>Remarks:</b> ${esc(po.remarks)}</div>` 
 <div class="sign"><div>Prepared by</div><div>Authorised signatory</div></div>
 </body></html>`;
 }
+
+/**
+ * Lens PO lines for one customer order's outstanding lenses (pending-requirements rows, as
+ * "Create Purchase Entry / Order from Supplier" in Sales > Orders > Lenses sends them): both eyes
+ * of one lens model become Single Customer pairs, a lone eye a Single Lens. Priced at the
+ * product's cost (per its pricing unit, so a single lens on a pair price costs half a pair).
+ */
+export function lensItemsFromRequirements(reqs = [], products = []) {
+  const all = [...products, ...(products.allProducts || [])];
+  const groups = new Map();
+  reqs.forEach((r) => {
+    const key = r.product || `line:${r.sales_order_item}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  });
+  const items = [];
+  groups.forEach((rows) => {
+    const base = rows[0];
+    const byEye = { RE: rows.find((r) => r.eye === 'RE'), LE: rows.find((r) => r.eye === 'LE') };
+    const left = { RE: byEye.RE?.outstanding || 0, LE: byEye.LE?.outstanding || 0 };
+    const product = base.product ? all.find((p) => String(p.id) === String(base.product)) : null;
+    const pricingUnit = String(product?.extra_data?.lens_price_unit || '').toUpperCase() === 'PIECE' ? 'PIECE' : 'PAIR';
+    const make = (orderType, pieces) => ({
+      key: `${Date.now()}-${Math.random()}`,
+      product: base.product || '',
+      product_name: base.product_name || '',
+      lens_model: product?.name || base.product_name || '',
+      lens_type: '',
+      lens_index: base.lens_index || '',
+      lens_coating: '',
+      order_type: orderType,
+      unit_price: product ? (parseFloat(product.cost_price) || '') : '',
+      pricing_unit: pricingUnit,
+      discount_amount: 0,
+      tax_percent: parseFloat(product?.tax_rate) || 0,
+      pieces,
+    });
+    while (left.RE > 0 && left.LE > 0) {
+      items.push(make(SINGLE_PAIR, [pieceFromRequirement(byEye.RE, 'RE'), pieceFromRequirement(byEye.LE, 'LE')]));
+      left.RE -= 1;
+      left.LE -= 1;
+    }
+    ['RE', 'LE'].forEach((eye) => {
+      for (; left[eye] > 0; left[eye] -= 1) items.push(make(SINGLE_PIECE, [pieceFromRequirement(byEye[eye], eye)]));
+    });
+  });
+  return items;
+}

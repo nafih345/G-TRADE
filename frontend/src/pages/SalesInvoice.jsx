@@ -375,12 +375,18 @@ export default function SalesInvoice() {
               phone: c.phone || 'N/A',
               email: c.email || '',
               address: c.address || '',
-              sphRight: matchedExam?.sub_sph_od || c.sphRight || 'Plano',
-              cylRight: matchedExam?.sub_cyl_od || c.cylRight || 'Plano',
-              axisRight: matchedExam?.sub_axis_od || c.axisRight || '0',
-              sphLeft: matchedExam?.sub_sph_os || c.sphLeft || 'Plano',
-              cylLeft: matchedExam?.sub_cyl_os || c.cylLeft || 'Plano',
-              axisLeft: matchedExam?.sub_axis_os || c.axisLeft || '0',
+              age: c.age || '',
+              gender: c.gender || '',
+              notes: c.notes || '',
+              // Lens power typed at Register Customer — an eye exam on file wins over it.
+              prescription: c.prescription || {},
+              sphRight: matchedExam?.sub_sph_od || c.prescription?.sphRight || c.sphRight || 'Plano',
+              cylRight: matchedExam?.sub_cyl_od || c.prescription?.cylRight || c.cylRight || 'Plano',
+              axisRight: matchedExam?.sub_axis_od || c.prescription?.axisRight || c.axisRight || '0',
+              sphLeft: matchedExam?.sub_sph_os || c.prescription?.sphLeft || c.sphLeft || 'Plano',
+              cylLeft: matchedExam?.sub_cyl_os || c.prescription?.cylLeft || c.cylLeft || 'Plano',
+              axisLeft: matchedExam?.sub_axis_os || c.prescription?.axisLeft || c.axisLeft || '0',
+              distancePD: c.prescription?.distancePD || '',
               doctor: matchedExam?.optometrist || c.doctor || 'Attending Optometrist',
               date: matchedExam?.examination_date ? matchedExam.examination_date.split('T')[0] : c.date || '',
               balance: c.outstanding_balance || c.balance || 0,
@@ -490,30 +496,23 @@ export default function SalesInvoice() {
   const [printOpen, setPrintOpen] = useState(false);
   const [qrOpen, setQrOpen] = useState(false);
 
-  // Add / Enter Patient details modal state
-  const [addPatientDialogOpen, setAddPatientDialogOpen] = useState(false);
-  const [patientInput, setPatientInput] = useState({
-    name: '',
-    phone: '',
-    email: '',
-    age: '',
-    gender: 'Male',
-    tier: 'Silver',
-    doctor: '',
-    frameRec: '',
-    frameType: 'Full-Rim Acetate',
-    lensRec: '',
-    lensCoating: 'Anti-Glare Blue-Cut Protection',
-    status: '',
-    sphRight: '',
-    cylRight: '',
-    axisRight: '',
-    sphLeft: '',
-    cylLeft: '',
-    axisLeft: '',
-    distancePD: '',
+  // Register Customer dialog state. registerFrom says who opened it: the Customers tab shows
+  // the saved customer in its list; New Sale (the + beside Search Customer) loads them into the
+  // bill through registeredCustomer.
+  const EMPTY_CUSTOMER_FORM = {
+    name: '', phone: '', email: '', age: '', gender: 'Male', address: '',
+    sphRight: '', cylRight: '', axisRight: '', sphLeft: '', cylLeft: '', axisLeft: '', distancePD: '',
     notes: ''
-  });
+  };
+  const [addPatientDialogOpen, setAddPatientDialogOpen] = useState(false);
+  const [registerFrom, setRegisterFrom] = useState('customers');
+  const [registeredCustomer, setRegisteredCustomer] = useState(null);
+  const [patientInput, setPatientInput] = useState(EMPTY_CUSTOMER_FORM);
+  const openRegisterCustomer = (from = 'customers') => {
+    setRegisterFrom(from);
+    setAddPatientDialogOpen(true);
+  };
+  const setField = (key) => (e) => setPatientInput(prev => ({ ...prev, [key]: e.target.value }));
 
   // Prescription loading states
   const [rxSphOD, setRxSphOD] = useState('');
@@ -638,73 +637,67 @@ export default function SalesInvoice() {
   );
 
   const handleAddPatientSubmit = async () => {
-    if (!patientInput.name || !patientInput.phone) {
-      alert("Please enter at least Patient Name and Phone Number.");
+    const form = patientInput;
+    if (!form.name.trim() || !form.phone.trim()) {
+      alert('Please enter at least the Customer Name and Phone Number.');
       return;
     }
-    // Previously generated a fake local id and only did setCustomers([...]) — a patient
-    // registered from the Sales module's Customers tab never actually reached the database, so
-    // it was invisible to Appointments/OpticalServices/PatientHistory and vanished on refresh.
+    const RX_KEYS = ['sphRight', 'cylRight', 'axisRight', 'sphLeft', 'cylLeft', 'axisLeft', 'distancePD'];
+    // Only the boxes actually filled in — a customer with no power stays blank, never "Plano".
+    const prescription = Object.fromEntries(
+      RX_KEYS.map(k => [k, String(form[k] || '').trim()]).filter(([, v]) => v)
+    );
     // Reuse a real Customer if one already matches this phone; otherwise create one.
-    let newId = `c-${Date.now()}`;
-    let newPatientCode = '';
-    const existingMatch = customers.find(c => c.phone && c.phone === patientInput.phone);
-    if (existingMatch) {
-      newId = existingMatch.id;
-      newPatientCode = existingMatch.patient_code || '';
+    let saved = customers.find(c => c.phone && c.phone === form.phone.trim());
+    if (saved) {
+      notify(`${saved.name} is already registered with this phone number — showing that customer.`);
     } else {
       try {
         const res = await axios.post('/api/sales/customers/', {
-          name: patientInput.name,
-          phone: patientInput.phone,
-          email: patientInput.email || '',
-          age: patientInput.age || '',
-          gender: patientInput.gender || 'Male'
+          name: form.name.trim(),
+          phone: form.phone.trim(),
+          email: form.email.trim() || null,
+          age: form.age || '',
+          gender: form.gender || 'Male',
+          address: form.address.trim(),
+          notes: form.notes.trim(),
+          prescription
         });
-        newId = res.data.id;
-        newPatientCode = res.data.patient_code || '';
+        const c = res.data;
+        saved = {
+          id: c.id,
+          patient_code: c.patient_code || '',
+          name: c.name,
+          phone: c.phone || '',
+          email: c.email || '',
+          age: c.age || '',
+          gender: c.gender || '',
+          address: c.address || '',
+          notes: c.notes || '',
+          prescription: c.prescription || prescription,
+          ...prescription,
+          date: new Date().toISOString().split('T')[0],
+          balance: 0,
+          hasSpecBooking: false,
+          specDetails: null
+        };
       } catch (e) {
-        alert('Could not save the new patient to the database. Please try again.');
+        alert(`Could not save the customer to the database — ${apiErrorMessage(e)}`);
         return;
       }
+      setCustomers(prev => [saved, ...prev]);
     }
-    const hasBookingIntent = Boolean(patientInput.frameRec || patientInput.lensRec);
-    const newCustObj = {
-      id: newId,
-      patient_code: newPatientCode,
-      name: patientInput.name,
-      phone: patientInput.phone,
-      email: patientInput.email || '',
-      age: patientInput.age || '',
-      gender: patientInput.gender || 'Male',
-      sphRight: patientInput.sphRight || 'Plano',
-      cylRight: patientInput.cylRight || 'Plano',
-      axisRight: patientInput.axisRight || '0',
-      sphLeft: patientInput.sphLeft || 'Plano',
-      cylLeft: patientInput.cylLeft || 'Plano',
-      axisLeft: patientInput.axisLeft || '0',
-      distancePD: patientInput.distancePD || '',
-      doctor: patientInput.doctor || 'Attending Doctor',
-      date: new Date().toISOString().split('T')[0],
-      balance: 0,
-      hasSpecBooking: hasBookingIntent,
-      specDetails: hasBookingIntent ? {
-        bookingId: `SPEC-${Math.floor(1000 + Math.random() * 9000)}`,
-        date: new Date().toISOString().split('T')[0],
-        frameRec: patientInput.frameRec ? `${patientInput.frameRec} (${patientInput.frameType || 'Full-Rim'})` : 'Prescribed Optical Frame',
-        lensRec: patientInput.lensRec ? `${patientInput.lensRec} - ${patientInput.lensCoating || 'Anti-Glare'}` : 'Prescribed Optical Lens',
-        status: patientInput.status || 'Booked for Spectacles',
-        notes: patientInput.notes || ''
-      } : null
-    };
-    setCustomers([newCustObj, ...customers]);
-    handleCustomerSelect(newId);
     setAddPatientDialogOpen(false);
-    setPatientInput({
-      name: '', phone: '', email: '', age: '', gender: 'Male', tier: 'Silver', doctor: '',
-      frameRec: '', frameType: 'Full-Rim Acetate', lensRec: '', lensCoating: 'Anti-Glare Blue-Cut Protection',
-      status: '', sphRight: '', cylRight: '', axisRight: '', sphLeft: '', cylLeft: '', axisLeft: '', distancePD: '', notes: ''
-    });
+    setPatientInput(EMPTY_CUSTOMER_FORM);
+    if (registerFrom === 'new-sale') {
+      // The wizard picks this up and loads the customer (and any lens power) into the bill.
+      setRegisteredCustomer({ customer: saved, at: Date.now() });
+    } else {
+      handleCustomerSelect(saved.id);
+      // Display the saved customer: filter the directory down to them.
+      setCustomerTierFilter('All');
+      setCustomerSearchQuery(saved.patient_code || saved.phone || saved.name);
+    }
   };
 
   const getCustomerName = () => {
@@ -963,12 +956,19 @@ export default function SalesInvoice() {
           // Set by the ✏️ Edit action in Sales > Orders: the wizard loads that document and
           // saves back onto it instead of creating a new bill.
           editDocumentId={location.state?.editDocumentId || null}
+          editConvertTo={location.state?.convertTo || null}
+          // A lens order whose lenses are in stock: open it as the tax invoice it becomes.
+          onBillLensOrder={(id) => navigate('/sales/new', { state: { editDocumentId: id, convertTo: 'Invoice' } })}
           // Eye Test "Pay After Sale" → Go to Sales: load that visit's patient + Rx by Test No
           // (its pending eye test fee then joins the bill).
           prefillTestNo={location.state?.eyeTestNo || null}
           onExitEdit={() => navigate('/sales/new', { replace: true })}
           onCancelEdit={() => navigate('/sales/orders')}
           onNavigateToEyeTest={() => navigate('/optical/eyetest')}
+          // + beside Search Customer: open Register Customer; the saved customer comes back
+          // through registeredCustomer and is loaded into the bill.
+          onRegisterCustomer={() => openRegisterCustomer('new-sale')}
+          registeredCustomer={registeredCustomer}
           onCheckoutComplete={(completedOrder) => {
             // The sale just moved stock on the server — reload so the next search shows it.
             refreshProducts();
@@ -985,7 +985,7 @@ export default function SalesInvoice() {
               // What was recorded against the bill (the pay-mode split, less any change returned).
               paidAmount: parseFloat(completedOrder.paidAmount) || 0,
               status: completedOrder.docType === 'Order'
-                ? 'Order Received'
+                ? (completedOrder.fulfillmentStatus || 'Order Received')
                 : completedOrder.docType === 'Quotation'
                   ? 'Draft'
                   : 'Ready for Collection',
@@ -1065,7 +1065,17 @@ export default function SalesInvoice() {
           orders={orders}
           onNavigateToNewSale={() => { setActiveTab('new-sale'); navigate('/sales/new'); }}
           onEditInNewSale={(ord) => navigate('/sales/new', { state: { editDocumentId: ord.id } })}
+          // Orders > Lenses: the supplier purchase / receiving / stock entry happen in Purchase,
+          // billing back in New Sale (the Order opens as its tax invoice).
+          onCreateLensPurchase={(row) => navigate('/purchase/entry', { state: { lensForSalesOrder: row.id } })}
+          onReceiveLensPO={(po) => navigate('/purchase/lens-orders', { state: { receiveLensPo: po.id, search: po.po_number } })}
+          onStockLensPO={(po) => navigate('/purchase/entry', { state: { convertLensPo: po.id } })}
+          onBillLensOrder={(row) => navigate('/sales/new', { state: { editDocumentId: row.id, convertTo: 'Invoice' } })}
           onNavigateToEyeTest={() => navigate('/optical/eyetest')}
+          // + beside Search Customer: open Register Customer; the saved customer comes back
+          // through registeredCustomer and is loaded into the bill.
+          onRegisterCustomer={() => openRegisterCustomer('new-sale')}
+          registeredCustomer={registeredCustomer}
           onOpenRecordPayment={(ord) => {
             // Opened from a row: the receipt is recorded against that bill (raising its Total
             // Paid), pre-filled with what's still due.
@@ -1159,17 +1169,17 @@ export default function SalesInvoice() {
                 <Button 
                   variant="contained" 
                   startIcon={<AddIcon />} 
-                  onClick={() => setAddPatientDialogOpen(true)}
+                  onClick={() => openRegisterCustomer('customers')}
                   sx={{ backgroundColor: '#2563EB' }}
                 >
-                  + Register New Patient
+                  + Register Customer
                 </Button>
                 <Button 
                   variant="outlined" 
                   startIcon={<AddIcon />} 
                   onClick={() => navigate('/optical/eyetest', { state: { newTest: true, fromSales: true } })}
                 >
-                  Enter Eye Test & Booking
+                  Book / Enter Eye Test
                 </Button>
               </Stack>
             </Box>
@@ -1263,7 +1273,7 @@ export default function SalesInvoice() {
                             {customerSearchQuery ? "No matching registered patients found." : "No registered customer profiles found in the database."}
                           </Typography>
                           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
-                            {customerSearchQuery ? "Try refining your search keyword or clearing filters." : "Click '+ Register New Patient' or enter patient details in Eye Test section to register patients."}
+                            {customerSearchQuery ? "Try refining your search keyword or clearing filters." : "Click '+ Register Customer', or 'Book / Enter Eye Test' if the customer needs an eye examination."}
                           </Typography>
                           {!customerSearchQuery && (
                             <Stack direction="row" spacing={2} justifyContent="center" sx={{ mt: 2 }}>
@@ -1271,17 +1281,17 @@ export default function SalesInvoice() {
                                 size="small" 
                                 variant="contained" 
                                 startIcon={<AddIcon />} 
-                                onClick={() => setAddPatientDialogOpen(true)} 
+                                onClick={() => openRegisterCustomer('customers')} 
                                 sx={{ backgroundColor: '#2563EB' }}
                               >
-                                + Register First Patient
+                                + Register Customer
                               </Button>
                               <Button 
                                 size="small" 
                                 variant="outlined" 
                                 onClick={() => navigate('/optical/eyetest', { state: { newTest: true, fromSales: true } })}
                               >
-                                Enter Eye Test & Booking
+                                Book / Enter Eye Test
                               </Button>
                             </Stack>
                           )}
@@ -2109,177 +2119,114 @@ export default function SalesInvoice() {
         </DialogActions>
       </Dialog>
 
-      {/* DIALOG FOR ENTER PATIENT & SPECTACLE DETAILS */}
-      <Dialog 
-        open={addPatientDialogOpen} 
-        onClose={() => setAddPatientDialogOpen(false)} 
-        maxWidth="md" 
+      {/* REGISTER CUSTOMER DIALOG */}
+      <Dialog
+        open={addPatientDialogOpen}
+        onClose={() => setAddPatientDialogOpen(false)}
+        maxWidth="md"
         fullWidth
         PaperProps={{ sx: { borderRadius: 4, overflow: 'hidden' } }}
       >
         <DialogTitle sx={{ bgcolor: '#1e293b', color: '#ffffff', py: 2.5, px: 3 }}>
-          <Stack direction="row" justifyContent="space-between" alignItems="center">
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-              <Typography variant="h5">👓</Typography>
-              <Box>
-                <Typography variant="h6" fontWeight={800} sx={{ color: '#ffffff', lineHeight: 1.2 }}>
-                  Patient & Spectacle Booking Registration
-                </Typography>
-                <Typography variant="caption" sx={{ color: '#94a3b8' }}>
-                  Register patient profile, ophthalmic recommendations, and correction prescription (Rx)
-                </Typography>
-              </Box>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+            <Typography variant="h5">👤</Typography>
+            <Box>
+              <Typography variant="h6" fontWeight={800} sx={{ color: '#ffffff', lineHeight: 1.2 }}>
+                Register Customer
+              </Typography>
+              <Typography variant="caption" sx={{ color: '#94a3b8' }}>
+                Customer details, with an optional lens power for powered-lens buyers who skip the eye test
+              </Typography>
             </Box>
-            <Chip label="Optical POS Link" color="primary" size="small" sx={{ fontWeight: 700 }} />
-          </Stack>
+          </Box>
         </DialogTitle>
 
         <DialogContent dividers sx={{ p: 3.5, bgcolor: '#f8fafc' }}>
           <Stack spacing={3}>
-            
-            {/* 1. Patient Demographics & Profile */}
+
+            {/* 1. Customer Details */}
             <Card variant="outlined" sx={{ p: 2.5, borderRadius: 3, bgcolor: '#ffffff' }}>
               <Typography variant="subtitle2" fontWeight={800} color="primary.main" sx={{ mb: 2, display: 'flex', alignItems: 'center', gap: 1 }}>
-                👤 PATIENT DEMOGRAPHICS & PROFILE
+                👤 CUSTOMER DETAILS
               </Typography>
               <Grid container spacing={2}>
                 <Grid item xs={12} sm={6}>
-                  <TextField 
-                    label="Patient Name" 
-                    fullWidth 
-                    required 
+                  <TextField
+                    label="Customer Name"
+                    fullWidth
+                    required
+                    autoFocus
                     size="small"
-                    value={patientInput.name} 
-                    onChange={(e) => setPatientInput({ ...patientInput, name: e.target.value })} 
+                    value={patientInput.name}
+                    onChange={setField('name')}
                   />
                 </Grid>
                 <Grid item xs={12} sm={6}>
-                  <TextField 
-                    label="Phone Number" 
-                    fullWidth 
-                    required 
+                  <TextField
+                    label="Phone Number"
+                    fullWidth
+                    required
                     size="small"
-                    value={patientInput.phone} 
-                    onChange={(e) => setPatientInput({ ...patientInput, phone: e.target.value })} 
+                    value={patientInput.phone}
+                    onChange={setField('phone')}
                   />
                 </Grid>
                 <Grid item xs={12} sm={6}>
-                  <TextField 
-                    label="Email Address" 
-                    fullWidth 
+                  <TextField
+                    label="Email Address"
+                    type="email"
+                    fullWidth
                     size="small"
-                    value={patientInput.email} 
-                    onChange={(e) => setPatientInput({ ...patientInput, email: e.target.value })} 
+                    value={patientInput.email}
+                    onChange={setField('email')}
                   />
                 </Grid>
                 <Grid item xs={6} sm={3}>
-                  <TextField 
-                    label="Age" 
-                    fullWidth 
+                  <TextField
+                    label="Age"
+                    fullWidth
                     size="small"
-                    value={patientInput.age} 
-                    onChange={(e) => setPatientInput({ ...patientInput, age: e.target.value })} 
+                    value={patientInput.age}
+                    onChange={setField('age')}
                   />
                 </Grid>
                 <Grid item xs={6} sm={3}>
-                  <TextField 
-                    select 
-                    label="Gender" 
-                    fullWidth 
+                  <TextField
+                    select
+                    label="Gender"
+                    fullWidth
                     size="small"
-                    value={patientInput.gender} 
-                    onChange={(e) => setPatientInput({ ...patientInput, gender: e.target.value })} 
+                    value={patientInput.gender}
+                    onChange={setField('gender')}
                   >
                     <MenuItem value="Male">Male</MenuItem>
                     <MenuItem value="Female">Female</MenuItem>
                     <MenuItem value="Other">Other</MenuItem>
                   </TextField>
                 </Grid>
-                <Grid item xs={12} sm={6}>
-                  <TextField
-                    label="Attending Optometrist / Doctor"
-                    fullWidth 
-                    size="small"
-                    value={patientInput.doctor} 
-                    onChange={(e) => setPatientInput({ ...patientInput, doctor: e.target.value })} 
-                  />
-                </Grid>
-              </Grid>
-            </Card>
-
-            {/* 2. Ophthalmic & Spectacle Recommendations */}
-            <Card variant="outlined" sx={{ p: 2.5, borderRadius: 3, bgcolor: '#ffffff' }}>
-              <Typography variant="subtitle2" fontWeight={800} color="primary.main" sx={{ mb: 2, display: 'flex', alignItems: 'center', gap: 1 }}>
-                🕶️ OPHTHALMIC & SPECTACLE RECOMMENDATIONS
-              </Typography>
-              <Grid container spacing={2}>
-                <Grid item xs={12} sm={6}>
-                  <TextField 
-                    label="Frame Recommendation" 
-                    fullWidth 
-                    size="small"
-                    value={patientInput.frameRec} 
-                    onChange={(e) => setPatientInput({ ...patientInput, frameRec: e.target.value })} 
-                  />
-                </Grid>
-                <Grid item xs={12} sm={6}>
-                  <TextField 
-                    select 
-                    label="Frame Style & Material" 
-                    fullWidth 
-                    size="small"
-                    value={patientInput.frameType} 
-                    onChange={(e) => setPatientInput({ ...patientInput, frameType: e.target.value })} 
-                  >
-                    <MenuItem value="Full-Rim Acetate">Full-Rim Acetate</MenuItem>
-                    <MenuItem value="Half-Rim Metal">Half-Rim Metal</MenuItem>
-                    <MenuItem value="Rimless Titanium">Rimless Titanium</MenuItem>
-                    <MenuItem value="Sunglasses Frame">Sunglasses Frame</MenuItem>
-                  </TextField>
-                </Grid>
-                <Grid item xs={12} sm={6}>
-                  <TextField 
-                    label="Lens Recommendation" 
-                    fullWidth 
-                    size="small"
-                    value={patientInput.lensRec} 
-                    onChange={(e) => setPatientInput({ ...patientInput, lensRec: e.target.value })} 
-                  />
-                </Grid>
-                <Grid item xs={12} sm={6}>
-                  <TextField 
-                    select 
-                    label="Lens Coating & Index" 
-                    fullWidth 
-                    size="small"
-                    value={patientInput.lensCoating} 
-                    onChange={(e) => setPatientInput({ ...patientInput, lensCoating: e.target.value })} 
-                  >
-                    <MenuItem value="Anti-Glare Blue-Cut Protection">Anti-Glare Blue-Cut 1.56</MenuItem>
-                    <MenuItem value="Photochromic Transition 1.61">Photochromic Transition 1.61</MenuItem>
-                    <MenuItem value="High Index 1.67 Ultra-Thin">High Index 1.67 Ultra-Thin</MenuItem>
-                    <MenuItem value="Standard Scratch-Resistant">Standard Scratch-Resistant</MenuItem>
-                  </TextField>
-                </Grid>
                 <Grid item xs={12}>
-                  <TextField 
-                    label="Booking & Exam Status" 
-                    fullWidth 
+                  <TextField
+                    label="Address"
+                    fullWidth
+                    multiline
+                    minRows={2}
                     size="small"
-                    value={patientInput.status} 
-                    onChange={(e) => setPatientInput({ ...patientInput, status: e.target.value })} 
+                    value={patientInput.address}
+                    onChange={setField('address')}
                   />
                 </Grid>
               </Grid>
             </Card>
 
-            {/* 3. Prescribed Optical Power (Side-by-side OD vs OS Cards) */}
+            {/* 2. Optional lens power — for powered-lens buyers without a full eye test */}
             <Card variant="outlined" sx={{ p: 2.5, borderRadius: 3, bgcolor: '#ffffff' }}>
-              <Typography variant="subtitle2" fontWeight={800} color="primary.main" sx={{ mb: 2, display: 'flex', alignItems: 'center', gap: 1 }}>
-                👁️ PRESCRIBED CORRECTION POWER (Rx)
+              <Typography variant="subtitle2" fontWeight={800} color="primary.main" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                👁️ LENS POWER / PRESCRIPTION (OPTIONAL)
+              </Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
+                Fill in only if the customer needs powered lenses. For a full examination use Book / Enter Eye Test instead.
               </Typography>
               <Grid container spacing={2}>
-                {/* Right Eye OD */}
                 <Grid item xs={12} md={6}>
                   <Paper variant="outlined" sx={{ p: 2, borderRadius: 2.5, borderLeft: '4px solid #10b981', bgcolor: '#f0fdf4' }}>
                     <Typography variant="subtitle2" fontWeight={800} color="success.dark" sx={{ mb: 1.5 }}>
@@ -2287,37 +2234,35 @@ export default function SalesInvoice() {
                     </Typography>
                     <Grid container spacing={1.5}>
                       <Grid item xs={4}>
-                        <TextField 
-                          size="small" 
-                          label="OD SPH" 
-                          fullWidth 
-                          value={patientInput.sphRight} 
-                          onChange={(e) => setPatientInput({ ...patientInput, sphRight: e.target.value })} 
+                        <TextField
+                          size="small"
+                          label="OD SPH"
+                          fullWidth
+                          value={patientInput.sphRight}
+                          onChange={setField('sphRight')}
                         />
                       </Grid>
                       <Grid item xs={4}>
-                        <TextField 
-                          size="small" 
-                          label="OD CYL" 
-                          fullWidth 
-                          value={patientInput.cylRight} 
-                          onChange={(e) => setPatientInput({ ...patientInput, cylRight: e.target.value })} 
+                        <TextField
+                          size="small"
+                          label="OD CYL"
+                          fullWidth
+                          value={patientInput.cylRight}
+                          onChange={setField('cylRight')}
                         />
                       </Grid>
                       <Grid item xs={4}>
-                        <TextField 
-                          size="small" 
-                          label="OD AXIS" 
-                          fullWidth 
-                          value={patientInput.axisRight} 
-                          onChange={(e) => setPatientInput({ ...patientInput, axisRight: e.target.value })} 
+                        <TextField
+                          size="small"
+                          label="OD AXIS"
+                          fullWidth
+                          value={patientInput.axisRight}
+                          onChange={setField('axisRight')}
                         />
                       </Grid>
                     </Grid>
                   </Paper>
                 </Grid>
-
-                {/* Left Eye OS */}
                 <Grid item xs={12} md={6}>
                   <Paper variant="outlined" sx={{ p: 2, borderRadius: 2.5, borderLeft: '4px solid #2563eb', bgcolor: '#eff6ff' }}>
                     <Typography variant="subtitle2" fontWeight={800} color="primary.dark" sx={{ mb: 1.5 }}>
@@ -2325,30 +2270,30 @@ export default function SalesInvoice() {
                     </Typography>
                     <Grid container spacing={1.5}>
                       <Grid item xs={4}>
-                        <TextField 
-                          size="small" 
-                          label="OS SPH" 
-                          fullWidth 
-                          value={patientInput.sphLeft} 
-                          onChange={(e) => setPatientInput({ ...patientInput, sphLeft: e.target.value })} 
+                        <TextField
+                          size="small"
+                          label="OS SPH"
+                          fullWidth
+                          value={patientInput.sphLeft}
+                          onChange={setField('sphLeft')}
                         />
                       </Grid>
                       <Grid item xs={4}>
-                        <TextField 
-                          size="small" 
-                          label="OS CYL" 
-                          fullWidth 
-                          value={patientInput.cylLeft} 
-                          onChange={(e) => setPatientInput({ ...patientInput, cylLeft: e.target.value })} 
+                        <TextField
+                          size="small"
+                          label="OS CYL"
+                          fullWidth
+                          value={patientInput.cylLeft}
+                          onChange={setField('cylLeft')}
                         />
                       </Grid>
                       <Grid item xs={4}>
-                        <TextField 
-                          size="small" 
-                          label="OS AXIS" 
-                          fullWidth 
-                          value={patientInput.axisLeft} 
-                          onChange={(e) => setPatientInput({ ...patientInput, axisLeft: e.target.value })} 
+                        <TextField
+                          size="small"
+                          label="OS AXIS"
+                          fullWidth
+                          value={patientInput.axisLeft}
+                          onChange={setField('axisLeft')}
                         />
                       </Grid>
                     </Grid>
@@ -2356,29 +2301,29 @@ export default function SalesInvoice() {
                 </Grid>
 
                 <Grid item xs={12}>
-                  <TextField 
-                    size="small" 
-                    label="Distance PD (Pupillary Distance in mm)" 
-                    fullWidth 
-                    value={patientInput.distancePD} 
-                    onChange={(e) => setPatientInput({ ...patientInput, distancePD: e.target.value })} 
+                  <TextField
+                    size="small"
+                    label="Distance PD (Pupillary Distance in mm)"
+                    fullWidth
+                    value={patientInput.distancePD}
+                    onChange={setField('distancePD')}
                   />
                 </Grid>
               </Grid>
             </Card>
 
-            {/* 4. Doctor Clinical Remarks */}
+            {/* 3. Notes */}
             <Card variant="outlined" sx={{ p: 2.5, borderRadius: 3, bgcolor: '#ffffff' }}>
               <Typography variant="subtitle2" fontWeight={800} color="primary.main" sx={{ mb: 1.5 }}>
-                📝 DOCTOR CLINICAL REMARKS & LENS INSTRUCTIONS
+                📝 NOTES (OPTIONAL)
               </Typography>
-              <TextField 
-                multiline 
-                rows={2} 
-                fullWidth 
-                placeholder="Enter doctor clinical remarks, special lens instructions, or delivery notes..." 
-                value={patientInput.notes} 
-                onChange={(e) => setPatientInput({ ...patientInput, notes: e.target.value })} 
+              <TextField
+                multiline
+                rows={2}
+                fullWidth
+                placeholder="Any extra remarks about this customer..."
+                value={patientInput.notes}
+                onChange={setField('notes')}
               />
             </Card>
 
@@ -2386,26 +2331,37 @@ export default function SalesInvoice() {
         </DialogContent>
 
         <DialogActions sx={{ p: 2.5, bgcolor: '#ffffff', justifyContent: 'space-between' }}>
-          <Button 
-            variant="outlined" 
-            onClick={() => setAddPatientDialogOpen(false)}
-            sx={{ borderRadius: 2.5, px: 3 }}
-          >
-            Cancel
-          </Button>
-          <Button 
-            variant="contained" 
-            onClick={handleAddPatientSubmit} 
-            sx={{ 
-              backgroundColor: '#2563EB', 
-              borderRadius: 2.5, 
-              px: 4, 
+          <Stack direction="row" spacing={1}>
+            <Button
+              variant="outlined"
+              onClick={() => setAddPatientDialogOpen(false)}
+              sx={{ borderRadius: 2.5, px: 3 }}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="text"
+              onClick={() => {
+                setAddPatientDialogOpen(false);
+                navigate('/optical/eyetest', { state: { newTest: true, fromSales: true } });
+              }}
+            >
+              Needs an eye exam? Book / Enter Eye Test
+            </Button>
+          </Stack>
+          <Button
+            variant="contained"
+            onClick={handleAddPatientSubmit}
+            sx={{
+              backgroundColor: '#2563EB',
+              borderRadius: 2.5,
+              px: 4,
               py: 1,
-              fontWeight: 700, 
-              boxShadow: '0 4px 12px rgba(37, 99, 235, 0.3)' 
+              fontWeight: 700,
+              boxShadow: '0 4px 12px rgba(37, 99, 235, 0.3)'
             }}
           >
-            Save & Display Patient Details
+            Save and Display Customer
           </Button>
         </DialogActions>
       </Dialog>

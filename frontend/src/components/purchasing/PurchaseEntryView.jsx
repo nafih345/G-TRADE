@@ -28,6 +28,7 @@ import {
   ReceiptLong as LensBillIcon
 } from '@mui/icons-material';
 import { LensPOEditor, useLensProducts, UUID_RE } from './LensPurchaseOrderView';
+import { lensItemsFromRequirements } from '../../utils/lensPurchaseOrders';
 import { printLensPO } from '../../utils/printLensPO';
 import { poQtyLabel } from '../../utils/lensPurchaseOrders';
 import { notify } from '../../utils/notify';
@@ -208,7 +209,7 @@ const rowFromInvoiceItem = (it) => {
   };
 };
 
-export default function PurchaseEntryView({ suppliers = [], suppliersLoading = false, products = [], initialSupplierId = '', initialPurchaseOrderId = '', initialLensPoId = '', editInvoiceId = '', onSaveComplete, onRequestAddSupplier }) {
+export default function PurchaseEntryView({ suppliers = [], suppliersLoading = false, products = [], initialSupplierId = '', initialPurchaseOrderId = '', initialLensPoId = '', initialLensSalesOrder = null, editInvoiceId = '', onSaveComplete, onRequestAddSupplier }) {
   const supplierInputRef = useRef(null);
   const dateInputRef = useRef(null);
   const productSearchRef = useRef(null);
@@ -471,6 +472,30 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
     if (initialLensPoId) applyLensPO(initialLensPoId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialLensPoId]);
+
+  // Sales > Orders > Lenses → "Create Purchase Entry / Order from Supplier": the Lens PO editor
+  // opens with that customer order's outstanding lenses (model, eye, Rx, index, cost) and the
+  // order / patient as the reference. Its two buttons are the two ways the lab works: submit the
+  // order and receive later, or the lenses arrived with the bill — receive + add to this entry.
+  const lensSeedDoneRef = useRef(null);
+  useEffect(() => {
+    if (!initialLensSalesOrder?.id || lensProductsLoading || lensSeedDoneRef.current === initialLensSalesOrder.at) return;
+    lensSeedDoneRef.current = initialLensSalesOrder.at;
+    axios.get('/api/purchase/lens-orders/pending-requirements/', { params: { sales_order: initialLensSalesOrder.id } })
+      .then(res => {
+        const reqs = Array.isArray(res.data) ? res.data : [];
+        if (!reqs.length) { alert('Every lens on this order is already on a lens purchase order.'); return; }
+        const items = lensItemsFromRequirements(reqs, lensProducts);
+        const first = reqs[0];
+        setLensEditor({
+          seedItems: items,
+          remarks: `Customer order ${first.sales_order_number} — ${first.customer_name || 'customer'}${first.patient_code ? ` (${first.patient_code})` : ''}`,
+        });
+        if (items.some(it => !it.product)) alert('A lens on this order has no product in the master — open it in the editor and pick the lens model.');
+      })
+      .catch(err => alert(err.response?.data?.detail || 'Could not load the lenses of that order.'));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialLensSalesOrder?.at, lensProductsLoading]);
 
   const openLensMenu = () => {
     if (editingId || !lensBtnRef.current) return;
@@ -1387,7 +1412,11 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
           open
           entryMode
           startWith={lensEditor.startWith}
-          seed={{ supplier: UUID_RE.test(String(selectedSupplierId)) ? selectedSupplierId : '' }}
+          seed={{
+            supplier: UUID_RE.test(String(selectedSupplierId)) ? selectedSupplierId : '',
+            items: lensEditor.seedItems || [],
+            remarks: lensEditor.remarks || '',
+          }}
           lockSupplier={UUID_RE.test(String(selectedSupplierId))}
           suppliers={suppliers.filter(sp => UUID_RE.test(String(sp.id)))}
           lensProducts={lensProducts}

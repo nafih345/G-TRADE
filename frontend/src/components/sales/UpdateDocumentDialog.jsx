@@ -11,9 +11,11 @@ import { paymentStatusOf, rowNetAmount } from '../../utils/salesDocStatus';
 // Lab / delivery workflow stages — kept in sync with OrdersManagerView.labStages.
 const PIPELINE_STAGES = [
   'Order Received',
+  'Pending Supplier Purchase', // New Sale: a lens not on the shelf, to be bought from a supplier
   'In Lab Processing',
   'Awaiting Remaining Lens', // Lens PO: some of the order's lenses have arrived
   'Lens Arrived',            // Lens PO: every lens is in — ready for fitting
+  'Ready for Delivery',      // Lens PO's Purchase Entry: the lenses are in stock for this order
   'Frame Mounting',
   'Quality Control',
   'Ready for Collection',

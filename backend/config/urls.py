@@ -17,7 +17,29 @@ from django.conf.urls.static import static
 from apps.security.urls import security_urlpatterns, backup_urlpatterns
 
 _migrations_known_current = False
+_db_instance = None
 API_VERSION = 2
+
+
+def _database_instance_id():
+    """Stable identity of the database's *contents*, for browsers to key their caches on.
+
+    Browsers mirror sales, patients, suppliers… into localStorage and merge those copies back
+    into API results. When the service is repointed at a different database (DATABASE_URL
+    swapped from `neondb` to `Uae client` on 2026-10-30) the old copies kept resurfacing.
+    Host + name can't be the identity: copying the database to another region
+    (scripts/copy_database.py) changes the host but not the data. The first row of
+    django_migrations is written when a database is born and travels with a dump/restore, so
+    it tells a copy (same id) from a different database (new id). One query per process.
+    """
+    global _db_instance
+    if _db_instance is None:
+        import hashlib
+        from django.db.migrations.recorder import MigrationRecorder
+        first = MigrationRecorder.Migration.objects.order_by('applied', 'id').first()
+        if first is not None:
+            _db_instance = hashlib.sha256(f'{first.id}:{first.applied.isoformat()}'.encode()).hexdigest()[:16]
+    return _db_instance
 
 
 def health_check_view(request):
@@ -27,6 +49,9 @@ def health_check_view(request):
         connection.ensure_connection()
     except Exception as e:
         db_status = f"error: {str(e)}"
+    expected_name = getattr(settings, 'EXPECTED_DATABASE_NAME', None)
+    actual_name = str(settings.DATABASES.get('default', {}).get('NAME', ''))
+    wrong_database = bool(expected_name) and actual_name != expected_name
 
     # Pending migrations are the usual reason the deployed app breaks after a release
     # (code ahead of schema — e.g. the Multi-Branch columns/tables). Surface them here so
@@ -73,6 +98,13 @@ def health_check_view(request):
     except Exception:
         pass  # table not migrated yet — no wipe to report
 
+    db_instance = None
+    if db_status == "connected":
+        try:
+            db_instance = _database_instance_id()
+        except Exception:
+            pass  # not migrated at all yet
+
     # Which database the process actually resolved. Host, port, database name and TLS state
     # only — never the user, never the password. The outage this endpoint exists to catch was
     # the service booting against a DATABASE_URL whose Postgres had been deleted; without the
@@ -98,6 +130,11 @@ def health_check_view(request):
         "conn_health_checks": bool(db_conf.get('CONN_HEALTH_CHECKS', False)),
     }
 
+    if wrong_database and db_status == "connected":
+        # Starts with "error" so the frontend banner quotes it (utils/backendStatus.js).
+        db_status = (f"error: connected to database '{actual_name}', but this deployment expects "
+                     f"'{expected_name}' (EXPECTED_DATABASE_NAME) - check DATABASE_URL on the service")
+
     return JsonResponse({
         "status": "ok" if db_status == "connected" and migrations_status == "up_to_date" else "degraded",
         "database": db_status,
@@ -116,6 +153,9 @@ def health_check_view(request):
         "multi_branch": multi_branch,
         # Last wipe_database run; browsers clear their cached records when this changes.
         "data_reset_epoch": data_reset_epoch,
+        # Which database this is (see _database_instance_id); browsers drop their cached
+        # records when it changes.
+        "db_instance": db_instance,
         "app":"Optical ERP Backend",
         "version": "1.0.0",
         # Bumped whenever the frontend starts depending on new endpoints. The frontend compares

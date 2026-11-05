@@ -65,6 +65,12 @@ services:
       # sslmode=require).
       - key: DATABASE_URL
         sync: false
+      # The database name DATABASE_URL must point at — `neondb` for this deployment. If the
+      # URL is ever swapped to another database (it was, to `Uae client`, on 2026-10-30, and
+      # every screen went empty), /api/health/ turns degraded and the app shows a red banner
+      # naming both databases. Optional; the service runs normally either way.
+      - key: EXPECTED_DATABASE_NAME
+        sync: false
       # build.sh's `bootstrap_admin` creates this login on the fresh, empty database —
       # without it there is no way to sign in to a brand-new database at all.
       - key: DJANGO_SUPERUSER_USERNAME

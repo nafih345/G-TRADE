@@ -1,5 +1,26 @@
 # Deployment — Vercel (frontend) + Render (backend) + Neon (Postgres)
 
+## Why existing records vanished on 2026-10-30
+
+The Neon project holds **two databases on the same host**: `neondb` (the real data — ~1,800
+products, ~2,000 suppliers, the chart of accounts, sales/purchase history since the
+2026-10-22 wipe) and `Uae client` (created and first migrated 2026-10-30 08:29 UTC, holding
+only a handful of test entries). On 2026-10-30 Render's `DATABASE_URL` was changed to end in
+`/Uae%20client` instead of `/neondb`, so every screen came up near-empty. Nothing was deleted
+and tenant filtering hid nothing — the backend was simply reading the wrong database.
+
+Check which one is live: `curl https://g-trade-backend.onrender.com/api/health/` →
+`db_target.name` must be `neondb`. Set `EXPECTED_DATABASE_NAME=neondb` on the service
+(table in §1b) and a future swap turns `/api/health/` degraded and puts a red banner in the
+app instead of failing silently. With row-level multi-tenancy in place, a new client (e.g.
+the UAE shop) is a new **tenant** in `neondb` (Client Management, `/#/superadmin/tenants`),
+never a separate database.
+
+Browsers also mirror records into localStorage. `/api/health/` now reports `db_instance`
+(an id of the database's contents that survives a region copy), and the app drops those
+copies when it changes — and when a different tenant signs in on the same browser — so rows
+from one database or client no longer resurface in another.
+
 ## Why the hosted database kept emptying itself
 
 The old Render service was running with a `DATABASE_URL` pointing at Postgres instance
@@ -139,6 +160,7 @@ On the **`g-trade-backend`** service → *Environment*, set:
 | Variable | Value |
 | --- | --- |
 | `DATABASE_URL` | the Neon connection string from 1a |
+| `EXPECTED_DATABASE_NAME` | the database name in that string (`neondb`) |
 | `DEBUG` | `False` |
 | `FRONTEND_ORIGINS` | `https://g-trade-pi.vercel.app` |
 | `DJANGO_SUPERUSER_USERNAME` | your admin login |
@@ -171,6 +193,7 @@ Expect all of:
 
 - `"status": "ok"` — not `"degraded"`
 - `"database": "connected"`
+- `"db_target": { "name": "neondb" }` — the database that holds the data, not `Uae client`
 - `"debug": false` — must be false
 - `"migrations": "up_to_date"` with `"pending_migrations": []`
 - `"db_target": { "host": "ep-….neon.tech" }` — the Neon host, not a `dpg-…` one

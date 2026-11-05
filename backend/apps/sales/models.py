@@ -57,6 +57,12 @@ class Customer(BaseUUIDModel):
     medical_aid_name = models.CharField(max_length=150, blank=True, null=True)
     medical_aid_scheme = models.CharField(max_length=150, blank=True, null=True)
     medical_aid_member_number = models.CharField(max_length=100, blank=True, null=True)
+    # Free-text remarks from the Sales > Register Customer form.
+    notes = models.TextField(blank=True, null=True)
+    # Optional lens power for a customer who buys powered lenses without a full eye test
+    # (keys: sphRight/cylRight/axisRight/sphLeft/cylLeft/axisLeft/distancePD). A real
+    # EyeExamination on file always wins over this when filling a sale's Rx.
+    prescription = models.JSONField(blank=True, default=dict)
     outstanding_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
     credit_limit = models.DecimalField(max_digits=12, decimal_places=2, default=5000.0)
 
