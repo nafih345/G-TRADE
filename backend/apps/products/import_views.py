@@ -4,6 +4,7 @@ import datetime
 import threading
 import uuid
 
+from apps.common.pagination import PageSizePagination
 from rest_framework import status, permissions
 from rest_framework.decorators import api_view, permission_classes, authentication_classes
 from rest_framework.response import Response
@@ -60,7 +61,7 @@ def ensure_import_tables_exist():
         print("Schema sync notice:", e)
 
 
-class ImportRowsPagination(PageNumberPagination):
+class ImportRowsPagination(PageSizePagination):
     page_size = 100
     page_size_query_param = 'page_size'
     max_page_size = 500

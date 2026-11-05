@@ -12,11 +12,21 @@
 //  4. Never silent — a write that fails is reported with the server's own reason, unless the
 //     screen reported it itself (any error notice/alert raised right after the failure counts).
 //     Screens that handle a failure without telling the user can pass `{ __silentError: true }`.
+//  5. Busy buttons — the Save / Add button that started a write shows a spinner and ignores
+//     further clicks until the answer arrives; writes no button started show "Saving…"
+//     (utils/busyButtons.js).
+//  6. Shared reads — identical GETs in flight at once (same user, branch, URL, params) go out
+//     as one request; each caller gets its own parsed copy.
+
 import axios from 'axios';
 import { notify, lastErrorNoticeAt } from './notify';
 import { apiErrorMessage } from './apiError';
+import { begin as busyBegin, end as busyEnd, installBusyButtons } from './busyButtons';
+import { ACTIVE_BRANCH_KEY } from './apiClient';
 
 const WRITE_METHODS = new Set(['post', 'put', 'patch', 'delete']);
+// Writes the app makes on its own; they never show the "Saving…" indicator.
+const BACKGROUND_WRITES = /\/api\/(security\/session\/heartbeat|auth\/logout|auth\/token\/refresh|company\/notifications|sales\/whatsapp|products\/label-settings\/import-legacy)/;
 // Render's free plan can take ~50 s to wake, and a large purchase save on the hosted database
 // takes a while more; anything past this is not coming back.
 export const REQUEST_TIMEOUT_MS = 120000;
@@ -41,6 +51,64 @@ const signatureOf = (config) => {
   }
   return `${config.method}|${config.baseURL || ''}|${config.url}|${JSON.stringify(config.params || {})}|${body || ''}`;
 };
+
+// A read is the same read only for the same signed-in user and branch. The branch header is
+// added by apiClient's interceptor, which runs after this one (axios runs request
+// interceptors last-installed first), so read it from where that interceptor does.
+const readSignatureOf = (config) => {
+  let branch = '';
+  try { branch = localStorage.getItem(ACTIVE_BRANCH_KEY) || ''; } catch { /* no storage */ }
+  const auth = config.headers?.Authorization || config.headers?.authorization || '';
+  return `get|${config.baseURL || ''}|${config.url}|${JSON.stringify(config.params || {})}|${auth}|${branch}`;
+};
+
+/** Route this request through the identical one already in flight, or register it as the one
+ *  later duplicates will share. */
+function shareInFlight(config, sig) {
+  if (!sig) return;
+  const running = inflight.get(sig);
+  if (running) {
+    // Answer as this caller's own request — success or failure — so retries (token refresh,
+    // re-auth) and per-call flags (__silentError) act on this config, not the original's.
+    config.adapter = () => running.then(res => ({ ...res, data: ownCopy(res.data), config }), (err) => {
+      if (!err || typeof err !== 'object' || !err.isAxiosError) throw err;
+      const mine = Object.assign(Object.create(Object.getPrototypeOf(err)), err, { config });
+      if (err.response) mine.response = { ...err.response, data: ownCopy(err.response.data), config };
+      throw mine;
+    });
+    return;
+  }
+  const defaultAdapter = axios.getAdapter(config.adapter || axios.defaults.adapter);
+  // Registered now, not when the adapter runs: axios reaches the adapter a few ticks later,
+  // and a double click's second request is already through this interceptor by then.
+  let settle;
+  const shared = new Promise((resolve, reject) => { settle = { resolve, reject }; });
+  shared.catch(() => {});
+  inflight.set(sig, shared);
+  const release = () => { if (inflight.get(sig) === shared) inflight.delete(sig); };
+  let started = false;
+  // Should the request never reach the network (cancelled before sending), don't strand the
+  // duplicates waiting on it.
+  setTimeout(() => {
+    if (!started) { release(); settle.reject(new axios.Cancel('The original request was not sent.')); }
+  }, 5000);
+  config.adapter = (cfg) => {
+    started = true;
+    const p = Promise.resolve().then(() => defaultAdapter(cfg));
+    // Snapshot, not the object itself: axios parses the body by assigning response.data on the
+    // original's response object, and the duplicates would all receive that one parsed object
+    // (one screen sorting or editing its list changed the others'). This handler is attached
+    // before axios's own, so the snapshot still holds the raw body.
+    p.then(res => settle.resolve({ ...res }), settle.reject).finally(release);
+    return p;
+  };
+}
+
+// Raw bodies are strings (each caller parses its own); anything already parsed is cloned.
+function ownCopy(data) {
+  if (data === null || typeof data !== 'object') return data;
+  try { return structuredClone(data); } catch { return data; }
+}
 
 /** A one-line, human explanation of a failed API call (DRF validation errors included). */
 export function describeApiError(error, fallback = 'The request failed.') {
@@ -76,6 +144,7 @@ let installed = false;
 export function installApiWriteGuard() {
   if (installed) return;
   installed = true;
+  installBusyButtons();
   if (!axios.defaults.timeout) axios.defaults.timeout = REQUEST_TIMEOUT_MS;
 
   axios.interceptors.request.use((config) => {
@@ -85,7 +154,22 @@ export function installApiWriteGuard() {
       config.timeout = 0;
     }
     const method = String(config.method || 'get').toLowerCase();
-    if (!WRITE_METHODS.has(method)) return config;
+    if (!WRITE_METHODS.has(method)) {
+      // 6. Identical reads in flight at the same moment (several mounted screens asking for the
+      // same list) share one network request. Each caller still gets its own parsed copy: the
+      // adapter hands back the raw body and axios parses it per caller.
+      if (method === 'get' && !config.signal && !config.cancelToken && !config.__allowDuplicate
+          && !config.__sameOriginRetry && !config.__directRetry && !config.__authRetried
+          && !config.__reauthRetried && !config.responseType) {
+        shareInFlight(config, readSignatureOf(config));
+      }
+      return config;
+    }
+    // 5. Busy state: spinner on the button that started this write (utils/busyButtons.js).
+    // Replays carry the original token, so the button stays busy until the final answer.
+    if (!config.__busyToken) {
+      config.__busyToken = busyBegin({ background: config.__background || BACKGROUND_WRITES.test(config.url || '') });
+    }
     if (method === 'post' && !isFormData(config.data) && config.headers
         && !config.headers['Idempotency-Key']) {
       config.headers['Idempotency-Key'] = newKey();
@@ -95,37 +179,15 @@ export function installApiWriteGuard() {
         || config.__allowDuplicate) {
       return config;
     }
-    const sig = signatureOf(config);
-    if (!sig) return config;
-    const running = inflight.get(sig);
-    if (running) {
-      config.adapter = () => running.then(res => ({ ...res, config }));
-      return config;
-    }
-    const defaultAdapter = axios.getAdapter(config.adapter || axios.defaults.adapter);
-    // Registered now, not when the adapter runs: axios reaches the adapter a few ticks later,
-    // and a double click's second request is already through this interceptor by then.
-    let settle;
-    const shared = new Promise((resolve, reject) => { settle = { resolve, reject }; });
-    shared.catch(() => {});
-    inflight.set(sig, shared);
-    const release = () => { if (inflight.get(sig) === shared) inflight.delete(sig); };
-    let started = false;
-    // Should the request never reach the network (cancelled before sending), don't strand the
-    // duplicates waiting on it.
-    setTimeout(() => {
-      if (!started) { release(); settle.reject(new axios.Cancel('The original request was not sent.')); }
-    }, 5000);
-    config.adapter = (cfg) => {
-      started = true;
-      const p = Promise.resolve().then(() => defaultAdapter(cfg));
-      p.then(settle.resolve, settle.reject).finally(release);
-      return p;
-    };
+    shareInFlight(config, signatureOf(config));
     return config;
   });
 
-  axios.interceptors.response.use(undefined, (error) => {
+  axios.interceptors.response.use((response) => {
+    busyEnd(response?.config?.__busyToken);
+    return response;
+  }, (error) => {
+    busyEnd(error?.config?.__busyToken);
     if (shouldReport(error)) {
       const failedAt = Date.now();
       setTimeout(() => {

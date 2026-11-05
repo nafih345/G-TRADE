@@ -7,6 +7,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import DecimalField as ModelDecimalField, Prefetch, Q, prefetch_related_objects
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
+from apps.common.pagination import PageSizePagination
 from rest_framework import viewsets, permissions, serializers
 from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
@@ -35,7 +36,7 @@ from apps.inventory.stock_utils import adjust_branch_stock_many
 from apps.common.branch_mixins import BranchScopedViewSetMixin
 from apps.financial.banks import validate_bank_account
 
-class SalesListPagination(PageNumberPagination):
+class SalesListPagination(PageSizePagination):
     """The site-wide page (settings PAGE_SIZE = 20) unless a screen asks for more with ?page_size=
     (up to 1000). The Sales screens read these lists whole; taking just the first page meant any
     bill, patient or receipt past the first 20 never appeared there — as if it had never saved."""

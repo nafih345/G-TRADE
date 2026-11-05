@@ -41,6 +41,7 @@ from django.db.models.functions import Coalesce
 from django.http import HttpResponse
 from django.utils import timezone
 from django.utils.dateparse import parse_date
+from apps.common.pagination import PageSizePagination
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied
@@ -514,13 +515,13 @@ def describe_ledger_rows(rows, product):
     return out
 
 
-class HistoryPagination(PageNumberPagination):
+class HistoryPagination(PageSizePagination):
     page_size = 50
     page_size_query_param = 'page_size'
     max_page_size = 500
 
 
-class StockOverviewPagination(PageNumberPagination):
+class StockOverviewPagination(PageSizePagination):
     page_size = 50
     page_size_query_param = 'page_size'
     max_page_size = 500

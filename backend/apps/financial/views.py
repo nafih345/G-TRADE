@@ -6,6 +6,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from apps.common.pagination import PageSizePagination
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.pagination import PageNumberPagination
@@ -31,7 +32,7 @@ from .services import (
 )
 
 
-class OptionalPagination(PageNumberPagination):
+class OptionalPagination(PageSizePagination):
     """Paginate only when the client asks (?page= or ?page_size=); otherwise return the
     plain list the existing Financial screens expect."""
     page_size = 50

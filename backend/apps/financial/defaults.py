@@ -14,6 +14,7 @@ Called lazily by mapping.resolve_role on a miss (so postings heal themselves), a
 wipe_database and after a backup restore, and by `manage.py ensure_accounting_setup`.
 """
 from django.db import transaction
+from django.utils import timezone
 
 from .accounting_catalog import DEFAULT_ACCOUNTS, ROLES
 from .models import AccountGroup, AccountingPolicy, AccountMapping, ChartOfAccount
@@ -28,26 +29,13 @@ def missing_defaults():
     return accounts, [role for role in ROLES if role not in mapped]
 
 
-def _default_account(code, name, group_name, acc_type, subtype, is_system):
-    acc = ChartOfAccount.all_objects.filter(code=code).first() \
-        or ChartOfAccount.all_objects.filter(name__iexact=name).first()
-    if acc is not None:
-        if acc.is_deleted:  # a soft-deleted default comes back rather than colliding on code/name
-            acc.is_deleted = False
-            acc.save(update_fields=['is_deleted', 'updated_at'])
-        return acc, False
-    group = AccountGroup.objects.filter(name=group_name).first()
-    if group is None:
-        group = AccountGroup.objects.create(name=group_name, account_type=acc_type)
-    elif group.account_type != acc_type:
-        group, _ = AccountGroup.objects.get_or_create(name=f"{group_name} ({acc_type})", defaults={'account_type': acc_type})
-    return ChartOfAccount.objects.create(code=code, name=name, account_group=group, status='Active',
-                                         account_subtype=subtype, is_system=is_system), True
-
-
 def ensure_accounting_defaults(user=None):
     """Create missing default accounts / role mappings. Returns {'accounts': [...], 'mappings': [...]}
-    naming what was added (both empty when nothing was missing)."""
+    naming what was added (both empty when nothing was missing).
+
+    Reads what exists once and writes in bulk. Row-by-row this was ~170 queries for a business
+    with no chart of accounts yet — a new client's first Supplier save, which links the
+    supplier's ledger head, took ~45 s on the hosted (cross-region) database."""
     accounts_needed, roles_needed = missing_defaults()
     if not accounts_needed and not roles_needed:
         return {'accounts': [], 'mappings': []}
@@ -55,21 +43,60 @@ def ensure_accounting_defaults(user=None):
         # The policy row doubles as the lock, so two postings healing at once can't both map a role.
         policy = AccountingPolicy.get()
         AccountingPolicy.objects.select_for_update().get(pk=policy.pk)
-        added_accounts, added_mappings = [], []
-        by_code = {}
-        for row in DEFAULT_ACCOUNTS:
-            acc, created = _default_account(*row)
-            by_code[row[0]] = acc
-            if created:
+
+        existing = list(ChartOfAccount.all_objects.all())
+        by_existing_code = {a.code: a for a in existing}
+        by_existing_name = {}
+        for a in existing:
+            by_existing_name.setdefault((a.name or '').lower(), a)
+        groups = {g.name: g for g in AccountGroup.objects.all()}
+        new_groups = []
+
+        def group_for(group_name, acc_type):
+            group = groups.get(group_name)
+            if group is not None and group.account_type != acc_type:
+                group_name = f"{group_name} ({acc_type})"
+                group = groups.get(group_name)
+            if group is None:
+                group = AccountGroup(name=group_name, account_type=acc_type)
+                groups[group_name] = group
+                new_groups.append(group)
+            return group
+
+        added_accounts, revived, new_accounts, by_code = [], [], [], {}
+        for code, name, group_name, acc_type, subtype, is_system in DEFAULT_ACCOUNTS:
+            acc = by_existing_code.get(code) or by_existing_name.get(name.lower())
+            if acc is not None:
+                if acc.is_deleted and acc not in revived:  # a soft-deleted default comes back
+                    acc.is_deleted = False
+                    revived.append(acc)
+            else:
+                acc = ChartOfAccount(code=code, name=name, account_group=group_for(group_name, acc_type),
+                                     status='Active', account_subtype=subtype, is_system=is_system)
+                new_accounts.append(acc)
+                by_existing_code[code] = acc
+                by_existing_name[name.lower()] = acc
                 added_accounts.append(f'{acc.code} {acc.name}')
+            by_code[code] = acc
+
+        if new_groups:
+            AccountGroup.objects.bulk_create(new_groups)
+        if new_accounts:
+            ChartOfAccount.objects.bulk_create(new_accounts)
+        if revived:
+            ChartOfAccount.all_objects.filter(pk__in=[a.pk for a in revived]).update(is_deleted=False, updated_at=timezone.now())
+
         mapped = set(AccountMapping.objects.values_list('role', flat=True))
+        new_mappings, added_mappings = [], []
         for role, (label, default_code, _allowed, _desc) in ROLES.items():
             if role in mapped:
                 continue
             acc = by_code[default_code]
-            AccountMapping.objects.create(role=role, account=acc, is_active=True,
-                                          notes='Default restored automatically (no mapping existed)')
+            new_mappings.append(AccountMapping(role=role, account=acc, is_active=True,
+                                               notes='Default restored automatically (no mapping existed)'))
             added_mappings.append(f'{label} → {acc.code} {acc.name}')
+        if new_mappings:
+            AccountMapping.objects.bulk_create(new_mappings)
         if added_accounts or added_mappings:
             from .services import audit
             audit('DEFAULTS_RESTORED', 'account_mapping', '',

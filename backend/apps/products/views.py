@@ -1,3 +1,4 @@
+from apps.common.pagination import PageSizePagination
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -9,7 +10,7 @@ from .models import Product, BarcodeHistory, ProductBarcode
 from .barcode_utils import find_barcode_owner, reserve_product_barcodes
 
 
-class ProductPagination(PageNumberPagination):
+class ProductPagination(PageSizePagination):
     page_size = 100
     page_size_query_param = 'page_size'
     max_page_size = 500

@@ -14,7 +14,8 @@ Only *new* parties are provisioned automatically. An older party with history on
 account is moved with `manage.py accounting link-party-ledgers` (dry run first), which also
 re-books its live documents so the history and the new postings sit in the same ledger.
 """
-from django.db import IntegrityError, transaction
+from django.db import transaction
+from django.db.models import Q
 
 from .models import AccountGroup, ChartOfAccount
 
@@ -65,8 +66,16 @@ def ensure_party_ledger(party, kind=None):
     if not party_code:
         return None
     code = f"{prefix}-{party_code}"[:50]
-    with transaction.atomic():
-        account = ChartOfAccount.all_objects.filter(code=code).first()
+    name = ledger_name(kind, party)
+    # savepoint=False: inside a save that is already atomic this only groups the writes. Each
+    # SAVEPOINT / RELEASE is its own round trip (~250 ms each on the hosted database), and an
+    # error still undoes the whole save.
+    with transaction.atomic(savepoint=False):
+        # One query answers both "is there a ledger with this code?" and "is the name taken?"
+        # (a hand-made account may already have it) — the name clash used to be found by
+        # attempting the INSERT inside a savepoint and catching the IntegrityError.
+        found = list(ChartOfAccount.all_objects.filter(Q(code=code) | Q(name=name)))
+        account = next((a for a in found if a.code == code), None)
         if account is None:
             control = _control_account(role)
             fields = dict(code=code, account_group=_group(group_name, acc_type), parent_account=control,
@@ -74,12 +83,9 @@ def ensure_party_ledger(party, kind=None):
                           # Typed only; reaches the books via "Post opening balances", like any account.
                           opening_balance=getattr(party, opening_attr, 0) or 0,
                           description=f"{label} sub-ledger, created automatically with the {label.lower()}.")
-            name = ledger_name(kind, party)
-            try:
-                with transaction.atomic():
-                    account = ChartOfAccount.objects.create(name=name, **fields)
-            except IntegrityError:  # a hand-made account already has that name
-                account = ChartOfAccount.objects.create(name=f"{name[:140]} [{code}]"[:150], **fields)
+            if any(a.name == name for a in found):
+                name = f"{name[:140]} [{code}]"[:150]
+            account = ChartOfAccount.objects.create(name=name, **fields)
         elif account.is_deleted:
             account.is_deleted = False
             account.save(update_fields=['is_deleted', 'updated_at'])
