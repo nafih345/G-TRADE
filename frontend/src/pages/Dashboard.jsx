@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { 
   Grid, Card, CardContent, Typography, Box, 
   Button, Table, TableBody, TableCell, TableContainer, 
-  TableHead, TableRow, Paper, Chip, Avatar, Stack
+  TableHead, TableRow, Paper, Chip, Avatar, Stack, Alert, LinearProgress
 } from '@mui/material';
 import {
   TrendingUp as SalesIcon,
@@ -22,103 +22,49 @@ import {
   CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend
 } from 'recharts';
 import { useNavigate } from 'react-router-dom';
-import { fetchAllPages } from '../utils/fetchAllPages';
+import axios from 'axios';
+import { apiErrorMessage } from '../utils/apiError';
 
 export default function Dashboard() {
   const navigate = useNavigate();
 
-  // Dynamic States (Starts 100% Blank by Default)
-  const [salesInvoices, setSalesInvoices] = useState([]);
-  const [eyeTests, setEyeTests] = useState([]);
-  const [appointments, setAppointments] = useState([]);
-  const [products, setProducts] = useState([]);
-  const [purchaseOrders, setPurchaseOrders] = useState([]);
+  // Every card comes from one aggregate request (GET /api/sales/dashboard-summary/). The page
+  // used to download every invoice, eye test, product and purchase order to count them here —
+  // the slowest screen on the hosted backend, and it got slower as the business grew.
+  const [summary, setSummary] = useState(null);
+  const [loadError, setLoadError] = useState('');
 
-  // Fetch Live Database Data
   useEffect(() => {
-    const fetchDashboardData = async () => {
-      // The database is the source of truth: a successful response replaces state even when it
-      // is empty, otherwise a cleared database kept showing stale browser copies. The
-      // localStorage pools are only an offline fallback, used when the API can't be reached.
-      // Lists are paginated (PAGE_SIZE 20), so read every page rather than a bare array.
-      const readLocal = (key) => {
-        try { return JSON.parse(localStorage.getItem(key) || '[]'); } catch (e) { return []; }
-      };
-
-      // All four load at once and each card fills in as its list arrives — one after another,
-      // the hosted backend's per-request latency stacked up into a long blank dashboard.
-      await Promise.all([
-        fetchAllPages('/api/sales/invoices/?document_type=INVOICE')
-          .then(setSalesInvoices, () => setSalesInvoices(readLocal('optical_sales_invoices'))),
-        fetchAllPages('/api/sales/eye-examinations/').then(setEyeTests, () => {}),
-        fetchAllPages('/api/products/items/').then(setProducts, () => {}),
-        fetchAllPages('/api/purchase/orders/')
-          .then(setPurchaseOrders, () => setPurchaseOrders(readLocal('optical_purchase_orders'))),
-      ]);
-    };
-
-    fetchDashboardData();
+    let alive = true;
+    const d = new Date();
+    // The browser's own calendar day (the server runs in UTC).
+    const today = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+    axios.get('/api/sales/dashboard-summary/', { params: { date: today } })
+      .then(({ data }) => { if (alive) { setSummary(data); setLoadError(''); } })
+      .catch((err) => { if (alive) setLoadError(apiErrorMessage(err, 'The dashboard figures could not be loaded.')); });
+    return () => { alive = false; };
   }, []);
 
-  // Today's Date String
-  const todayStr = new Date().toISOString().split('T')[0];
-
-  // Dynamic KPI Calculations
-  const todaySales = salesInvoices.filter(s => s.date === todayStr || s.created_at?.startsWith(todayStr));
-  const todayRevenue = todaySales.reduce((sum, s) => sum + (parseFloat(s.total || s.paidAmount || 0)), 0);
-  
-  const todayEyeTestsCount = eyeTests.length;
-  const todayAppointmentsCount = appointments.length;
-  const readyForPickupCount = salesInvoices.filter(s => s.status === 'Ready for Pickup' || s.status === 'Booked for Spectacles').length;
-
-  // Dynamic Low Stock Items
-  const lowStockItems = products.filter(p => parseInt(p.stock || 0) < 5);
-
-  // Monthly Analytics Chart Data (Calculated accurately by Month)
-  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  const currentMonthIdx = new Date().getMonth();
-  
-  const monthsToShow = [];
-  for (let i = 5; i >= 0; i--) {
-    let m = currentMonthIdx - i;
-    if (m < 0) m += 12;
-    monthsToShow.push(m);
-  }
-
-  const chartData = monthsToShow.map(mIdx => {
-    const name = monthNames[mIdx];
-
-    const monthlySales = salesInvoices.reduce((sum, inv) => {
-      const dateStr = inv.date || inv.created_at || inv.invoice_date || inv.createdAt;
-      if (!dateStr) return sum;
-      const d = new Date(dateStr);
-      if (!isNaN(d.getTime()) && d.getMonth() === mIdx) {
-        const val = parseFloat(inv.total || inv.paidAmount || inv.total_amount || inv.grand_total || 0);
-        return sum + (isNaN(val) ? 0 : val);
-      }
-      return sum;
-    }, 0);
-
-    const monthlyPurchases = purchaseOrders.reduce((sum, po) => {
-      const dateStr = po.date || po.order_date || po.created_at || po.expectedDate || po.createdAt;
-      if (!dateStr) return sum;
-      const d = new Date(dateStr);
-      if (!isNaN(d.getTime()) && d.getMonth() === mIdx) {
-        const val = parseFloat(po.total || po.total_amount || po.net_amount || (po.costPrice && po.qty ? po.costPrice * po.qty : 0) || 0);
-        return sum + (isNaN(val) ? 0 : val);
-      }
-      return sum;
-    }, 0);
-
-    return {
-      name,
-      Sales: Math.round(monthlySales),
-      Purchases: Math.round(monthlyPurchases)
-    };
-  });
+  const loading = !summary && !loadError;
+  const todayRevenue = parseFloat(summary?.today?.revenue || 0);
+  const todayEyeTestsCount = summary?.today?.eye_tests ?? 0;
+  const todayAppointmentsCount = summary?.today?.appointments ?? 0;
+  const readyForPickupCount = summary?.ready_for_pickup ?? 0;
+  const lowStockItems = summary?.low_stock?.first ? [summary.low_stock.first] : [];
+  const salesInvoices = summary?.recent_invoices || [];
+  const eyeTests = (summary?.recent_eye_tests || []).map(t => ({
+    id: t.id, customer_name: t.patient_name, examiner_name: t.optometrist, sph_od: t.sph_od,
+  }));
+  const chartData = (summary?.monthly || []).map(m => ({ name: m.label, Sales: m.sales, Purchases: m.purchases }));
 
   return (
     <Box sx={{ p: 4, pb: 8 }}>
+      {loading && <LinearProgress sx={{ mb: 2, borderRadius: 1 }} />}
+      {loadError && (
+        <Alert severity="error" sx={{ mb: 3 }}>
+          {loadError} The figures below are not current.
+        </Alert>
+      )}
       {/* Welcome Heading */}
       <Box sx={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', mb: 4, gap: 2 }}>
         <Box>

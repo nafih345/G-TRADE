@@ -72,7 +72,7 @@ def onboard_tenant(*, name, admin_username, password, admin_email='', contact_ph
                    branch_name='', code=None, package=module_access.FULL_SUITE, modules=None,
                    settings_features=None, max_users=5, actor=''):
     """Create the tenant and its Super Admin in one transaction; returns (tenant, admin)."""
-    from apps.company.models import Branch, Company
+    from apps.company.models import Branch, Company, Warehouse
 
     User = get_user_model()
     name = (name or '').strip()
@@ -117,8 +117,12 @@ def onboard_tenant(*, name, admin_username, password, admin_email='', contact_ph
                 fiscal_year_start=datetime.date(start_year, 4, 1),
                 fiscal_year_end=datetime.date(start_year + 1, 3, 31),
             )
-            Branch.objects.create(company=company, name=(branch_name or '').strip() or 'Head Office',
-                                  code='HO', phone=contact_phone or None, is_default=True, is_active=True)
+            branch = Branch.objects.create(company=company, name=(branch_name or '').strip() or 'Head Office',
+                                           code='HO', phone=contact_phone or None, is_default=True,
+                                           is_active=True)
+            # Stock ledger rows, stock adjustments, racks and opening stock all need a warehouse;
+            # without one a new client's stock movements were silently left out of the ledger.
+            Warehouse.objects.create(branch=branch, name='Main Warehouse', code='WH-MAIN')
         log_event(tenant, 'ONBOARDED', actor, admin=admin.username, package=package, modules=modules,
                   max_users=max_users)
     return tenant, admin

@@ -28,7 +28,7 @@ class LenientJWTAuthentication(JWTAuthentication):
             # raise a real 401 / 403 — unlike a junk token, an expired session is not anonymous.
             from apps.security.policy import check_request
             from apps.common.tenant_context import check_user_tenant
-            check_user_tenant(result[0])
+            check_user_tenant(result[0], result[1])
             check_request(request, *result)
         return result
 

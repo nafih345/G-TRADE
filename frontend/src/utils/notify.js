@@ -27,12 +27,19 @@ export const guessSeverity = (message) => {
 // Leading status emoji duplicate the Alert's own icon.
 const cleanMessage = (message) => String(message ?? '').replace(/^\s*(✔️?|✅|❌|⚠️?)\s*/u, '');
 
+// When the last error notice was raised — lets the API write guard (utils/apiWriteGuard.js) skip
+// its generic failure notice when the screen already explained the failure itself.
+let lastErrorAt = 0;
+export const lastErrorNoticeAt = () => lastErrorAt;
+
 export const notify = (message, severity) => {
   const text = cleanMessage(message);
+  const resolved = severity || guessSeverity(message);
+  if (resolved === 'error' || resolved === 'warning') lastErrorAt = Date.now();
   const notice = {
     id: nextId++,
     message: text,
-    severity: severity || guessSeverity(message),
+    severity: resolved,
     // Longer messages stay up longer (4s – 10s); hovering pauses the timer.
     duration: Math.min(10000, 4000 + text.length * 40),
   };

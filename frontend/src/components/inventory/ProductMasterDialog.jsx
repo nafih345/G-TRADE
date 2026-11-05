@@ -22,6 +22,7 @@ import {
 } from '@mui/icons-material';
 import BarcodeSection from './BarcodeSection';
 import { notify } from '../../utils/notify';
+import { describeApiError } from '../../utils/apiWriteGuard';
 import { getBusinessPrefs } from '../../utils/localeFormat';
 import { navDialogProps, enterOpensSelectProps, focusField, focusRelative, focusNextAfterRender } from '../../pages/wholesale/keyboardNav';
 
@@ -590,7 +591,12 @@ export default function ProductMasterDialog({
         } catch (e) {}
       }
     } catch (err) {
-      console.log(isEdit ? 'Product update failed on API (kept local copy).' : 'Product saved to local store only (API unavailable).');
+      // Never report success for a product the server didn't save. The old fallback kept a
+      // browser-only copy under a Date.now() id: it looked saved, never reached other devices
+      // or the other screens, and any sale / purchase of it then failed on the unknown id.
+      setSaving(false);
+      notify(`${isEdit ? 'Product was not updated' : 'Product was not saved'}: ${describeApiError(err)}`, 'error');
+      return;
     }
 
     const productRecord = {

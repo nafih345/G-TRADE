@@ -28,6 +28,7 @@ import {
   NavigateNext as NavigateNextIcon
 } from '@mui/icons-material';
 import axios from 'axios';
+import { describeApiError } from '../../utils/apiWriteGuard';
 import { loadMaster } from '../../utils/masterDataCache';
 
 const OPTICAL_CATEGORY_MASTER_DEFAULTS = {
@@ -478,19 +479,22 @@ export default function CategoryManagementView({ products = [] }) {
       display_order: parseInt(formState.display_order || 1)
     };
 
+    // Only the server's answer counts: a failed save is reported and the form stays open (it used
+    // to be kept as a browser-only row under a made-up id that later edits/deletes 404'd on).
+    let saved;
     try {
-      if (editingCategory && !editingCategory.id.startsWith('CAT-DB-')) {
-        await axios.put(`/api/masters/categories/${editingCategory.id}/`, payload);
-      } else {
-        await axios.post('/api/masters/categories/', payload);
-      }
+      const res = (editingCategory && !String(editingCategory.id).startsWith('CAT-'))
+        ? await axios.put(`/api/masters/categories/${editingCategory.id}/`, payload, { __silentError: true })
+        : await axios.post('/api/masters/categories/', payload, { __silentError: true });
+      saved = res.data || {};
     } catch (err) {
-      console.warn("Local category sync used.");
+      setSnackbar({ open: true, message: `Category '${payload.name}' was not saved: ${describeApiError(err)}`, severity: 'error' });
+      return;
     }
 
     const updatedCatObj = {
-      id: editingCategory ? editingCategory.id : `CAT-${Date.now()}`,
       ...payload,
+      id: saved.id ? String(saved.id) : (editingCategory ? editingCategory.id : `CAT-${Date.now()}`),
       created_at: editingCategory ? editingCategory.created_at : new Date().toLocaleDateString('en-IN'),
       updated_at: new Date().toLocaleDateString('en-IN')
     };
@@ -537,15 +541,23 @@ export default function CategoryManagementView({ products = [] }) {
     const assigned = dbProducts.filter(p => productMatchesCategory(p, categoryToDelete.name));
     setReassigning(true);
 
+    const failedMoves = [];
     for (const p of assigned) {
       try {
         await axios.patch(`/api/products/items/${p.id}/`, {
           category_name: targetCat.name,
           category: targetCat.name
-        });
+        }, { __silentError: true });
       } catch (e) {
-        console.warn(`Category reassignment API sync failed for product ${p.id}, updated locally only:`, e);
+        failedMoves.push(p.name || p.id);
       }
+    }
+    if (failedMoves.length) {
+      // Deleting the category now would orphan the products that didn't move.
+      setReassigning(false);
+      setSnackbar({ open: true, severity: 'error',
+        message: `${failedMoves.length} product(s) could not be moved (${failedMoves.slice(0, 3).join(', ')}${failedMoves.length > 3 ? '…' : ''}); '${categoryToDelete.name}' was kept. Try again.` });
+      return;
     }
 
     try {
@@ -556,10 +568,18 @@ export default function CategoryManagementView({ products = [] }) {
     } catch (e) {}
 
     try {
-      if (!categoryToDelete.id.startsWith('CAT-DB-')) {
-        await axios.delete(`/api/masters/categories/${categoryToDelete.id}/`);
+      if (!String(categoryToDelete.id).startsWith('CAT-')) {
+        await axios.delete(`/api/masters/categories/${categoryToDelete.id}/`, { __silentError: true });
       }
-    } catch (e) {}
+    } catch (e) {
+      // 404 = already gone on the server; anything else means it is still there.
+      if (e?.response?.status !== 404) {
+        setReassigning(false);
+        setDeleteModalOpen(false);
+        setSnackbar({ open: true, message: `Category '${categoryToDelete.name}' was not removed: ${describeApiError(e)}`, severity: 'error' });
+        return;
+      }
+    }
 
     const updatedCategories = categories.filter(c => c.id !== categoryToDelete.id);
     setCategories(updatedCategories);
@@ -592,10 +612,18 @@ export default function CategoryManagementView({ products = [] }) {
     }
 
     try {
-      if (!categoryToDelete.id.startsWith('CAT-DB-')) {
-        await axios.delete(`/api/masters/categories/${categoryToDelete.id}/`);
+      if (!String(categoryToDelete.id).startsWith('CAT-')) {
+        await axios.delete(`/api/masters/categories/${categoryToDelete.id}/`, { __silentError: true });
       }
-    } catch (e) {}
+    } catch (e) {
+      // 404 = already gone on the server; anything else means it is still there.
+      if (e?.response?.status !== 404) {
+        setReassigning(false);
+        setDeleteModalOpen(false);
+        setSnackbar({ open: true, message: `Category '${categoryToDelete.name}' was not removed: ${describeApiError(e)}`, severity: 'error' });
+        return;
+      }
+    }
 
     const updated = categories.filter(c => c.id !== categoryToDelete.id);
     setCategories(updated);
@@ -612,68 +640,116 @@ export default function CategoryManagementView({ products = [] }) {
     setCategoryToDelete(null);
   };
 
+  // Server-backed rows have the API's UUID; CAT-… ids are browser-only (derived from product
+  // category names or left by older versions) and have nothing to update on the server.
+  const isServerRow = (cat) => cat && !String(cat.id).startsWith('CAT-');
+
+  const storeCategories = (updated) => {
+    setCategories(updated);
+    try {
+      localStorage.setItem('optical_categories_db', JSON.stringify(updated));
+    } catch (e) {}
+  };
+
+  // Applies `request` to each category; returns the ids that were saved and the failures.
+  const applyToServer = async (cats, request) => {
+    const done = [];
+    const failed = [];
+    for (const cat of cats) {
+      try {
+        if (isServerRow(cat)) await request(cat);
+        done.push(cat.id);
+      } catch (e) {
+        if (e?.response?.status === 404 && request.allow404) done.push(cat.id);
+        else failed.push({ cat, error: e });
+      }
+    }
+    return { done, failed };
+  };
+
+  const reportFailures = (failed, verb) => {
+    if (!failed.length) return false;
+    const names = failed.slice(0, 3).map(f => f.cat.name).join(', ');
+    setSnackbar({ open: true, severity: 'error',
+      message: `${failed.length} category(ies) could not be ${verb} (${names}${failed.length > 3 ? '…' : ''}): ${describeApiError(failed[0].error)}` });
+    return true;
+  };
+
   // Duplicate Category Handler
-  const handleDuplicateCategory = (cat) => {
+  const handleDuplicateCategory = async (cat) => {
     const newCode = `${cat.code}-COPY`.slice(0, 50);
     const newName = `${cat.name} (Copy)`;
+    let saved;
+    try {
+      saved = (await axios.post('/api/masters/categories/', {
+        name: newName, code: newCode, description: cat.description || '', gst_percentage: cat.gst_percentage,
+        hsn_code: cat.hsn_code, status: cat.status || 'Active', display_order: cat.display_order || 1,
+        ...(cat.product_mode ? { product_mode: cat.product_mode } : {}),
+      }, { __silentError: true })).data || {};
+    } catch (err) {
+      setSnackbar({ open: true, message: `Category was not duplicated: ${describeApiError(err)}`, severity: 'error' });
+      return;
+    }
     const newCat = {
       ...cat,
-      id: `CAT-${Date.now()}`,
+      id: saved.id ? String(saved.id) : `CAT-${Date.now()}`,
       code: newCode,
       name: newName,
       created_at: new Date().toLocaleDateString('en-IN'),
       updated_at: new Date().toLocaleDateString('en-IN')
     };
-    const updated = [newCat, ...categories];
-    setCategories(updated);
-    try {
-      localStorage.setItem('optical_categories_db', JSON.stringify(updated));
-    } catch (e) {}
-    setSnackbar({ open: true, message: `Category duplicated as '${newName}'`, severity: 'info' });
+    storeCategories([newCat, ...categories]);
+    setSnackbar({ open: true, message: `Category duplicated as '${newName}'`, severity: 'success' });
+  };
+
+  const setStatusFor = async (cats, nextStatus) => {
+    const { done, failed } = await applyToServer(cats, (c) =>
+      axios.patch(`/api/masters/categories/${c.id}/`, { status: nextStatus }, { __silentError: true }));
+    const doneSet = new Set(done);
+    storeCategories(categories.map(c => doneSet.has(c.id) ? { ...c, status: nextStatus } : c));
+    return { done, failed };
   };
 
   // Toggle Category Status (Active / Inactive)
-  const handleToggleStatus = (cat) => {
+  const handleToggleStatus = async (cat) => {
     const nextStatus = cat.status === 'Active' ? 'Inactive' : 'Active';
-    const updated = categories.map(c => c.id === cat.id ? { ...c, status: nextStatus } : c);
-    setCategories(updated);
-    try {
-      localStorage.setItem('optical_categories_db', JSON.stringify(updated));
-    } catch (e) {}
+    const { failed } = await setStatusFor([cat], nextStatus);
+    if (reportFailures(failed, 'updated')) return;
     setSnackbar({ open: true, message: `Category '${cat.name}' set to ${nextStatus}`, severity: 'info' });
   };
 
   // Bulk Actions Handlers
-  const handleBulkActivate = () => {
-    const updated = categories.map(c => selectedIds.includes(c.id) ? { ...c, status: 'Active' } : c);
-    setCategories(updated);
+  const handleBulkActivate = async () => {
+    const { done, failed } = await setStatusFor(categories.filter(c => selectedIds.includes(c.id)), 'Active');
     setSelectedIds([]);
-    setSnackbar({ open: true, message: `${selectedIds.length} categories activated.`, severity: 'success' });
+    if (reportFailures(failed, 'activated')) return;
+    setSnackbar({ open: true, message: `${done.length} categories activated.`, severity: 'success' });
   };
 
-  const handleBulkDeactivate = () => {
-    const updated = categories.map(c => selectedIds.includes(c.id) ? { ...c, status: 'Inactive' } : c);
-    setCategories(updated);
+  const handleBulkDeactivate = async () => {
+    const { done, failed } = await setStatusFor(categories.filter(c => selectedIds.includes(c.id)), 'Inactive');
     setSelectedIds([]);
-    setSnackbar({ open: true, message: `${selectedIds.length} categories deactivated.`, severity: 'info' });
+    if (reportFailures(failed, 'deactivated')) return;
+    setSnackbar({ open: true, message: `${done.length} categories deactivated.`, severity: 'info' });
   };
 
-  const handleBulkDelete = () => {
+  const handleBulkDelete = async () => {
     // Only delete categories with 0 assigned products
-    const deletable = selectedIds.filter(id => {
-      const cat = categories.find(c => c.id === id);
-      return cat && getProductCountForCat(cat.name) === 0;
-    });
+    const deletable = categories.filter(c => selectedIds.includes(c.id) && getProductCountForCat(c.name) === 0);
 
     if (deletable.length === 0) {
       alert("Selected categories contain active products and cannot be deleted.");
       return;
     }
 
-    const updated = categories.filter(c => !deletable.includes(c.id));
-    setCategories(updated);
+    const remove = (c) => axios.delete(`/api/masters/categories/${c.id}/`, { __silentError: true });
+    remove.allow404 = true;  // already gone on the server
+    const { done, failed } = await applyToServer(deletable, remove);
+    const doneSet = new Set(done);
+    storeCategories(categories.filter(c => !doneSet.has(c.id)));
     setSelectedIds([]);
-    setSnackbar({ open: true, message: `${deletable.length} category(ies) removed from database.`, severity: 'success' });
+    if (reportFailures(failed, 'deleted')) return;
+    setSnackbar({ open: true, message: `${done.length} category(ies) removed from database.`, severity: 'success' });
   };
 
   // Export Categories to CSV File

@@ -10,12 +10,15 @@ counter. Any failure is written to PostingFailure (never swallowed) and can be r
 from the Accounting Integration screen once fixed.
 """
 import logging
+from contextlib import nullcontext
 from decimal import Decimal
 
 from django.apps import apps as django_apps
 from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
+
+from apps.common import tenancy
 
 from . import batch, posting_rules as rules
 from .accounting_catalog import SOURCES
@@ -220,15 +223,21 @@ def schedule(source_key, pk):
                           if getattr(fn, '_accounting_batch', None) is not None
                           and not fn._accounting_batch.started), None) or batch.Batch()
 
+    # The callback runs whenever the outermost transaction commits, which need not be inside the
+    # request (or use_tenant block) that scheduled it. Book in the tenant the document belongs to,
+    # never in whatever context — or none, i.e. every tenant's rows — happens to be active then.
+    tenant_id = tenancy.current_tenant_id()
+
     def run():
         run._accounting_done = True
-        if run_batch is None:
-            book_source_safely(source_key, pk)
-            return
-        run_batch.started = True
-        with batch.active(run_batch):
-            if not batch.already_booked(key):
+        with (tenancy.use_tenant(tenant_id) if tenant_id is not None else nullcontext()):
+            if run_batch is None:
                 book_source_safely(source_key, pk)
+                return
+            run_batch.started = True
+            with batch.active(run_batch):
+                if not batch.already_booked(key):
+                    book_source_safely(source_key, pk)
 
     run._accounting_key = key
     run._accounting_batch = run_batch

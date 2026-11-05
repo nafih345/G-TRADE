@@ -113,6 +113,9 @@ MIDDLEWARE = [
     # Sets the request's tenant from the JWT; must run before anything that queries tenant data.
     'apps.common.tenant_context.TenantContextMiddleware',
     'apps.common.branch_context.BranchContextMiddleware',
+    # Replays the stored response for a re-sent write (same Idempotency-Key) instead of saving
+    # it twice (apps/common/idempotency.py).
+    'apps.common.idempotency.IdempotencyMiddleware',
     # Pauses writes while a database restore runs (apps/security/middleware.py).
     'apps.security.middleware.RestoreMaintenanceMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
@@ -527,15 +530,18 @@ CORS_POLICY = 'restricted' if not CORS_ALLOW_ALL_ORIGINS else 'allow-all'
 # (OPTIONS) fails and silently blocks the real request.
 try:
     from corsheaders.defaults import default_headers as _cors_default_headers
-    CORS_ALLOW_HEADERS = (*_cors_default_headers, 'x-branch-id', 'x-user-name', 'x-user-role')
+    CORS_ALLOW_HEADERS = (*_cors_default_headers, 'x-branch-id', 'x-user-name', 'x-user-role', 'idempotency-key')
 except Exception:
     CORS_ALLOW_HEADERS = [
         'accept', 'accept-encoding', 'authorization', 'content-type', 'dnt', 'origin',
         'user-agent', 'x-csrftoken', 'x-requested-with',
-        'x-branch-id', 'x-user-name', 'x-user-role',
+        'x-branch-id', 'x-user-name', 'x-user-role', 'idempotency-key',
     ]
 
 # Media files
+# Lets the frontend tell a replayed (already saved) write from a fresh one.
+CORS_EXPOSE_HEADERS = ['Idempotent-Replayed']
+
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 

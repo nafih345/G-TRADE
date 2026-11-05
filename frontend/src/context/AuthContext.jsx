@@ -49,10 +49,25 @@ function tokenTenantId(token) {
   }
 }
 
+// While the platform owner works inside a client's workspace, their own platform session is
+// parked here so "Return to platform" can resume it (see openWorkspace below).
+const PLATFORM_SESSION_KEY = 'platform_session_backup';
+
 function clearSession() {
   localStorage.removeItem('access_token');
   localStorage.removeItem('refresh_token');
   localStorage.removeItem('user_profile');
+}
+
+function readPlatformSession() {
+  try { return JSON.parse(localStorage.getItem(PLATFORM_SESSION_KEY) || 'null'); } catch { return null; }
+}
+
+// A full reload after switching tenants: every screen re-reads its data in the new scope and no
+// component keeps the previous client's rows in memory.
+function reloadAt(hash) {
+  window.location.hash = hash;
+  window.location.reload();
 }
 
 export const AuthProvider = ({ children }) => {
@@ -174,11 +189,58 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
+  /**
+   * Platform owner: open a client's workspace (Client Management → "Open workspace"). The server
+   * issues a separate session scoped to that client (POST …/tenants/<id>/workspace/, audited);
+   * records created there belong to the client. The platform session is kept aside.
+   */
+  const openWorkspace = async (tenantId) => {
+    const { data } = await axios.post(`/api/superadmin/tenants/${tenantId}/workspace/`, {});
+    if (!readPlatformSession()) {
+      localStorage.setItem(PLATFORM_SESSION_KEY, JSON.stringify({
+        access: localStorage.getItem('access_token'),
+        refresh: localStorage.getItem('refresh_token'),
+        profile: localStorage.getItem('user_profile'),
+      }));
+    }
+    clearLocalDataIfScopeChanged('tenant', tokenTenantId(data.access));
+    localStorage.removeItem('active_branch_id');
+    localStorage.setItem('access_token', data.access);
+    localStorage.setItem('refresh_token', data.refresh);
+    localStorage.setItem('user_profile', JSON.stringify(withRoleLabel({ ...data.user, workspace: data.workspace })));
+    reloadAt('#/');
+  };
+
+  /** Leave a client's workspace and resume the parked platform session. */
+  const exitWorkspace = () => {
+    const platform = readPlatformSession();
+    if (axios.defaults.headers.common.Authorization) {
+      axios.post('/api/auth/logout/', {}, { __silentError: true }).catch(() => {});
+    }
+    localStorage.removeItem(PLATFORM_SESSION_KEY);
+    localStorage.removeItem('active_branch_id');
+    clearSession();
+    if (platform?.access) {
+      clearLocalDataIfScopeChanged('tenant', tokenTenantId(platform.access));
+      localStorage.setItem('access_token', platform.access);
+      if (platform.refresh) localStorage.setItem('refresh_token', platform.refresh);
+      if (platform.profile) localStorage.setItem('user_profile', platform.profile);
+    }
+    reloadAt(platform?.access ? '#/superadmin/tenants' : '#/');
+  };
+
   const logout = () => {
     // End the server-side session too (best effort — the local sign-out never waits on it).
     if (axios.defaults.headers.common.Authorization) {
-      axios.post('/api/auth/logout/').catch(() => {});
+      axios.post('/api/auth/logout/', {}, { __silentError: true }).catch(() => {});
     }
+    // Signing out of a client workspace signs the platform owner out completely.
+    const platform = readPlatformSession();
+    if (platform?.access) {
+      axios.post('/api/auth/logout/', {}, { headers: { Authorization: `Bearer ${platform.access}` }, __silentError: true })
+        .catch(() => {});
+    }
+    localStorage.removeItem(PLATFORM_SESSION_KEY);
     clearSession();
     setToken(null);
     setUser(null);
@@ -188,6 +250,7 @@ export const AuthProvider = ({ children }) => {
   useEffect(() => {
     const onEnded = () => {
       delete axios.defaults.headers.common['Authorization'];
+      localStorage.removeItem(PLATFORM_SESSION_KEY);
       clearSession();
       setToken(null);
       setUser(null);
@@ -203,7 +266,7 @@ export const AuthProvider = ({ children }) => {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, token, loading, login, verifyTwoFactor, logout }}>
+    <AuthContext.Provider value={{ user, token, loading, login, verifyTwoFactor, logout, openWorkspace, exitWorkspace }}>
       {children}
     </AuthContext.Provider>
   );

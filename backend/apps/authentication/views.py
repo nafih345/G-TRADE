@@ -33,6 +33,7 @@ class CustomTokenObtainPairView(APIView):
     """Sign in. Order matters: the lockout is checked before the password (a locked account says
     nothing about whether the password was right), then the role gate, then the second factor."""
     authentication_classes = []
+    token_authentication = False  # token-blind by design (see tenant_context.install_drf_hook)
     permission_classes = [permissions.AllowAny]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'login'
@@ -74,6 +75,7 @@ class CustomTokenObtainPairView(APIView):
 class TwoFactorVerifyView(APIView):
     """Second step of sign-in: the 6-digit code for the challenge issued by the login view."""
     authentication_classes = []
+    token_authentication = False  # token-blind by design (see tenant_context.install_drf_hook)
     permission_classes = [permissions.AllowAny]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'login'
@@ -138,14 +140,17 @@ class RegisterUserView(generics.CreateAPIView):
 
     def perform_create(self, serializer):
         from apps.common.tenant_onboarding import OnboardingError, check_seat_available
-        tenant = self.request.user.tenant
+        from apps.common.models import Tenant
+        from apps.common.permissions import request_tenant_id
+        tenant_id = request_tenant_id(self.request.user)
+        tenant = Tenant.objects.filter(pk=tenant_id).first() if tenant_id else None
         if tenant is not None:
             try:
                 check_seat_available(tenant)  # the client's seat limit (platform console)
             except OnboardingError as e:
                 raise exceptions.ValidationError({'detail': e.message, 'code': 'seat_limit'})
         # New accounts always join the creator's tenant; the body can't choose another.
-        user = serializer.save(tenant_id=self.request.user.tenant_id)
+        user = serializer.save(tenant_id=tenant_id)
         password = self.request.data.get('password')
         if password:
             user.set_password(password)

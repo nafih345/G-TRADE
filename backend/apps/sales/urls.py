@@ -1,5 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
+from .dashboard import DashboardSummaryView
 from .views import (
     CustomerViewSet, InvoiceViewSet, PaymentViewSet, EyeExaminationViewSet, AppointmentViewSet,
     ServiceViewSet, send_whatsapp_automated_bg,
@@ -29,4 +30,5 @@ router.register('wholesale/returns', WholesaleReturnViewSet)
 urlpatterns = [
     path('', include(router.urls)),
     path('whatsapp/send-automated/', send_whatsapp_automated_bg, name='send_whatsapp_automated'),
+    path('dashboard-summary/', DashboardSummaryView.as_view(), name='dashboard-summary'),
 ]

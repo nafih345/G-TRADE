@@ -266,9 +266,11 @@ def settings_features_for(user, config=None):
     if is_platform_admin(user):
         return list(SETTINGS_FEATURE_KEYS)
     if config is None:
-        if not getattr(user, 'tenant_id', None):
+        from apps.common.permissions import request_tenant_id
+        tenant_id = request_tenant_id(user)
+        if not tenant_id:
             return []
-        config = tenant_access_config(user.tenant_id)
+        config = tenant_access_config(tenant_id)
     if effective_access(user, config).get('settings', NONE) == NONE:
         return []
     return enabled_settings_features(config)
@@ -316,9 +318,11 @@ def effective_access(user, config=None):
     if is_platform_admin(user):
         return {m: FULL for m in MODULE_KEYS}
     if config is None:
-        if not getattr(user, 'tenant_id', None):
+        from apps.common.permissions import request_tenant_id
+        tenant_id = request_tenant_id(user)
+        if not tenant_id:
             return {m: NONE for m in MODULE_KEYS}
-        config = tenant_access_config(user.tenant_id)
+        config = tenant_access_config(tenant_id)
     enabled = set(config['modules'])
     role = 'SUPER_ADMIN' if user.is_superuser else (user.role or '')
     levels = role_levels(role, config['role_permissions'])

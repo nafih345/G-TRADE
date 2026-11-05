@@ -27,6 +27,7 @@ import {
 } from '@mui/icons-material';
 import axios from 'axios';
 import { loadMaster } from '../../utils/masterDataCache';
+import { describeApiError } from '../../utils/apiWriteGuard';
 
 export default function BrandManagementView({ products = [] }) {
   const [brands, setBrands] = useState([]);
@@ -342,19 +343,22 @@ export default function BrandManagementView({ products = [] }) {
       status: formState.status
     };
 
+    // Only the server's answer counts: a failed save is reported and the form stays open (it used
+    // to be kept as a browser-only row under a made-up id that later edits/deletes 404'd on).
+    let saved;
     try {
-      if (editingBrand && !editingBrand.id.startsWith('BRD-DB-')) {
-        await axios.put(`/api/masters/brands/${editingBrand.id}/`, payload);
-      } else {
-        await axios.post('/api/masters/brands/', payload);
-      }
+      const res = (editingBrand && !String(editingBrand.id).startsWith('BRD-'))
+        ? await axios.put(`/api/masters/brands/${editingBrand.id}/`, payload, { __silentError: true })
+        : await axios.post('/api/masters/brands/', payload, { __silentError: true });
+      saved = res.data || {};
     } catch (err) {
-      console.warn("Local brand sync used.");
+      setSnackbar({ open: true, message: `Brand '${payload.name}' was not saved: ${describeApiError(err)}`, severity: 'error' });
+      return;
     }
 
     const updatedBrandObj = {
-      id: editingBrand ? editingBrand.id : `BRD-${Date.now()}`,
       ...payload,
+      id: saved.id ? String(saved.id) : (editingBrand ? editingBrand.id : `BRD-${Date.now()}`),
       created_at: editingBrand ? editingBrand.created_at : new Date().toLocaleDateString('en-IN')
     };
 
@@ -398,11 +402,16 @@ export default function BrandManagementView({ products = [] }) {
     }
 
     try {
-      if (!brandToDelete.id.startsWith('BRD-DB-')) {
-        await axios.delete(`/api/masters/brands/${brandToDelete.id}/`);
+      if (!String(brandToDelete.id).startsWith('BRD-')) {
+        await axios.delete(`/api/masters/brands/${brandToDelete.id}/`, { __silentError: true });
       }
     } catch (e) {
-      console.warn("Brand deletion notice:", e);
+      // 404 = already gone on the server; anything else means it is still there.
+      if (e?.response?.status !== 404) {
+        setSnackbar({ open: true, message: `Brand '${brandToDelete.name}' was not removed: ${describeApiError(e)}`, severity: 'error' });
+        setDeleteModalOpen(false);
+        return;
+      }
     }
 
     const updated = brands.filter(b => b.id !== brandToDelete.id);
@@ -421,12 +430,20 @@ export default function BrandManagementView({ products = [] }) {
   };
 
   // Duplicate Brand Handler
-  const handleDuplicateBrand = (brand) => {
+  const handleDuplicateBrand = async (brand) => {
     const newCode = `${brand.code}-COPY`.slice(0, 50);
     const newName = `${brand.name} (Copy)`;
+    let saved;
+    try {
+      saved = (await axios.post('/api/masters/brands/', { ...brand, id: undefined, code: newCode, name: newName },
+        { __silentError: true })).data || {};
+    } catch (err) {
+      setSnackbar({ open: true, message: `Brand was not duplicated: ${describeApiError(err)}`, severity: 'error' });
+      return;
+    }
     const newBrand = {
       ...brand,
-      id: `BRD-${Date.now()}`,
+      id: saved.id ? String(saved.id) : `BRD-${Date.now()}`,
       code: newCode,
       name: newName,
       created_at: new Date().toLocaleDateString('en-IN')

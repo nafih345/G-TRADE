@@ -11,6 +11,7 @@ import ReauthDialogHost from './components/security/ReauthDialogHost';
 import SessionActivityMonitor from './components/security/SessionActivityMonitor';
 import { loadBusinessPrefs } from './utils/businessPrefs';
 import BackendStatusBanner from './components/BackendStatusBanner';
+import WorkspaceBanner from './components/WorkspaceBanner';
 import Login from './pages/Login';
 import { moduleForPath, canOpenModule } from './utils/moduleAccess';
 
@@ -206,6 +207,7 @@ function MainLayout() {
         {/* Main Work Area */}
         <Box sx={{ flexGrow: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
           <BackendStatusBanner />
+          <WorkspaceBanner />
           <Header toggleTheme={toggleTheme} mode={themeMode} onMenuClick={() => setSidebarOpen(true)} />
           
           <Box component="main" sx={{ flexGrow: 1, overflowY: 'auto' }}>

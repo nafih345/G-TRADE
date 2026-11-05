@@ -215,6 +215,7 @@ class ClientBackupDownloadView(APIView):
     """Streams a per-client backup for a signed link from client_backup_link, so the browser can
     download natively (a plain navigation carries no bearer header)."""
     authentication_classes = []
+    token_authentication = False  # token-blind by design (see tenant_context.install_drf_hook)
     permission_classes = [permissions.AllowAny]
 
     def get(self, request, pk):

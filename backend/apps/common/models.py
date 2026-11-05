@@ -184,3 +184,32 @@ class DataResetMarker(models.Model):
         from django.utils import timezone
         cls.objects.all().delete()
         return cls.objects.create(reset_at=timezone.now()).reset_at
+
+
+class IdempotencyRecord(models.Model):
+    """One API write sent with an `Idempotency-Key` header (see apps/common/idempotency.py).
+
+    A repeat of the same key by the same user replays the stored response instead of running
+    the write again — the browser re-sends a POST after a dropped connection, a proxy timeout or
+    a password re-confirmation, and the first attempt may already have been saved. Rows older
+    than a day are purged. Not tenant-owned (written by middleware before any view); the tenant
+    and user are part of the key instead."""
+    STATE_PENDING = 'PENDING'
+    STATE_DONE = 'DONE'
+
+    key = models.CharField(max_length=80)
+    tenant_id = models.IntegerField(null=True, blank=True)
+    user_id = models.CharField(max_length=64)
+    method = models.CharField(max_length=10)
+    path = models.CharField(max_length=300)
+    request_hash = models.CharField(max_length=64)
+    state = models.CharField(max_length=10, default=STATE_PENDING)
+    status_code = models.PositiveSmallIntegerField(null=True, blank=True)
+    content_type = models.CharField(max_length=100, blank=True, default='')
+    response_body = models.BinaryField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['tenant_id', 'user_id', 'key'],
+                                               name='common_idempotency_key_per_user')]

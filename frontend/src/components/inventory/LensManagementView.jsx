@@ -23,6 +23,8 @@ import {
   Laptop as DigitalIcon
 } from '@mui/icons-material';
 import axios from 'axios';
+import { notify } from '../../utils/notify';
+import { describeApiError } from '../../utils/apiWriteGuard';
 
 const initialLensCatalog = [
   {
@@ -227,7 +229,7 @@ export default function LensManagementView({ onProductAdded }) {
 
     // Post to Database API
     try {
-      await axios.post('/api/products/items/', {
+      const res = await axios.post('/api/products/items/', {
         name: presetName,
         sku: skuCode,
         barcode: barcodeVal,
@@ -237,8 +239,13 @@ export default function LensManagementView({ onProductAdded }) {
         retail_price: sellPrice,
         stock: 25,
         is_active: true
-      });
-    } catch (err) {}
+      }, { __silentError: true });
+      if (res.data?.id) newPreset.id = String(res.data.id);
+    } catch (err) {
+      // Not saved on the server: don't add a browser-only lens that sales can't bill.
+      notify(`Lens preset '${presetName}' was not saved: ${describeApiError(err)}`, 'error');
+      return;
+    }
 
     const updated = [newPreset, ...lensList];
     saveLensCatalog(updated);
@@ -277,7 +284,7 @@ export default function LensManagementView({ onProductAdded }) {
 
     // Post to Database API
     try {
-      await axios.post('/api/products/items/', {
+      const res = await axios.post('/api/products/items/', {
         name: newLens.name,
         sku: skuCode,
         barcode: barcodeVal,
@@ -287,8 +294,12 @@ export default function LensManagementView({ onProductAdded }) {
         retail_price: parseFloat(newLens.sellingPrice) || 0,
         stock: parseInt(newLens.stock) || 0,
         is_active: true
-      });
-    } catch (err) {}
+      }, { __silentError: true });
+      if (res.data?.id) created.id = String(res.data.id);
+    } catch (err) {
+      notify(`Lens '${newLens.name}' was not saved: ${describeApiError(err)}`, 'error');
+      return;
+    }
 
     const updated = [created, ...lensList];
     saveLensCatalog(updated);

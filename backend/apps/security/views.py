@@ -411,6 +411,7 @@ class BackupDownloadLinkView(APIView):
 
 class BackupDownloadView(APIView):
     authentication_classes = []
+    token_authentication = False  # token-blind by design (see tenant_context.install_drf_hook)
     permission_classes = [permissions.AllowAny, SingleTenantInstall]
 
     def get(self, request, pk):

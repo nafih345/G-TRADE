@@ -65,7 +65,9 @@ class IsUserAdmin(permissions.BasePermission):
 
 
 def _tenant(request):
-    return Tenant.objects.get(pk=request.user.tenant_id)
+    # The request's tenant: the user's own, or the client a platform workspace token acts in.
+    from apps.common.permissions import request_tenant_id
+    return Tenant.objects.get(pk=request_tenant_id(request.user))
 
 
 def _payload(request, tenant):

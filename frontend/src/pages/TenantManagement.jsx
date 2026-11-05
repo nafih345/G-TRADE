@@ -21,7 +21,9 @@ import {
   Visibility, VisibilityOff, ContentCopy as CopyIcon, Refresh as RefreshIcon, Search as SearchIcon,
   PersonAddAlt1 as OnboardIcon, Tune as ManageIcon, PowerSettingsNew as PowerIcon,
   AutoAwesome as GenerateIcon, ExpandMore as ExpandIcon, ExpandLess as CollapseIcon, Storage as DataIcon,
+  Login as EnterIcon,
 } from '@mui/icons-material';
+import { useAuth } from '../context/AuthContext';
 import { apiErrorMessage } from '../utils/apiError';
 import { notify } from '../utils/notify';
 import ModuleAccessEditor from '../components/superadmin/ModuleAccessEditor';
@@ -217,6 +219,22 @@ const FILTERS = [
 ];
 
 export default function TenantManagement() {
+  const { openWorkspace: openClientWorkspace } = useAuth();
+  const [enteringId, setEnteringId] = useState(null);
+  // Switch this browser into the client's own workspace (separate audited session; see AuthContext).
+  const enterWorkspace = async (t) => {
+    if (!window.confirm(`Open ${t.name}'s workspace?
+
+Everything you create or change there belongs to ${t.name}. `
+      + 'Use "Return to platform" in the yellow bar to come back.')) return;
+    setEnteringId(t.id);
+    try {
+      await openClientWorkspace(t.id);
+    } catch (err) {
+      if (!isReauth(err)) notify(`Could not open ${t.name}'s workspace: ${apiErrorMessage(err)}`, 'error');
+      setEnteringId(null);
+    }
+  };
   const [catalog, setCatalog] = useState(null);
   const [tenants, setTenants] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -427,6 +445,18 @@ export default function TenantManagement() {
                             Data
                           </Button>
                         </Tooltip>
+                        {!t.is_platform && (
+                          <Tooltip title={t.status === 'INACTIVE'
+                            ? 'Reactivate the client to work in its workspace'
+                            : 'Create and manage records as this client (audited)'}>
+                            <span>
+                              <Button size="small" startIcon={<EnterIcon />} disabled={t.status === 'INACTIVE' || enteringId === t.id}
+                                onClick={() => enterWorkspace(t)} aria-label={`Open the workspace of ${t.name}`}>
+                                {enteringId === t.id ? 'Opening…' : 'Open workspace'}
+                              </Button>
+                            </span>
+                          </Tooltip>
+                        )}
                         <Tooltip title={t.is_platform ? 'The platform account cannot be deactivated' : ''}>
                           <span>
                             <Button size="small" color={t.status === 'ACTIVE' ? 'error' : 'success'} startIcon={<PowerIcon />}

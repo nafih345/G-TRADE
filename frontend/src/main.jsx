@@ -8,6 +8,7 @@ import { installAlertOverride } from './utils/notify'
 import { resolveApiBaseUrl, installBackendHealthWatch } from './utils/backendStatus'
 import { installSessionGuard } from './utils/sessionGuard'
 import { installMasterCacheInvalidation } from './utils/masterDataCache'
+import { installApiWriteGuard } from './utils/apiWriteGuard'
 import './index.css'
 
 // Every alert(...) in the app shows as an in-page notice at the bottom of the screen
@@ -40,6 +41,11 @@ installBackendHealthWatch()
 // (utils/masterDataCache.js); any write to one of them marks it stale. AuthContext warms them
 // as soon as a session exists.
 installMasterCacheInvalidation()
+
+// Idempotency keys + double-submit guard + request timeout + a notice for every failed write
+// the screen itself doesn't report. Installed last so its failure notice runs after the
+// refresh / re-auth / fallback retries above have had their chance (utils/apiWriteGuard.js).
+installApiWriteGuard()
 
 const queryClient = new QueryClient({
   defaultOptions: {

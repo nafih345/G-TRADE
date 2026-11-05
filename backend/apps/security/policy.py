@@ -97,7 +97,9 @@ def open_session(user, request=None, two_factor=False):
                                       user_agent=agent)
 
 
-def issue_tokens(user, request=None, two_factor=False):
+def issue_tokens(user, request=None, two_factor=False, workspace_tenant_id=None):
+    """Tokens for a new sign-in session. `workspace_tenant_id` (platform owner only — the caller
+    checks) scopes the session to that client instead of the user's own tenant."""
     from rest_framework_simplejwt.tokens import RefreshToken
     if user.tenant_id is None:
         raise exceptions.AuthenticationFailed('This account is not linked to a business.')
@@ -106,7 +108,9 @@ def issue_tokens(user, request=None, two_factor=False):
     refresh['sid'] = str(session.id)
     # Copied into every access token minted from this refresh token. TenantContextMiddleware
     # scopes the request by it; LenientJWTAuthentication checks it still matches the user.
-    refresh['tenant_id'] = user.tenant_id
+    refresh['tenant_id'] = workspace_tenant_id or user.tenant_id
+    if workspace_tenant_id and workspace_tenant_id != user.tenant_id:
+        refresh['workspace'] = True
     return {'refresh': str(refresh), 'access': str(refresh.access_token), 'session_id': str(session.id)}
 
 

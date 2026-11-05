@@ -10,11 +10,13 @@ class UserSerializer(serializers.ModelSerializer):
     role_display = serializers.CharField(source='get_role_display', read_only=True)
     # The platform owner (manages client tenants) — distinct from a tenant's own Super Admin role.
     is_platform_admin = serializers.SerializerMethodField()
+    # {tenant_id, tenant_name} while the platform owner works inside a client's workspace.
+    workspace = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = ('id', 'username', 'email', 'first_name', 'last_name', 'role', 'role_display', 'phone', 'is_active',
-                  'tenant', 'is_platform_admin', 'module_access',
+                  'tenant', 'is_platform_admin', 'workspace', 'module_access',
                   'settings_features')
         read_only_fields = ('id', 'is_active', 'tenant')
 
@@ -25,6 +27,16 @@ class UserSerializer(serializers.ModelSerializer):
     def get_is_platform_admin(self, obj):
         from apps.common.permissions import is_platform_admin
         return is_platform_admin(obj)
+
+    def get_workspace(self, obj):
+        from apps.common import tenancy
+        from apps.common.models import Tenant
+        current = tenancy.current_tenant_id()
+        if current is None or current == obj.tenant_id:
+            return None
+        tenant = Tenant.objects.filter(pk=current).values('id', 'name', 'code').first()
+        return {'tenant_id': current, 'tenant_name': tenant['name'] if tenant else '',
+                'tenant_code': tenant['code'] if tenant else ''} if tenant else None
 
     # Settings page sections this user may open (Tenant.settings_features ∩ Settings access).
     settings_features = serializers.SerializerMethodField()
@@ -85,7 +97,15 @@ class SessionTokenRefreshSerializer(TokenRefreshSerializer):
         from apps.security import policy
         refresh = RefreshToken(attrs['refresh'])
         user = User.objects.filter(pk=refresh.get('user_id'), is_active=True).first()
-        if user is None or user.tenant_id is None or refresh.get('tenant_id') != user.tenant_id:
+        if user is None or user.tenant_id is None or refresh.get('tenant_id') is None:
             raise policy.SessionEnded()
+        if refresh.get('tenant_id') != user.tenant_id:
+            # Only a platform workspace token may carry another tenant, and only while that
+            # client is still active.
+            from apps.common.models import Tenant
+            from apps.common.tenant_context import workspace_allowed
+            if not workspace_allowed(user, refresh) or not Tenant.objects.filter(
+                    Tenant.active_q(), pk=refresh.get('tenant_id')).exists():
+                raise policy.SessionEnded()
         policy.validate_session(refresh.get('sid'), user, policy.get_settings().inactivity_timeout_minutes)
         return super().validate(attrs)

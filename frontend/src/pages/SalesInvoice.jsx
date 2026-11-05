@@ -5,6 +5,7 @@ import { normalizeSalesRow, summarizeLines, rowCustomerName, rowPayment } from '
 import { apiErrorMessage } from '../utils/apiError';
 import { fetchAllPages } from '../utils/fetchAllPages';
 import { notify } from '../utils/notify';
+import { describeApiError } from '../utils/apiWriteGuard';
 import PaymentModeDetails from '../components/common/PaymentModeDetails';
 import { needsBank } from '../utils/paymentModes';
 import { 
@@ -1109,9 +1110,13 @@ export default function SalesInvoice() {
             } catch (e) {}
             if (isUuid) {
               try {
-                await axios.post(`/api/sales/invoices/${order.id}/convert/`, { document_type: targetType });
+                await axios.post(`/api/sales/invoices/${order.id}/convert/`, { document_type: targetType },
+                  { __silentError: true });
               } catch (err) {
-                console.warn('Failed to convert document on backend:', err);
+                // The server kept the old type: put the list back the way it really is.
+                setOrders(orders);
+                try { localStorage.setItem('optical_sales_invoices', JSON.stringify(orders)); } catch (e) {}
+                notify(`Could not convert ${order.invoiceNo || order.invoice_number || 'the document'}: ${describeApiError(err)}`, 'error');
               }
             }
           }}
@@ -1127,9 +1132,12 @@ export default function SalesInvoice() {
             // checkout) just keep the local-only update above.
             if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(orderId)) {
               try {
-                await axios.patch(`/api/sales/invoices/${orderId}/`, { fulfillment_status: newStatus });
+                await axios.patch(`/api/sales/invoices/${orderId}/`, { fulfillment_status: newStatus },
+                  { __silentError: true });
               } catch (err) {
-                console.warn('Failed to sync order status to backend:', err);
+                setOrders(orders);
+                try { localStorage.setItem('optical_sales_invoices', JSON.stringify(orders)); } catch (e) {}
+                notify(`Order status was not changed: ${describeApiError(err)}`, 'error');
               }
             }
           }}
@@ -1385,12 +1393,17 @@ export default function SalesInvoice() {
                 payment_date: newPayment.date || new Date().toISOString().split('T')[0],
                 status: 'Completed',
                 notes: newPayment.notes
-              });
+              }, { __silentError: true });
               // Swap the optimistic local-id row for the real backend one so it keys correctly
               // on the next fetchOpticalDbData dedup pass.
               setPayments(prev => prev.map(p => p.id === newPayment.id ? { ...p, id: res.data.id, receiptNo: res.data.receipt_no } : p));
             } catch (err) {
-              console.warn('Failed to save payment to backend:', err);
+              // Not recorded: take the optimistic receipt and balance change back off the screen.
+              setPayments(prev => prev.filter(p => p.id !== newPayment.id));
+              if (custId) {
+                setCustomers(customers);  // the list as it was before the optimistic change
+              }
+              notify(`Payment of ${payAmt} was NOT recorded: ${describeApiError(err)}`, 'error');
             }
           }}
         />

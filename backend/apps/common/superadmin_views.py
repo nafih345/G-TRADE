@@ -297,6 +297,35 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
                   reason=serializer.validated_data['reason'])
         return Response(self._row(tenant.pk))
 
+    # ---- workspace ----------------------------------------------------------------------
+
+    @action(detail=True, methods=['post'])
+    def workspace(self, request, pk=None):
+        """Open this client's workspace: a separate sign-in session whose signed token is scoped
+        to the client, so the platform owner can create and manage the client's records with
+        the client's own rules (modules, numbering, branches). The tenant comes from the URL
+        the owner chose — never from a request body — and every opening is audited.
+
+        Inside the workspace the platform console is closed (is_platform_admin is False for a
+        request scoped to another tenant); the frontend returns to it with the platform session
+        it kept aside."""
+        from apps.authentication.serializers import login_user_payload
+        from apps.security.policy import issue_tokens
+
+        tenant = self.get_object()
+        if tenant.pk == request.user.tenant_id:
+            return _bad(None, 'This is the platform account itself — use the normal sign-in.')
+        if not tenant.is_effectively_active:
+            return _bad(None, f'{tenant.name} is deactivated. Reactivate it before opening its workspace.')
+        tokens = issue_tokens(request.user, request, workspace_tenant_id=tenant.pk)
+        log_event(tenant, 'WORKSPACE_OPENED', request.user, session_id=tokens['session_id'])
+        with tenancy.use_tenant(tenant.pk):
+            user = login_user_payload(request.user)
+        user['tenant_name'] = tenant.name
+        return Response({**tokens, 'user': user,
+                         'workspace': {'tenant_id': tenant.pk, 'tenant_name': tenant.name,
+                                       'tenant_code': tenant.code}})
+
     # ---- users --------------------------------------------------------------------------
 
     @action(detail=True, methods=['post'], url_path='users')

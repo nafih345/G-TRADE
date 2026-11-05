@@ -56,19 +56,26 @@ class BrandSerializer(ModelSerializer):
         except Exception:
             return obj.product_mode or 'FRAME'
 
+    def _product_brand_rows(self):
+        """(brand_id, lower-cased brand_name or None) for every product, read once per response.
+        Counting per brand in SQL cost one query per row — on the hosted database a brand list of
+        200 took ~50 s."""
+        rows = self.context.get('_product_brand_rows')
+        if rows is None:
+            from apps.products.models import Product
+            rows = [(bid, name.lower() if name is not None else None)
+                    for bid, name in Product.objects.values_list('brand_id', 'brand_name')]
+            self.context['_product_brand_rows'] = rows
+        return rows
+
     def get_products_count(self, obj):
         try:
-            from apps.products.models import Product
-            from django.db.models import Q
-            name_str = (obj.name or '').strip()
-            code_str = (obj.code or '').strip()
-
-            return Product.objects.filter(
-                Q(brand=obj) |
-                Q(brand_name__iexact=name_str) |
-                Q(brand_name__icontains=name_str) |
-                Q(brand_name__icontains=code_str)
-            ).count()
+            # Same rule as before: linked by FK, or brand_name equals / contains the brand's
+            # name or code (case-insensitive; NULL brand_name never matches a text test).
+            name_str = (obj.name or '').strip().lower()
+            code_str = (obj.code or '').strip().lower()
+            return sum(1 for bid, bname in self._product_brand_rows()
+                       if bid == obj.pk or (bname is not None and (name_str in bname or code_str in bname)))
         except Exception:
             try:
                 return obj.products.count()

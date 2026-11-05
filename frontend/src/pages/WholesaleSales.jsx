@@ -70,6 +70,7 @@ import useBankAccounts, { bankName as bankNameOf } from '../hooks/useBankAccount
 import { CASH_PAID, CASH_UNPAID, needsBank } from '../utils/paymentModes';
 import { downloadPdfInvoice } from '../utils/printInvoice';
 import { useAuth } from '../context/AuthContext';
+import { describeApiError } from '../utils/apiWriteGuard';
 import {
   LS_KEYS, PRICE_LIST_OPTIONS, PRICE_TIER_LABEL, DELIVERY_TYPES, ORDER_STATUSES, ORDER_STATUS_COLORS,
   DEFAULT_SCHEMES, DEMO_SALES_REPS, INITIAL_DEMO_PRODUCTS, INITIAL_DEMO_CUSTOMERS,
@@ -1589,19 +1590,29 @@ export default function WholesaleSales() {
     if (!selectedCustomer) return;
     const receiptNo = `RCPT-${Math.floor(100000 + Math.random() * 900000)}`;
     const date = new Date().toISOString().split('T')[0];
-    const payments = readLS(LS_KEYS.payments, []);
-    writeLS(LS_KEYS.payments, [{ id: receiptNo, receiptNo, date, customer: selectedCustomer, amount, mode, refNo: recRef }, ...payments]);
+    let offline = false;
     if (isUuid(selectedCustomer.id)) {
       try {
         await axios.post(`${WHOLESALE_API}/collections/`, {
           receipt_number: receiptNo, dealer: selectedCustomer.id, payment_date: date,
           payment_method: mode, amount_paid: amount, reference_note: recRef || '', bank_account: bankAccount || null,
-        });
-      } catch (e) {}
+        }, { __silentError: true });
+      } catch (e) {
+        if (e?.response) {
+          // The server refused it (validation, permission…): nothing was recorded anywhere.
+          showToast(`Payment was NOT recorded: ${describeApiError(e)}`, 'error');
+          return;
+        }
+        offline = true;  // unreachable: keep the local receipt, as this screen does offline
+      }
     }
+    const payments = readLS(LS_KEYS.payments, []);
+    writeLS(LS_KEYS.payments, [{ id: receiptNo, receiptNo, date, customer: selectedCustomer, amount, mode, refNo: recRef }, ...payments]);
     adjustDealerOutstanding(selectedCustomer, -amount);
     setRecordPaymentOpen(false);
-    showToast(`Payment of ₹${amount.toLocaleString('en-IN')} recorded (${receiptNo}).`, 'success');
+    showToast(offline
+      ? `Payment of ₹${amount.toLocaleString('en-IN')} kept on this device only (${receiptNo}) — the server could not be reached.`
+      : `Payment of ₹${amount.toLocaleString('en-IN')} recorded (${receiptNo}).`, offline ? 'warning' : 'success');
   }
 
   // The trailing "Add New Dealer" row keeps dealer creation reachable with ArrowDown + Enter.

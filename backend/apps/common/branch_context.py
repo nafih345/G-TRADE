@@ -74,8 +74,15 @@ def _resolve(request):
 
     request.multi_branch_enabled = multi
 
-    username = request.headers.get('X-User-Name') or getattr(getattr(request, 'user', None), 'username', '') or ''
-    role = (request.headers.get('X-User-Role') or getattr(getattr(request, 'user', None), 'role', '') or '').upper()
+    # Identity comes from the signed token. The X-User-* headers are client-controlled and only
+    # describe requests without one — which tenancy already limits to seeing nothing.
+    from apps.common.tenant_context import token_identity
+    identity = token_identity(request)
+    if identity is not None:
+        username, role = identity[0] or '', (identity[1] or '').upper()
+    else:
+        username = request.headers.get('X-User-Name') or getattr(getattr(request, 'user', None), 'username', '') or ''
+        role = (request.headers.get('X-User-Role') or getattr(getattr(request, 'user', None), 'role', '') or '').upper()
 
     def is_admin():
         access = _user_access(username)
@@ -129,7 +136,15 @@ class BranchContextMiddleware:
 
         # Audit name for stock-ledger rows written during this request (see request_actor).
         from apps.common.request_actor import set_actor, reset_actor
-        token = set_actor((request.META.get('HTTP_X_USER_NAME') or '').strip())
+        actor = ''
+        if request.path.startswith('/api/'):
+            try:
+                from apps.common.tenant_context import token_identity
+                identity = token_identity(request)
+                actor = (identity[0] if identity else '') or ''
+            except Exception:
+                actor = ''
+        token = set_actor(actor or (request.META.get('HTTP_X_USER_NAME') or '').strip())
         try:
             return self.get_response(request)
         finally:
