@@ -304,6 +304,25 @@ def stock_status(product):
     return 'in'
 
 
+def stock_value(row):
+    """On-hand qty × the price the stock sells at — mirrors frontend utils/stockValue.js.
+
+    A running offer with a fixed offer_price values its units at that price (a partial offer only
+    its `remaining` units; the rest stay at the selling price). No offer, or an "any price" offer,
+    values everything at the selling price."""
+    qty = max(Decimal(str(row.get('stock') or 0)), Decimal('0'))
+    price = Decimal(str(row.get('retail_price') or 0))
+    offer = row.get('offer')
+    if not offer or offer.get('offer_price') in (None, ''):
+        return _money(qty * price)
+    offer_price = Decimal(str(offer['offer_price']))
+    if offer.get('apply_to_all', True):
+        units = qty
+    else:
+        units = min(qty, Decimal(max(int(offer.get('remaining') or 0), 0)))
+    return _money(units * offer_price + (qty - units) * price)
+
+
 def serialize_row(p, caps, offers=None):
     """offers: pricing_rules.offer_resolver() — the row's running offer (Offer Price / Offer Qty
     columns); None leaves `offer` out of the decision (sent as null)."""
@@ -681,6 +700,7 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
         ('status_label', 'Stock Status'), ('cost_price', 'Purchase Cost'), ('retail_price', 'Selling Price'),
         ('mrp', 'MRP'), ('supplier_name', 'Supplier'), ('last_purchase_date', 'Last Purchase Date'),
         ('source_label', 'Stock Source'), ('offer_price', 'Offer Price'), ('offer_status', 'Offer Qty / Status'),
+        ('stock_value', 'Stock Value'),
     ]
     SOURCE_LABELS = {'OPENING_STOCK': 'Opening Stock', 'EXCEL_IMPORT': 'Excel Import'}
     STATUS_LABELS = {'in': 'In Stock', 'low': 'Low Stock', 'out': 'Out of Stock'}
@@ -702,6 +722,7 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
                 o = r['offer']
                 r['offer_price'] = o['offer_price'] if o else None
                 r['offer_status'] = offer_status_text(o)
+                r['stock_value'] = stock_value(r)
                 r['status_label'] = self.STATUS_LABELS[r['status']]
                 r['source_label'] = self.SOURCE_LABELS.get(r['stock_source'], 'Regular')
                 yield [r.get(key) for key, _ in columns]
@@ -721,11 +742,11 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
         wb = Workbook(write_only=True)
         ws = wb.create_sheet('Stock Overview')
         ws.append([label for _, label in columns])
-        numeric = {'stock', 'minimum_stock', 'cost_price', 'retail_price', 'mrp', 'offer_price'}
+        numeric = {'stock', 'minimum_stock', 'cost_price', 'retail_price', 'mrp', 'offer_price', 'stock_value'}
         keys = [k for k, _ in columns]
         for row in rows():
             ws.append([
-                (float(v) if k in ('cost_price', 'retail_price', 'mrp') else v) if (k in numeric and v not in (None, ''))
+                (float(v) if k in ('cost_price', 'retail_price', 'mrp', 'stock_value') else v) if (k in numeric and v not in (None, ''))
                 else ('' if v is None else v)
                 for k, v in zip(keys, row)
             ])

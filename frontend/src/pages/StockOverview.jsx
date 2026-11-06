@@ -40,6 +40,7 @@ import useBarcodeScanner from '../hooks/useBarcodeScanner';
 import { useDebounce } from '../hooks/useDebounce';
 import { apiErrorMessage } from '../utils/apiError';
 import { notify } from '../utils/notify';
+import { stockValue, activeOfferPrice } from '../utils/stockValue';
 
 const BLANK_FILTERS = { brand: '', category: '', rack: '', supplier: '', variant_group: '', status: '', import_batch: '', source: '', offer: '' };
 const SOURCE_VALUES = STOCK_SOURCES.map((s) => s.value);
@@ -94,8 +95,9 @@ const COLUMNS = [
   { key: 'cost_price', label: 'Purchase Cost ₹', sort: 'cost_price', align: 'right', w: 58, edit: 'money', costOnly: true },
   { key: 'retail_price', label: 'Selling Price ₹', sort: 'retail_price', align: 'right', w: 52, edit: 'money' },
   { key: 'mrp', label: 'MRP ₹', sort: 'mrp', align: 'right', w: 50, edit: 'money' },
-  // Settings → Pricing Rules & Offers: the item's running offer (read-only here).
-  { key: 'offer_price', label: 'Offer Price ₹', align: 'right', w: 48 },
+  // Stock × the price it sells at: the running offer price (Settings → Pricing Rules & Offers)
+  // when there is one, else the selling price; follows the typed qty / price while editing.
+  { key: 'stock_value', label: 'Stock Value ₹', align: 'right', w: 56 },
   { key: 'offer_status', label: 'Offer Qty / Status', w: 62 },
   { key: 'supplier_name', label: 'Supplier / Vendor', w: 64, edit: 'text', list: 'suppliers' },
   { key: 'last_purchase_date', label: 'Last Purchase', sort: 'last_purchase_date', w: 58 },
@@ -671,13 +673,44 @@ export default function StockOverview() {
         return isEditing
           ? <StatusChip preview status={previewStatus(editing.values.stock, editing.values.minimum_stock)} />
           : <StatusChip status={row.status} />;
-      case 'cost_price': case 'retail_price': case 'mrp':
+      case 'retail_price': {
+        // Running offer: regular price struck through, offer price prominent beneath it.
+        const op = activeOfferPrice(row.offer);
+        if (op === null || Number(op) === Number(row.retail_price)) {
+          return (
+            <>
+              <span title={formatMoney(row.retail_price)} style={{ whiteSpace: 'nowrap' }}>{amount(row.retail_price)}</span>
+              {row.offer && op === null && (
+                <Box title={`${row.offer.tag || 'Offer'} · may sell at any price`} sx={{ fontSize: 9.5, fontWeight: 700, color: 'success.main' }}>Offer: any</Box>
+              )}
+            </>
+          );
+        }
+        return (
+          <Box data-offer-price={row.id} title={`${row.offer.tag || 'Offer'}: ${formatMoney(op)} (regular ${formatMoney(row.retail_price)})`}
+            sx={{ lineHeight: 1.15, whiteSpace: 'nowrap' }}>
+            <Box component="s" sx={{ display: 'block', fontSize: 10, color: 'text.secondary' }}>{amount(row.retail_price)}</Box>
+            <Box component="span" sx={{ fontWeight: 800, fontSize: 12.5, color: 'success.main' }}>{amount(op)}</Box>
+          </Box>
+        );
+      }
+      case 'stock_value': {
+        const v = stockValue(row, isEditing ? editing : undefined);
+        const how = {
+          regular: `${formatQty(v.qty)} × ${formatMoney(v.price)}`,
+          offer: `${formatQty(v.qty)} × offer ${formatMoney(v.offerPrice)}`,
+          mixed: `${formatQty(v.offerUnits)} × offer ${formatMoney(v.offerPrice)} + ${formatQty(v.qty - v.offerUnits)} × ${formatMoney(v.price)}`,
+          edited: `${formatQty(v.qty)} × ${formatMoney(v.price)} (edited price)`,
+        }[v.basis];
+        return (
+          <Box component="span" data-stock-value={row.id} title={how}
+            sx={{ fontWeight: 700, whiteSpace: 'nowrap', color: v.basis === 'offer' || v.basis === 'mixed' ? 'success.main' : undefined }}>
+            {amount(v.value)}
+          </Box>
+        );
+      }
+      case 'cost_price': case 'mrp':
         return <span title={formatMoney(row[col.key])} style={{ whiteSpace: 'nowrap' }}>{amount(row[col.key])}</span>;
-      case 'offer_price':
-        if (!row.offer) return muted();
-        return row.offer.offer_price == null
-          ? <Box component="span" title="May sell at any price" sx={{ fontWeight: 800, color: 'success.main' }}>Any</Box>
-          : <Box component="span" title={formatMoney(row.offer.offer_price)} sx={{ fontWeight: 800, color: 'success.main', whiteSpace: 'nowrap' }}>{amount(row.offer.offer_price)}</Box>;
       case 'offer_status': return <OfferStatus offer={row.offer} stock={row.stock} />;
       case 'last_purchase_date': return <span title={formatDate(row.last_purchase_date)}>{shortDate(row.last_purchase_date)}</span>;
       case 'name': return (
@@ -786,7 +819,7 @@ export default function StockOverview() {
         <SummaryCard icon={<PurchaseValueIcon />} label="Total Purchase Value" tone="#059669" loading={summaryLoading && !s}
           value={s ? (s.purchase_value === null ? 'Restricted' : formatMoney(s.purchase_value)) : '—'} hint="On-hand quantity × purchase cost" />
         <SummaryCard icon={<SellValueIcon />} label="Total Selling Value" tone="#7c3aed" loading={summaryLoading && !s}
-          value={s ? formatMoney(s.selling_value) : '—'} hint="On-hand quantity × selling price" />
+          value={s ? formatMoney(s.selling_value) : '—'} hint="On-hand quantity × regular selling price (before offers — see the Stock Value column per row)" />
       </Box>
       {filtersActive && (
         <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: -1, mb: 1.5 }}>

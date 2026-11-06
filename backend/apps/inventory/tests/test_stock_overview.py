@@ -3,6 +3,7 @@ optimistic locks, idempotency, permissions, history and export."""
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
+from django.test import SimpleTestCase
 from rest_framework.test import APITestCase
 
 from apps.company.models import BranchStock
@@ -218,3 +219,19 @@ class StockOverviewTests(APITestCase):
         xlsx = self.client.get(URL + 'export/')
         self.assertEqual(xlsx.status_code, 200)
         self.assertTrue(xlsx.content.startswith(b'PK'))
+
+
+class StockValueTests(SimpleTestCase):
+    """Row Stock Value = qty × offer price when an offer runs (mirrors utils/stockValue.js)."""
+
+    def test_values(self):
+        from apps.inventory.stock_overview import stock_value
+        offer_all = {'offer_price': '200.00', 'apply_to_all': True, 'remaining': 10}
+        self.assertEqual(stock_value({'stock': 10, 'retail_price': '300.00', 'offer': None}), '3000.00')
+        self.assertEqual(stock_value({'stock': 10, 'retail_price': '300.00', 'offer': offer_all}), '2000.00')
+        partial = {'offer_price': '200', 'apply_to_all': False, 'remaining': 3}
+        self.assertEqual(stock_value({'stock': 10, 'retail_price': '300', 'offer': partial}), '2700.00')
+        self.assertEqual(stock_value({'stock': 2, 'retail_price': '300', 'offer': partial}), '400.00')
+        anyprice = {'offer_price': None, 'apply_to_all': True}
+        self.assertEqual(stock_value({'stock': 3, 'retail_price': '300', 'offer': anyprice}), '900.00')
+        self.assertEqual(stock_value({'stock': -2, 'retail_price': '300', 'offer': None}), '0.00')
