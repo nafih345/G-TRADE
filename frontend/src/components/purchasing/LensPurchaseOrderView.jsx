@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   Box, Card, Typography, Button, Grid, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Paper,
   Chip, Dialog, DialogTitle, DialogContent, DialogActions, TextField, MenuItem, Stack, IconButton, Tooltip,
-  InputAdornment, Autocomplete, CircularProgress, LinearProgress, Stepper, Step, StepLabel, ToggleButton,
+  InputAdornment, Autocomplete, CircularProgress, LinearProgress, ToggleButton,
   ToggleButtonGroup, Alert, Divider, Checkbox, FormControlLabel, Menu, ListItemIcon, ListItemText,
 } from '@mui/material';
 import {
@@ -20,17 +20,17 @@ import { isPairSellable, formatDioptre } from '../../utils/lensUnits';
 import { notify } from '../../utils/notify';
 import { printLensPO } from '../../utils/printLensPO';
 import {
-  navScopeProps, navDialogProps, enterOpensSelectProps, focusNextAfterRender, focusField, getNavFields,
+  navScopeProps, navDialogProps, enterOpensSelectProps, focusNextAfterRender,
 } from '../../pages/wholesale/keyboardNav';
 import { makeShortcutHook } from '../../pages/wholesale/posShortcuts';
 import { ShortcutHelpDialog } from '../../pages/wholesale/WholesaleDialogs';
 import {
-  LENS_ITEM_SHORTCUTS, LENS_PO_EDITOR_SHORTCUTS, LENS_DASHBOARD_SHORTCUTS, dialogHotkeys,
+  LENS_PO_EDITOR_SHORTCUTS, LENS_DASHBOARD_SHORTCUTS, dialogHotkeys,
 } from './lensPoShortcuts';
 import {
-  SINGLE_PAIR, SPLIT_PAIR, SINGLE_PIECE, ORDER_TYPES, LPO_STATUSES, RECEIVING_STATUSES, FITTING_STATUSES, statusMeta,
-  eyeLabel, eyeShort, lpoQtyLabel, poQtyLabel, rxCells, rxSummary, sameRx, pieceFromRequirement, draftItemErrors,
-  itemPayload, draftFromItem, splitPairItem, joinPairItems, groupItemsBySupplier, lensItemsFromRequirements,
+  SINGLE_PAIR, SINGLE_PIECE, ORDER_TYPES, LPO_STATUSES, RECEIVING_STATUSES, FITTING_STATUSES, statusMeta,
+  eyeLabel, eyeShort, lpoQtyLabel, poQtyLabel, rxCells, rxSummary, sameRx, draftItemErrors, itemPayload, draftFromItem,
+  splitPairItem, joinPairItems, setEyeSupplier, lineSupplier, groupItemsBySupplier, lensItemsFromRequirements,
 } from '../../utils/lensPurchaseOrders';
 
 const API = '/api/purchase/lens-orders/';
@@ -42,11 +42,8 @@ const errText = (err, fallback) => {
   const flat = (v) => (Array.isArray(v) ? v.map(flat).join(' ') : typeof v === 'object' && v ? Object.values(v).map(flat).join(' ') : String(v));
   return flat(d.detail ?? d) || fallback;
 };
-const LENS_TYPES = ['Single Vision', 'Bifocal', 'Progressive', 'Office / Computer', 'Kryptok'];
-const LENS_INDEXES = ['1.50', '1.56', '1.59', '1.60', '1.67', '1.74'];
-const LENS_COATINGS = ['HMC', 'Blue Cut', 'UC (Uncoated)', 'Hard Coat', 'Photochromic', 'Anti-Glare'];
 
-// Keyboard model (see lensPoShortcuts.js): every dialog's Paper is one keyboardNav scope — Enter /
+// Keyboard model (see lensPoShortcuts.js): the editor's Paper is one keyboardNav scope — Enter /
 // ↑ / ↓ walk its fields, Enter in an open list picks and moves on — plus the dialog's hotkeys.
 const keyboardPaper = (hotkeys, extra = {}) => ({
   ...navScopeProps,
@@ -64,9 +61,8 @@ const KeyHint = ({ children }) => (
 // Prescription editor for one lens
 // ---------------------------------------------------------------------------
 
-function PieceRxEditor({ piece, onChange, title, unlockTick = 0 }) {
+function PieceRxEditor({ piece, onChange, title }) {
   const [unlocked, setUnlocked] = useState(false);
-  useEffect(() => { if (unlockTick) setUnlocked(true); }, [unlockTick]);
   const changed = piece.original_rx && !sameRx(piece.rx, piece.original_rx);
   const set = (field, value) => onChange({ ...piece, rx: { ...piece.rx, [field]: value } });
   const tidy = (field) => {
@@ -80,7 +76,7 @@ function PieceRxEditor({ piece, onChange, title, unlockTick = 0 }) {
         {piece.sales_order && (
           <Tooltip title={locked ? 'Prescription comes from the sales order. Unlock to correct it (a reason is recorded).' : 'Lock'}>
             <Button size="small" startIcon={locked ? <LockIcon fontSize="small" /> : <UnlockIcon fontSize="small" />} onClick={() => setUnlocked((u) => !u)}>
-              {locked ? 'Edit Rx (Alt+R)' : 'Lock Rx'}
+              {locked ? 'Edit Rx' : 'Lock Rx'}
             </Button>
           </Tooltip>
         )}
@@ -118,10 +114,12 @@ function PieceRxEditor({ piece, onChange, title, unlockTick = 0 }) {
 }
 
 // ---------------------------------------------------------------------------
-// Pending sales-order lens requirement picker
+// Customer-order picker: one option per sales order that still has lenses to order. Picking it
+// drops every outstanding lens of that order straight onto the PO grid — model, type, index,
+// coating, Rx and cost as sold — so nothing is re-entered.
 // ---------------------------------------------------------------------------
 
-function RequirementPicker({ label, product, excludePoId, pairMode, takenKeys, value, onChange, disabledOrder }) {
+function OrderPicker({ excludePoId, takenKeys, onPick, inputRef }) {
   const [input, setInput] = useState('');
   const [options, setOptions] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -130,68 +128,62 @@ function RequirementPicker({ label, product, excludePoId, pairMode, takenKeys, v
   useEffect(() => {
     let alive = true;
     setLoading(true);
-    axios.get(`${API}pending-requirements/`, { params: { search: term || undefined, product: product || undefined, exclude_po: excludePoId || undefined } })
+    axios.get(`${API}pending-requirements/`, { params: { search: term || undefined, exclude_po: excludePoId || undefined } })
       .then((res) => {
         if (!alive) return;
-        let rows = Array.isArray(res.data) ? res.data : [];
-        rows = rows.filter((r) => r.outstanding - (takenKeys?.[`${r.sales_order}|${r.product}|${r.eye}`] || 0) > 0);
-        if (pairMode) {
-          // One option per order whose lens line still needs BOTH eyes.
-          const byOrder = {};
-          rows.forEach((r) => {
-            const k = `${r.sales_order}|${r.product}`;
-            (byOrder[k] = byOrder[k] || { ...r, eyes: {} }).eyes[r.eye] = r;
-          });
-          rows = Object.values(byOrder).filter((o) => o.eyes.RE && o.eyes.LE);
-        }
-        setOptions(rows);
+        const byOrder = new Map();
+        (Array.isArray(res.data) ? res.data : []).forEach((r) => {
+          const left = r.outstanding - (takenKeys?.[`${r.sales_order}|${r.product}|${r.eye}`] || 0);
+          if (left <= 0) return;
+          if (!byOrder.has(r.sales_order)) byOrder.set(r.sales_order, { ...r, rows: [] });
+          byOrder.get(r.sales_order).rows.push({ ...r, outstanding: left });
+        });
+        setOptions([...byOrder.values()]);
       })
       .catch(() => alive && setOptions([]))
       .finally(() => alive && setLoading(false));
     return () => { alive = false; };
-  }, [term, product, excludePoId, pairMode, takenKeys]);
+  }, [term, excludePoId, takenKeys]);
 
-  const optionKey = (o) => `${o.sales_order}|${o.product}|${pairMode ? 'PAIR' : o.eye}`;
+  const eyesOf = (o) => {
+    const eyes = new Set(o.rows.map((r) => r.eye));
+    return eyes.has('RE') && eyes.has('LE') ? 'RE + LE' : eyes.has('RE') ? 'RE only' : 'LE only';
+  };
   return (
     <Autocomplete
       options={options}
-      value={value}
+      value={null}
+      inputValue={input}
       loading={loading}
       filterOptions={(x) => x}
       autoHighlight
-      openOnFocus
-      isOptionEqualToValue={(a, b) => optionKey(a) === optionKey(b)}
-      getOptionDisabled={(o) => Boolean(disabledOrder) && o.sales_order === disabledOrder}
-      getOptionLabel={(o) => (o ? `${o.customer_name || 'Customer'} — ${o.sales_order_number}${pairMode ? '' : ` — ${eyeShort(o.eye)}`}` : '')}
-      onInputChange={(e, v, reason) => { if (reason === 'input') setInput(v); }}
-      onChange={(e, v) => {
-        // A single eye also hands back the same order's other eye when it still needs ordering.
-        const other = v && !pairMode ? options.find((o) => o.sales_order === v.sales_order
-          && String(o.product) === String(v.product) && o.eye !== v.eye) : null;
-        onChange(v, other || null);
-        nextAfterPick(v);
-      }}
-      noOptionsText={product ? 'No pending sales orders need this lens. Check the lens model or the order.' : 'No pending lens orders'}
+      blurOnSelect={false}
+      isOptionEqualToValue={(a, b) => a.sales_order === b.sales_order}
+      getOptionLabel={(o) => (o ? `${o.customer_name || 'Customer'} — ${o.sales_order_number}` : '')}
+      onInputChange={(e, v, reason) => { if (reason === 'input' || reason === 'clear') setInput(v); }}
+      onChange={(e, v) => { if (v) { onPick(v.rows); setInput(''); } }}
+      noOptionsText={term ? 'No pending lens orders match.' : 'No customer orders are waiting for lenses.'}
       renderOption={(props, o) => (
-        <li {...props} key={optionKey(o)}>
+        <li {...props} key={o.sales_order}>
           <Box sx={{ width: '100%' }}>
             <Stack direction="row" justifyContent="space-between" spacing={1}>
               <Typography variant="body2" fontWeight={800}>{o.customer_name || 'Customer'}{o.patient_code ? ` · ${o.patient_code}` : ''}</Typography>
               <Typography variant="caption" fontWeight={700} color="primary">{o.sales_order_number} · {o.order_date}</Typography>
             </Stack>
             <Typography variant="caption" color="text.secondary" component="div">
-              {o.product_name}{o.lens_index ? ` (${o.lens_index})` : ''} · {pairMode ? 'Both eyes' : eyeLabel(o.eye)} · {o.order_status || 'Order Received'}
+              {[...new Set(o.rows.map((r) => r.product_name))].join(', ')} · {eyesOf(o)} · {o.order_status || 'Order Received'}
             </Typography>
-            <Typography variant="caption" component="div" sx={{ fontFamily: 'monospace' }}>
-              {pairMode
-                ? `OD ${rxSummary(o.eyes.RE.rx) || '—'} | OS ${rxSummary(o.eyes.LE.rx) || '—'}`
-                : (o.rx_summary || 'No prescription on the order')}
-            </Typography>
+            {o.rows.map((r) => (
+              <Typography key={`${r.product}|${r.eye}`} variant="caption" component="div" sx={{ fontFamily: 'monospace' }}>
+                {eyeShort(r.eye)} {r.rx_summary || '—'}
+              </Typography>
+            ))}
           </Box>
         </li>
       )}
       renderInput={(params) => (
-        <TextField {...params} size="small" label={label} placeholder="Search customer, phone, patient code or sales order"
+        <TextField {...params} inputRef={inputRef} size="small" label="Add lenses from a customer order (Alt+A)"
+          placeholder="Search customer, phone, patient code or sales order"
           InputProps={{ ...params.InputProps, endAdornment: <>{loading ? <CircularProgress size={16} /> : null}{params.InputProps.endAdornment}</> }} />
       )}
     />
@@ -199,356 +191,11 @@ function RequirementPicker({ label, product, excludePoId, pairMode, takenKeys, v
 }
 
 // ---------------------------------------------------------------------------
-// Add lens dialog — Pair (RE + LE) or Single Lens (RE or LE). Supplier-centric: a Single Lens
-// picked from an order that needs both eyes offers the other eye to a different supplier; each
-// supplier's lenses are saved on their own Lens PO with the same customer order reference.
-// ---------------------------------------------------------------------------
-
-const emptyDraft = (orderType) => ({
-  key: `${Date.now()}-${Math.random()}`, product: '', product_name: '', lens_model: '', lens_type: '', lens_index: '',
-  lens_coating: '', order_type: orderType, unit_price: '', pricing_unit: ORDER_TYPES[orderType].unit,
-  discount_amount: 0, tax_percent: 0, pieces: [], supplier: '',
-});
-
-const SupplierSelect = ({ label, value, onChange, suppliers, emptyLabel, required = false, sx }) => (
-  <TextField select size="small" label={label} value={value} onChange={(e) => onChange(e.target.value)} required={required}
-    sx={{ minWidth: 240, ...sx }} SelectProps={{ ...enterOpensSelectProps, displayEmpty: Boolean(emptyLabel) }}
-    InputLabelProps={emptyLabel ? { shrink: true } : undefined}>
-    {emptyLabel && <MenuItem value=""><em>{emptyLabel}</em></MenuItem>}
-    {suppliers.map((s) => <MenuItem key={s.id} value={s.id}>{s.name}</MenuItem>)}
-  </TextField>
-);
-
-function LensItemDialog({ open, initial, orderType, lensProducts, productsLoading, excludePoId, takenKeys, suppliers = [], headerSupplier = '', supplierPerLine = false, onClose, onAdd }) {
-  const [draft, setDraft] = useState(() => initial || emptyDraft(orderType || SINGLE_PAIR));
-  const [step, setStep] = useState(0);
-  const [reqA, setReqA] = useState(null);
-  const [reqB, setReqB] = useState(null);
-  // Single Lens from an order that needs both eyes: the other eye and who supplies it ('' = not now).
-  const [otherReq, setOtherReq] = useState(null);
-  const [otherSupplier, setOtherSupplier] = useState('');
-  const [showAll, setShowAll] = useState(false);
-  const [rxUnlockTick, setRxUnlockTick] = useState(0);
-  const [help, setHelp] = useState(false);
-  const contentRef = useRef(null);
-  const addBtnRef = useRef(null);
-  const typeGroupRef = useRef(null);
-
-  useEffect(() => {
-    if (!open) return;
-    setDraft(initial || emptyDraft(orderType || SINGLE_PAIR));
-    setStep(0); setReqA(null); setReqB(null); setOtherReq(null); setOtherSupplier('');
-  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Each step starts with the cursor in its first field; the Review step on "Add to PO".
-  useEffect(() => {
-    setRxUnlockTick(0); // Alt+R unlocks only the step it was pressed on
-    const t = setTimeout(() => {
-      if (step > 0 && step === stepsCountRef.current - 1) addBtnRef.current?.focus();
-      else if (step > 0) focusField(getNavFields(contentRef.current)[0]);
-    }, 80);
-    return () => clearTimeout(t);
-  }, [step]);
-
-  const type = draft.order_type;
-  const legacyTwoOrders = type === SPLIT_PAIR; // only reachable when editing an old line
-  const steps = ['Lens Model', 'Customer Order', ...(legacyTwoOrders ? ['Second Order'] : []), 'Review'];
-  const reviewStep = steps.length - 1;
-  const stepsCountRef = useRef(steps.length);
-  stepsCountRef.current = steps.length;
-  const product = lensProducts.find((p) => String(p.id) === String(draft.product)) || null;
-  const piece = (i) => draft.pieces[i];
-  const setPiece = (i, p) => setDraft((d) => { const pieces = [...d.pieces]; pieces[i] = p; return { ...d, pieces }; });
-  const supplierName = (id) => suppliers.find((s) => String(s.id) === String(id))?.name || '';
-  const thisSupplier = draft.supplier || headerSupplier;
-  const offerOtherEye = supplierPerLine && !initial && type === SINGLE_PIECE && Boolean(otherReq);
-  const secondDraft = offerOtherEye && otherSupplier ? {
-    ...draft,
-    key: `${Date.now()}-${Math.random()}`,
-    supplier: String(otherSupplier) === String(headerSupplier) ? '' : otherSupplier,
-    pieces: [pieceFromRequirement(otherReq, otherReq.eye)],
-  } : null;
-
-  const setType = (t) => {
-    if (!t || t === type) return;
-    setDraft((d) => ({ ...d, order_type: t, pricing_unit: ORDER_TYPES[t].unit, pieces: [] }));
-    setReqA(null); setOtherReq(null); setOtherSupplier('');
-  };
-
-  const pickA = (r, sibling) => {
-    setReqA(r);
-    setOtherReq(r && type === SINGLE_PIECE ? sibling || null : null);
-    setOtherSupplier('');
-    if (!r) { setDraft((d) => ({ ...d, pieces: d.pieces.slice(legacyTwoOrders ? 1 : 0, legacyTwoOrders ? 2 : 0) })); return; }
-    if (type === SINGLE_PAIR) {
-      setDraft((d) => ({ ...d, pieces: [pieceFromRequirement(r.eyes.RE, 'RE'), pieceFromRequirement(r.eyes.LE, 'LE')] }));
-    } else {
-      setDraft((d) => { const pieces = [...d.pieces]; pieces[0] = pieceFromRequirement(r, r.eye); return { ...d, pieces }; });
-    }
-  };
-  const pickB = (r) => {
-    setReqB(r);
-    setDraft((d) => { const pieces = [...d.pieces]; pieces[1] = r ? pieceFromRequirement(r, r.eye) : undefined; return { ...d, pieces: pieces.filter(Boolean) }; });
-  };
-
-  const allErrors = () => {
-    const e = draftItemErrors(draft);
-    if (supplierPerLine && !thisSupplier) e.push('Select the supplier for this lens.');
-    if (secondDraft) draftItemErrors(secondDraft).forEach((x) => e.push(`Other lens: ${x}`));
-    return e;
-  };
-  const stepErrors = () => {
-    if (step === 0) return draft.product ? [] : ['Select the lens model.'];
-    if (step === 1 && !piece(0)) return ['Select the customer order.'];
-    if (legacyTwoOrders && step === 2 && !piece(1)) return ['Select the second order.'];
-    if (step === reviewStep) return allErrors();
-    return [];
-  };
-  const errs = stepErrors();
-  const next = () => {
-    if (errs.length) { notify(errs[0], 'warning'); return; }
-    setStep((s) => Math.min(reviewStep, s + 1));
-  };
-  const finish = () => {
-    const e = allErrors();
-    if (e.length) { notify(e[0], 'warning'); return; }
-    if (!secondDraft) { onAdd([draft]); return; }
-    // The two eyes stay linked so the editor can join them back into one Pair.
-    const group = `${draft.key}-pair`;
-    onAdd([{ ...draft, pair_group: group }, { ...secondDraft, pair_group: group }]);
-  };
-
-  const options = showAll ? lensProducts.allProducts || lensProducts : lensProducts;
-  const reviewPieces = [
-    ...draft.pieces.map((p) => ({ ...p, supplier_label: supplierName(thisSupplier) })),
-    ...(secondDraft ? secondDraft.pieces.map((p) => ({ ...p, supplier_label: `${supplierName(otherSupplier)} (separate PO)` })) : []),
-  ];
-
-  const typeChoices = legacyTwoOrders
-    ? [[SPLIT_PAIR, ORDER_TYPES[SPLIT_PAIR].label, '']]
-    : [[SINGLE_PAIR, 'Pair — RE + LE (2 pieces)', 'Alt+1'], [SINGLE_PIECE, 'Single Lens — RE or LE (1 piece)', 'Alt+2']];
-  const focusTypeButton = () => setTimeout(() => typeGroupRef.current?.querySelector('[aria-pressed="true"]')?.focus(), 30);
-  const chooseType = (t) => {
-    if (step !== 0 || initial) return false;
-    setType(t);
-    focusTypeButton();
-    return true;
-  };
-  // ←/→ on the order-type buttons change the type; Enter moves on to the next field.
-  const onTypeKeys = (e) => {
-    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-    e.preventDefault();
-    chooseType(type === SINGLE_PAIR ? SINGLE_PIECE : SINGLE_PAIR);
-  };
-  const handlersRef = useRef({});
-  handlersRef.current = {
-    type1: () => chooseType(SINGLE_PAIR),
-    type3: () => chooseType(SINGLE_PIECE),
-    next: () => (step < reviewStep ? next() : finish()),
-    back: () => { if (step === 0) return false; setStep((st) => st - 1); return true; },
-    editRx: () => {
-      if (step === 0 || step === reviewStep) return false;
-      setRxUnlockTick((t) => t + 1);
-      setTimeout(() => contentRef.current?.querySelector('input[data-rx-sph]:not([disabled])')?.focus(), 60);
-      return true;
-    },
-    help: () => setHelp(true),
-  };
-  const hotkeys = useMemo(() => dialogHotkeys(LENS_ITEM_SHORTCUTS, () => handlersRef.current), []);
-
-  return (
-    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth disableRestoreFocus
-      {...navDialogProps} PaperProps={keyboardPaper(hotkeys)}>
-      <DialogTitle sx={{ fontWeight: 800 }}>
-        {initial ? 'Edit Lens' : type === SINGLE_PAIR ? 'Add Pair (RE + LE)' : 'Add Single Lens'}
-        <Typography variant="caption" display="block" color="text.secondary">Nothing is invoiced and no stock moves until the lenses are received and converted to a purchase invoice.</Typography>
-      </DialogTitle>
-      <DialogContent dividers ref={contentRef}>
-        <Stepper activeStep={step} alternativeLabel sx={{ mb: 2 }}>
-          {steps.map((s) => <Step key={s}><StepLabel>{s}</StepLabel></Step>)}
-        </Stepper>
-
-        {step === 0 && (
-          <Stack spacing={2}>
-            <ToggleButtonGroup ref={typeGroupRef} exclusive size="small" color="primary" value={type} onChange={(e, v) => setType(v)}
-              disabled={Boolean(initial)} onKeyDown={onTypeKeys}>
-              {typeChoices.map(([value, label, keys]) => (
-                // Only the selected type is a stop in the Enter chain; ←/→ switch between them.
-                <ToggleButton key={value} value={value} sx={{ fontWeight: 700 }} title={keys ? `${keys} · ←/→ to change, Enter to continue` : ''}
-                  tabIndex={value === type ? 0 : -1} {...(value === type ? { 'data-nav-stop': 'advance' } : {})}>
-                  {label}
-                </ToggleButton>
-              ))}
-            </ToggleButtonGroup>
-            <Grid container spacing={1.5}>
-              <Grid item xs={12} md={6}>
-                <Autocomplete
-                  options={options}
-                  loading={productsLoading}
-                  value={product}
-                  autoHighlight
-                  openOnFocus
-                  getOptionLabel={(p) => p?.name || ''}
-                  isOptionEqualToValue={(a, b) => String(a.id) === String(b.id)}
-                  onChange={(e, p) => {
-                    setDraft((d) => ({
-                      ...d, product: p ? p.id : '', product_name: p?.name || '', lens_model: p?.name || '',
-                      unit_price: d.unit_price || (p ? (parseFloat(p.cost_price) || '') : ''),
-                      lens_index: d.lens_index || (p?.name?.match(/\b1\.(5|6|7)\d\b/) || [''])[0],
-                      tax_percent: d.tax_percent || parseFloat(p?.tax_rate) || 0,
-                    }));
-                    setReqA(null); setOtherReq(null); setOtherSupplier('');
-                    setDraft((d) => ({ ...d, pieces: [] }));
-                    nextAfterPick(p);
-                  }}
-                  renderOption={(props, p) => (
-                    <li {...props} key={p.id}>
-                      <Box><Typography variant="body2" fontWeight={700}>{p.name}</Typography>
-                        <Typography variant="caption" color="text.secondary">{p.category_name || 'Lens'} · Stock {p.stock ?? 0} · Cost ₹{p.cost_price || 0}</Typography></Box>
-                    </li>
-                  )}
-                  renderInput={(params) => <TextField {...params} size="small" label="Lens Product / Model" required />}
-                />
-                <FormControlLabel sx={{ mt: 0.5 }} control={<Checkbox size="small" checked={showAll} onChange={(e) => setShowAll(e.target.checked)} />}
-                  label={<Typography variant="caption">Show all products (not only lens categories)</Typography>} />
-              </Grid>
-              <Grid item xs={6} md={3}>
-                <Autocomplete freeSolo autoHighlight options={LENS_TYPES} inputValue={draft.lens_type || ''}
-                  onInputChange={(e, v) => setDraft((d) => ({ ...d, lens_type: v }))} onChange={(e, v) => nextAfterPick(v)}
-                  renderInput={(params) => <TextField {...params} size="small" label="Lens Type" />} />
-              </Grid>
-              <Grid item xs={6} md={3}>
-                <Autocomplete freeSolo autoHighlight options={LENS_INDEXES} inputValue={draft.lens_index || ''}
-                  onInputChange={(e, v) => setDraft((d) => ({ ...d, lens_index: v }))} onChange={(e, v) => nextAfterPick(v)}
-                  renderInput={(params) => <TextField {...params} size="small" label="Material / Index" />} />
-              </Grid>
-              <Grid item xs={6} md={3}>
-                <Autocomplete freeSolo autoHighlight options={LENS_COATINGS} inputValue={draft.lens_coating || ''}
-                  onInputChange={(e, v) => setDraft((d) => ({ ...d, lens_coating: v }))} onChange={(e, v) => nextAfterPick(v)}
-                  renderInput={(params) => <TextField {...params} size="small" label="Coating" />} />
-              </Grid>
-              <Grid item xs={6} md={3}>
-                <TextField size="small" fullWidth label="Purchase price" type="number" value={draft.unit_price}
-                  onChange={(e) => setDraft((d) => ({ ...d, unit_price: e.target.value }))}
-                  InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }} />
-              </Grid>
-              <Grid item xs={6} md={3}>
-                <TextField size="small" fullWidth select label="Price per" value={draft.pricing_unit} onChange={(e) => setDraft((d) => ({ ...d, pricing_unit: e.target.value }))}
-                  SelectProps={{ ...enterOpensSelectProps }}>
-                  <MenuItem value="PAIR">Pair (2 lenses)</MenuItem>
-                  <MenuItem value="PIECE">Piece (1 lens)</MenuItem>
-                </TextField>
-              </Grid>
-              <Grid item xs={6} md={3}>
-                <TextField size="small" fullWidth label="GST %" type="number" value={draft.tax_percent} onChange={(e) => setDraft((d) => ({ ...d, tax_percent: e.target.value }))} />
-              </Grid>
-            </Grid>
-            <Alert severity="info" sx={{ py: 0 }}>
-              Order quantity: <b>{lpoQtyLabel(type, 1)}</b>
-              {type === SINGLE_PIECE && supplierPerLine ? ' — if the customer ordered a pair, the other eye can be ordered from a different supplier on the next step.' : ''}
-            </Alert>
-          </Stack>
-        )}
-
-        {step >= 1 && step < reviewStep && (() => {
-          const idx = step - 1;
-          const isA = idx === 0;
-          return (
-            <Stack spacing={2}>
-              <RequirementPicker
-                label={type === SINGLE_PAIR ? 'Customer order (both eyes)' : 'Customer order / eye'}
-                product={draft.product}
-                excludePoId={excludePoId}
-                pairMode={type === SINGLE_PAIR}
-                takenKeys={takenKeys}
-                value={isA ? reqA : reqB}
-                disabledOrder={legacyTwoOrders && !isA ? reqA?.sales_order : null}
-                onChange={isA ? pickA : pickB}
-              />
-              {supplierPerLine && isA && (
-                <SupplierSelect label={type === SINGLE_PAIR ? 'Supplier for both lenses' : `Supplier for this lens${piece(0) ? ` (${eyeShort(piece(0).eye)})` : ''}`}
-                  value={thisSupplier} suppliers={suppliers} required
-                  onChange={(v) => setDraft((d) => ({ ...d, supplier: String(v) === String(headerSupplier) ? '' : v }))} />
-              )}
-              {offerOtherEye && (
-                <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 2, borderColor: 'primary.main', bgcolor: 'action.hover' }}>
-                  <Typography variant="body2" fontWeight={800} sx={{ mb: 1 }}>
-                    This order is a pair — the other lens ({eyeLabel(otherReq.eye)}) is still to be ordered.
-                  </Typography>
-                  <SupplierSelect label={`Order the ${eyeShort(otherReq.eye)} lens from`} value={otherSupplier} onChange={setOtherSupplier}
-                    suppliers={suppliers} emptyLabel="Not now — leave it pending" sx={{ minWidth: 300 }} />
-                  <Typography variant="caption" display="block" color="text.secondary" sx={{ mt: 0.5 }}>
-                    {otherSupplier && String(otherSupplier) !== String(thisSupplier)
-                      ? `A separate PO is created for ${supplierName(otherSupplier)}, with the same customer order reference.`
-                      : otherSupplier ? 'Same supplier as this lens — consider ordering both as a Pair.' : 'It stays on the pending list and can be ordered later.'}
-                    {otherReq.rx_summary ? ` Rx: ${otherReq.rx_summary}` : ''}
-                  </Typography>
-                </Paper>
-              )}
-              {type === SINGLE_PAIR
-                ? draft.pieces.map((p, i) => <PieceRxEditor key={p.eye} piece={p} onChange={(np) => setPiece(i, np)} unlockTick={rxUnlockTick}
-                    title={`${eyeLabel(p.eye)} · ${p.customer_name} · ${p.sales_order_number}`} />)
-                : piece(idx) && (
-                  <>
-                    <Typography variant="body2"><b>{piece(idx).customer_name}</b> · {piece(idx).sales_order_number} · <b>{eyeLabel(piece(idx).eye)}</b></Typography>
-                    <PieceRxEditor piece={piece(idx)} onChange={(np) => setPiece(idx, np)} unlockTick={rxUnlockTick}
-                      title={eyeLabel(piece(idx).eye)} />
-                  </>
-                )}
-            </Stack>
-          );
-        })()}
-
-        {step === reviewStep && (
-          <Stack spacing={1.5}>
-            <Stack direction="row" spacing={3} flexWrap="wrap">
-              <Typography variant="body2"><b>Lens Model:</b> {draft.lens_model || draft.product_name}</Typography>
-              <Typography variant="body2"><b>Order Type:</b> {ORDER_TYPES[type].short}</Typography>
-              <Typography variant="body2"><b>Total:</b> {secondDraft ? lpoQtyLabel(SINGLE_PIECE, 2) : lpoQtyLabel(type, 1)}</Typography>
-              {draft.unit_price ? <Typography variant="body2"><b>Price:</b> ₹{draft.unit_price} / {draft.pricing_unit === 'PIECE' ? 'piece' : 'pair'}</Typography> : null}
-            </Stack>
-            <TableContainer component={Paper} variant="outlined">
-              <Table size="small">
-                <TableHead><TableRow><TableCell sx={{ fontWeight: 800 }}>Detail</TableCell>
-                  {reviewPieces.map((p, i) => <TableCell key={i} sx={{ fontWeight: 800 }}>{eyeLabel(p.eye)}</TableCell>)}</TableRow></TableHead>
-                <TableBody>
-                  {[
-                    ...(supplierPerLine ? [['Supplier', (p) => p.supplier_label || '—']] : []),
-                    ['Customer', (p) => p.customer_name || '—'],
-                    ['Sales Order', (p) => p.sales_order_number || '—'],
-                    ['SPH', (p) => rxCells(p.rx).sph], ['CYL', (p) => rxCells(p.rx).cyl],
-                    ['AXIS', (p) => rxCells(p.rx).axis], ['ADD', (p) => rxCells(p.rx).add],
-                    ['Rx', (p) => (sameRx(p.rx, p.original_rx) ? 'As per sales order' : `Changed: ${p.rx_change_reason || '(reason missing)'}`)],
-                  ].map(([label, fn]) => (
-                    <TableRow key={label}><TableCell sx={{ fontWeight: 700, color: 'text.secondary' }}>{label}</TableCell>
-                      {reviewPieces.map((p, i) => <TableCell key={i}>{fn(p)}</TableCell>)}</TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </TableContainer>
-            {errs.map((e) => <Alert key={e} severity="error" sx={{ py: 0 }}>{e}</Alert>)}
-          </Stack>
-        )}
-      </DialogContent>
-      <DialogActions sx={{ px: 3, py: 1.5 }}>
-        <Button onClick={onClose}>Cancel</Button>
-        <KeyHint>Enter: next field · Ctrl+Enter: {step < reviewStep ? 'next step' : (initial ? 'update' : 'add to PO')} · Alt+B: back · Ctrl+/: all keys</KeyHint>
-        {step > 0 && <Button onClick={() => setStep((s) => s - 1)}>Back (Alt+B)</Button>}
-        {step < reviewStep && <Button variant="contained" onClick={next} {...navStop()}>Next</Button>}
-        {step === reviewStep && <Button ref={addBtnRef} variant="contained" onClick={finish} sx={{ fontWeight: 800 }} {...navStop()}>
-          {initial ? 'Update Lens' : secondDraft ? 'Add Both Lenses' : 'Add to PO'} (Enter)</Button>}
-      </DialogActions>
-      <ShortcutHelpDialog open={help} onClose={() => setHelp(false)} shortcuts={LENS_ITEM_SHORTCUTS} title="Add Lens" />
-    </Dialog>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // Create / edit a Lens PO
 // ---------------------------------------------------------------------------
 
-// Lens models come from the product master: spectacle-lens categories first; the lens dialog
-// can widen to every product for shops whose lens categories are named differently.
+// Lens models come from the product master: spectacle-lens categories first; the grid's model
+// picker widens to every product for shops whose lens categories are named differently.
 export function useLensProducts() {
   const [lensProducts, setLensProducts] = useState([]);
   const [productsLoading, setProductsLoading] = useState(true);
@@ -566,27 +213,28 @@ export function useLensProducts() {
   return { lensProducts, productsLoading };
 }
 
-/** Create / edit a Lens PO. Supplier-centric: every lens line is ordered from the PO's supplier
- *  unless it names its own, and a new order is saved as one Lens PO per supplier (a pair split by
- *  eye — RE from Supplier A, LE from Supplier B — becomes two POs with the same customer order
- *  reference). onSaved(firstPo, { receivedNow, all }) gets every PO created.
+/** Create / edit a Lens PO — all on one screen, no lens popups. The customer order's lenses come
+ *  pre-filled from the sale (model, type, index, coating, Rx, cost) as one row per eye; the user only
+ *  maps suppliers. Full pair from one supplier: pick it at the top and submit. Different supplier for
+ *  one eye: change the supplier on that eye's row — the pair is split and each supplier's lenses
+ *  are saved as their own Lens PO with the same customer order reference.
+ *  onSaved(firstPo, { receivedNow, all }) gets every PO created.
  *  `entryMode` = opened from Purchase Entry: the supplier follows the entry's, and "Lenses received
  *  now" saves the PO, receives every lens and hands it back so the entry can bill it at once.
  *  `onPartial(savedPos)`: some suppliers' POs were saved before one failed — the editor stays
  *  open with the unsaved lines only. */
-export function LensPOEditor({ open, po, seed, suppliers, lensProducts, productsLoading, onClose, onSaved, onPartial, entryMode = false, lockSupplier = false, startWith = null }) {
+export function LensPOEditor({ open, po, seed, suppliers, lensProducts, productsLoading, onClose, onSaved, onPartial, entryMode = false, lockSupplier = false }) {
   const editing = Boolean(po?.id);
   const scope = !editing || ['DRAFT', 'PENDING'].includes(po.status) ? 'full' : po.status === 'ORDERED' ? 'header' : 'remarks';
   const [header, setHeader] = useState({});
   const [items, setItems] = useState([]);
-  const [itemDialog, setItemDialog] = useState(null); // {orderType, initial, index}
+  const [rxOpen, setRxOpen] = useState({}); // `${line key}|${eye}` → prescription editor shown
   const [saving, setSaving] = useState(false);
   const [help, setHelp] = useState(false);
   const vendorInputRef = useRef(null);
   const remarksRef = useRef(null);
   const primaryRef = useRef(null);
-  const itemDialogOpenRef = useRef(false);
-  itemDialogOpenRef.current = Boolean(itemDialog);
+  const orderInputRef = useRef(null);
 
   useEffect(() => {
     if (!open) return;
@@ -596,31 +244,34 @@ export function LensPOEditor({ open, po, seed, suppliers, lensProducts, products
       submitAs: po?.status && po.status !== 'DRAFT' ? po.status : 'PENDING',
     });
     setItems((po?.items || []).map(draftFromItem).concat(seed?.items || []));
-    if (startWith) setItemDialog({ orderType: startWith });
+    setRxOpen({});
   }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Requirements already claimed by unsaved lines in this editor (the server excludes this PO's
-  // saved lines itself), so the picker never offers the same eye twice.
+  // Requirements already on this editor's unsaved lines (the server excludes this PO's saved
+  // lines itself), so the order picker never offers the same eye twice.
   const takenKeys = useMemo(() => {
     const out = {};
-    items.forEach((it, i) => {
-      if (itemDialog && itemDialog.index === i) return;
-      it.pieces.forEach((p) => { const k = `${p.sales_order}|${p.product}|${p.eye}`; out[k] = (out[k] || 0) + 1; });
-    });
+    items.forEach((it) => it.pieces.forEach((p) => { const k = `${p.sales_order}|${p.product}|${p.eye}`; out[k] = (out[k] || 0) + 1; }));
     return out;
-  }, [items, itemDialog]);
+  }, [items]);
 
   const supplierName = (id) => suppliers.find((s) => String(s.id) === String(id))?.name || 'supplier';
   // New orders: one PO per supplier. An existing PO keeps its one supplier.
   const groups = useMemo(() => (editing ? [{ supplier: String(header.supplier || ''), items }] : groupItemsBySupplier(items, header.supplier)),
     [editing, items, header.supplier]);
+  const lineErrors = () => items.flatMap((it, i) => draftItemErrors(it)
+    .map((e) => `Line ${i + 1} (${it.lens_model || it.product_name || 'lens'}): ${e}`));
 
   const save = async (status, { receivedNow = false } = {}) => {
     if (editing || !items.length ? !header.supplier : groups.some((g) => !g.supplier)) {
       notify(header.supplier ? 'Select a supplier for every lens.' : 'Select the supplier.', 'warning');
       return;
     }
-    if (status !== 'DRAFT' && !items.length) { notify('Add at least one lens before submitting.', 'warning'); return; }
+    if (status !== 'DRAFT' && !items.length) { notify('Add the lenses of a customer order before submitting.', 'warning'); return; }
+    if (scope === 'full') {
+      const errs = lineErrors();
+      if (errs.length) { notify(errs[0], 'warning'); return; }
+    }
     if (receivedNow && (groups.length > 1 || groups[0]?.supplier !== String(header.supplier))) {
       notify(`Only lenses from ${supplierName(header.supplier)} can be added to this Purchase Entry. Submit the order (one PO per supplier) and bill the other supplier's lenses when they arrive.`, 'warning');
       return;
@@ -672,32 +323,51 @@ export function LensPOEditor({ open, po, seed, suppliers, lensProducts, products
   };
 
   const supplier = suppliers.find((s) => String(s.id) === String(header.supplier)) || null;
-  const perLineSupplier = !editing && scope === 'full';
+  const full = scope === 'full';
+  const perLineSupplier = !editing && full;
   const setLine = (i, patch) => setItems((prev) => prev.map((x, j) => (j === i ? { ...x, ...patch } : x)));
+  const setPiece = (i, k, piece) => setItems((prev) => prev.map((x, j) => (j === i ? { ...x, pieces: x.pieces.map((p, m) => (m === k ? piece : p)) } : x)));
   const hasOtherEye = (it, i) => Boolean(it.pair_group) && items.some((x, j) => j !== i && x.pair_group === it.pair_group && x.order_type === SINGLE_PIECE);
   const toPairOrSingle = (i, kind) => {
     const it = items[i];
     if (kind === SINGLE_PIECE && it.order_type === SINGLE_PAIR) setItems((prev) => prev.flatMap((x, j) => (j === i ? splitPairItem(x) : [x])));
     if (kind === SINGLE_PAIR && it.order_type === SINGLE_PIECE) {
       const other = items.find((x, j) => j !== i && x.pair_group === it.pair_group);
-      if (other && String(other.supplier || '') !== String(it.supplier || '')) notify('Both lenses now come from one supplier.', 'info');
+      if (other && lineSupplier(other, header.supplier) !== lineSupplier(it, header.supplier)) notify('Both lenses now come from one supplier.', 'info');
       setItems((prev) => joinPairItems(prev, i));
     }
   };
+  // Drops one eye: a Pair keeps the other eye as a Single Lens; that eye goes back to pending.
+  const removeEye = (i, eye) => setItems((prev) => prev.flatMap((x, j) => {
+    if (j !== i) return [x];
+    if (x.order_type !== SINGLE_PAIR) return [];
+    return splitPairItem(x).filter((p) => p.pieces[0].eye !== eye).map((p) => ({ ...p, pair_group: undefined }));
+  }));
+  const pickModel = (i, p) => setLine(i, {
+    product: p ? p.id : '', product_name: p?.name || '', lens_model: p?.name || '',
+    ...(p && !items[i].unit_price ? { unit_price: parseFloat(p.cost_price) || '' } : {}),
+    ...(p && !parseFloat(items[i].tax_percent) ? { tax_percent: parseFloat(p.tax_rate) || 0 } : {}),
+  });
+
+  // A customer order picked on the main screen: its lenses land in the grid, pre-filled.
+  const addOrder = (rows) => {
+    const added = lensItemsFromRequirements(rows, lensProducts);
+    if (!added.length) { notify('Every lens on that order is already on this PO.', 'info'); return; }
+    setItems((prev) => [...prev, ...added]);
+    const first = rows[0];
+    const ref = `Customer order ${first.sales_order_number} — ${first.customer_name || 'customer'}${first.patient_code ? ` (${first.patient_code})` : ''}`;
+    setHeader((h) => ({ ...h, remarks: h.remarks ? (h.remarks.includes(first.sales_order_number) ? h.remarks : `${h.remarks}; ${ref}`) : ref }));
+    if (added.some((it) => !it.product)) notify('A lens on that order has no product in the master — pick its lens model in the grid.', 'warning');
+    setTimeout(() => (header.supplier || lockSupplier ? primaryRef.current : vendorInputRef.current)?.focus(), 60);
+  };
+
   const canDraft = !editing || po.status === 'DRAFT';
   const mainStatus = canDraft ? header.submitAs || 'PENDING' : null;
   const receiveNowOffered = entryMode && !editing;
 
-  // Back from the lens dialog: to the vendor if it is still empty, otherwise to the primary button.
-  const afterItemDialog = () => setTimeout(() => {
-    if (!header.supplier && !lockSupplier) vendorInputRef.current?.focus();
-    else primaryRef.current?.focus();
-  }, 60);
-  const addLens = (orderType) => { if (scope !== 'full') return false; setItemDialog({ orderType }); return true; };
   const handlersRef = useRef({});
   handlersRef.current = {
-    addPair: () => addLens(SINGLE_PAIR),
-    addPiece: () => addLens(SINGLE_PIECE),
+    addOrder: () => { if (!full || !orderInputRef.current) return false; orderInputRef.current.focus(); return true; },
     primary: () => (saving ? true : receiveNowOffered ? save('ORDERED', { receivedNow: true }) : save(mainStatus)),
     submit: () => (saving ? true : save(mainStatus)),
     draft: () => { if (!canDraft || saving) return false; save('DRAFT'); return true; },
@@ -706,31 +376,29 @@ export function LensPOEditor({ open, po, seed, suppliers, lensProducts, products
     help: () => setHelp(true),
   };
   const hotkeys = useMemo(() => dialogHotkeys(LENS_PO_EDITOR_SHORTCUTS, () => handlersRef.current), []);
-  // The first field gets the cursor once the dialog is in — unless a lens dialog opened on top
-  // of it straight away (Purchase Entry → Add Pair / Single Lens), which keeps the cursor.
-  const transitionProps = useMemo(() => ({
-    onEntered: (node) => { if (!itemDialogOpenRef.current) navDialogProps.TransitionProps.onEntered(node); },
-  }), []);
 
+  const COLS = 9;
+  const modelOptions = lensProducts.allProducts || lensProducts;
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="lg" fullWidth PaperProps={keyboardPaper(hotkeys)} TransitionProps={transitionProps}>
+    <Dialog open={open} onClose={onClose} maxWidth="xl" fullWidth PaperProps={keyboardPaper(hotkeys)} TransitionProps={navDialogProps.TransitionProps}>
       <DialogTitle sx={{ fontWeight: 800 }}>
         {editing ? `Lens PO ${po.po_number}` : 'Lens Purchase Order'}
         {editing && <Chip size="small" sx={{ ml: 1 }} label={statusMeta(po.status).label} color={statusMeta(po.status).color} />}
         <Typography variant="caption" display="block" color="text.secondary">
-          Choose the supplier, then add each lens as a Pair (RE + LE) or a Single Lens. Lenses from different suppliers are saved as separate POs. No invoice, stock or accounting until the lenses are received and billed.
+          The lenses come from the customer order exactly as sold — just choose the supplier and submit. To order one eye from a different supplier, change the supplier on that eye's row: a separate PO is created for it. No invoice, stock or accounting until the lenses are received and billed.
         </Typography>
       </DialogTitle>
       <DialogContent dividers>
         <Grid container spacing={1.5} sx={{ mb: 2 }}>
-          <Grid item xs={12} sm={6} md={3}>
+          <Grid item xs={12} sm={6} md={2.5}>
             <TextField size="small" fullWidth label="PO Number" value={po?.po_number || (groups.length > 1 ? `${groups.length} POs — auto-numbered on save` : 'Auto-generated on save')} disabled />
           </Grid>
-          <Grid item xs={12} sm={6} md={3}>
-            <Autocomplete options={suppliers} value={supplier} disabled={scope !== 'full' || lockSupplier} autoHighlight openOnFocus
+          <Grid item xs={12} sm={6} md={3.5}>
+            <Autocomplete options={suppliers} value={supplier} disabled={!full || lockSupplier} autoHighlight openOnFocus
               getOptionLabel={(s) => s?.name || ''} isOptionEqualToValue={(a, b) => String(a.id) === String(b.id)}
               onChange={(e, s) => { setHeader((h) => ({ ...h, supplier: s?.id || '' })); nextAfterPick(s); }}
-              renderInput={(params) => <TextField {...params} inputRef={vendorInputRef} size="small" label="Supplier (Alt+V)" required />} />
+              renderInput={(params) => <TextField {...params} inputRef={vendorInputRef} size="small" required
+                label={perLineSupplier ? 'Supplier — both lenses (Alt+V)' : 'Supplier (Alt+V)'} />} />
           </Grid>
           <Grid item xs={6} md={2}>
             <QuickDatePickerField size="small" fullWidth label="Order Date" value={header.order_date || ''} disabled={scope === 'remarks'}
@@ -741,7 +409,7 @@ export function LensPOEditor({ open, po, seed, suppliers, lensProducts, products
               onChange={(v) => setHeader((h) => ({ ...h, expected_delivery_date: v?.target ? v.target.value : v }))} />
           </Grid>
           <Grid item xs={12} md={2}>
-            {(!editing || po.status === 'DRAFT') ? (
+            {canDraft ? (
               <TextField select size="small" fullWidth label="Submit as" value={header.submitAs || 'PENDING'} onChange={(e) => setHeader((h) => ({ ...h, submitAs: e.target.value }))}
                 SelectProps={{ ...enterOpensSelectProps }}>
                 <MenuItem value="PENDING">Pending</MenuItem>
@@ -751,93 +419,142 @@ export function LensPOEditor({ open, po, seed, suppliers, lensProducts, products
               <TextField size="small" fullWidth label="Order Status" value={statusMeta(po.status).label} disabled />
             )}
           </Grid>
-          <Grid item xs={12}>
+          <Grid item xs={12} md={full ? 6 : 12}>
             <TextField size="small" fullWidth label="Remarks (Alt+M)" value={header.remarks || ''} inputRef={remarksRef}
               onChange={(e) => setHeader((h) => ({ ...h, remarks: e.target.value }))} />
           </Grid>
+          {full && (
+            <Grid item xs={12} md={6}>
+              <OrderPicker excludePoId={po?.id} takenKeys={takenKeys} onPick={addOrder} inputRef={orderInputRef} />
+            </Grid>
+          )}
         </Grid>
 
-        <Stack direction="row" spacing={1} sx={{ mb: 1 }} flexWrap="wrap" useFlexGap>
-          <Typography variant="subtitle1" fontWeight={800} sx={{ flex: 1 }}>Lenses — {poQtyLabel(items)}</Typography>
-          {scope === 'full' && (
-            <>
-              {/* While no lens is on the PO, Enter from Remarks lands on these (↑/↓ between them). */}
-              <Button size="small" variant="contained" startIcon={<AddIcon />} onClick={() => setItemDialog({ orderType: SINGLE_PAIR })} sx={{ fontWeight: 800 }} {...navStop(!items.length)}>Add Pair — RE + LE (Alt+P)</Button>
-              <Button size="small" variant="outlined" startIcon={<AddIcon />} onClick={() => setItemDialog({ orderType: SINGLE_PIECE })} {...navStop(!items.length)}>Add Single Lens — RE or LE (Alt+L)</Button>
-            </>
-          )}
-        </Stack>
+        <Typography variant="subtitle1" fontWeight={800} sx={{ mb: 1 }}>Lenses — {poQtyLabel(items)}</Typography>
         {!editing && groups.length > 1 && (
           <Alert severity="info" sx={{ mb: 1, py: 0 }}>
-            Saving creates <b>{groups.length} purchase orders</b> — {groups.map((g) => `${supplierName(g.supplier)} (${poQtyLabel(g.items)})`).join(' · ')}.
+            Submitting creates <b>{groups.length} purchase orders</b> — {groups.map((g) => `${supplierName(g.supplier)} (${poQtyLabel(g.items)})`).join(' · ')} — each with the customer order reference.
           </Alert>
         )}
-        {scope !== 'full' && <Alert severity="info" sx={{ mb: 1, py: 0 }}>This PO is {statusMeta(po.status).label} — its lenses are locked. {scope === 'header' ? 'Dates and remarks can still be changed.' : 'Only remarks can be changed.'}</Alert>}
+        {!full && <Alert severity="info" sx={{ mb: 1, py: 0 }}>This PO is {statusMeta(po.status).label} — its lenses are locked. {scope === 'header' ? 'Dates and remarks can still be changed.' : 'Only remarks can be changed.'}</Alert>}
         <TableContainer component={Paper} variant="outlined">
           <Table size="small">
             <TableHead>
-              <TableRow sx={{ '& th': { fontWeight: 800, bgcolor: 'action.hover' } }}>
-                <TableCell>#</TableCell><TableCell>Lens Model</TableCell>{perLineSupplier && <TableCell>Supplier</TableCell>}<TableCell>Pair / Single</TableCell><TableCell>Quantity</TableCell>
-                <TableCell>Lens assignments (customer · order · eye · Rx)</TableCell><TableCell align="right">Price</TableCell><TableCell />
+              <TableRow sx={{ '& th': { fontWeight: 800, bgcolor: 'action.hover', whiteSpace: 'nowrap' } }}>
+                <TableCell>Eye</TableCell><TableCell>Customer / Order</TableCell><TableCell>Lens (as sold)</TableCell><TableCell>Power</TableCell>
+                <TableCell>Supplier</TableCell><TableCell>Pair / Single</TableCell><TableCell>Quantity</TableCell><TableCell align="right">Price</TableCell><TableCell />
               </TableRow>
             </TableHead>
             <TableBody>
               {items.length === 0 && (
-                <TableRow><TableCell colSpan={perLineSupplier ? 8 : 7} align="center" sx={{ py: 4, color: 'text.secondary' }}>No lenses yet — add a Pair (RE + LE) or a Single Lens.</TableCell></TableRow>
+                <TableRow><TableCell colSpan={COLS} align="center" sx={{ py: 4, color: 'text.secondary' }}>
+                  No lenses yet — pick a customer order above; its lenses are filled in automatically.
+                </TableCell></TableRow>
               )}
-              {items.map((it, i) => (
-                <TableRow key={it.key} hover>
-                  <TableCell>{i + 1}</TableCell>
-                  <TableCell><Typography variant="body2" fontWeight={700}>{it.lens_model || it.product_name}</Typography>
-                    <Typography variant="caption" color="text.secondary">{[it.lens_type, it.lens_index, it.lens_coating].filter(Boolean).join(' · ')}</Typography></TableCell>
-                  {perLineSupplier && (
-                    <TableCell sx={{ minWidth: 190 }}>
-                      <TextField select size="small" fullWidth value={it.supplier || ''} onChange={(e) => setLine(i, { supplier: String(e.target.value) === String(header.supplier) ? '' : e.target.value })}
-                        SelectProps={{ ...enterOpensSelectProps, displayEmpty: true }} inputProps={{ 'aria-label': `Supplier for lens ${i + 1}` }}>
-                        <MenuItem value=""><em>{supplier ? supplier.name : 'PO supplier'}</em></MenuItem>
-                        {suppliers.filter((s) => String(s.id) !== String(header.supplier)).map((s) => <MenuItem key={s.id} value={s.id}>{s.name}</MenuItem>)}
-                      </TextField>
-                    </TableCell>
-                  )}
-                  <TableCell>
-                    {perLineSupplier && (it.order_type === SINGLE_PAIR || (it.order_type === SINGLE_PIECE && hasOtherEye(it, i))) ? (
-                      <Tooltip title={it.order_type === SINGLE_PAIR ? 'Single: order RE and LE separately (each can have its own supplier)' : 'Pair: order both eyes together from one supplier'}>
-                        <ToggleButtonGroup exclusive size="small" color="primary" value={it.order_type} onChange={(e, v) => v && toPairOrSingle(i, v)}>
-                          <ToggleButton value={SINGLE_PAIR} sx={{ py: 0.25, px: 1, fontWeight: 700 }}>Pair</ToggleButton>
-                          <ToggleButton value={SINGLE_PIECE} sx={{ py: 0.25, px: 1, fontWeight: 700 }}>Single{it.order_type === SINGLE_PIECE ? ` · ${eyeShort(it.pieces[0]?.eye)}` : ''}</ToggleButton>
-                        </ToggleButtonGroup>
-                      </Tooltip>
-                    ) : (
-                      <Chip size="small" variant="outlined" label={`${ORDER_TYPES[it.order_type]?.short}${it.order_type === SINGLE_PIECE ? ` · ${eyeShort(it.pieces[0]?.eye)}` : ''}`} />
-                    )}
-                  </TableCell>
-                  <TableCell sx={{ whiteSpace: 'nowrap', fontWeight: 700 }}>{lpoQtyLabel(it.order_type, 1)}</TableCell>
-                  <TableCell>
-                    {it.pieces.map((p, k) => (
-                      <Typography key={k} variant="caption" component="div">
-                        <b>{eyeShort(p.eye)}</b> · {p.customer_name} · {p.sales_order_number} · <span style={{ fontFamily: 'monospace' }}>{rxSummary(p.rx)}</span>
-                        {!sameRx(p.rx, p.original_rx) && <Chip size="small" color="warning" label="Rx changed" sx={{ ml: 0.5, height: 16 }} />}
-                      </Typography>
-                    ))}
-                  </TableCell>
-                  <TableCell align="right">{it.unit_price ? `₹${it.unit_price}/${it.pricing_unit === 'PIECE' ? 'pc' : 'pr'}` : '—'}</TableCell>
-                  <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>
-                    {scope === 'full' && (
-                      <>
-                        <IconButton size="small" onClick={() => setItemDialog({ orderType: it.order_type, initial: it, index: i })}><EditIcon fontSize="small" /></IconButton>
-                        <IconButton size="small" color="error" onClick={() => setItems((prev) => prev.filter((_, j) => j !== i))}><DeleteIcon fontSize="small" /></IconButton>
-                      </>
-                    )}
-                  </TableCell>
-                </TableRow>
-              ))}
+              {items.flatMap((it, i) => {
+                const span = it.pieces.length || 1;
+                const own = lineSupplier(it, header.supplier);
+                const separate = perLineSupplier && header.supplier && own !== String(header.supplier);
+                const needsModel = !it.product;
+                return it.pieces.flatMap((p, k) => {
+                  const first = k === 0;
+                  const rxKey = `${it.key}|${p.eye}`;
+                  const changed = p.original_rx && !sameRx(p.rx, p.original_rx);
+                  const rows = [(
+                    <TableRow key={rxKey} hover sx={first && i > 0 ? { '& td': { borderTop: '2px solid', borderTopColor: 'divider' } } : undefined}>
+                      <TableCell sx={{ fontWeight: 800, whiteSpace: 'nowrap' }}>{eyeShort(p.eye)}<Typography variant="caption" display="block" color="text.secondary">{p.eye === 'RE' ? 'Right' : 'Left'}</Typography></TableCell>
+                      <TableCell><Typography variant="body2" fontWeight={700}>{p.customer_name || '—'}</Typography>
+                        <Typography variant="caption" color="text.secondary">{p.sales_order_number}{p.patient_code ? ` · ${p.patient_code}` : ''}</Typography></TableCell>
+                      {first && (
+                        <TableCell rowSpan={span} sx={{ minWidth: 200 }}>
+                          {needsModel && full ? (
+                            <Autocomplete options={modelOptions} loading={productsLoading} value={null} autoHighlight size="small"
+                              getOptionLabel={(o) => o?.name || ''} isOptionEqualToValue={(a, b) => String(a.id) === String(b.id)}
+                              onChange={(e, v) => pickModel(i, v)}
+                              renderInput={(params) => <TextField {...params} size="small" error label={`Pick lens model (sold as ${it.product_name || 'custom lens'})`} />} />
+                          ) : (
+                            <Typography variant="body2" fontWeight={700}>{it.lens_model || it.product_name}</Typography>
+                          )}
+                          <Typography variant="caption" color="text.secondary">{[it.lens_type, it.lens_index && `Index ${it.lens_index}`, it.lens_coating].filter(Boolean).join(' · ') || '—'}</Typography>
+                        </TableCell>
+                      )}
+                      <TableCell sx={{ fontFamily: 'monospace', fontSize: 12 }}>
+                        {rxSummary(p.rx) || '—'}
+                        {changed && <Chip size="small" color="warning" label="Rx changed" sx={{ ml: 0.5, height: 16 }} />}
+                      </TableCell>
+                      <TableCell sx={{ minWidth: 200 }}>
+                        {perLineSupplier ? (
+                          <>
+                            <TextField select size="small" fullWidth value={it.supplier || ''}
+                              onChange={(e) => setItems((prev) => setEyeSupplier(prev, i, p.eye, e.target.value, header.supplier))}
+                              SelectProps={{ ...enterOpensSelectProps, displayEmpty: true }} inputProps={{ 'aria-label': `Supplier for ${eyeShort(p.eye)} lens of line ${i + 1}` }}>
+                              <MenuItem value=""><em>{supplier ? `${supplier.name} (PO supplier)` : 'PO supplier (select above)'}</em></MenuItem>
+                              {suppliers.filter((s) => String(s.id) !== String(header.supplier)).map((s) => <MenuItem key={s.id} value={s.id}>{s.name}</MenuItem>)}
+                            </TextField>
+                            {separate && <Typography variant="caption" color="primary" fontWeight={700}>Separate PO</Typography>}
+                          </>
+                        ) : (
+                          <Typography variant="body2">{supplier?.name || po?.supplier_name || '—'}</Typography>
+                        )}
+                      </TableCell>
+                      {first && (
+                        <TableCell rowSpan={span}>
+                          {perLineSupplier && (it.order_type === SINGLE_PAIR || (it.order_type === SINGLE_PIECE && hasOtherEye(it, i))) ? (
+                            <Tooltip title={it.order_type === SINGLE_PAIR ? 'Single: order RE and LE as separate lenses' : 'Pair: order both eyes together from one supplier'}>
+                              <ToggleButtonGroup exclusive size="small" color="primary" value={it.order_type} onChange={(e, v) => v && toPairOrSingle(i, v)}>
+                                <ToggleButton value={SINGLE_PAIR} sx={{ py: 0.25, px: 1, fontWeight: 700 }}>Pair</ToggleButton>
+                                <ToggleButton value={SINGLE_PIECE} sx={{ py: 0.25, px: 1, fontWeight: 700 }}>Single</ToggleButton>
+                              </ToggleButtonGroup>
+                            </Tooltip>
+                          ) : (
+                            <Chip size="small" variant="outlined" label={ORDER_TYPES[it.order_type]?.short || it.order_type} />
+                          )}
+                        </TableCell>
+                      )}
+                      {first && <TableCell rowSpan={span} sx={{ whiteSpace: 'nowrap', fontWeight: 700 }}>{lpoQtyLabel(it.order_type, 1)}</TableCell>}
+                      {first && (
+                        <TableCell rowSpan={span} align="right" sx={{ minWidth: 130 }}>
+                          {full ? (
+                            <TextField size="small" type="number" value={it.unit_price ?? ''} onChange={(e) => setLine(i, { unit_price: e.target.value })}
+                              inputProps={{ 'aria-label': `Price for line ${i + 1}`, style: { textAlign: 'right' } }}
+                              InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment>,
+                                endAdornment: <InputAdornment position="end">/{it.pricing_unit === 'PIECE' ? 'pc' : 'pr'}</InputAdornment> }} />
+                          ) : (it.unit_price ? `₹${it.unit_price}/${it.pricing_unit === 'PIECE' ? 'pc' : 'pr'}` : '—')}
+                        </TableCell>
+                      )}
+                      <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>
+                        {full && (
+                          <>
+                            <Tooltip title={rxOpen[rxKey] ? 'Hide prescription' : 'Check / correct the prescription'}>
+                              <IconButton size="small" color={rxOpen[rxKey] ? 'primary' : 'default'} onClick={() => setRxOpen((o) => ({ ...o, [rxKey]: !o[rxKey] }))}><EditIcon fontSize="small" /></IconButton>
+                            </Tooltip>
+                            <Tooltip title={`Remove the ${eyeShort(p.eye)} lens (it stays pending on the order)`}>
+                              <IconButton size="small" color="error" onClick={() => removeEye(i, p.eye)}><DeleteIcon fontSize="small" /></IconButton>
+                            </Tooltip>
+                          </>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  )];
+                  if (full && rxOpen[rxKey]) {
+                    rows.push(
+                      <TableRow key={`${rxKey}|rx`}>
+                        <TableCell colSpan={COLS} sx={{ bgcolor: 'action.hover' }}>
+                          <PieceRxEditor piece={p} onChange={(np) => setPiece(i, k, np)} title={`${eyeLabel(p.eye)} · ${p.customer_name} · ${p.sales_order_number}`} />
+                        </TableCell>
+                      </TableRow>,
+                    );
+                  }
+                  return rows;
+                });
+              })}
             </TableBody>
           </Table>
         </TableContainer>
       </DialogContent>
       <DialogActions sx={{ px: 3, py: 1.5 }}>
         <Button onClick={onClose} disabled={saving}>Close</Button>
-        <KeyHint>Enter: next field · Alt+P / Alt+L: add pair / single lens · Ctrl+Enter: {receiveNowOffered ? 'add to Purchase Entry' : 'submit'} · Ctrl+/: all keys</KeyHint>
+        <KeyHint>Enter: next field · Alt+A: add a customer order · Ctrl+Enter: {receiveNowOffered ? 'add to Purchase Entry' : 'submit'} · Ctrl+/: all keys</KeyHint>
         {canDraft && <Button variant="outlined" disabled={saving} onClick={() => save('DRAFT')}>Save Draft (Alt+D)</Button>}
         <Button ref={receiveNowOffered ? undefined : primaryRef} variant={entryMode ? 'outlined' : 'contained'} disabled={saving} onClick={() => save(mainStatus)} sx={{ fontWeight: 800 }}
           startIcon={saving ? <CircularProgress size={16} color="inherit" /> : <SendIcon />} {...navStop(!receiveNowOffered)}>
@@ -851,29 +568,6 @@ export function LensPOEditor({ open, po, seed, suppliers, lensProducts, products
         )}
       </DialogActions>
       <ShortcutHelpDialog open={help} onClose={() => setHelp(false)} shortcuts={LENS_PO_EDITOR_SHORTCUTS} title="Lens Purchase Order" />
-
-      {itemDialog && (
-        <LensItemDialog
-          open
-          orderType={itemDialog.orderType}
-          initial={itemDialog.initial}
-          lensProducts={lensProducts}
-          productsLoading={productsLoading}
-          excludePoId={po?.id}
-          takenKeys={takenKeys}
-          suppliers={suppliers}
-          headerSupplier={header.supplier || ''}
-          supplierPerLine={perLineSupplier}
-          onClose={() => { setItemDialog(null); afterItemDialog(); }}
-          onAdd={(list) => {
-            setItems((prev) => (itemDialog.index !== undefined
-              ? prev.flatMap((x, j) => (j === itemDialog.index ? list : [x]))
-              : [...prev, ...list]));
-            setItemDialog(null);
-            afterItemDialog();
-          }}
-        />
-      )}
     </Dialog>
   );
 }

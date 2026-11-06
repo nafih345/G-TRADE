@@ -148,6 +148,17 @@ def line_rx(item, eye):
     return clean_rx(rx)
 
 
+def line_specs(item, details=None):
+    """Lens design (type) and coating as sold — the line's snapshot first, then the product master —
+    so the Lens PO is pre-filled and never asks for them again."""
+    details = details if isinstance(details, dict) else (item.lens_details if isinstance(item.lens_details, dict) else {})
+    specs = details.get('specs') if isinstance(details.get('specs'), dict) else {}
+    extra = (item.product.extra_data if item.product_id and item.product else None) or {}
+    pick = lambda *vals: next((str(v).strip() for v in vals if str(v or '').strip()), '')
+    return {'lens_type': pick(specs.get('design'), extra.get('lens_design'), extra.get('lens_type')),
+            'lens_coating': pick(specs.get('coating'), extra.get('coating'), extra.get('lens_coating'))}
+
+
 def order_requirements(order):
     """{(product_id, eye): {'count', 'item', 'rx', 'lens_index'}} for one sales order's lens lines.
     product_id None = a custom lens line with no product, which any lens model may fill."""
@@ -164,7 +175,8 @@ def order_requirements(order):
                 continue
             rx = line_rx(item, eye)
             reqs[key] = {'count': qty, 'item': item, 'lens_index': str(details.get('lens_index') or '').strip(),
-                         'rx': rx if any(rx.values()) else _exam_rx(order.customer_id, eye)}
+                         'rx': rx if any(rx.values()) else _exam_rx(order.customer_id, eye),
+                         **line_specs(item, details)}
     return reqs
 
 
@@ -1072,6 +1084,7 @@ class LensPurchaseOrderViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
                     'product_name': item.product.name if item.product else (item.description or 'Lens'),
                     'description': item.description or '', 'selling_unit': item.selling_unit or PAIR,
                     'lens_index': req['lens_index'], 'eye': eye, 'eye_label': EYE_LABEL[eye],
+                    'lens_type': req.get('lens_type', ''), 'lens_coating': req.get('lens_coating', ''),
                     'rx': req['rx'], 'rx_summary': rx_summary(req['rx']),
                     'required': req['count'], 'outstanding': max(0, outstanding),
                 })

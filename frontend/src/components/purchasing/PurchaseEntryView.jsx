@@ -286,7 +286,7 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
   const [pendingFocusRow, setPendingFocusRow] = useState(null);
   const [addProductOpen, setAddProductOpen] = useState(false);
   const [multiItemsOpen, setMultiItemsOpen] = useState(false);
-  // Lens Purchase Order from inside the entry: menu anchor, open editor ({startWith}), the PO just
+  // Lens Purchase Order from inside the entry: menu anchor, open editor, the PO just
   // saved (offered for printing as an order form) and received-but-unbilled POs to pull in.
   const [lensMenuAnchor, setLensMenuAnchor] = useState(null);
   const [lensEditor, setLensEditor] = useState(null);
@@ -503,10 +503,10 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
       .then(res => setUnbilledLensPOs((res.data?.results || res.data || []).filter(po => !po.purchase_invoice)))
       .catch(() => setUnbilledLensPOs([]));
   };
-  const startLensOrder = (startWith) => {
+  const startLensOrder = () => {
     setLensMenuAnchor(null);
     if (linkedLensPO) { alert(`This entry already bills Lens PO ${linkedLensPO.po_number}. Save it first, then start the next lens order.`); return; }
-    setLensEditor({ startWith });
+    setLensEditor({});
   };
   const billLensPO = (po) => {
     setLensMenuAnchor(null);
@@ -519,14 +519,12 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
   };
   // After lenses join the entry the next step is saving it: Enter on the focused button saves.
   const focusSaveButton = () => setTimeout(() => saveBtnRef.current?.focus(), 60);
-  // Menu letters: N / P / L start that kind of lens order (↑/↓ + Enter work too).
+  // Menu letter N starts a lens order (↑/↓ + Enter work too).
   const onLensMenuKeys = (e) => {
-    if (e.ctrlKey || e.altKey || e.metaKey) return;
-    const start = { n: null, p: 'SINGLE_PAIR', l: 'SINGLE_PIECE' }[e.key.toLowerCase()];
-    if (start === undefined) return;
+    if (e.ctrlKey || e.altKey || e.metaKey || e.key.toLowerCase() !== 'n') return;
     e.preventDefault();
     e.stopPropagation();
-    startLensOrder(start);
+    startLensOrder();
   };
   const onLensPOSaved = async (po, { receivedNow, all } = {}) => {
     setLensEditor(null);
@@ -1385,16 +1383,10 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
         </Tooltip>
         <Menu anchorEl={lensMenuAnchor} open={Boolean(lensMenuAnchor)} onClose={() => setLensMenuAnchor(null)}
           MenuListProps={{ onKeyDown: onLensMenuKeys }}>
-          {[
-            [null, <AddIcon fontSize="small" sx={{ mr: 1 }} />, 'Lens Purchase Order', 'N'],
-            ['SINGLE_PAIR', <AddIcon fontSize="small" sx={{ mr: 1 }} />, 'Add Pair (RE + LE)', 'P'],
-            ['SINGLE_PIECE', <AddIcon fontSize="small" sx={{ mr: 1 }} />, 'Add Single Lens (RE or LE)', 'L'],
-          ].map(([start, icon, label, key]) => (
-            <MenuItem key={key} onClick={() => startLensOrder(start)}>
-              {icon}{label}
-              <Typography component="span" variant="caption" sx={{ ml: 'auto', pl: 3, fontWeight: 800, color: 'text.secondary' }}>{key}</Typography>
-            </MenuItem>
-          ))}
+          <MenuItem onClick={() => startLensOrder()}>
+            <AddIcon fontSize="small" sx={{ mr: 1 }} />Lens Purchase Order
+            <Typography component="span" variant="caption" sx={{ ml: 'auto', pl: 3, fontWeight: 800, color: 'text.secondary' }}>N</Typography>
+          </MenuItem>
           <Divider />
           <MenuItem disabled sx={{ fontSize: 12, fontWeight: 700 }}>Bill a received lens order</MenuItem>
           {unbilledLensPOs.length === 0 && <MenuItem disabled sx={{ fontSize: 13 }}>No received lens orders waiting to be billed</MenuItem>}
@@ -1410,7 +1402,6 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
         <LensPOEditor
           open
           entryMode
-          startWith={lensEditor.startWith}
           seed={{
             supplier: UUID_RE.test(String(selectedSupplierId)) ? selectedSupplierId : '',
             items: lensEditor.seedItems || [],

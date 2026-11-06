@@ -169,6 +169,20 @@ class ValidationTests(LensPOBase):
         err = self.create([self.item('SPLIT_PAIR', [self.piece(order, 'RE'), self.piece(other, 'LE')])], expect=400)
         self.assertIn('already been ordered', str(err))
 
+    def test_pending_requirements_prefill_type_and_coating(self):
+        """The Lens PO pre-fills what was sold — the line's specs first, then the product master."""
+        self.hmc.extra_data = {'lens_design': 'Single Vision', 'coating': 'HMC'}
+        self.hmc.save()
+        order = self.pair_order(self.asha)
+        rows = self.client.get(f'{URL}pending-requirements/', {'sales_order': str(order.pk)}).data
+        self.assertEqual({(r['eye'], r['lens_type'], r['lens_coating']) for r in rows},
+                         {('RE', 'Single Vision', 'HMC'), ('LE', 'Single Vision', 'HMC')})
+        item = order.items.get()
+        item.lens_details = {**item.lens_details, 'specs': {'design': 'Progressive', 'coating': 'Blue Cut'}}
+        item.save(update_fields=['lens_details'])
+        rows = self.client.get(f'{URL}pending-requirements/', {'sales_order': str(order.pk)}).data
+        self.assertEqual({(r['lens_type'], r['lens_coating']) for r in rows}, {('Progressive', 'Blue Cut')})
+
     def test_cancelled_po_frees_the_requirement(self):
         order = self.pair_order(self.asha)
         po = self.create([self.item('SINGLE_PAIR', [self.piece(order, 'RE'), self.piece(order, 'LE')])])

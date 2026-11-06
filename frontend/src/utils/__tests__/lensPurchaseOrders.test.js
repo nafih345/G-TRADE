@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   SINGLE_PAIR, SPLIT_PAIR, SINGLE_PIECE, lpoQtyLabel, poQtyLabel, rxCells, rxSummary, sameRx,
   pieceFromRequirement, draftItemErrors, itemPayload, buildOrderSheetHtml, lensItemsFromRequirements,
-  splitPairItem, joinPairItems, groupItemsBySupplier,
+  splitPairItem, joinPairItems, groupItemsBySupplier, setEyeSupplier,
 } from '../lensPurchaseOrders.js';
 
 const reqA = { sales_order: 'so-a', sales_order_number: 'SO-101', customer_name: 'Customer A', product: 'hmc', eye: 'RE',
@@ -157,4 +157,44 @@ test('pair split by eye: RE and LE to different suppliers become separate POs, a
   assert.deepEqual(draftItemErrors(joined[0]), []);
   // One supplier for the whole order = one PO.
   assert.equal(groupItemsBySupplier(joined, 'sup-a').length, 1);
+});
+
+test('lensItemsFromRequirements: lens type and coating come pre-filled as sold', () => {
+  const order = { sales_order: 'so-1', sales_order_number: 'ORD-8', customer_name: 'Ravi', product: 'pg', product_name: 'Progressive', outstanding: 1 };
+  const products = [{ id: 'pg', name: 'Progressive 1.60', cost_price: '1200', extra_data: { lens_design: 'Progressive', coating: 'Blue Cut', refractive_index: '1.60' } }];
+  const [fromSale] = lensItemsFromRequirements([{ ...order, eye: 'RE', rx: { sph: '1.00' }, lens_type: 'Office', lens_coating: 'HMC' }], products);
+  assert.equal(fromSale.lens_type, 'Office');
+  assert.equal(fromSale.lens_coating, 'HMC');
+  assert.equal(fromSale.lens_index, '1.60'); // product master fallback
+  const [fromMaster] = lensItemsFromRequirements([{ ...order, eye: 'LE', rx: { sph: '1.00' } }], products);
+  assert.equal(fromMaster.lens_type, 'Progressive');
+  assert.equal(fromMaster.lens_coating, 'Blue Cut');
+});
+
+test("setEyeSupplier: changing one eye's supplier splits the pair; matching again rejoins it", () => {
+  const order = { sales_order: 'so-1', sales_order_number: 'ORD-9', customer_name: 'Mini', product: 'hmc', product_name: 'HMC', outstanding: 1 };
+  const [pair] = lensItemsFromRequirements([{ ...order, eye: 'RE', rx: { sph: '-1.00' } }, { ...order, eye: 'LE', rx: { sph: '-1.25' } }],
+    [{ id: 'hmc', name: 'HMC', cost_price: '800' }]);
+  const items = [pair];
+  // Same as the header supplier: nothing changes.
+  assert.equal(setEyeSupplier(items, 0, 'LE', 'sup-a', 'sup-a'), items);
+
+  const split = setEyeSupplier(items, 0, 'LE', 'sup-b', 'sup-a');
+  assert.equal(split.length, 2);
+  assert.deepEqual(split.map((x) => [x.order_type, x.pieces[0].eye, x.supplier, x.unit_price]),
+    [[SINGLE_PIECE, 'RE', '', 400], [SINGLE_PIECE, 'LE', 'sup-b', 400]]);
+  const groups = groupItemsBySupplier(split, 'sup-a');
+  assert.deepEqual(groups.map((g) => [g.supplier, g.items.length]), [['sup-a', 1], ['sup-b', 1]]);
+  assert.ok(split.every((x) => x.pieces[0].sales_order === 'so-1'), 'both POs keep the customer order');
+
+  // LE back to the PO supplier → one Pair again.
+  const joined = setEyeSupplier(split, 1, 'LE', 'sup-a', 'sup-a');
+  assert.equal(joined.length, 1);
+  assert.equal(joined[0].order_type, SINGLE_PAIR);
+  assert.equal(joined[0].unit_price, 800);
+  assert.deepEqual(joined[0].pieces.map((x) => x.eye), ['RE', 'LE']);
+
+  // An explicit Pair → Single split is not rejoined just because the suppliers match.
+  const manual = splitPairItem(pair);
+  assert.equal(setEyeSupplier(manual, 1, 'LE', '', 'sup-a').length, 2);
 });

@@ -313,9 +313,10 @@ export function lensItemsFromRequirements(reqs = [], products = []) {
       product: base.product || '',
       product_name: base.product_name || '',
       lens_model: product?.name || base.product_name || '',
-      lens_type: '',
-      lens_index: base.lens_index || '',
-      lens_coating: '',
+      // As sold (the server reads the line's specs, then the product master) — never re-asked.
+      lens_type: base.lens_type || product?.extra_data?.lens_design || '',
+      lens_index: base.lens_index || product?.extra_data?.refractive_index || '',
+      lens_coating: base.lens_coating || product?.extra_data?.coating || '',
       order_type: orderType,
       unit_price: product ? (parseFloat(product.cost_price) || '') : '',
       pricing_unit: pricingUnit,
@@ -384,6 +385,30 @@ export function joinPairItems(items, index) {
 
 /** The supplier a line is ordered from: its own pick, else the PO header's supplier. */
 export const lineSupplier = (item, headerSupplier) => String(item?.supplier || headerSupplier || '');
+
+/**
+ * Gives one eye of a line its own supplier, straight from the grid. An eye of a Pair is split off
+ * (RE from Supplier A, LE from Supplier B → two Single Lens lines, two POs); when both eyes of a
+ * pair split this way end up with the same supplier again they are joined back into the Pair.
+ * `supplier` '' = the PO header's supplier.
+ */
+export function setEyeSupplier(items, index, eye, supplier, headerSupplier = '') {
+  const it = items[index];
+  if (!it) return items;
+  const sup = String(supplier || '') === String(headerSupplier || '') ? '' : String(supplier || '');
+  if (it.order_type === SINGLE_PAIR) {
+    if (sup === String(it.supplier || '')) return items;
+    const parts = splitPairItem(it).map((p) => ({
+      ...p, split_by_supplier: true, supplier: p.pieces[0].eye === eye ? sup : String(it.supplier || ''),
+    }));
+    return items.flatMap((x, j) => (j === index ? parts : [x]));
+  }
+  const next = items.map((x, j) => (j === index ? { ...x, supplier: sup } : x));
+  if (!it.split_by_supplier || !it.pair_group) return next;
+  const other = next.findIndex((x, j) => j !== index && x.pair_group === it.pair_group && x.order_type === SINGLE_PIECE);
+  if (other < 0 || lineSupplier(next[other], headerSupplier) !== lineSupplier(next[index], headerSupplier)) return next;
+  return joinPairItems(next, index).map((x) => (x.key === it.pair_group ? { ...x, split_by_supplier: false } : x));
+}
 
 /** [{ supplier, items }] in first-seen order — each group is saved as its own Lens PO. */
 export function groupItemsBySupplier(items = [], headerSupplier = '') {

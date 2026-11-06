@@ -26,34 +26,19 @@ export const PURCHASE_ENTRY_SHORTCUTS = [
   { id: 'save', keys: ['Ctrl+S'], group: 'Purchase Entry', label: 'Save purchase' },
   { id: 'print', keys: ['Ctrl+P'], group: 'Purchase Entry', label: 'Save & print' },
   { id: 'new', keys: ['Ctrl+N', 'Esc'], group: 'Purchase Entry', label: 'Clear the form' },
-  { id: 'lensMenu', keys: ['Alt+L'], group: 'Lens Purchase Order', label: 'Open the Lens Purchase Order menu (then N / P / L, or ↑↓ + Enter)' },
-  { id: 'lensMenuN', keys: ['N'], group: 'Lens Purchase Order', global: false, label: 'Menu: Lens Purchase Order' },
-  { id: 'lensMenuP', keys: ['P'], group: 'Lens Purchase Order', global: false, label: 'Menu: Add Pair (RE + LE)' },
-  { id: 'lensMenuL', keys: ['L'], group: 'Lens Purchase Order', global: false, label: 'Menu: Add Single Lens (RE or LE)' },
+  { id: 'lensMenu', keys: ['Alt+L'], group: 'Lens Purchase Order', label: 'Open the Lens Purchase Order menu (then N, or ↑↓ + Enter)' },
+  { id: 'lensMenuN', keys: ['N'], group: 'Lens Purchase Order', global: false, label: 'Menu: Lens Purchase Order (pick the customer order, map suppliers)' },
   { id: 'help', keys: ['Ctrl+/'], group: 'Help', label: 'This list' },
   ...FIELD_KEYS,
 ];
 
 export const LENS_PO_EDITOR_SHORTCUTS = [
-  { id: 'addPair', keys: ['Alt+P'], group: 'Lenses', label: 'Add Pair (RE + LE from one supplier)' },
-  { id: 'addPiece', keys: ['Alt+L'], group: 'Lenses', label: 'Add Single Lens (RE or LE — the other eye can go to another supplier)' },
+  { id: 'addOrder', keys: ['Alt+A'], group: 'Lenses', label: "Add a customer order's lenses (pre-filled as sold)" },
   { id: 'primary', keys: ['Ctrl+Enter'], group: 'Save', label: 'From Purchase Entry: Lenses Received — Add to Purchase Entry. Elsewhere: Submit Order' },
   { id: 'submit', keys: ['Alt+O'], group: 'Save', label: 'Submit Order — one PO per supplier (lenses arrive later)' },
   { id: 'draft', keys: ['Alt+D'], group: 'Save', label: 'Save Draft' },
   { id: 'vendor', keys: ['Alt+V'], group: 'Header', label: 'Supplier' },
   { id: 'remarks', keys: ['Alt+M'], group: 'Header', label: 'Remarks' },
-  { id: 'help', keys: ['Ctrl+/'], group: 'Help', label: 'This list' },
-  ...FIELD_KEYS,
-];
-
-export const LENS_ITEM_SHORTCUTS = [
-  { id: 'type1', keys: ['Alt+1'], group: 'Order type', label: 'Pair — RE + LE (2 pieces)' },
-  { id: 'type3', keys: ['Alt+2'], group: 'Order type', label: 'Single Lens — RE or LE (1 piece)' },
-  { id: 'typeArrows', keys: ['←', '→'], group: 'Order type', global: false, label: 'On the order-type buttons: change the type (Enter moves on)' },
-  { id: 'next', keys: ['Ctrl+Enter'], group: 'Steps', label: 'Next step; on Review: Add to PO' },
-  { id: 'back', keys: ['Alt+B'], group: 'Steps', label: 'Previous step' },
-  { id: 'draft', keys: ['Alt+D'], group: 'Steps', label: 'Save Draft (where offered)' },
-  { id: 'editRx', keys: ['Alt+R'], group: 'Prescription', label: 'Unlock the prescription to correct it (a reason is then required)' },
   { id: 'help', keys: ['Ctrl+/'], group: 'Help', label: 'This list' },
   ...FIELD_KEYS,
 ];
