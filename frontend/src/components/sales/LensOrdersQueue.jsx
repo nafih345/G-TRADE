@@ -80,7 +80,7 @@ export default function LensOrdersQueue({ onCreateLensPurchase, onReceiveLensPO,
       return (
         <Button size="small" variant="contained" color="warning" startIcon={<PurchaseIcon />} onClick={() => onCreateLensPurchase?.(row)}
           sx={{ fontWeight: 800, textTransform: 'none', whiteSpace: 'nowrap' }}>
-          Create Purchase Entry / Order from Supplier
+          Purchase Lens
         </Button>
       );
     }

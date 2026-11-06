@@ -26,32 +26,29 @@ export const PURCHASE_ENTRY_SHORTCUTS = [
   { id: 'save', keys: ['Ctrl+S'], group: 'Purchase Entry', label: 'Save purchase' },
   { id: 'print', keys: ['Ctrl+P'], group: 'Purchase Entry', label: 'Save & print' },
   { id: 'new', keys: ['Ctrl+N', 'Esc'], group: 'Purchase Entry', label: 'Clear the form' },
-  { id: 'lensMenu', keys: ['Alt+L'], group: 'Lens Purchase Order', label: 'Open the Lens Purchase Order menu (then N / S / P / L, or ↑↓ + Enter)' },
-  { id: 'lensMenuN', keys: ['N'], group: 'Lens Purchase Order', global: false, label: 'Menu: New Lens Purchase Order' },
-  { id: 'lensMenuS', keys: ['S'], group: 'Lens Purchase Order', global: false, label: 'Menu: Add Split Pair Lens (2 customers)' },
-  { id: 'lensMenuP', keys: ['P'], group: 'Lens Purchase Order', global: false, label: 'Menu: Single Customer Pair' },
-  { id: 'lensMenuL', keys: ['L'], group: 'Lens Purchase Order', global: false, label: 'Menu: Single Lens (1 piece)' },
+  { id: 'lensMenu', keys: ['Alt+L'], group: 'Lens Purchase Order', label: 'Open the Lens Purchase Order menu (then N / P / L, or ↑↓ + Enter)' },
+  { id: 'lensMenuN', keys: ['N'], group: 'Lens Purchase Order', global: false, label: 'Menu: Lens Purchase Order' },
+  { id: 'lensMenuP', keys: ['P'], group: 'Lens Purchase Order', global: false, label: 'Menu: Add Pair (RE + LE)' },
+  { id: 'lensMenuL', keys: ['L'], group: 'Lens Purchase Order', global: false, label: 'Menu: Add Single Lens (RE or LE)' },
   { id: 'help', keys: ['Ctrl+/'], group: 'Help', label: 'This list' },
   ...FIELD_KEYS,
 ];
 
 export const LENS_PO_EDITOR_SHORTCUTS = [
-  { id: 'addSplit', keys: ['Alt+S'], group: 'Lenses', label: 'Add Split Pair Lens (2 customers)' },
-  { id: 'addPair', keys: ['Alt+P'], group: 'Lenses', label: 'Add Single Customer Pair' },
-  { id: 'addPiece', keys: ['Alt+L'], group: 'Lenses', label: 'Add Single Lens (1 piece)' },
+  { id: 'addPair', keys: ['Alt+P'], group: 'Lenses', label: 'Add Pair (RE + LE from one supplier)' },
+  { id: 'addPiece', keys: ['Alt+L'], group: 'Lenses', label: 'Add Single Lens (RE or LE — the other eye can go to another supplier)' },
   { id: 'primary', keys: ['Ctrl+Enter'], group: 'Save', label: 'From Purchase Entry: Lenses Received — Add to Purchase Entry. Elsewhere: Submit Order' },
-  { id: 'submit', keys: ['Alt+O'], group: 'Save', label: 'Submit Order (lenses arrive later)' },
+  { id: 'submit', keys: ['Alt+O'], group: 'Save', label: 'Submit Order — one PO per supplier (lenses arrive later)' },
   { id: 'draft', keys: ['Alt+D'], group: 'Save', label: 'Save Draft' },
-  { id: 'vendor', keys: ['Alt+V'], group: 'Header', label: 'Vendor / Laboratory' },
+  { id: 'vendor', keys: ['Alt+V'], group: 'Header', label: 'Supplier' },
   { id: 'remarks', keys: ['Alt+M'], group: 'Header', label: 'Remarks' },
   { id: 'help', keys: ['Ctrl+/'], group: 'Help', label: 'This list' },
   ...FIELD_KEYS,
 ];
 
 export const LENS_ITEM_SHORTCUTS = [
-  { id: 'type1', keys: ['Alt+1'], group: 'Order type', label: 'Single Customer — 1 Pair (2 Pieces)' },
-  { id: 'type2', keys: ['Alt+2'], group: 'Order type', label: 'Split Pair — 2 Customers' },
-  { id: 'type3', keys: ['Alt+3'], group: 'Order type', label: 'Single Lens — 1 Piece' },
+  { id: 'type1', keys: ['Alt+1'], group: 'Order type', label: 'Pair — RE + LE (2 pieces)' },
+  { id: 'type3', keys: ['Alt+2'], group: 'Order type', label: 'Single Lens — RE or LE (1 piece)' },
   { id: 'typeArrows', keys: ['←', '→'], group: 'Order type', global: false, label: 'On the order-type buttons: change the type (Enter moves on)' },
   { id: 'next', keys: ['Ctrl+Enter'], group: 'Steps', label: 'Next step; on Review: Add to PO' },
   { id: 'back', keys: ['Alt+B'], group: 'Steps', label: 'Previous step' },
@@ -62,8 +59,7 @@ export const LENS_ITEM_SHORTCUTS = [
 ];
 
 export const LENS_DASHBOARD_SHORTCUTS = [
-  { id: 'newPo', keys: ['Alt+N'], group: 'Lens Purchase Order', label: 'New Lens Purchase Order' },
-  { id: 'split', keys: ['Alt+S'], group: 'Lens Purchase Order', label: 'Add Split Pair Lens' },
+  { id: 'newPo', keys: ['Alt+N'], group: 'Lens Purchase Order', label: 'New Lens PO' },
   { id: 'search', keys: ['Alt+F'], group: 'Lens Purchase Order', label: 'Search' },
   { id: 'help', keys: ['Ctrl+/'], group: 'Help', label: 'This list' },
 ];

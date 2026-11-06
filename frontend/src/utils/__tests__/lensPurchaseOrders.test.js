@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   SINGLE_PAIR, SPLIT_PAIR, SINGLE_PIECE, lpoQtyLabel, poQtyLabel, rxCells, rxSummary, sameRx,
   pieceFromRequirement, draftItemErrors, itemPayload, buildOrderSheetHtml, lensItemsFromRequirements,
+  splitPairItem, joinPairItems, groupItemsBySupplier,
 } from '../lensPurchaseOrders.js';
 
 const reqA = { sales_order: 'so-a', sales_order_number: 'SO-101', customer_name: 'Customer A', product: 'hmc', eye: 'RE',
@@ -38,7 +39,7 @@ test('a valid split pair has no errors and posts each lens to its own order', ()
 test('split pair validation', () => {
   const same = split();
   same.pieces[1] = pieceFromRequirement({ ...reqA, eye: 'LE' });
-  assert.ok(draftItemErrors(same).some((e) => e.includes('two different customers')));
+  assert.ok(draftItemErrors(same).some((e) => e.includes('ordered as a Pair')));
 
   const wrongModel = split();
   wrongModel.pieces[1].product = 'bluecut';
@@ -67,7 +68,7 @@ test('vendor sheet shows both prescriptions and hides customer names', () => {
     ] }],
   };
   const vendor = buildOrderSheetHtml(po, { store: { name: 'G Opticals' } });
-  for (const text of ['LPO-2026-0001', 'Selected Laboratory', 'HMC 1.56', 'Split Pair', '1 Pair (2 Pieces)',
+  for (const text of ['LPO-2026-0001', 'Selected Laboratory', 'HMC 1.56', 'Pair (2 orders)', '1 Pair (2 Pieces)',
     '-2.50', '-0.75', '>90<', '-1.75', '-0.50', '>85<', '>OD<', '>OS<', 'SO-101', 'SO-102', 'G Opticals']) {
     assert.ok(vendor.includes(text), `vendor sheet missing ${text}`);
   }
@@ -123,4 +124,37 @@ test('lensItemsFromRequirements: a customer order lenses become ready-to-submit 
   const custom = lensItemsFromRequirements([{ ...order, product: null, sales_order_item: 'line-1', eye: 'RE', rx: { sph: '-1.00' } }], products);
   assert.equal(custom[0].product, '');
   assert.ok(draftItemErrors(custom[0]).includes('Select the lens model.'));
+});
+
+test('pair split by eye: RE and LE to different suppliers become separate POs, and join back', () => {
+  const both = { ...reqA, sales_order: 'so-a', product: 'hmc' };
+  const pair = {
+    key: 'k1', product: 'hmc', order_type: SINGLE_PAIR, unit_price: 1000, pricing_unit: 'PAIR', discount_amount: 100,
+    tax_percent: 0, supplier: '', pieces: [pieceFromRequirement({ ...both, eye: 'LE' }, 'LE'), pieceFromRequirement(both, 'RE')],
+  };
+  const [re, le] = splitPairItem(pair);
+  assert.equal(re.order_type, SINGLE_PIECE);
+  assert.equal(re.pieces[0].eye, 'RE');
+  assert.equal(le.pieces[0].eye, 'LE');
+  assert.equal(re.pieces[0].sales_order, 'so-a');
+  assert.equal(le.pieces[0].sales_order, 'so-a');
+  assert.equal(re.unit_price, 500); // half a pair, priced per piece
+  assert.equal(re.pricing_unit, 'PIECE');
+  assert.equal(re.discount_amount, 50);
+  assert.deepEqual(draftItemErrors(re), []);
+
+  const lines = [re, { ...le, supplier: 'sup-b' }];
+  const groups = groupItemsBySupplier(lines, 'sup-a');
+  assert.deepEqual(groups.map((g) => g.supplier), ['sup-a', 'sup-b']);
+  assert.deepEqual(groups.map((g) => g.items[0].pieces[0].eye), ['RE', 'LE']);
+
+  const joined = joinPairItems(lines, 1);
+  assert.equal(joined.length, 1);
+  assert.equal(joined[0].order_type, SINGLE_PAIR);
+  assert.equal(joined[0].unit_price, 1000);
+  assert.equal(joined[0].pricing_unit, 'PAIR');
+  assert.deepEqual(joined[0].pieces.map((p) => p.eye), ['RE', 'LE']);
+  assert.deepEqual(draftItemErrors(joined[0]), []);
+  // One supplier for the whole order = one PO.
+  assert.equal(groupItemsBySupplier(joined, 'sup-a').length, 1);
 });

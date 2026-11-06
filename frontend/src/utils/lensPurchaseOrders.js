@@ -8,9 +8,12 @@ export const SPLIT_PAIR = 'SPLIT_PAIR';
 export const SINGLE_PIECE = 'SINGLE_PIECE';
 
 export const ORDER_TYPES = {
-  [SINGLE_PAIR]: { label: 'Single Customer — 1 Pair', short: 'Single Customer', pieces: 2, unit: 'PAIR' },
-  [SPLIT_PAIR]: { label: 'Split Pair — 2 Customers', short: 'Split Pair', pieces: 2, unit: 'PAIR' },
-  [SINGLE_PIECE]: { label: 'Single Lens — 1 Piece', short: 'Single Lens', pieces: 1, unit: 'PIECE' },
+  // Supplier-centric wording: a Pair is both eyes (RE + LE) from one supplier; a Single Lens is one
+  // eye — the other eye of a pair can then be ordered from a different supplier on its own PO.
+  // SPLIT_PAIR (two orders sharing one pair) can no longer be created; old POs still show it.
+  [SINGLE_PAIR]: { label: 'Pair — RE + LE', short: 'Pair', pieces: 2, unit: 'PAIR' },
+  [SPLIT_PAIR]: { label: 'Pair — 2 orders', short: 'Pair (2 orders)', pieces: 2, unit: 'PAIR' },
+  [SINGLE_PIECE]: { label: 'Single Lens — RE or LE', short: 'Single Lens', pieces: 1, unit: 'PIECE' },
 };
 
 export const LPO_STATUSES = {
@@ -131,11 +134,11 @@ export function draftItemErrors(draft) {
     }
   });
   if (draft.order_type === SINGLE_PAIR && pieces.length === 2) {
-    if (pieces[0].sales_order && pieces[0].sales_order !== pieces[1].sales_order) errors.push('Both lenses of a single-customer pair belong to one sales order.');
-    if ([pieces[0].eye, pieces[1].eye].sort().join() !== 'LE,RE') errors.push('A single-customer pair is one Right (OD) and one Left (OS) lens.');
+    if (pieces[0].sales_order && pieces[0].sales_order !== pieces[1].sales_order) errors.push('Both lenses of a pair belong to one sales order.');
+    if ([pieces[0].eye, pieces[1].eye].sort().join() !== 'LE,RE') errors.push('A pair is one Right (OD) and one Left (OS) lens.');
   }
   if (draft.order_type === SPLIT_PAIR && pieces.length === 2 && pieces[0].sales_order && pieces[0].sales_order === pieces[1].sales_order) {
-    errors.push('A split pair is for two different customers — use Single Customer for both eyes of one order.');
+    errors.push('Both eyes of one order are ordered as a Pair.');
   }
   return errors;
 }
@@ -287,7 +290,7 @@ ${po?.remarks ? `<div class="remarks"><b>Remarks:</b> ${esc(po.remarks)}</div>` 
 /**
  * Lens PO lines for one customer order's outstanding lenses (pending-requirements rows, as
  * "Create Purchase Entry / Order from Supplier" in Sales > Orders > Lenses sends them): both eyes
- * of one lens model become Single Customer pairs, a lone eye a Single Lens. Priced at the
+ * of one lens model become Pairs, a lone eye a Single Lens. Priced at the
  * product's cost (per its pricing unit, so a single lens on a pair price costs half a pair).
  */
 export function lensItemsFromRequirements(reqs = [], products = []) {
@@ -330,4 +333,65 @@ export function lensItemsFromRequirements(reqs = [], products = []) {
     });
   });
   return items;
+}
+
+const sortRE = (a, b) => (a.eye === b.eye ? 0 : a.eye === 'RE' ? -1 : 1);
+const cents = (n) => Math.round((parseFloat(n) || 0) * 100) / 100;
+
+/**
+ * Pair → Single: a pair line's two eyes become two Single Lens lines so each can get its own
+ * supplier (RE from Supplier A, LE from Supplier B). Both keep the customer order reference;
+ * `pair_group` lets them be joined back into one Pair. A pair price is split in half.
+ */
+export function splitPairItem(item) {
+  if (!item || item.order_type !== SINGLE_PAIR || (item.pieces || []).length !== 2) return [item];
+  const group = item.pair_group || item.key || `${Date.now()}-${Math.random()}`;
+  const perPair = item.pricing_unit !== 'PIECE';
+  return [...item.pieces].sort(sortRE).map((p) => ({
+    ...item,
+    key: `${group}-${p.eye}`,
+    pair_group: group,
+    order_type: SINGLE_PIECE,
+    unit_price: item.unit_price === '' || !perPair ? item.unit_price : cents((parseFloat(item.unit_price) || 0) / 2),
+    pricing_unit: 'PIECE',
+    discount_amount: cents((parseFloat(item.discount_amount) || 0) / 2),
+    supplier: item.supplier || '',
+    pieces: [p],
+  }));
+}
+
+/** Single → Pair: joins the line at `index` with its other eye (same pair_group) back into one Pair. */
+export function joinPairItems(items, index) {
+  const it = items[index];
+  if (!it?.pair_group) return items;
+  const j = items.findIndex((x, k) => k !== index && x.pair_group === it.pair_group && x.order_type === SINGLE_PIECE);
+  if (j < 0) return items;
+  const lo = Math.min(index, j);
+  const first = items[lo];
+  const second = items[lo === index ? j : index];
+  const merged = {
+    ...first,
+    key: first.pair_group,
+    order_type: SINGLE_PAIR,
+    pricing_unit: 'PAIR',
+    unit_price: first.unit_price === '' ? '' : cents((parseFloat(first.unit_price) || 0) + (parseFloat(second.unit_price) || 0)),
+    discount_amount: cents((parseFloat(first.discount_amount) || 0) + (parseFloat(second.discount_amount) || 0)),
+    supplier: first.supplier || '',
+    pieces: [...first.pieces, ...second.pieces].sort(sortRE),
+  };
+  return items.flatMap((x, k) => (k === lo ? [merged] : k === index || k === j ? [] : [x]));
+}
+
+/** The supplier a line is ordered from: its own pick, else the PO header's supplier. */
+export const lineSupplier = (item, headerSupplier) => String(item?.supplier || headerSupplier || '');
+
+/** [{ supplier, items }] in first-seen order — each group is saved as its own Lens PO. */
+export function groupItemsBySupplier(items = [], headerSupplier = '') {
+  const groups = new Map();
+  items.forEach((it) => {
+    const sup = lineSupplier(it, headerSupplier);
+    if (!groups.has(sup)) groups.set(sup, []);
+    groups.get(sup).push(it);
+  });
+  return [...groups.entries()].map(([supplier, list]) => ({ supplier, items: list }));
 }

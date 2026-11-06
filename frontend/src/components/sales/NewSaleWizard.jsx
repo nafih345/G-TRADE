@@ -914,8 +914,8 @@ export default function NewSaleWizard({
   const [couponCode, setCouponCode] = useState('');
   const [couponDisc, setCouponDisc] = useState(0);
   const [overallDisc, setOverallDisc] = useState(0);
-  // Settings → Pricing Rules & Offers: the floors of this bill's products ({productId: info}, only
-  // while the below-cost lock is on) and the manager-approval dialog ({lines, resolve} while open).
+  // Settings → Pricing Rules & Offers: the floors / running offer of this bill's products
+  // ({productId: info}, while the below-cost lock or Offers & Clearance is on) and the manager-approval dialog ({lines, resolve} while open).
   const [priceFloors, setPriceFloors] = useState({ settings: null, floors: {}, canOverride: false });
   const [priceApproval, setPriceApproval] = useState(null);
   const floorsFetched = useRef(new Set());
@@ -3885,6 +3885,7 @@ export default function NewSaleWizard({
                       const belowCost = priceViolations[row.id];
                       const floorInfo = row.productId ? priceFloors.floors[row.productId] : null;
                       const offerPrice = floorInfo?.offer ? offerUnitPrice(row, floorInfo) : null;
+                      const offersOn = !!priceFloors.settings?.offers_enabled;
                       return (
                       <TableRow key={row.id} data-item-row={row.id} data-below-cost={belowCost ? 'true' : undefined} hover sx={{ '&:nth-of-type(even)': { bgcolor: '#f8fafc' }, ...(isSvcRow ? { bgcolor: '#fffbeb' } : {}), ...(belowCost ? { bgcolor: '#fef2f2 !important', boxShadow: 'inset 4px 0 0 #dc2626' } : {}) }}>
                         <TableCell sx={{ fontWeight: 800, color: isSvcRow ? '#b45309' : 'primary.main', fontSize: '0.8rem' }}>{row.barcode}</TableCell>
@@ -3897,15 +3898,23 @@ export default function NewSaleWizard({
                               {row.rack ? `Rack: ${row.rack}` : ''}
                             </Box>
                           )}
-                          {floorInfo?.offer && (
-                            <Tooltip title={offerPrice != null && Number(row.price) !== offerPrice
-                              ? `${floorInfo.offer.tag}: may sell down to ₹${offerPrice.toFixed(2)} — click to apply`
-                              : `${floorInfo.offer.tag}: ${offerPrice != null ? `offer price ₹${offerPrice.toFixed(2)}` : 'may sell at any price'}`}>
-                              <Chip size="small" icon={<DiscountIcon />} label={floorInfo.offer.tag} color="success" variant="outlined"
+                          {offersOn && !isSvcRow && floorInfo && (floorInfo.offer ? (
+                            <Tooltip title={[
+                              `On Offer — ${floorInfo.offer.tag}`,
+                              offerPrice != null ? `offer price ₹${offerPrice.toFixed(2)}` : 'may sell at any price',
+                              floorInfo.offer.end_date ? `until ${floorInfo.offer.end_date}` : '',
+                              offerPrice != null && Number(row.price) !== offerPrice ? 'click to apply the offer price' : '',
+                            ].filter(Boolean).join(' · ')}>
+                              <Chip size="small" icon={<DiscountIcon />} data-offer-status="on"
+                                label={`On Offer · ${floorInfo.offer.tag}${offerPrice != null ? ` ₹${offerPrice.toFixed(2)}` : ''}`}
+                                color="success"
                                 onClick={offerPrice != null ? () => { set('price')(offerPrice); } : undefined}
                                 sx={{ mt: 0.3, height: 18, fontSize: '0.6rem', fontWeight: 800, '& .MuiChip-icon': { fontSize: 12 } }} />
                             </Tooltip>
-                          )}
+                          ) : (
+                            <Chip size="small" data-offer-status="off" label="Not on Offer" variant="outlined"
+                              sx={{ mt: 0.3, height: 18, fontSize: '0.6rem', fontWeight: 700, color: 'text.secondary', borderColor: '#cbd5e1' }} />
+                          ))}
                         </TableCell>
                         {showStockCol && <TableCell />}
                         <TableCell sx={{ fontSize: '0.8rem' }}>{row.modelNo}</TableCell>

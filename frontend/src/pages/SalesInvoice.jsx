@@ -1082,7 +1082,7 @@ export default function SalesInvoice() {
           onEditInNewSale={(ord) => openSavedDocForEdit(ord)}
           // Orders > Lenses: the supplier purchase / receiving / stock entry happen in Purchase,
           // billing back in New Sale (the Order opens as its tax invoice).
-          onCreateLensPurchase={(row) => navigate('/purchase/entry', { state: { lensForSalesOrder: row.id } })}
+          onCreateLensPurchase={(row) => navigate('/purchase/lens-orders', { state: { lensForSalesOrder: row.id } })}
           onReceiveLensPO={(po) => navigate('/purchase/lens-orders', { state: { receiveLensPo: po.id, search: po.po_number } })}
           onStockLensPO={(po) => navigate('/purchase/entry', { state: { convertLensPo: po.id } })}
           onBillLensOrder={(row) => openSavedDocForEdit(row, 'Invoice')}

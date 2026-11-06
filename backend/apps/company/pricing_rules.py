@@ -372,14 +372,16 @@ def floors_for(products, settings=None, today=None):
 
 
 class PricingFloorsView(APIView):
-    """What New Sale needs to check each line as it is typed."""
+    """What New Sale needs to check each line as it is typed, and to badge each line On Offer /
+    Not on Offer. Products are looked up while either the lock or Offers & Clearance is on."""
 
     def post(self, request):
         from apps.products.models import Product
         from apps.sales.views import _is_uuid
         ids = [str(x) for x in ((request.data or {}).get('products') or []) if _is_uuid(x)][:500]
         settings = get_settings()
-        products = Product.objects.filter(pk__in=ids) if ids and settings['cost_lock_enabled'] else []
+        wanted = settings['cost_lock_enabled'] or settings['offers_enabled']
+        products = Product.objects.filter(pk__in=ids) if ids and wanted else []
         return Response({'settings': settings, 'floors': floors_for(products, settings),
                          'can_override': is_pricing_admin(request.user)})
 

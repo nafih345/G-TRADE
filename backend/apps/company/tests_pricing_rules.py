@@ -172,3 +172,21 @@ class PricingRulesTests(APITestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.data['floors'][str(self.frame.id)]['floor'], 110.0)
         self.assertFalse(res.data['can_override'])
+
+    def test_floors_report_offer_status_with_lock_off(self):
+        # Offers on, lock off: New Sale still needs each line's On Offer / Not on Offer state.
+        self._rules(offers_enabled=True)
+        self._offer(products=[str(self.frame.id)], offer_price=None, tag='Clearance Stock')
+        self.client.force_authenticate(self.cashier)
+        res = self.client.post('/api/company/pricing-rules/floors/',
+                               {'products': [str(self.frame.id), str(self.lens.id)]}, format='json')
+        self.assertEqual(res.status_code, 200)
+        frame, lens = res.data['floors'][str(self.frame.id)], res.data['floors'][str(self.lens.id)]
+        self.assertEqual(frame['offer']['tag'], 'Clearance Stock')
+        self.assertIsNone(frame['floor'])
+        self.assertIsNone(lens['offer'])
+        # Offers switched off → no product info at all (nothing to badge).
+        self._rules(offers_enabled=False)
+        self.client.force_authenticate(self.cashier)
+        res = self.client.post('/api/company/pricing-rules/floors/', {'products': [str(self.frame.id)]}, format='json')
+        self.assertEqual(res.data['floors'], {})

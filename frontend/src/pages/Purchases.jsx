@@ -154,12 +154,9 @@ export default function Purchases() {
   useEffect(() => {
     const st = location.state || {};
     if (st.lensForSalesOrder) {
-      setEntryPrefillSupplierId('');
-      setEntryPrefillPoId('');
-      setEntryEditId('');
-      setEntryLensPoId('');
-      setEntryLensSalesOrder({ id: st.lensForSalesOrder, at: Date.now() });
-      setActiveTab('entry');
+      // Straight into the Lens PO screen with the order's lenses — supplier + Pair / Single there.
+      setLensDashFocus({ salesOrderId: st.lensForSalesOrder, at: Date.now() });
+      setActiveTab('lens');
     } else if (st.convertLensPo) {
       goToConvertLensPO(st.convertLensPo);
       return;

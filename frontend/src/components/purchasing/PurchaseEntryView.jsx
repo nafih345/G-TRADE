@@ -23,7 +23,6 @@ import {
   LibraryAdd as MultiItemsIcon,
   QrCode2 as LabelIcon,
   Visibility as LensIcon,
-  CallSplit as SplitIcon,
   ArrowDropDown as DropDownIcon,
   ReceiptLong as LensBillIcon
 } from '@mui/icons-material';
@@ -520,19 +519,20 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
   };
   // After lenses join the entry the next step is saving it: Enter on the focused button saves.
   const focusSaveButton = () => setTimeout(() => saveBtnRef.current?.focus(), 60);
-  // Menu letters: N / S / P / L start that kind of lens order (↑/↓ + Enter work too).
+  // Menu letters: N / P / L start that kind of lens order (↑/↓ + Enter work too).
   const onLensMenuKeys = (e) => {
     if (e.ctrlKey || e.altKey || e.metaKey) return;
-    const start = { n: null, s: 'SPLIT_PAIR', p: 'SINGLE_PAIR', l: 'SINGLE_PIECE' }[e.key.toLowerCase()];
+    const start = { n: null, p: 'SINGLE_PAIR', l: 'SINGLE_PIECE' }[e.key.toLowerCase()];
     if (start === undefined) return;
     e.preventDefault();
     e.stopPropagation();
     startLensOrder(start);
   };
-  const onLensPOSaved = async (po, { receivedNow } = {}) => {
+  const onLensPOSaved = async (po, { receivedNow, all } = {}) => {
     setLensEditor(null);
     if (receivedNow) await applyLensPO(po.id, { append: true });
-    setSavedLensPO({ po, receivedNow });
+    // One PO per supplier: lenses split by eye across suppliers come back as several POs.
+    setSavedLensPO({ po, receivedNow, others: (all || []).filter(x => x.id !== po.id) });
   };
 
   // "Edit" from Purchase Order Reports: pull the whole saved entry back into the form,
@@ -1366,7 +1366,7 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
             Add Multiple Items
           </Button>
         </Tooltip>
-        <Tooltip title={editingId ? 'Lens orders are added to new entries only' : 'Alt+L — order prescription lenses from a lab (single pair, split pair or single lens), or bill lenses already received'}>
+        <Tooltip title={editingId ? 'Lens orders are added to new entries only' : 'Alt+L — order prescription lenses from a supplier (pair or single lens), or bill lenses already received'}>
           <span>
             <Button
               ref={lensBtnRef}
@@ -1386,10 +1386,9 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
         <Menu anchorEl={lensMenuAnchor} open={Boolean(lensMenuAnchor)} onClose={() => setLensMenuAnchor(null)}
           MenuListProps={{ onKeyDown: onLensMenuKeys }}>
           {[
-            [null, <AddIcon fontSize="small" sx={{ mr: 1 }} />, 'New Lens Purchase Order', 'N'],
-            ['SPLIT_PAIR', <SplitIcon fontSize="small" sx={{ mr: 1 }} />, '+ Add Split Pair Lens (2 customers)', 'S'],
-            ['SINGLE_PAIR', <AddIcon fontSize="small" sx={{ mr: 1 }} />, 'Single Customer Pair', 'P'],
-            ['SINGLE_PIECE', <AddIcon fontSize="small" sx={{ mr: 1 }} />, 'Single Lens (1 piece)', 'L'],
+            [null, <AddIcon fontSize="small" sx={{ mr: 1 }} />, 'Lens Purchase Order', 'N'],
+            ['SINGLE_PAIR', <AddIcon fontSize="small" sx={{ mr: 1 }} />, 'Add Pair (RE + LE)', 'P'],
+            ['SINGLE_PIECE', <AddIcon fontSize="small" sx={{ mr: 1 }} />, 'Add Single Lens (RE or LE)', 'L'],
           ].map(([start, icon, label, key]) => (
             <MenuItem key={key} onClick={() => startLensOrder(start)}>
               {icon}{label}
@@ -1427,6 +1426,11 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
       )}
       <Dialog open={Boolean(savedLensPO)} onClose={() => { setSavedLensPO(null); focusSaveButton(); }} maxWidth="xs" fullWidth {...navDialogProps}>
         <DialogTitle sx={{ fontWeight: 800 }}>Lens PO {savedLensPO?.po.po_number}</DialogTitle>
+        {savedLensPO?.others?.length > 0 && (
+          <Typography variant="body2" sx={{ px: 3, mt: -1, mb: 1 }} color="text.secondary">
+            Also ordered: {savedLensPO.others.map(x => `${x.po_number} (${x.supplier_name})`).join(', ')} — print those from Purchase → Lens Purchase Order.
+          </Typography>
+        )}
         <DialogContent>
           <Typography variant="body2">
             {savedLensPO?.po.supplier_name} · {poQtyLabel(savedLensPO?.po.items || [])}
