@@ -33,7 +33,8 @@ export function mapDealerFromApi(d) {
     email: d.email || '',
     gstin: d.gstin || '',
     billingAddress: d.address || '',
-    shippingAddress: d.address || '',
+    // Blank shipping address = ship to the billing address (dealers saved before it existed).
+    shippingAddress: d.shipping_address || d.address || '',
     city: d.city || '', state: d.state || '', pincode: d.pincode || '',
     priceList: categoryToPriceList(d.category),
     category: d.category || 'Wholesale',
@@ -44,6 +45,9 @@ export function mapDealerFromApi(d) {
     outstanding: parseFloat(d.outstanding_balance) || 0,
     salesExec: d.sales_executive || '',
     status: d.status || 'Active',
+    ownerName: d.owner_name || '',
+    whatsapp: d.whatsapp_number || '',
+    licenseNumber: d.license_number || '',
     lastPurchaseDate: '',
     totalPurchases: '',
   };
@@ -57,12 +61,19 @@ export function mapDealerToApi(local) {
     phone: local.phone,
     email: local.email || '',
     gstin: local.gstin || '',
-    address: local.shippingAddress || local.billingAddress || '',
+    address: local.billingAddress || local.shippingAddress || '',
+    shipping_address: local.shippingAddress && local.shippingAddress !== local.billingAddress ? local.shippingAddress : '',
     credit_limit: parseFloat(local.creditLimit) || 0,
     credit_days: parseInt(local.creditDays) || 30,
     outstanding_balance: parseFloat(local.outstanding) || 0,
     category: priceListToCategory(local.priceList),
     sales_executive: local.salesExec || '',
+    city: local.city || '',
+    state: local.state || '',
+    pincode: local.pincode || '',
+    ...(local.ownerName !== undefined ? { owner_name: local.ownerName || '' } : {}),
+    ...(local.whatsapp !== undefined ? { whatsapp_number: local.whatsapp || '' } : {}),
+    ...(local.status ? { status: local.status } : {}),
   };
 }
 

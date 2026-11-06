@@ -54,10 +54,12 @@ import {
   Tune as DetailsIcon,
   Receipt as BillIcon,
   ImageOutlined as NoImageIcon,
+  Edit as EditIcon,
 } from '@mui/icons-material';
 import axios from 'axios';
 import QuickDatePickerField from '../components/common/QuickDatePickerField';
-import { navScopeProps, focusField, enterOpensSelectProps } from './wholesale/keyboardNav';
+import { navScopeProps, focusField, enterOpensSelectProps, selectOnFocusProps, zeroAsBlank, typedNumber } from './wholesale/keyboardNav';
+import { ensureEditAccess } from '../utils/editPermissions';
 import { useWholesaleShortcuts } from './wholesale/posShortcuts';
 import useBarcodeScanner from '../hooks/useBarcodeScanner';
 import ProductMasterDialog from '../components/inventory/ProductMasterDialog';
@@ -77,7 +79,7 @@ import {
   ADDITIONAL_CHARGE_TYPES, NOTE_TEMPLATES, SPLIT_PAYMENT_MODES, WHOLESALE_API,
   uid, readLS, writeLS, resolvePriceForDealer, computeLineTotals, buildDealerLedger,
   fmtINR, canOverridePrice, isUuid, fetchAllPages, mapDealerFromApi, mapDealerToApi,
-  saveInvoiceToBackend, cacheInvoice, syncWholesaleInvoices, newInvoiceNo,
+  saveInvoiceToBackend, cacheInvoice, syncWholesaleInvoices, newInvoiceNo, invoiceFromApi,
 } from './wholesale/wholesaleConstants';
 import {
   NewDealerDialog, LedgerDialog, RecordPaymentDialog, DealerProfileDialog, PreviousOrdersDialog, BulkAddDialog,
@@ -129,11 +131,11 @@ function SectionTitle({ icon, title, kbd, right }) {
   );
 }
 
-const PANEL_SX = { p: 1.5, borderRadius: 3, bgcolor: '#ffffff', borderColor: '#cbd5e1' };
+const PANEL_SX = { p: 1.5, borderRadius: 1, bgcolor: '#ffffff', borderColor: '#cbd5e1' };
 const NAVY = '#0f172a';
 const HEAD_CELL_SX = { bgcolor: NAVY, color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.72rem', whiteSpace: 'nowrap' };
 const NO_SPIN_SX = { '& input[type=number]': { MozAppearance: 'textfield' }, '& input::-webkit-outer-spin-button, & input::-webkit-inner-spin-button': { WebkitAppearance: 'none', margin: 0 } };
-const cellInputSx = (width, align = 'right') => ({
+const cellInputSx = (width, align = 'center') => ({
   width, ...NO_SPIN_SX,
   '& .MuiInputBase-input': { py: 0.35, px: 0.5, textAlign: align, fontWeight: 800, fontSize: '0.8rem' },
 });
@@ -147,6 +149,34 @@ const GRID_COLS = ['qty', 'rate', 'disc', 'gst'];
 
 // Treat inventory placeholder dashes as "no value" so empty columns stay blank.
 const cellText = (v) => (v == null || v === '' || v === '—' || v === '-' ? '' : v);
+
+// Units of each product a saved, active invoice already holds out of stock — while it is being
+// edited those count as available again (the server only moves the difference on save).
+const heldUnitsOf = (inv) => {
+  const held = {};
+  if (!inv || inv.status === 'Draft' || inv.orderStatus === 'Draft' || inv.status === 'Cancelled' || inv.stockReturned) return held;
+  (inv.items || []).forEach((it) => {
+    if (isServiceLine(it) || !it.id) return;
+    held[it.id] = (held[it.id] || 0) + computeLineTotals(it).stockUnits;
+  });
+  return held;
+};
+
+// What the POS remembers about the saved invoice open for editing.
+const editStateOf = (inv) => {
+  const isDraft = inv.status === 'Draft' || inv.orderStatus === 'Draft';
+  return {
+    backendId: inv.backendId || null,
+    invoiceNo: inv.invoiceNo,
+    date: inv.date,
+    isDraft,
+    originalPaid: parseFloat(inv.amountReceived) || 0,
+    originalDue: isDraft ? 0 : (parseFloat(inv.dueAmount) || 0),
+    originalTotal: parseFloat(inv.summary?.grandTotal) || 0,
+    payMode: inv.payMode || 'Cash',
+    heldUnits: heldUnitsOf(inv),
+  };
+};
 
 const NEW_DEALER_DEFAULTS = {
   code: '', name: '', contactPerson: '', phone: '', email: '', gstin: '', billingAddress: '', shippingAddress: '',
@@ -188,6 +218,14 @@ export default function WholesaleSales() {
   // The number this invoice will be posted under (shown in the header; renumbered by
   // saveInvoiceToBackend only if the server reports a clash). A fresh one after each save.
   const [invoiceNo, setInvoiceNo] = useState(newInvoiceNo);
+  // A saved invoice re-opened for correction (editStateOf), or null for a new sale. Saving
+  // PATCHes that invoice in place: the server moves only the stock difference and re-posts
+  // its journal; the dealer's balance moves by the change in what is due.
+  const [editing, setEditing] = useState(null);
+  const [loadingEdit, setLoadingEdit] = useState(false);
+  // Confirmed (non-draft) bills keep the payments already recorded against them.
+  const paymentLocked = Boolean(editing && !editing.isDraft);
+  const heldFor = (id) => (editing?.heldUnits?.[id] || 0);
 
   // Product entry row (Product / Lens / Services tabs) — search, pick, adjust, Add Item.
   const rootRef = useRef(null);
@@ -610,6 +648,12 @@ export default function WholesaleSales() {
 
   // Payment Calculation
   const paymentCalc = useMemo(() => {
+    if (paymentLocked) {
+      // Editing a confirmed bill: what was received stays as recorded (receipts are their own
+      // documents); a higher total leaves more due, a lower one can leave the dealer in credit.
+      const paid = editing.originalPaid;
+      return { dueAmount: Math.max(0, summary.grandTotal - paid), balanceAmount: Math.max(0, paid - summary.grandTotal), paidNow: paid };
+    }
     if (payMode === 'Split Payment') {
       const shortfall = Math.max(0, summary.grandTotal - splitTotal);
       const dueAmount = splitCreditAmount + shortfall;
@@ -623,14 +667,14 @@ export default function WholesaleSales() {
     const dueAmount = Math.max(0, summary.grandTotal - received);
     const balanceAmount = Math.max(0, received - summary.grandTotal);
     return { dueAmount, balanceAmount, paidNow: received };
-  }, [payMode, amountReceived, summary.grandTotal, splitTotal, splitCreditAmount, splitPaidAmount, cashUnpaid]);
+  }, [payMode, amountReceived, summary.grandTotal, splitTotal, splitCreditAmount, splitPaidAmount, cashUnpaid, paymentLocked, editing]);
 
   const dueDate = useMemo(() => {
     if (paymentCalc.dueAmount <= 0.009) return '';
-    const base = new Date();
+    const base = editing?.date ? new Date(editing.date) : new Date();
     base.setDate(base.getDate() + (parseInt(creditDays) || 0));
     return base.toISOString().split('T')[0];
-  }, [paymentCalc.dueAmount, creditDays]);
+  }, [paymentCalc.dueAmount, creditDays, editing]);
 
   // Outstanding Balance warning color logic
   const outstandingColor = useMemo(() => {
@@ -648,10 +692,12 @@ export default function WholesaleSales() {
     if (!selectedCustomer || !selectedCustomer.creditLimit) return false;
     const currOutstanding = parseFloat(selectedCustomer.outstanding || 0);
     const limit = parseFloat(selectedCustomer.creditLimit || 0);
-    const creditPortion = payMode === 'Credit Sale' ? summary.grandTotal : payMode === 'Split Payment' ? splitCreditAmount : 0;
+    const creditPortion = paymentLocked
+      ? Math.max(0, summary.grandTotal - editing.originalPaid) - editing.originalDue // only the extra the edit adds
+      : payMode === 'Credit Sale' ? summary.grandTotal : payMode === 'Split Payment' ? splitCreditAmount : 0;
     const newTotalOut = currOutstanding + creditPortion;
     return limit > 0 && creditPortion > 0 && newTotalOut > limit;
-  }, [selectedCustomer, summary.grandTotal, payMode, splitCreditAmount]);
+  }, [selectedCustomer, summary.grandTotal, payMode, splitCreditAmount, paymentLocked, editing]);
 
   // Alt+L — Wholesale → Retail → Special → Wholesale for this invoice (the dropdown still offers every
   // list). Like the dropdown, it prices lines added from now on.
@@ -713,7 +759,7 @@ export default function WholesaleSales() {
   const priceForProduct = (prod, qty = 1) => resolvePriceForDealer(prod, effectiveDealer, specialPrices, qty, priceListRows);
 
   const buildCartLine = (prod, qty = 1) => {
-    const avail = parseFloat(prod.availableStock ?? prod.stock ?? 0);
+    const avail = parseFloat(prod.availableStock ?? prod.stock ?? 0) + heldFor(prod.id);
     const { rate, tier } = priceForProduct(prod, qty);
     return {
       itemType: 'PRODUCT',
@@ -753,7 +799,7 @@ export default function WholesaleSales() {
   // than a second line, so stock and reorder logic keep one line per product.
   const handleAddProductToCart = (prod, qty = 1, overrides = null) => {
     if (!prod) return false;
-    const avail = parseFloat(prod.availableStock ?? prod.stock ?? 0);
+    const avail = parseFloat(prod.availableStock ?? prod.stock ?? 0) + heldFor(prod.id);
     if (avail <= 0) {
       showToast(`Out of Stock: ${prod.name} has 0 available inventory.`, 'error');
       return false;
@@ -1024,6 +1070,7 @@ export default function WholesaleSales() {
     setAttachments([]);
     setSplitPayments([{ mode: 'Cash', amount: '' }]);
     setOrderStatus('Confirmed');
+    setEditing(null);
   };
 
   const handleClearCart = () => {
@@ -1032,6 +1079,10 @@ export default function WholesaleSales() {
   };
 
   const handleHoldInvoice = () => {
+    if (editing) {
+      showToast(`${editing.invoiceNo} is a saved invoice being edited — save the changes or cancel the edit instead of holding it.`, 'warning');
+      return;
+    }
     if (cartItems.length === 0) {
       showToast('Cannot hold an empty invoice cart.', 'warning');
       return;
@@ -1164,7 +1215,14 @@ export default function WholesaleSales() {
 
   // --- Bulk Add / Excel Import / Reorder ---
   const handleBulkAdd = (items) => {
-    items.forEach(({ product, qty }) => handleAddProductToCart(product, qty));
+    // Price / discount typed in the bulk grid ride along as line overrides (a changed price marks
+    // the line CUSTOM, as in the billing grid).
+    items.forEach(({ product, qty, rate, discount }) => {
+      const overrides = {};
+      if (rate !== undefined && canOverride) overrides.rate = rate;
+      if (discount) overrides.discount = discount;
+      handleAddProductToCart(product, qty, Object.keys(overrides).length ? overrides : null);
+    });
     showToast(`${items.length} product(s) added to cart.`, 'success');
   };
 
@@ -1209,6 +1267,150 @@ export default function WholesaleSales() {
 
   const handleViewOrder = (order) => { setPrintableInvoice(order); setPrintModalOpen(true); };
 
+  // Loads a saved invoice into the POS form for correction. The server copy is read fresh (the
+  // cache may be stale), a billed invoice is gated by the module's edit permission (admin
+  // approval when Direct Edit is off), and the lines it already holds count as available stock.
+  async function startEditInvoice(ref, { preChecked = false } = {}) {
+    const number = typeof ref === 'string' ? ref : ref?.invoiceNo;
+    if (!number || loadingEdit) return;
+    if (editing?.invoiceNo === number) { showToast(`${number} is already open for editing.`, 'info'); return; }
+    if (cartItems.length && !window.confirm(`Discard ${editing ? `the unsaved changes to ${editing.invoiceNo}` : 'the current cart'} and open ${number} for editing?`)) return;
+    setLoadingEdit(true);
+    try {
+      let inv = null;
+      try {
+        const { data } = await axios.get(`${WHOLESALE_API}/invoices/`, { params: { invoice_number: number }, __silentError: true });
+        const row = (Array.isArray(data) ? data : data?.results || [])[0];
+        if (row) {
+          inv = invoiceFromApi(row, Object.fromEntries(customers.filter(c => c?.id).map(c => [c.id, c])));
+          const cached = readLS(LS_KEYS.invoices, []).find(x => x.invoiceNo === number);
+          if (cached?.attachments?.some(a => a.dataUrl)) inv.attachments = cached.attachments;
+          cacheInvoice(inv);
+          setInvoicesVersion(v => v + 1);
+        }
+      } catch (e) {
+        showToast(`Could not load ${number} from the server — saved invoices can only be edited online.`, 'error');
+        return;
+      }
+      if (!inv) { showToast(`Invoice ${number} was not found on the server.`, 'error'); return; }
+      if (inv.status === 'Cancelled' || inv.orderStatus === 'Cancelled') { showToast(`${number} is cancelled and can't be edited.`, 'warning'); return; }
+      if (inv.stockReturned) { showToast(`${number} was ${String(inv.stockReturned).toLowerCase()} — its stock is back on the shelf, so it can't be edited.`, 'warning'); return; }
+      if (!(inv.items || []).length) { showToast(`${number} has no saved line items (an old record) — it can't be edited here.`, 'warning'); return; }
+      const ed = editStateOf(inv);
+      // preChecked: the caller (Wholesale Reports) already ran the same check; the server
+      // re-checks on save either way.
+      if (!ed.isDraft && !preChecked) {
+        const allowed = await ensureEditAccess({ module: 'wholesale', recordId: inv.backendId, recordRef: number });
+        if (!allowed) return;
+      }
+      applyInvoiceToForm(inv, ed);
+    } finally {
+      setLoadingEdit(false);
+    }
+  }
+
+  function applyInvoiceToForm(inv, ed) {
+    const dealer = customers.find(c => c.id === inv.customer?.id || (inv.customer?.code && c.code === inv.customer.code)) || inv.customer;
+    setSelectedCustomer(dealer);
+    setSalesRep(inv.salesExecutive || dealer?.salesExec || '');
+    setInvoicePriceList(inv.priceList && inv.priceList !== dealer?.priceList ? inv.priceList : '');
+    setAddressEditUnlocked(false);
+    setCartItems(inv.items.map(({ taxPercent, total, ...line }) => {
+      if (isServiceLine(line)) return line;
+      const live = products.find(p => p.id === line.id || (line.code && p.code === line.code));
+      const stock = live ? parseFloat(live.availableStock ?? live.stock ?? 0) + (ed.heldUnits[line.id] || 0) : line.availableStock;
+      return { ...line, availableStock: stock };
+    }));
+    clearSearch();
+    setSelectedRowIndex(-1);
+    setNotesOpenIdx(-1);
+    setPreviewDoc(null);
+    setInvoiceNo(inv.invoiceNo);
+    const blankCharges = ADDITIONAL_CHARGE_TYPES.map(name => ({ name, amount: '', taxable: false }));
+    if (Array.isArray(inv.chargesList)) {
+      setChargesList(blankCharges.map(c => ({ ...c, ...(inv.chargesList.find(x => x.name === c.name) || {}) })));
+    } else {
+      // Invoices saved before the charge rows were kept only carry the taxable / untaxed totals.
+      const taxable = parseFloat(inv.summary?.taxableCharges) || 0;
+      const untaxed = parseFloat(inv.summary?.nonTaxableCharges) || 0;
+      setChargesList(blankCharges.map(c => {
+        if (c.name === 'Other Charge' && (taxable || untaxed)) return taxable ? { ...c, amount: String(taxable), taxable: true } : { ...c, amount: String(untaxed) };
+        if (c.name === 'Delivery Charge' && taxable && untaxed) return { ...c, amount: String(untaxed) };
+        return c;
+      }));
+    }
+    setInvoiceDiscount(inv.invoiceDiscount || null);
+    setCouponInput(inv.invoiceDiscount?.couponCode || '');
+    setCouponError('');
+    setReferenceNo(inv.referenceNo || '');
+    setPoNumber(inv.poNumber || '');
+    if (inv.warehouseId) setSelectedWarehouseId(String(inv.warehouseId));
+    setDelivery({ type: 'Pickup', address: '', expectedDate: '', courierName: '', trackingNo: '', notes: '', ...(inv.delivery || {}) });
+    setPacking({ packages: '', weight: '', packedBy: '', packingDate: '', ...(inv.packing || {}) });
+    setNotesState({ customer: '', internal: '', ...(inv.notes && typeof inv.notes === 'object' ? inv.notes : {}) });
+    setAttachments(inv.attachments || []);
+    setOrderStatus(ed.isDraft ? 'Confirmed' : (inv.orderStatus || 'Confirmed'));
+    setPayMode(PAY_MODE_BUTTONS.some(([v]) => v === inv.payMode) ? inv.payMode : 'Cash');
+    setCreditDays(inv.creditDays || 30);
+    setRefNo(inv.refNo || '');
+    setBankName(inv.bankName || '');
+    setPayBankAccount(inv.bankAccount || '');
+    setCashStatus(inv.cashStatus || CASH_PAID);
+    setSplitPayments(inv.splitPayments?.length ? inv.splitPayments : [{ mode: 'Cash', amount: '' }]);
+    setAmountReceived(ed.isDraft ? '' : String(ed.originalPaid || ''));
+    setEditing(ed);
+    setPrevOrdersOpen(false);
+    setPrintModalOpen(false);
+    showToast(ed.isDraft ? `Draft ${inv.invoiceNo} opened — complete it to bill it.` : `Editing ${inv.invoiceNo} — change lines, quantities or prices, then save with Ctrl+Enter.`, 'info');
+    setTimeout(() => focusGrid(), 120);
+  }
+
+  const cancelEdit = () => {
+    if (!editing) return;
+    const no = editing.invoiceNo;
+    resetSaleForm();
+    showToast(`Edit of ${no} cancelled — nothing was changed.`, 'info');
+    setTimeout(() => focusSearch(), 60);
+  };
+
+  // While editing, keep each line's "available" figure = live stock + what this invoice holds.
+  useEffect(() => {
+    if (!editing || !products.length) return;
+    setCartItems(prev => {
+      let changed = false;
+      const next = prev.map(line => {
+        if (isServiceLine(line)) return line;
+        const live = products.find(p => p.id === line.id || (line.code && p.code === line.code));
+        if (!live) return line;
+        const avail = parseFloat(live.availableStock ?? live.stock ?? 0) + heldFor(line.id);
+        if (avail === line.availableStock) return line;
+        changed = true;
+        return { ...line, availableStock: avail };
+      });
+      return changed ? next : prev;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [products, editing]);
+
+  // Deep links: ?edit=<invoice no> (Wholesale Reports → Edit Bill) and ?dealer=<id> (Dealers
+  // master → New Sale). Read once the dealer list is in, then dropped from the URL.
+  const deepLinkDoneRef = useRef('');
+  useEffect(() => {
+    if (dealersLoading) return;
+    const params = new URLSearchParams(location.search);
+    const editNo = params.get('edit');
+    const dealerId = params.get('dealer');
+    if (!editNo && !dealerId) return;
+    const key = location.search;
+    if (deepLinkDoneRef.current === key) return;
+    deepLinkDoneRef.current = key;
+    navigate(location.pathname, { replace: true });
+    if (editNo) { startEditInvoice(editNo, { preChecked: params.get('checked') === '1' }); return; }
+    const d = customers.find(c => String(c.id) === dealerId);
+    if (d && !editing) { handleSelectCustomer(d); setTimeout(() => focusSearch(), 60); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.search, dealersLoading]);
+
   // Ctrl+Enter / "Complete Wholesale Invoice": validate everything, then ask to confirm (the
   // confirm dialog also carries the credit-limit override). Never runs twice at once.
   function validateForCompletion() {
@@ -1246,16 +1448,23 @@ export default function WholesaleSales() {
   }
 
   function buildInvoiceObject(status) {
-    const invoiceDate = new Date().toISOString().split('T')[0];
+    // An edited invoice keeps its own date (and server row); a new one is dated today.
+    const invoiceDate = editing?.date || new Date().toISOString().split('T')[0];
     const paid = paymentCalc.paidNow;
 
     return {
+      ...(editing?.backendId ? { backendId: editing.backendId } : {}),
       id: invoiceNo,
       invoiceNo,
       date: invoiceDate,
       dueDate: paymentCalc.dueAmount > 0.009 ? dueDate : '',
       customer: selectedCustomer,
-      items: cartItems.map(it => ({ ...it, taxPercent: it.gst, total: computeLineTotals(it).total })),
+      // Cells may still hold half-typed text ("12."); the saved line always carries numbers.
+      items: cartItems.map(it => {
+        const line = { ...it };
+        ['rate', 'discount', 'gst'].forEach(k => { if (typeof line[k] === 'string' && line[k] !== '') line[k] = Number(line[k]) || 0; });
+        return { ...line, taxPercent: line.gst, total: computeLineTotals(line).total };
+      }),
       summary,
       payMode,
       splitPayments: payMode === 'Split Payment' ? splitPayments : undefined,
@@ -1279,6 +1488,8 @@ export default function WholesaleSales() {
       notes: notesState,
       salesExecutive: salesRep,
       invoiceDiscount,
+      // The typed charge rows, so an edit reopens them as entered (summary only has the totals).
+      chargesList: chargesList.filter(c => parseFloat(c.amount) > 0),
     };
   }
 
@@ -1303,11 +1514,22 @@ export default function WholesaleSales() {
       showToast('Cannot save an empty invoice as draft.', 'warning');
       return;
     }
+    if (paymentLocked) {
+      // Turning a billed invoice back into a draft would reverse its stock and accounts.
+      showToast(`${editing.invoiceNo} is already billed — save the changes with Complete (Ctrl+Enter), or cancel the edit.`, 'warning');
+      return;
+    }
     const dealer = await ensureBackendDealer(selectedCustomer);
     const draft = { ...buildInvoiceObject('Draft'), customer: dealer };
     const { invoice, synced, refused } = await persistInvoice(draft);
     if (refused) { showToast(`Draft not saved: ${refused}`, 'error'); return; }
-    setInvoiceNo(newInvoiceNo()); // the draft keeps its number; the live cart gets a fresh one
+    if (synced && invoice.backendId) {
+      // Carry on in that draft: a later Save Draft / Complete updates it rather than adding a
+      // second invoice next to it.
+      setEditing(editStateOf(invoice));
+    } else {
+      setInvoiceNo(newInvoiceNo()); // offline: the draft keeps its number; the live cart gets a fresh one
+    }
     showToast(synced ? `Draft saved as ${invoice.invoiceNo}.` : `Draft ${invoice.invoiceNo} saved on this device only — the server could not be reached; it will upload automatically.`, synced ? 'success' : 'warning');
   }
 
@@ -1345,7 +1567,12 @@ export default function WholesaleSales() {
       const status = e?.response?.status;
       if (status >= 400 && status < 500) {
         const d = e.response.data;
-        return { invoice: inv, synced: false, refused: (typeof d?.detail === 'string' && d.detail) || 'The server refused this invoice.' };
+        return { invoice: inv, synced: false, refused: (typeof d?.detail === 'string' && d.detail) || describeApiError(e, 'The server refused this invoice.') };
+      }
+      // A change to an invoice already on the server can't wait offline: the next sync takes the
+      // server's copy, which would silently drop the edit.
+      if (inv.backendId) {
+        return { invoice: inv, synced: false, refused: 'the server could not be reached, so the changes were not saved. Try again when the connection is back.' };
       }
       invoice = { ...inv, pendingSync: true };
     }
@@ -1368,7 +1595,37 @@ export default function WholesaleSales() {
     }
   }
 
+  // Saving an edited (already billed) invoice: PATCH it in place. The server re-checks the edit
+  // permission, moves only the stock difference and re-posts the invoice journal; receipts
+  // already recorded stay as they are, so the dealer's balance moves by the change in what's due.
+  async function runSaveEdit() {
+    const dealer = selectedCustomer;
+    const built = { ...buildInvoiceObject(orderStatus === 'Draft' ? 'Confirmed' : orderStatus), customer: dealer };
+    const overStock = cartItems.some(i => !isServiceLine(i) && ((parseFloat(i.qty) || 0) + (parseFloat(i.freeQty) || 0)) > (parseFloat(i.availableStock) || 0));
+    if (overStock && canOverride) built.overrideNegativeStock = true;
+    const { invoice: saved, refused } = await persistInvoice(built);
+    if (refused) {
+      showToast(`Changes to ${built.invoiceNo} not saved: ${refused}`, 'error');
+      return;
+    }
+    window.dispatchEvent(new Event('optical_stock_updated'));
+    const dueDelta = (parseFloat(saved.dueAmount) || 0) - editing.originalDue;
+    if (Math.abs(dueDelta) > 0.009) adjustDealerOutstanding(dealer, dueDelta);
+    setPrintableInvoice(saved);
+    setCompletionOpen(true);
+    if (printAfterSaveRef.current) {
+      printAfterSaveRef.current = false;
+      printBill({ doc: saved, documentType: 'WHOLESALE_BILL' }).then((opened) => {
+        if (!opened) { showToast('Print pop-up was blocked — opening the print preview instead.', 'warning'); setPrintModalOpen(true); }
+      });
+    }
+    resetSaleForm();
+    const totalDelta = (parseFloat(saved.summary?.grandTotal) || 0) - editing.originalTotal;
+    showToast(`Invoice ${saved.invoiceNo} updated${Math.abs(totalDelta) > 0.009 ? ` — total ${totalDelta > 0 ? 'up' : 'down'} ${fmtINR(Math.abs(totalDelta))}` : ''}.`, 'success');
+  }
+
   async function runCompleteSale() {
+    if (paymentLocked) { await runSaveEdit(); return; }
     const dealer = await ensureBackendDealer(selectedCustomer);
     const built = { ...buildInvoiceObject(orderStatus === 'Draft' ? 'Confirmed' : orderStatus), customer: dealer };
     // A Manager/Admin may knowingly sell past the stock on hand (validateForCompletion).
@@ -1707,6 +1964,7 @@ export default function WholesaleSales() {
     dealerSearch: () => focusById('ws-dealer-search'),
     newDealer: () => openNewDealer(),
     changeDealer: () => {
+      if (paymentLocked) { showToast("The dealer of a billed invoice can't be changed while editing it.", 'warning'); return; }
       focusById('ws-dealer-search');
       // Open the dealer list (ArrowDown is how the Autocomplete opens from the keyboard).
       setTimeout(() => document.getElementById('ws-dealer-search')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })), 30);
@@ -1804,8 +2062,20 @@ export default function WholesaleSales() {
   const freeGiftValue = cartItems.filter(i => i.isFreeGift).reduce((a, i) => a + (parseFloat(i.rate) || 0) * (parseFloat(i.qty) || 0), 0);
   const billDoc = previewDoc || printableInvoice;
 
+  // Item details panel: the highlighted search result while searching, otherwise the selected
+  // grid line (or the last one added). Stock is read from the live catalogue.
+  const detailFromSearch = showSearchResults && searchMatches.length > 0;
+  const detailIdx = selectedRowIndex >= 0 && selectedRowIndex < cartItems.length ? selectedRowIndex : cartItems.length - 1;
+  const detailItem = detailFromSearch ? searchMatches[Math.min(matchIndex, searchMatches.length - 1)] : (showSearchResults ? null : cartItems[detailIdx]);
+  const detailIsService = Boolean(detailItem) && (isServiceLine(detailItem) || itemMode === 'service');
+  const detailLive = detailItem && !detailIsService
+    ? (products.find(p => p.id === detailItem.id || (cellText(detailItem.code) && p.code === detailItem.code)) || detailItem)
+    : null;
+  const detailStock = detailLive ? parseFloat(detailLive.availableStock ?? detailLive.stock ?? 0) : null;
+  const detailInBill = detailItem && !detailFromSearch ? (parseFloat(detailItem.qty) || 0) : (detailItem ? (cartItems.find(it => !it.isFreeGift && !isServiceLine(it) && it.id === detailItem.id)?.qty || 0) : 0);
+
   return (
-    <Box ref={rootRef} {...navScopeProps} sx={{ p: { xs: 1.5, md: 2 }, bgcolor: '#f8fafc', minHeight: '100vh' }}>
+    <Box ref={rootRef} {...navScopeProps} sx={{ p: { xs: 1.5, md: 2 }, bgcolor: '#ffffff', minHeight: '100vh' }}>
       {/* ============ HEADER ============ */}
       <Card variant="outlined" sx={{ ...PANEL_SX, mb: 1.5 }}>
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 1.5 }}>
@@ -1813,16 +2083,30 @@ export default function WholesaleSales() {
             <Avatar sx={{ bgcolor: '#2563eb', width: 40, height: 40 }}><InventoryIcon /></Avatar>
             <Box>
               <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
-                <Typography variant="h6" fontWeight={900} color="primary.main" sx={{ lineHeight: 1.2 }}>Wholesale Sale</Typography>
+                <Typography variant="h6" fontWeight={900} color="primary.main" sx={{ lineHeight: 1.2 }}>{paymentLocked ? 'Edit Wholesale Invoice' : 'Wholesale Sale'}</Typography>
                 <Paper elevation={0} sx={{ px: 1.2, py: 0.25, bgcolor: NAVY, color: '#facc15', fontWeight: 900, borderRadius: 1.5, fontSize: '0.8rem', fontFamily: 'monospace' }} title="Invoice number this sale will be saved under">
                   {invoiceNo}
                 </Paper>
               </Stack>
-              <Typography variant="caption" color="text.secondary" fontWeight={600}>Create a wholesale invoice</Typography>
+              <Typography variant="caption" color="text.secondary" fontWeight={600}>
+                {paymentLocked ? `Correcting a saved invoice dated ${editing.date} — Ctrl+Enter saves the changes` : editing?.isDraft ? 'Continuing a saved draft' : 'Create a wholesale invoice'}
+              </Typography>
             </Box>
           </Box>
 
           <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+            {loadingEdit && <CircularProgress size={18} />}
+            {editing && (
+              <Chip
+                icon={<EditIcon sx={{ fontSize: 15 }} />} color={paymentLocked ? 'warning' : 'default'} variant="outlined"
+                label={`${paymentLocked ? 'Editing' : 'Draft'} ${editing.invoiceNo}`} sx={{ fontWeight: 900, borderRadius: 1 }}
+              />
+            )}
+            {editing && (
+              <Button variant="outlined" size="small" color="inherit" onClick={cancelEdit} sx={{ fontWeight: 800, textTransform: 'none', borderColor: '#cbd5e1' }}>
+                {paymentLocked ? 'Cancel Edit' : 'Close Draft'}
+              </Button>
+            )}
             {heldInvoices.length > 0 && (
               <Button variant="outlined" color="warning" size="small" startIcon={<ResumeIcon />} onClick={() => setHeldModalOpen(true)} sx={{ fontWeight: 800, textTransform: 'none' }}>
                 Held ({heldInvoices.length})
@@ -1860,6 +2144,7 @@ export default function WholesaleSales() {
         <MenuItem disabled={!printableInvoice} onClick={() => { setMoreActionsAnchor(null); printBill({ doc: { ...printableInvoice, __title: 'PAYMENT RECEIPT' }, documentType: 'WHOLESALE_BILL' }); }}><DocumentIcon fontSize="small" sx={{ mr: 1 }} /> Payment Receipt</MenuItem>
         <MenuItem disabled={!selectedCustomer} onClick={() => { setMoreActionsAnchor(null); setPrevOrdersOpen(true); }}><HistoryIcon fontSize="small" sx={{ mr: 1 }} /> Previous Orders</MenuItem>
         <MenuItem disabled={!printableInvoice} onClick={() => { setMoreActionsAnchor(null); applyOrderToCart(printableInvoice, 'duplicate'); }}><DuplicateIcon fontSize="small" sx={{ mr: 1 }} /> Duplicate Invoice</MenuItem>
+        <MenuItem disabled={!printableInvoice || loadingEdit} onClick={() => { setMoreActionsAnchor(null); startEditInvoice(printableInvoice); }}><EditIcon fontSize="small" sx={{ mr: 1 }} /> Edit Invoice{printableInvoice ? ` ${printableInvoice.invoiceNo}` : ''}</MenuItem>
         <Divider />
         <MenuItem disabled={!printableInvoice || !canOverride} onClick={() => { setMoreActionsAnchor(null); setReturnConfirmOpen(true); }}><ReturnIcon fontSize="small" sx={{ mr: 1 }} /> Sales Return{!canOverride ? ' (Manager/Admin)' : ''}</MenuItem>
         <MenuItem disabled={!printableInvoice || !canOverride} onClick={() => { setMoreActionsAnchor(null); setReplacementConfirmOpen(true); }}><ReplacementIcon fontSize="small" sx={{ mr: 1 }} /> Replacement{!canOverride ? ' (Manager/Admin)' : ''}</MenuItem>
@@ -1887,6 +2172,7 @@ export default function WholesaleSales() {
                 fullWidth
                 autoHighlight
                 id="ws-dealer-search"
+                disabled={paymentLocked}
                 options={customers}
                 filterOptions={dealerSearchFilter}
                 getOptionLabel={(o) => (o?.__addNew ? '' : o ? `${o.name}${o.code ? ` (${o.code})` : ''}` : '')}
@@ -1976,7 +2262,7 @@ export default function WholesaleSales() {
 
           <Grid item xs={12} md={8}>
             {selectedCustomer ? (
-              <Box sx={{ p: 1.25, borderRadius: 2, bgcolor: '#f8fafc', border: '1px solid #e2e8f0', height: '100%' }}>
+              <Box sx={{ p: 1.25, borderRadius: 1, bgcolor: '#ffffff', border: '1px solid #e2e8f0', height: '100%' }}>
                 <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" useFlexGap spacing={1} sx={{ mb: 0.75 }}>
                   <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
                     <Typography variant="subtitle2" fontWeight={900} color={NAVY}>{selectedCustomer.name}</Typography>
@@ -1989,7 +2275,11 @@ export default function WholesaleSales() {
                     <Button size="small" variant="outlined" startIcon={<ProfileIcon />} onClick={() => setDealerProfileOpen(true)} sx={{ fontWeight: 800, textTransform: 'none', py: 0.1 }}>View Dealer Details</Button>
                     <Button size="small" variant="outlined" startIcon={<LedgerIcon />} onClick={() => setLedgerOpen(true)} sx={{ fontWeight: 800, textTransform: 'none', py: 0.1 }}>Ledger</Button>
                     <Button size="small" variant="outlined" startIcon={<HistoryIcon />} onClick={() => setPrevOrdersOpen(true)} sx={{ fontWeight: 800, textTransform: 'none', py: 0.1 }}>Orders{dealerOrders.length ? ` (${dealerOrders.length})` : ''}</Button>
-                    <Button size="small" variant="text" color="inherit" startIcon={<ChangeDealerIcon />} onClick={() => { handleSelectCustomer(null); setTimeout(() => focusById('ws-dealer-search'), 30); }} sx={{ fontWeight: 800, textTransform: 'none', py: 0.1 }}>Change</Button>
+                    <Tooltip title={paymentLocked ? "A billed invoice stays with its dealer — cancel it and bill the right dealer instead" : ''}>
+                      <span>
+                        <Button size="small" variant="text" color="inherit" disabled={paymentLocked} startIcon={<ChangeDealerIcon />} onClick={() => { handleSelectCustomer(null); setTimeout(() => focusById('ws-dealer-search'), 30); }} sx={{ fontWeight: 800, textTransform: 'none', py: 0.1 }}>Change</Button>
+                      </span>
+                    </Tooltip>
                   </Stack>
                 </Stack>
                 <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 1 }}>
@@ -2021,7 +2311,7 @@ export default function WholesaleSales() {
       </Paper>
 
       {/* ============ PRODUCT ENTRY ============ */}
-      <Paper variant="outlined" data-nav-own sx={{ p: 1.2, mb: 1.5, borderRadius: 2.5, bgcolor: '#eff6ff', borderColor: '#bfdbfe' }}>
+      <Paper variant="outlined" data-nav-own sx={{ p: 1.2, mb: 1.5, borderRadius: 1, bgcolor: '#ffffff', borderColor: '#cbd5e1' }}>
         <Box sx={{ display: 'flex', gap: 0.75, mb: 1, flexWrap: 'wrap', alignItems: 'center' }} role="tablist" aria-label="Item type">
           {ITEM_MODES.map(m => (
             <Button
@@ -2054,10 +2344,10 @@ export default function WholesaleSales() {
             inputProps={{
               role: 'combobox', 'aria-expanded': showSearchResults && searchMatches.length > 0, 'aria-controls': 'ws-search-results',
               'aria-activedescendant': showSearchResults && searchMatches.length ? `ws-search-opt-${matchIndex}` : undefined,
-              style: { fontWeight: 800, fontSize: '1rem', color: '#1d4ed8', paddingTop: 13, paddingBottom: 13 },
+              style: { fontWeight: 800, fontSize: '1rem', color: NAVY, paddingTop: 13, paddingBottom: 13 },
             }}
             InputProps={{
-              startAdornment: <InputAdornment position="start"><QrCodeScannerIcon sx={{ color: '#2563eb', fontSize: 26 }} /></InputAdornment>,
+              startAdornment: <InputAdornment position="start"><QrCodeScannerIcon sx={{ color: '#475569', fontSize: 26 }} /></InputAdornment>,
               endAdornment: (
                 <InputAdornment position="end">
                   {showSearchResults && (
@@ -2069,7 +2359,7 @@ export default function WholesaleSales() {
                 </InputAdornment>
               ),
             }}
-            sx={{ bgcolor: '#fff', flex: 1, minWidth: 260, '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
+            sx={{ bgcolor: '#fff', flex: 1, minWidth: 260, '& .MuiOutlinedInput-root': { borderRadius: 1 } }}
           />
           <Button
             variant="contained" onClick={handleAddHighlighted} startIcon={<AddIcon />}
@@ -2085,6 +2375,33 @@ export default function WholesaleSales() {
             New {itemMode === 'service' ? 'Service' : itemMode === 'lens' ? 'Lens' : 'Item'}
           </Button>
         </Box>
+
+        {/* Selected item details */}
+        <Box
+          aria-live="polite"
+          sx={{ mt: 1, border: '1px solid #e2e8f0', bgcolor: '#ffffff', display: 'grid', gridTemplateColumns: { xs: 'repeat(2, 1fr)', md: '1.1fr 2.2fr 1fr 1fr 1fr 1fr 1.1fr' } }}
+        >
+          {[
+            ['Tag Code', detailItem ? (cellText(detailItem.barcode) || cellText(detailItem.code)) : '', { fontFamily: 'monospace' }],
+            ['Item Description', detailItem ? detailItem.name : ''],
+            ['Brand', detailItem ? cellText(detailItem.brand) : ''],
+            ['Model Number', detailItem ? cellText(detailItem.modelNo) : ''],
+            ['Color', detailItem ? cellText(detailItem.color) : ''],
+            ['Size', detailItem ? cellText(detailItem.size) : ''],
+            ['Available Stock', detailIsService ? 'Service' : detailStock == null ? '' : `${detailStock}${detailInBill ? ` · ${detailInBill} in bill` : ''}`,
+              { color: detailStock == null ? undefined : detailStock > 5 ? '#15803d' : detailStock > 0 ? '#b45309' : '#dc2626' }],
+          ].map(([label, value, extra], i) => (
+            <Box key={label} sx={{ px: 1, py: 0.6, borderLeft: i ? '1px solid #e2e8f0' : 'none', minWidth: 0 }}>
+              <Typography variant="caption" color="text.secondary" display="block" sx={{ fontSize: '0.64rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0.3 }}>{label}</Typography>
+              <Typography variant="body2" fontWeight={800} noWrap title={value ? String(value) : undefined} sx={{ fontSize: '0.8rem', color: NAVY, ...(extra || {}) }}>{value || '—'}</Typography>
+            </Box>
+          ))}
+        </Box>
+        {!detailItem && (
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.25 }}>
+            {showSearchResults ? 'No match to show.' : 'Search a product (or click a bill line) to see its full details here.'}
+          </Typography>
+        )}
 
         <Stack direction="row" spacing={1} sx={{ mt: 1 }} flexWrap="wrap" useFlexGap alignItems="center">
           <Button size="small" variant="outlined" startIcon={<BulkAddIconMui />} onClick={() => setBulkAddOpen(true)} sx={{ fontWeight: 800, textTransform: 'none', bgcolor: '#fff', py: 0.25 }}>
@@ -2114,7 +2431,7 @@ export default function WholesaleSales() {
       </Paper>
 
       {/* ============ BILLING GRID ============ */}
-      <Card variant="outlined" sx={{ borderRadius: 3, overflow: 'hidden', mb: 1.5, borderColor: '#cbd5e1' }}>
+      <Card variant="outlined" sx={{ borderRadius: 1, overflow: 'hidden', mb: 1.5, borderColor: '#cbd5e1' }}>
         <TableContainer data-nav-own onKeyDown={handleGridKeyDown} sx={{ maxHeight: 360 }}>
           <Table size="small" stickyHeader sx={{ minWidth: 1180 }}>
             <TableHead>
@@ -2130,9 +2447,9 @@ export default function WholesaleSales() {
                 <TableCell sx={HEAD_CELL_SX}>Category</TableCell>
                 {showPowerCol && <TableCell sx={HEAD_CELL_SX}>Power</TableCell>}
                 <TableCell align="center" sx={HEAD_CELL_SX}>Qty</TableCell>
-                <TableCell align="right" sx={HEAD_CELL_SX}>Unit Price</TableCell>
-                <TableCell align="right" sx={HEAD_CELL_SX}>Disc %</TableCell>
-                <TableCell align="right" sx={HEAD_CELL_SX}>Tax %</TableCell>
+                <TableCell align="center" sx={HEAD_CELL_SX}>Unit Price</TableCell>
+                <TableCell align="center" sx={HEAD_CELL_SX}>Disc %</TableCell>
+                <TableCell align="center" sx={HEAD_CELL_SX}>Tax %</TableCell>
                 <TableCell align="right" sx={HEAD_CELL_SX}>Line Total</TableCell>
                 <TableCell align="center" sx={HEAD_CELL_SX}>Action</TableCell>
               </TableRow>
@@ -2142,8 +2459,8 @@ export default function WholesaleSales() {
                   has text. ↑/↓ highlight, Enter or click adds one to the bill; Esc returns to the bill. */}
               {showSearchResults && (
                 <TableRow>
-                  <TableCell colSpan={gridColCount} sx={{ py: 0.6, bgcolor: '#eff6ff', borderBottom: '1px solid #bfdbfe' }}>
-                    <Typography variant="caption" fontWeight={800} color="#1e3a8a">
+                  <TableCell colSpan={gridColCount} sx={{ py: 0.6, bgcolor: '#ffffff', borderBottom: '1px solid #cbd5e1' }}>
+                    <Typography variant="caption" fontWeight={800} color="#334155">
                       {searchMatches.length
                         ? <>{searchMatches.length}{searchMatches.length === 50 ? '+' : ''} {modeNoun} match{searchMatches.length === 1 ? '' : 'es'} for “{barcodeInput.trim()}” — <Kbd>↑</Kbd><Kbd>↓</Kbd> choose · <Kbd>Enter</Kbd> add to bill · <Kbd>Esc</Kbd> back to the bill{cartItems.length ? ` (${cartItems.length} line${cartItems.length === 1 ? '' : 's'})` : ''}</>
                         : <>No {modeNoun} matches “{barcodeInput.trim()}”. An exact barcode still adds on <Kbd>Enter</Kbd> · <Kbd>Esc</Kbd> back to the bill</>}
@@ -2166,12 +2483,13 @@ export default function WholesaleSales() {
                     onMouseEnter={() => setMatchIndex(i)} onClick={() => addPickedItem(p)}
                     sx={{
                       cursor: 'pointer',
-                      bgcolor: active ? '#dbeafe' : (i % 2 ? '#f8fafc' : '#fff'),
-                      '& > td:first-of-type': { borderLeft: active ? '3px solid #2563eb' : '3px solid transparent' },
+                      bgcolor: '#fff',
+                      outline: active ? '1px solid #0f172a' : 'none', outlineOffset: -1,
+                      '& > td:first-of-type': { borderLeft: active ? `3px solid ${NAVY}` : '3px solid transparent' },
                       '& td': { py: 0.5, fontSize: '0.78rem', whiteSpace: 'nowrap', borderBottom: '1px solid #e2e8f0' },
                     }}
                   >
-                    <TableCell sx={{ color: active ? '#2563eb' : '#64748b', fontWeight: 900 }}>{active ? '▶' : i + 1}</TableCell>
+                    <TableCell sx={{ color: active ? NAVY : '#64748b', fontWeight: 900 }}>{active ? '▶' : i + 1}</TableCell>
                     <TableCell sx={{ fontWeight: 800, color: svc ? '#b45309' : 'primary.main', fontFamily: 'monospace' }}>{cellText(p.barcode) || cellText(p.code)}</TableCell>
                     <TableCell>
                       <Avatar variant="rounded" src={p.image || undefined} alt="" sx={{ width: 28, height: 28, bgcolor: '#f1f5f9', color: '#94a3b8' }}>
@@ -2199,9 +2517,9 @@ export default function WholesaleSales() {
                     </TableCell>
                     {showPowerCol && <TableCell sx={{ color: '#2563eb', fontWeight: 700 }}>{cellText(p.power)}</TableCell>}
                     <TableCell align="center" sx={{ fontWeight: 900 }}>1</TableCell>
-                    <TableCell align="right" sx={{ fontWeight: 800 }}>{fmtINR(price)}</TableCell>
-                    <TableCell align="right" sx={{ color: '#94a3b8' }}>0%</TableCell>
-                    <TableCell align="right" sx={{ color: '#0f766e', fontWeight: 700 }}>{tax}%</TableCell>
+                    <TableCell align="center" sx={{ fontWeight: 800 }}>{fmtINR(price)}</TableCell>
+                    <TableCell align="center" sx={{ color: '#94a3b8' }}>0%</TableCell>
+                    <TableCell align="center" sx={{ color: '#0f766e', fontWeight: 700 }}>{tax}%</TableCell>
                     <TableCell align="right" sx={{ fontWeight: 900, color: '#2563eb' }}>{fmtINR(computeLineTotals({ qty: 1, rate: price, discount: 0, gst: tax }).total)}</TableCell>
                     <TableCell align="center">
                       {active
@@ -2241,9 +2559,10 @@ export default function WholesaleSales() {
                       onFocus={() => setSelectedRowIndex(idx)}
                       sx={{
                         cursor: 'pointer',
-                        bgcolor: isStockExceeded ? '#fef2f2' : item.isFreeGift ? '#f0fdf4' : svc ? '#fffbeb' : (idx % 2 ? '#f8fafc' : '#fff'),
-                        '&.Mui-selected, &.Mui-selected:hover': { bgcolor: '#dbeafe' },
-                        '& > td:first-of-type': { borderLeft: rowSelected ? '3px solid #2563eb' : '3px solid transparent' },
+                        bgcolor: isStockExceeded ? '#fef2f2' : item.isFreeGift ? '#f0fdf4' : svc ? '#fffbeb' : '#fff',
+                        // The focused / selected line is marked by its left bar, not a blue wash.
+                        '&.Mui-selected, &.Mui-selected:hover': { bgcolor: isStockExceeded ? '#fef2f2' : '#ffffff' },
+                        '& > td:first-of-type': { borderLeft: rowSelected ? `3px solid ${NAVY}` : '3px solid transparent' },
                         '& td': { py: 0.5, fontSize: '0.78rem', whiteSpace: 'nowrap', borderBottom: '1px solid #e2e8f0' },
                       }}
                     >
@@ -2286,49 +2605,49 @@ export default function WholesaleSales() {
                             <TextField
                               size="small" type="number" value={item.qty} error={Boolean(errs.qty) || isStockExceeded}
                               onChange={(e) => handleUpdateItemQty(idx, e.target.value, true)} onBlur={() => tidyItemQty(idx)}
-                              inputProps={cellProps('qty', { min: 1, step: 1 })}
+                              inputProps={cellProps('qty', { min: 1, step: 1, ...selectOnFocusProps })}
                               sx={cellInputSx(48, 'center')}
                             />
                           </Tooltip>
                           <IconButton size="small" tabIndex={-1} aria-label={`Increase quantity of ${item.name}`} sx={{ p: 0.2 }} onClick={() => handleUpdateItemQty(idx, 1)}><AddIcon sx={{ fontSize: 15 }} /></IconButton>
                         </Stack>
                       </TableCell>
-                      <TableCell align="right" onClick={(e) => e.stopPropagation()}>
+                      <TableCell align="center" onClick={(e) => e.stopPropagation()}>
                         {canOverride && !item.isFreeGift ? (
                           <Tooltip title={errs.rate || ''} placement="top">
                             <TextField
-                              size="small" type="number" value={item.rate} error={Boolean(errs.rate)}
-                              onChange={(e) => handleUpdateItemField(idx, 'rate', e.target.value === '' ? '' : Number(e.target.value))}
-                              inputProps={cellProps('rate', { min: 0, step: '0.01' })}
+                              size="small" type="number" value={zeroAsBlank(item.rate)} placeholder="0" error={Boolean(errs.rate)}
+                              onChange={(e) => handleUpdateItemField(idx, 'rate', typedNumber(e.target.value))}
+                              inputProps={cellProps('rate', { min: 0, step: '0.01', ...selectOnFocusProps })}
                               sx={cellInputSx(82)}
                             />
                           </Tooltip>
                         ) : (
                           <Tooltip title={item.isFreeGift ? 'Free line' : 'Only Managers/Admins can override price'}>
-                            <Stack direction="row" spacing={0.25} alignItems="center" justifyContent="flex-end">
+                            <Stack direction="row" spacing={0.25} alignItems="center" justifyContent="center">
                               <LockIcon sx={{ fontSize: 11, color: '#cbd5e1' }} />
                               <Typography variant="body2" fontWeight={800} sx={{ fontSize: '0.8rem' }}>{fmtINR(item.rate)}</Typography>
                             </Stack>
                           </Tooltip>
                         )}
                       </TableCell>
-                      <TableCell align="right" onClick={(e) => e.stopPropagation()}>
+                      <TableCell align="center" onClick={(e) => e.stopPropagation()}>
                         <Tooltip title={errs.disc || (t.lineDiscount > 0 ? `−${fmtINR(t.lineDiscount)}` : '')} placement="top">
                           <TextField
-                            size="small" type="number" value={item.discount} disabled={item.isFreeGift} error={Boolean(errs.disc)}
-                            onChange={(e) => handleUpdateItemField(idx, 'discount', e.target.value === '' ? '' : Number(e.target.value))}
-                            inputProps={cellProps('disc', { min: 0, max: 100 })}
+                            size="small" type="number" value={item.isFreeGift ? item.discount : zeroAsBlank(item.discount)} placeholder="0" disabled={item.isFreeGift} error={Boolean(errs.disc)}
+                            onChange={(e) => handleUpdateItemField(idx, 'discount', typedNumber(e.target.value))}
+                            inputProps={cellProps('disc', { min: 0, max: 100, ...selectOnFocusProps })}
                             sx={{ ...cellInputSx(54), '& .MuiInputBase-input': { ...cellInputSx(54)['& .MuiInputBase-input'], color: '#dc2626' } }}
                           />
                         </Tooltip>
                       </TableCell>
-                      <TableCell align="right" onClick={(e) => e.stopPropagation()}>
+                      <TableCell align="center" onClick={(e) => e.stopPropagation()}>
                         {canOverride ? (
                           <Tooltip title={errs.gst || `GST ${fmtINR(t.gst)}`} placement="top">
                             <TextField
-                              size="small" type="number" value={item.gst} error={Boolean(errs.gst)}
-                              onChange={(e) => handleUpdateItemField(idx, 'gst', e.target.value === '' ? '' : Number(e.target.value))}
-                              inputProps={cellProps('gst', { min: 0, max: 100 })}
+                              size="small" type="number" value={zeroAsBlank(item.gst)} placeholder="0" error={Boolean(errs.gst)}
+                              onChange={(e) => handleUpdateItemField(idx, 'gst', typedNumber(e.target.value))}
+                              inputProps={cellProps('gst', { min: 0, max: 100, ...selectOnFocusProps })}
                               sx={cellInputSx(50)}
                             />
                           </Tooltip>
@@ -2352,13 +2671,14 @@ export default function WholesaleSales() {
                     </TableRow>
                     {notesOpenIdx === idx && (
                       <TableRow>
-                        <TableCell colSpan={gridColCount} sx={{ bgcolor: '#f8fafc', py: 1 }}>
+                        <TableCell colSpan={gridColCount} sx={{ bgcolor: '#ffffff', py: 1 }}>
                           <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
                             {!svc && (
                               <>
                                 <TextField
-                                  size="small" type="number" label="Free Qty" value={item.freeQty} disabled={item.isFreeGift}
+                                  size="small" type="number" label="Free Qty" value={zeroAsBlank(item.freeQty)} placeholder="0" disabled={item.isFreeGift}
                                   onChange={(e) => handleUpdateItemField(idx, 'freeQty', Math.max(0, parseInt(e.target.value) || 0))}
+                                  inputProps={{ ...selectOnFocusProps, style: { textAlign: 'center' } }}
                                   sx={{ width: 90, ...NO_SPIN_SX }}
                                 />
                                 <TextField size="small" label="Batch" value={item.batch} onChange={(e) => handleUpdateItemField(idx, 'batch', e.target.value)} sx={{ width: 120 }} />
@@ -2381,7 +2701,7 @@ export default function WholesaleSales() {
             </TableBody>
           </Table>
         </TableContainer>
-        <Box sx={{ px: 1.5, py: 0.6, borderTop: '1px solid #e2e8f0', bgcolor: '#f8fafc', display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 1 }}>
+        <Box sx={{ px: 1.5, py: 0.6, borderTop: '1px solid #e2e8f0', bgcolor: '#ffffff', display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 1 }}>
           <Typography variant="caption" fontWeight={800} color="#475569">
             {summary.totalItems} line{summary.totalItems === 1 ? '' : 's'} · {summary.totalQty} unit{summary.totalQty === 1 ? '' : 's'}{summary.totalFreeQty ? ` + ${summary.totalFreeQty} free` : ''}
           </Typography>
@@ -2392,11 +2712,11 @@ export default function WholesaleSales() {
       </Card>
 
       {/* ============ SUMMARY · COUPON · PAYMENT · COMPLETE ============ */}
-      <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 3, bgcolor: '#f8fafc', borderColor: '#cbd5e1', mb: 1.5 }}>
+      <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 1, bgcolor: '#ffffff', borderColor: '#cbd5e1', mb: 1.5 }}>
         <Grid container spacing={1.5} alignItems="stretch">
           {/* Box 1: billing summary */}
           <Grid item xs={12} sm={6} md={2.4}>
-            <Paper variant="outlined" sx={{ p: 1.2, borderRadius: 2, bgcolor: '#ffffff', height: '100%' }}>
+            <Paper variant="outlined" sx={{ p: 1.2, borderRadius: 0, bgcolor: '#ffffff', height: '100%' }}>
               <SumRow label="Total Quantity" value={`${summary.totalQty}${summary.totalFreeQty ? ` + ${summary.totalFreeQty}` : ''}`} />
               <SumRow label="Item Price (Gross)" value={fmtINR(summary.subtotal)} />
               <SumRow label="Item Discount" value={`−${fmtINR(summary.productDiscount)}`} color="#dc2626" />
@@ -2426,7 +2746,7 @@ export default function WholesaleSales() {
                       <TextField
                         size="small" type="number" placeholder="0" value={c.amount}
                         onChange={(e) => setChargesList(prev => prev.map((p, pi) => pi === idx ? { ...p, amount: e.target.value } : p))}
-                        inputProps={{ 'aria-label': `${c.name} amount`, min: 0 }}
+                        inputProps={{ 'aria-label': `${c.name} amount`, min: 0, ...selectOnFocusProps }}
                         sx={cellInputSx(72)}
                       />
                     </Stack>
@@ -2439,7 +2759,7 @@ export default function WholesaleSales() {
 
           {/* Box 2: Net Payable / Advance Paid / Balance */}
           <Grid item xs={12} sm={6} md={2.2}>
-            <Paper variant="outlined" sx={{ p: 1.2, borderRadius: 2, bgcolor: '#ffffff', borderLeft: '4px solid #2563eb', height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+            <Paper variant="outlined" sx={{ p: 1.2, borderRadius: 0, bgcolor: '#ffffff', height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
               <Typography variant="caption" fontWeight={900} color="primary.main">Net Payable</Typography>
               <Typography variant="h5" fontWeight={900} color="primary.main" sx={{ lineHeight: 1.2, mb: 1 }}>{fmtINR(summary.grandTotal)}</Typography>
               <SumRow label="Advance Paid" value={fmtINR(totalPaid)} color="#15803d" />
@@ -2454,7 +2774,7 @@ export default function WholesaleSales() {
 
           {/* Box 3: Coupon + Payment Mode */}
           <Grid item xs={12} sm={6} md={2.6}>
-            <Paper variant="outlined" sx={{ p: 1.2, borderRadius: 2, bgcolor: '#ffffff', height: '100%' }}>
+            <Paper variant="outlined" sx={{ p: 1.2, borderRadius: 0, bgcolor: '#ffffff', height: '100%' }}>
               <Stack direction="row" spacing={0.75} alignItems="flex-start" data-nav-own>
                 <TextField
                   fullWidth size="small" id="ws-coupon" label="Coupon Code" placeholder="Scheme code / name"
@@ -2478,7 +2798,7 @@ export default function WholesaleSales() {
                 <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.62rem' }}>← → to switch</Typography>
               </Stack>
               <ToggleButtonGroup
-                id="ws-pay-mode" value={payMode} exclusive fullWidth size="small"
+                id="ws-pay-mode" value={payMode} exclusive fullWidth size="small" disabled={paymentLocked}
                 onChange={(e, v) => { if (v) setPayMode(v); }}
                 onKeyDown={(e) => {
                   if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
@@ -2500,8 +2820,20 @@ export default function WholesaleSales() {
 
           {/* Box 4: details for the chosen payment mode */}
           <Grid item xs={12} sm={6} md={2.6}>
-            <Paper variant="outlined" sx={{ p: 1.2, borderRadius: 2, bgcolor: '#ffffff', height: '100%' }}>
-              {payMode === 'Cash' && (
+            <Paper variant="outlined" sx={{ p: 1.2, borderRadius: 0, bgcolor: '#ffffff', height: '100%' }}>
+              {paymentLocked && (
+                <Stack spacing={0.5}>
+                  <Typography variant="caption" fontWeight={900} color="text.secondary">Payment on this invoice ({editing.payMode})</Typography>
+                  <SummaryLine label="Already received" value={fmtINR(editing.originalPaid)} valueColor="#15803d" dense />
+                  <SummaryLine label="Due before edit" value={fmtINR(editing.originalDue)} dense />
+                  <SummaryLine label="Due after edit" value={fmtINR(balanceDue)} valueColor={balanceDue > 0.009 ? '#dc2626' : '#15803d'} dense />
+                  {changeDue > 0.009 && <SummaryLine label="Received over new total" value={fmtINR(changeDue)} valueColor="#b45309" dense />}
+                  <Typography variant="caption" color="text.secondary" sx={{ lineHeight: 1.3 }}>
+                    Receipts already recorded stay as they are. Collect any extra with Ledger → Record Payment{changeDue > 0.009 ? '; refund the excess from Accounts' : ''}.
+                  </Typography>
+                </Stack>
+              )}
+              {!paymentLocked && payMode === 'Cash' && (
                 <Stack spacing={1}>
                   <Stack direction="row" spacing={0.75} alignItems="flex-start">
                     <TextField
@@ -2509,7 +2841,7 @@ export default function WholesaleSales() {
                       disabled={cashUnpaid}
                       placeholder={String(summary.grandTotal)} value={cashUnpaid ? '' : amountReceived} onChange={(e) => setAmountReceived(e.target.value)}
                       error={amountReceived !== '' && !(parseFloat(amountReceived) >= 0)}
-                      inputProps={{ min: 0, style: { fontWeight: 900, color: '#15803d' } }} sx={NO_SPIN_SX}
+                      inputProps={{ min: 0, ...selectOnFocusProps, style: { fontWeight: 900, color: '#15803d', textAlign: 'center' } }} sx={NO_SPIN_SX}
                     />
                     <Button size="small" variant="outlined" disabled={cashUnpaid} onClick={() => setAmountReceived(String(summary.grandTotal))} sx={{ textTransform: 'none', fontWeight: 800, py: 0.85, whiteSpace: 'nowrap' }}>Full</Button>
                   </Stack>
@@ -2517,28 +2849,28 @@ export default function WholesaleSales() {
                   <Typography variant="caption" color="text.secondary">{cashUnpaid ? "Cash not received — the full amount goes on the dealer's credit." : "Leave blank or part-pay to put the balance on the dealer's credit."}</Typography>
                 </Stack>
               )}
-              {(payMode === 'UPI' || payMode === 'Card') && (
+              {!paymentLocked && (payMode === 'UPI' || payMode === 'Card') && (
                 <Stack spacing={1}>
-                  <TextField fullWidth size="small" label="Amount Paid ₹" InputLabelProps={{ shrink: true }} value={summary.grandTotal} InputProps={{ readOnly: true }} inputProps={{ tabIndex: -1 }} sx={{ bgcolor: '#f8fafc' }} />
+                  <TextField fullWidth size="small" label="Amount Paid ₹" InputLabelProps={{ shrink: true }} value={summary.grandTotal} InputProps={{ readOnly: true }} inputProps={{ tabIndex: -1, style: { textAlign: 'center' } }} />
                   <TextField fullWidth size="small" label="Reference / Txn ID" InputLabelProps={{ shrink: true }} placeholder={payMode === 'UPI' ? 'UPI ref' : 'Approval code'} value={refNo} onChange={(e) => setRefNo(e.target.value)} />
                   {payMode === 'UPI' && <PaymentModeDetails method="UPI" bankAccount={payBankAccount} onBankAccountChange={(id) => setPayBankAccount(id || '')} />}
                 </Stack>
               )}
-              {payMode === 'Bank Transfer' && (
+              {!paymentLocked && payMode === 'Bank Transfer' && (
                 <Stack spacing={1}>
                   <TextField fullWidth size="small" label="Reference / Cheque No" InputLabelProps={{ shrink: true }} placeholder="NEFT / RTGS ref" value={refNo} onChange={(e) => setRefNo(e.target.value)} />
                   <PaymentModeDetails method="Bank Transfer" bankAccount={payBankAccount} onBankAccountChange={(id) => setPayBankAccount(id || '')} />
                   <Typography variant="caption" color="text.secondary">Bank transfers stay due until the receipt is recorded against the dealer.</Typography>
                 </Stack>
               )}
-              {payMode === 'Split Payment' && (
+              {!paymentLocked && payMode === 'Split Payment' && (
                 <Stack spacing={0.75}>
                   {splitPayments.map((sp, i) => (
                     <Stack direction="row" spacing={0.5} key={i} alignItems="center">
                       <TextField select size="small" value={sp.mode} onChange={(e) => setSplitPayments(prev => prev.map((p, pi) => pi === i ? { ...p, mode: e.target.value } : p))} SelectProps={enterOpensSelectProps} sx={{ width: 108, '& .MuiSelect-select': { fontSize: '0.75rem', py: 0.6 } }}>
                         {SPLIT_PAYMENT_MODES.map(m => <MenuItem key={m} value={m}>{m}</MenuItem>)}
                       </TextField>
-                      <TextField fullWidth size="small" type="number" placeholder="Amount" value={sp.amount} onChange={(e) => setSplitPayments(prev => prev.map((p, pi) => pi === i ? { ...p, amount: e.target.value } : p))} inputProps={{ 'aria-label': `Split ${i + 1} amount`, min: 0 }} sx={cellInputSx('100%')} />
+                      <TextField fullWidth size="small" type="number" placeholder="Amount" value={sp.amount} onChange={(e) => setSplitPayments(prev => prev.map((p, pi) => pi === i ? { ...p, amount: e.target.value } : p))} inputProps={{ 'aria-label': `Split ${i + 1} amount`, min: 0, ...selectOnFocusProps }} sx={cellInputSx('100%')} />
                       <IconButton size="small" aria-label="Remove split row" disabled={splitPayments.length <= 1} onClick={() => setSplitPayments(prev => prev.filter((_, pi) => pi !== i))}><DeleteIcon sx={{ fontSize: 15 }} /></IconButton>
                     </Stack>
                   ))}
@@ -2559,13 +2891,13 @@ export default function WholesaleSales() {
                   {splitCreditAmount > 0 && <Typography variant="caption" color="text.secondary">{fmtINR(splitCreditAmount)} as Credit goes to the dealer's outstanding.</Typography>}
                 </Stack>
               )}
-              {payMode === 'Credit Sale' && (
+              {!paymentLocked && payMode === 'Credit Sale' && (
                 <Stack spacing={0.75}>
                   <TextField select fullWidth size="small" label="Payment Terms" value={creditDays} onChange={(e) => setCreditDays(e.target.value)} SelectProps={enterOpensSelectProps}>
                     {[15, 30, 45, 60].map(d => <MenuItem key={d} value={d}>{d} Days</MenuItem>)}
                   </TextField>
                   {selectedCustomer ? (
-                    <Box sx={{ p: 0.75, borderRadius: 1.5, bgcolor: '#f8fafc', border: '1px solid #e2e8f0' }}>
+                    <Box sx={{ p: 0.75, borderRadius: 0, bgcolor: '#ffffff', border: '1px solid #e2e8f0' }}>
                       <SummaryLine label="Previous Outstanding" value={fmtINR(selectedCustomer.outstanding)} dense />
                       <SummaryLine label="New Outstanding" value={fmtINR((parseFloat(selectedCustomer.outstanding) || 0) + summary.grandTotal)} valueColor="#dc2626" dense />
                       <SummaryLine label="Credit Limit" value={fmtINR(selectedCustomer.creditLimit)} dense />
@@ -2606,7 +2938,7 @@ export default function WholesaleSales() {
               </Box>
               <Button
                 fullWidth variant="outlined" size="small" onClick={handleShowBill} startIcon={<BillIcon />}
-                sx={{ fontWeight: 900, py: 0.6, borderRadius: 2.5, textTransform: 'none', bgcolor: '#fff' }}
+                sx={{ fontWeight: 900, py: 0.6, borderRadius: 1, textTransform: 'none', bgcolor: '#fff' }}
               >
                 Show Bill&nbsp;<Kbd>Ctrl+P</Kbd>
               </Button>
@@ -2615,10 +2947,10 @@ export default function WholesaleSales() {
                 disabled={savingInvoice || cartItems.length === 0}
                 onClick={() => handleAttemptCompleteSale()}
                 startIcon={savingInvoice ? <CircularProgress size={16} sx={{ color: '#fff' }} /> : <CheckedIcon />}
-                sx={{ fontWeight: 900, py: 0.9, borderRadius: 2.5, textTransform: 'none', lineHeight: 1.2 }}
+                sx={{ fontWeight: 900, py: 0.9, borderRadius: 1, textTransform: 'none', lineHeight: 1.2 }}
               >
                 <Box sx={{ textAlign: 'left' }}>
-                  {savingInvoice ? 'Saving…' : 'Complete Wholesale Invoice'}
+                  {savingInvoice ? 'Saving…' : paymentLocked ? `Save Changes to ${editing.invoiceNo}` : 'Complete Wholesale Invoice'}
                   <Box sx={{ mt: 0.25 }}><Kbd dark>Ctrl+Enter</Kbd></Box>
                 </Box>
               </Button>
@@ -2704,10 +3036,10 @@ export default function WholesaleSales() {
               <Box sx={{ px: 1.5, pb: 1.5 }}>
                 <Grid container spacing={1}>
                   <Grid item xs={6}>
-                    <TextField fullWidth size="small" type="number" id="ws-pack-packages" label="No. of Packages" value={packing.packages} onChange={(e) => setPacking({ ...packing, packages: e.target.value })} sx={NO_SPIN_SX} />
+                    <TextField fullWidth size="small" type="number" id="ws-pack-packages" label="No. of Packages" value={packing.packages} onChange={(e) => setPacking({ ...packing, packages: e.target.value })} inputProps={{ ...selectOnFocusProps, style: { textAlign: 'center' } }} sx={NO_SPIN_SX} />
                   </Grid>
                   <Grid item xs={6}>
-                    <TextField fullWidth size="small" type="number" label="Total Weight (kg)" value={packing.weight} onChange={(e) => setPacking({ ...packing, weight: e.target.value })} sx={NO_SPIN_SX} />
+                    <TextField fullWidth size="small" type="number" label="Total Weight (kg)" value={packing.weight} onChange={(e) => setPacking({ ...packing, weight: e.target.value })} inputProps={{ ...selectOnFocusProps, style: { textAlign: 'center' } }} sx={NO_SPIN_SX} />
                   </Grid>
                   <Grid item xs={6}>
                     <TextField fullWidth size="small" label="Packed By" value={packing.packedBy} onChange={(e) => setPacking({ ...packing, packedBy: e.target.value })} />
@@ -2758,7 +3090,7 @@ export default function WholesaleSales() {
                 ))}
               </Stack>
               {attachments.map((a, idx) => (
-                <Stack key={idx} direction="row" alignItems="center" justifyContent="space-between" sx={{ px: 0.75, borderRadius: 1.5, bgcolor: '#f8fafc' }}>
+                <Stack key={idx} direction="row" alignItems="center" justifyContent="space-between" sx={{ px: 0.75, border: '1px solid #e2e8f0' }}>
                   <Typography variant="caption" noWrap sx={{ maxWidth: 200 }}>{a.category}: {a.name}</Typography>
                   <IconButton size="small" aria-label={`Remove ${a.name}`} onClick={() => handleRemoveAttachment(idx)}><DeleteIcon sx={{ fontSize: 14 }} /></IconButton>
                 </Stack>
@@ -2792,8 +3124,12 @@ export default function WholesaleSales() {
         onView={handleViewOrder}
         onDuplicate={(o) => applyOrderToCart(o, 'duplicate')}
         onReorder={(o) => applyOrderToCart(o, 'reorder')}
+        onEdit={(o) => startEditInvoice(o)}
       />
-      <BulkAddDialog open={bulkAddOpen} products={products} onClose={() => setBulkAddOpen(false)} onAdd={handleBulkAdd} />
+      <BulkAddDialog
+        open={bulkAddOpen} products={products} onClose={() => setBulkAddOpen(false)} onAdd={handleBulkAdd}
+        priceFor={(p) => priceForProduct(p).rate} canEditPrice={canOverride}
+      />
       <ExcelImportDialog open={excelImportOpen} onClose={() => setExcelImportOpen(false)} onImport={handleExcelImport} />
       <SchemeDialog open={schemeOpen} onClose={() => setSchemeOpen(false)} dealer={selectedCustomer} schemes={schemes} products={products} invoiceDiscount={invoiceDiscount} onApply={handleApplyScheme} />
       <CreditNoteDialog open={creditNoteOpen} invoice={printableInvoice} onClose={() => setCreditNoteOpen(false)} onCreate={handleCreateCreditNote} />
@@ -2851,7 +3187,7 @@ export default function WholesaleSales() {
       {/* Complete confirmation — the validation step before anything is saved. Enter confirms
           (the confirm button has focus), Esc cancels. Carries the credit-limit override too. */}
       <Dialog open={completeConfirmOpen} onClose={() => { if (!savingInvoice) { setCompleteConfirmOpen(false); printAfterSaveRef.current = false; } }} maxWidth="xs" fullWidth PaperProps={{ ...navScopeProps, sx: { borderRadius: 3 } }}>
-        <DialogTitle sx={{ fontWeight: 900, pb: 1 }}>Complete Wholesale Invoice?</DialogTitle>
+        <DialogTitle sx={{ fontWeight: 900, pb: 1 }}>{paymentLocked ? `Save changes to ${editing.invoiceNo}?` : 'Complete Wholesale Invoice?'}</DialogTitle>
         <DialogContent dividers>
           <Stack spacing={0.5}>
             <SummaryLine label="Invoice No." value={invoiceNo} dense />
@@ -2859,6 +3195,7 @@ export default function WholesaleSales() {
             <SummaryLine label="Lines / Qty" value={`${summary.totalItems} / ${summary.totalQty}${summary.totalFreeQty ? ` + ${summary.totalFreeQty} free` : ''}`} dense />
             <SummaryLine label="Payment Mode" value={payMode} dense />
             <Divider sx={{ my: 0.5 }} />
+            {paymentLocked && <SummaryLine label="Total before edit" value={fmtINR(editing.originalTotal)} dense />}
             <SummaryLine label="Net Payable" value={fmtINR(summary.grandTotal)} valueColor="#2563eb" />
             <SummaryLine label="Paid Now" value={fmtINR(totalPaid)} valueColor="#15803d" />
             <SummaryLine label="Balance Due (dealer credit)" value={fmtINR(balanceDue)} valueColor={balanceDue > 0.009 ? '#dc2626' : '#15803d'} />
@@ -2872,12 +3209,12 @@ export default function WholesaleSales() {
         </DialogContent>
         <DialogActions sx={{ px: 2, py: 1.5, gap: 1 }}>
           <Button onClick={() => { setCompleteConfirmOpen(false); printAfterSaveRef.current = false; }} disabled={savingInvoice}>Back (Esc)</Button>
-          <Button variant="outlined" disabled={savingInvoice} onClick={() => { printAfterSaveRef.current = true; executeCompleteSale(); }} startIcon={<PrintIcon />}>Complete &amp; Print</Button>
+          <Button variant="outlined" disabled={savingInvoice} onClick={() => { printAfterSaveRef.current = true; executeCompleteSale(); }} startIcon={<PrintIcon />}>{paymentLocked ? 'Save' : 'Complete'} &amp; Print</Button>
           <Button
             variant="contained" color={isCreditExceeded ? 'warning' : 'success'} autoFocus disabled={savingInvoice}
             onClick={() => executeCompleteSale()} sx={{ fontWeight: 900 }}
           >
-            {isCreditExceeded ? 'Override & Complete' : 'Complete'} (Enter)
+            {isCreditExceeded ? (paymentLocked ? 'Override & Save' : 'Override & Complete') : (paymentLocked ? 'Save Changes' : 'Complete')} (Enter)
           </Button>
         </DialogActions>
       </Dialog>
@@ -2927,6 +3264,9 @@ export default function WholesaleSales() {
             <Stack direction="row" spacing={1}>
               <Button size="small" variant="outlined" startIcon={<WhatsAppIcon />} onClick={() => showToast('Shared via WhatsApp', 'success')}>WhatsApp</Button>
               <Button size="small" variant="outlined" startIcon={<PdfIcon />} onClick={() => downloadPdfInvoice(printableInvoice, 'WHOLESALE_BILL')}>PDF</Button>
+              {printableInvoice.status !== 'Cancelled' && printableInvoice.orderStatus !== 'Cancelled' && (
+                <Button size="small" variant="outlined" startIcon={<EditIcon />} disabled={loadingEdit} onClick={() => startEditInvoice(printableInvoice)}>Edit Bill</Button>
+              )}
               <Button size="small" variant="contained" startIcon={<PrintIcon />} onClick={() => printBill({ doc: printableInvoice, documentType: 'WHOLESALE_BILL' })}>Print</Button>
             </Stack>
           )}

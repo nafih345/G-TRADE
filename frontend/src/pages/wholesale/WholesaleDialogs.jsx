@@ -8,7 +8,7 @@ import {
   Print as PrintIcon, PictureAsPdf as PdfIcon, WhatsApp as WhatsAppIcon,
   CheckCircle as CheckedIcon, Add as AddIcon, UploadFile as UploadFileIcon,
   Download as DownloadIcon, ContentCopy as DuplicateIcon, Replay as ReorderIcon,
-  Visibility as ViewIcon, Search as SearchIcon, Payment as PaymentIcon
+  Visibility as ViewIcon, Search as SearchIcon, Payment as PaymentIcon, Edit as EditIcon
 } from '@mui/icons-material';
 import { ORDER_STATUS_COLORS, SCHEME_TYPES, PRICE_LIST_OPTIONS, fmtINR } from './wholesaleConstants';
 import { navDialogProps } from './keyboardNav';
@@ -213,7 +213,7 @@ export function RecordPaymentDialog({ open, dealer, onClose, onRecord }) {
 // ---------------------------------------------------------------------------
 // Previous Orders
 // ---------------------------------------------------------------------------
-export function PreviousOrdersDialog({ open, dealer, orders, onClose, onView, onDuplicate, onReorder }) {
+export function PreviousOrdersDialog({ open, dealer, orders, onClose, onView, onDuplicate, onReorder, onEdit }) {
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
       <DialogTitle sx={{ fontWeight: 850 }}>Previous Orders — {dealer?.name}</DialogTitle>
@@ -252,6 +252,9 @@ export function PreviousOrdersDialog({ open, dealer, orders, onClose, onView, on
                     <TableCell align="center">
                       <Stack direction="row" spacing={0.5} justifyContent="center">
                         <IconButton size="small" onClick={() => onView(o)} title="View Order"><ViewIcon sx={{ fontSize: 18 }} /></IconButton>
+                        {onEdit && o.status !== 'Cancelled' && o.orderStatus !== 'Cancelled' && (
+                          <IconButton size="small" onClick={() => onEdit(o)} title="Edit Bill"><EditIcon sx={{ fontSize: 17 }} /></IconButton>
+                        )}
                         <IconButton size="small" onClick={() => onDuplicate(o)} title="Duplicate Order"><DuplicateIcon sx={{ fontSize: 17 }} /></IconButton>
                         <IconButton size="small" onClick={() => onReorder(o)} title="Reorder"><ReorderIcon sx={{ fontSize: 18 }} /></IconButton>
                       </Stack>
@@ -273,99 +276,199 @@ export function PreviousOrdersDialog({ open, dealer, orders, onClose, onView, on
 // ---------------------------------------------------------------------------
 // Bulk Add Products
 // ---------------------------------------------------------------------------
-export function BulkAddDialog({ open, products, onClose, onAdd }) {
+const dash = (v) => (v == null || v === '' || v === '—' || v === '-' ? '' : v);
+const BULK_HEAD_SX = { fontWeight: 800, bgcolor: '#0f172a', color: '#fff', whiteSpace: 'nowrap', fontSize: '0.72rem', py: 0.8 };
+const bulkCellSx = (width) => ({
+  width,
+  '& input[type=number]': { MozAppearance: 'textfield' },
+  '& input::-webkit-outer-spin-button, & input::-webkit-inner-spin-button': { WebkitAppearance: 'none', margin: 0 },
+  '& .MuiInputBase-input': { py: 0.3, px: 0.5, textAlign: 'center', fontWeight: 700, fontSize: '0.8rem' },
+});
+const selectAll = (e) => { try { e.target.select(); } catch { /* not selectable */ } };
+
+// `priceFor(product)` = the dealer's resolved unit price (price list / special rates), the same
+// one a single add would use; `canEditPrice` gates the price cell like the billing grid does.
+export function BulkAddDialog({ open, products, onClose, onAdd, priceFor, canEditPrice = false }) {
   const [search, setSearch] = useState('');
-  const [selected, setSelected] = useState({}); // id -> qty
+  const [selected, setSelected] = useState({}); // id -> { qty, rate, discount }
+  const [onlySelected, setOnlySelected] = useState(false);
+
+  const listPrice = (p) => {
+    const r = priceFor ? priceFor(p) : null;
+    return Number.isFinite(Number(r)) && r !== null ? Number(r) : (parseFloat(p.wholesalePrice ?? p.price ?? 0) || 0);
+  };
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return products.slice(0, 200);
-    return products.filter(p =>
-      (p.name || '').toLowerCase().includes(q) ||
-      (p.code || '').toLowerCase().includes(q) ||
-      (p.sku || '').toLowerCase().includes(q) ||
-      (p.brand || '').toLowerCase().includes(q)
-    ).slice(0, 200);
-  }, [products, search]);
+    let list = products;
+    if (onlySelected) list = list.filter(p => selected[p.id]);
+    if (q) {
+      list = list.filter(p => [p.name, p.code, p.sku, p.barcode, p.brand, p.modelNo, p.color, p.size, p.category]
+        .some(v => dash(v) && String(v).toLowerCase().includes(q)));
+    }
+    return list.slice(0, 300);
+  }, [products, search, onlySelected, selected]);
 
   const toggle = (p) => {
     setSelected(prev => {
       const next = { ...prev };
       if (next[p.id]) delete next[p.id];
-      else next[p.id] = 1;
+      else next[p.id] = { qty: 1, rate: listPrice(p), discount: 0 };
       return next;
     });
   };
 
-  const setQty = (id, qty) => setSelected(prev => ({ ...prev, [id]: Math.max(1, parseInt(qty) || 1) }));
+  // Typing in a cell of an unticked row ticks it — the edit is what the user wants added.
+  const setField = (p, field, raw) => setSelected(prev => {
+    const cur = prev[p.id] || { qty: 1, rate: listPrice(p), discount: 0 };
+    // Kept as typed ("0.", "12.5") while editing; parsed when the lines are added.
+    return { ...prev, [p.id]: { ...cur, [field]: raw } };
+  });
+
+  const lineOk = (v) => parseFloat(v.qty) >= 1 && parseFloat(v.rate) >= 0
+    && !(parseFloat(v.discount) < 0 || parseFloat(v.discount) > 100);
 
   const handleAdd = () => {
-    const items = products.filter(p => selected[p.id]).map(p => ({ product: p, qty: selected[p.id] }));
+    const items = products.filter(p => selected[p.id]).map(p => {
+      const v = selected[p.id];
+      const rate = parseFloat(v.rate);
+      return {
+        product: p,
+        qty: Math.max(1, parseInt(v.qty) || 1),
+        rate: Number.isFinite(rate) ? rate : listPrice(p),
+        discount: Math.min(100, Math.max(0, parseFloat(v.discount) || 0)),
+      };
+    });
     onAdd(items);
     setSelected({});
     setSearch('');
+    setOnlySelected(false);
   };
 
-  const selectedCount = Object.keys(selected).length;
+  const selectedIds = Object.keys(selected);
+  const selectedCount = selectedIds.length;
+  const invalid = selectedIds.some(id => !lineOk(selected[id]));
+  const selectedValue = products.filter(p => selected[p.id]).reduce((a, p) => {
+    const v = selected[p.id];
+    const base = (parseFloat(v.rate) || 0) * (parseFloat(v.qty) || 0);
+    return a + base * (1 - (parseFloat(v.discount) || 0) / 100);
+  }, 0);
 
   return (
     // Keyboard: type to filter → Enter / ↓ walks the rows; Enter on a row's checkbox ticks it and
-    // jumps to its Qty, Enter in Qty goes to the next row; the chain ends on "Add Selected".
-    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth {...navDialogProps}>
+    // jumps to its cells, Enter in the last cell goes to the next row; the chain ends on "Add Selected".
+    <Dialog open={open} onClose={onClose} maxWidth="xl" fullWidth {...navDialogProps}>
       <DialogTitle sx={{ fontWeight: 850 }}>Bulk Add Products</DialogTitle>
       <DialogContent dividers sx={{ p: 0 }}>
-        <Box sx={{ p: 2, pb: 1 }}>
+        <Stack direction="row" spacing={1.5} alignItems="center" sx={{ p: 2, pb: 1 }}>
           <TextField
-            fullWidth size="small" autoFocus placeholder="Search products to multi-select..."
+            fullWidth size="small" autoFocus placeholder="Search name, tag / barcode, brand, model, colour, size…"
             value={search} onChange={(e) => setSearch(e.target.value)}
             InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon sx={{ fontSize: 18, color: '#94a3b8' }} /></InputAdornment> }}
           />
+          <Button size="small" variant={onlySelected ? 'contained' : 'outlined'} disabled={!selectedCount && !onlySelected} onClick={() => setOnlySelected(v => !v)} sx={{ whiteSpace: 'nowrap', textTransform: 'none', fontWeight: 800 }}>
+            {onlySelected ? 'Show all' : `Selected only (${selectedCount})`}
+          </Button>
+        </Stack>
+        <Box sx={{ maxHeight: '60vh', overflow: 'auto' }}>
+          <Table size="small" stickyHeader sx={{ minWidth: 1150 }}>
+            <TableHead>
+              <TableRow>
+                <TableCell padding="checkbox" sx={BULK_HEAD_SX} />
+                <TableCell sx={BULK_HEAD_SX}>Tag / Code</TableCell>
+                <TableCell sx={BULK_HEAD_SX}>Product</TableCell>
+                <TableCell sx={BULK_HEAD_SX}>Brand</TableCell>
+                <TableCell sx={BULK_HEAD_SX}>Model No</TableCell>
+                <TableCell sx={BULK_HEAD_SX}>Variant (Colour / Size)</TableCell>
+                <TableCell sx={BULK_HEAD_SX}>Category</TableCell>
+                <TableCell align="center" sx={BULK_HEAD_SX}>Stock</TableCell>
+                <TableCell align="center" sx={BULK_HEAD_SX}>Unit Price</TableCell>
+                <TableCell align="center" sx={BULK_HEAD_SX}>Disc %</TableCell>
+                <TableCell align="center" sx={BULK_HEAD_SX}>Qty</TableCell>
+                <TableCell align="right" sx={BULK_HEAD_SX}>Amount</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {filtered.length === 0 && (
+                <TableRow><TableCell colSpan={12} align="center" sx={{ py: 4, color: 'text.secondary' }}>No products match.</TableCell></TableRow>
+              )}
+              {filtered.map((p) => {
+                const stock = parseFloat(p.availableStock ?? p.stock ?? 0);
+                const v = selected[p.id];
+                const isSel = Boolean(v);
+                const out = stock <= 0;
+                const rate = isSel ? v.rate : listPrice(p);
+                const qty = isSel ? v.qty : 1;
+                const disc = isSel ? v.discount : 0;
+                const amount = (parseFloat(rate) || 0) * (parseFloat(qty) || 0) * (1 - (parseFloat(disc) || 0) / 100);
+                const overStock = isSel && (parseFloat(qty) || 0) > stock;
+                const variant = [dash(p.color), dash(p.size)].filter(Boolean).join(' / ');
+                return (
+                  <TableRow key={p.id} hover sx={{ bgcolor: isSel ? '#f8fafc' : '#fff', '& td': { fontSize: '0.78rem', py: 0.5 }, '& > td:first-of-type': { borderLeft: isSel ? '3px solid #0f172a' : '3px solid transparent' } }}>
+                    <TableCell padding="checkbox">
+                      <Checkbox size="small" checked={isSel} onChange={() => toggle(p)} disabled={out && !isSel} inputProps={{ 'data-nav-stop': '', 'aria-label': `Select ${p.name}` }} />
+                    </TableCell>
+                    <TableCell sx={{ fontFamily: 'monospace', fontWeight: 700 }}>{dash(p.barcode) || dash(p.code)}</TableCell>
+                    <TableCell onClick={() => !out && toggle(p)} sx={{ cursor: out ? 'default' : 'pointer', minWidth: 180 }}>
+                      <Typography variant="body2" fontWeight={700} sx={{ fontSize: '0.8rem' }}>{p.name}</Typography>
+                      {dash(p.code) && dash(p.barcode) && <Typography variant="caption" color="text.secondary">{p.code}</Typography>}
+                    </TableCell>
+                    <TableCell>{dash(p.brand)}</TableCell>
+                    <TableCell>{dash(p.modelNo)}</TableCell>
+                    <TableCell>
+                      {variant}
+                      {dash(p.power) ? <Typography variant="caption" color="text.secondary" display="block">Power {p.power}</Typography> : null}
+                    </TableCell>
+                    <TableCell>{dash(p.category)}</TableCell>
+                    <TableCell align="center" sx={{ color: stock > 5 ? '#059669' : stock > 0 ? '#d97706' : '#dc2626', fontWeight: 800 }}>
+                      {stock > 0 ? stock : 'Out'}
+                    </TableCell>
+                    <TableCell align="center">
+                      {canEditPrice ? (
+                        <TextField
+                          size="small" type="number" value={rate === 0 ? '' : rate} placeholder="0" disabled={out && !isSel}
+                          error={isSel && !(parseFloat(v.rate) >= 0)}
+                          onFocus={selectAll} onChange={(e) => setField(p, 'rate', e.target.value)}
+                          inputProps={{ min: 0, step: '0.01', 'aria-label': `Unit price for ${p.name}` }} sx={bulkCellSx(90)}
+                        />
+                      ) : (
+                        <Typography variant="body2" fontWeight={700} sx={{ fontSize: '0.8rem' }}>{fmtINR(rate)}</Typography>
+                      )}
+                    </TableCell>
+                    <TableCell align="center">
+                      <TextField
+                        size="small" type="number" value={disc === 0 ? '' : disc} placeholder="0" disabled={out && !isSel}
+                        error={isSel && (parseFloat(v.discount) < 0 || parseFloat(v.discount) > 100)}
+                        onFocus={selectAll} onChange={(e) => setField(p, 'discount', e.target.value)}
+                        inputProps={{ min: 0, max: 100, 'aria-label': `Discount for ${p.name}` }} sx={bulkCellSx(60)}
+                      />
+                    </TableCell>
+                    <TableCell align="center">
+                      <TextField
+                        size="small" type="number" value={qty} disabled={out && !isSel}
+                        error={isSel && (!(parseFloat(v.qty) >= 1) || overStock)}
+                        title={overStock ? `Only ${stock} in stock` : undefined}
+                        onFocus={selectAll} onChange={(e) => setField(p, 'qty', e.target.value)}
+                        inputProps={{ min: 1, step: 1, 'aria-label': `Quantity for ${p.name}` }} sx={bulkCellSx(64)}
+                      />
+                    </TableCell>
+                    <TableCell align="right" sx={{ fontWeight: 800, color: isSel ? '#0f172a' : '#94a3b8' }}>{fmtINR(amount)}</TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
         </Box>
-        <Table size="small" stickyHeader>
-          <TableHead sx={{ '& th': { fontWeight: 700, bgcolor: '#f8fafc' } }}>
-            <TableRow>
-              <TableCell padding="checkbox" />
-              <TableCell>Product</TableCell>
-              <TableCell>Brand</TableCell>
-              <TableCell align="right">Stock</TableCell>
-              <TableCell align="right">Qty</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {filtered.map((p) => {
-              const stock = parseFloat(p.availableStock ?? p.stock ?? 0);
-              const isSel = Boolean(selected[p.id]);
-              return (
-                <TableRow key={p.id} hover selected={isSel}>
-                  <TableCell padding="checkbox">
-                    <Checkbox size="small" checked={isSel} onChange={() => toggle(p)} disabled={stock <= 0} inputProps={{ 'data-nav-stop': '' }} />
-                  </TableCell>
-                  <TableCell onClick={() => stock > 0 && toggle(p)} sx={{ cursor: stock > 0 ? 'pointer' : 'default' }}>
-                    <Typography variant="body2" fontWeight={700}>{p.name}</Typography>
-                    <Typography variant="caption" color="text.secondary">{p.code}</Typography>
-                  </TableCell>
-                  <TableCell>{p.brand}</TableCell>
-                  <TableCell align="right" sx={{ color: stock > 5 ? '#059669' : stock > 0 ? '#d97706' : '#dc2626', fontWeight: 700 }}>
-                    {stock > 0 ? stock : 'Out'}
-                  </TableCell>
-                  <TableCell align="right">
-                    <TextField
-                      size="small" type="number" disabled={!isSel} value={selected[p.id] || 1}
-                      onChange={(e) => setQty(p.id, e.target.value)}
-                      sx={{ width: 64, '& .MuiInputBase-input': { py: 0.25, textAlign: 'right' } }}
-                    />
-                  </TableCell>
-                </TableRow>
-              );
-            })}
-          </TableBody>
-        </Table>
       </DialogContent>
       <DialogActions sx={{ px: 2, py: 1.5 }}>
-        <Typography variant="caption" color="text.secondary" sx={{ mr: 'auto' }}>{selectedCount} product(s) selected</Typography>
+        <Typography variant="caption" color="text.secondary" sx={{ mr: 'auto' }}>
+          {selectedCount} product(s) selected{selectedCount ? ` · ${fmtINR(selectedValue)} before tax` : ''}
+          {invalid ? ' · fix the highlighted cells' : ''}
+          {!canEditPrice ? ' · price changes need a Manager/Admin' : ''}
+        </Typography>
         <Button onClick={onClose}>Cancel</Button>
-        <Button variant="contained" data-nav-stop disabled={selectedCount === 0} onClick={handleAdd} startIcon={<AddIcon />} sx={{ backgroundColor: '#4f46e5', fontWeight: 800 }}>
-          Add Selected to Cart
+        <Button variant="contained" data-nav-stop disabled={selectedCount === 0 || invalid} onClick={handleAdd} startIcon={<AddIcon />} sx={{ backgroundColor: '#0f172a', fontWeight: 800, '&:hover': { bgcolor: '#1e293b' } }}>
+          Add Selected to Bill
         </Button>
       </DialogActions>
     </Dialog>

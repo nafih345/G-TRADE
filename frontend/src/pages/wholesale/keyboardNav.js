@@ -61,6 +61,37 @@ export const focusField = (el) => {
   return true;
 };
 
+// Numeric entry cells: the whole value is selected whenever the field gains focus (Enter from
+// the previous cell, Tab, or a mouse click), so a typed figure replaces a default 0 instead of
+// becoming "05". A click would normally drop the selection on mouseup and park the caret after
+// the 0 — the first mouseup after focusing is swallowed so the selection survives.
+export const selectOnFocusProps = {
+  onFocus: (e) => {
+    const el = e.target;
+    try { el.select(); } catch { /* not selectable */ }
+    el.dataset.justFocused = '1';
+  },
+  onMouseUp: (e) => {
+    if (e.target.dataset.justFocused) {
+      delete e.target.dataset.justFocused;
+      e.preventDefault();
+    }
+  },
+  onKeyDownCapture: (e) => { delete e.target.dataset.justFocused; },
+  onBlur: (e) => { delete e.target.dataset.justFocused; },
+};
+
+// A numeric cell shows an empty box (with a "0" placeholder) instead of a stored 0. Pair it with
+// typedNumber in onChange: text the user is still typing ("0", "0.", "12.") is kept as typed so
+// the box doesn't blank under them, anything complete becomes a number.
+export const zeroAsBlank = (v) => (v === 0 ? '' : v);
+export const typedNumber = (raw) => {
+  if (raw === '' || raw == null) return '';
+  if (/^-?0?$|\.$|\.\d*0$/.test(String(raw))) return String(raw);
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : String(raw);
+};
+
 // Moves focus `delta` fields away from `from` inside its nav scope. Returns true if it moved.
 export const focusRelative = (from, delta = 1) => {
   const scope = from?.closest?.(`[${SCOPE_ATTR}]`);

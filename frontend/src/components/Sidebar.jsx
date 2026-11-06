@@ -69,6 +69,7 @@ const menuItems = [
     roles: ['*'],
     subItems: [
       { text: 'Wholesale POS', path: '/wholesale/pos' },
+      { text: 'Wholesale Dealers / Customers', path: '/wholesale/dealers' },
       { text: 'Wholesale Reports', path: '/wholesale/reports' }
     ]
   },

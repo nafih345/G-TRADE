@@ -1425,6 +1425,56 @@ class DealerViewSet(viewsets.ModelViewSet):
     serializer_class = DealerSerializer
     permission_classes = [permissions.AllowAny]
 
+    def perform_destroy(self, instance):
+        """Only a dealer nothing was ever billed / received / returned against can go: its
+        invoices, receipts and returns all point at it (and its receivable ledger). Those
+        dealers are set Inactive instead."""
+        used = []
+        if WholesaleInvoice.all_objects.filter(dealer=instance, is_deleted=False).exists():
+            used.append('invoices')
+        if WholesalePaymentCollection.all_objects.filter(dealer=instance, is_deleted=False).exists():
+            used.append('payments')
+        if WholesaleReturn.all_objects.filter(dealer=instance, is_deleted=False).exists():
+            used.append('returns / credit notes')
+        if used:
+            raise serializers.ValidationError({'detail': (
+                f"{instance.business_name} has {', '.join(used)} on record, so it can't be deleted. "
+                "Set its status to Inactive instead.")})
+        instance.delete()
+
+    @action(detail=False, methods=['get'])
+    def directory(self, request):
+        """Every dealer with its billed business and what it still owes, for the Wholesale
+        Dealers / Customers master. `bills_due` is worked out from the invoices themselves
+        (grand total − paid − credit notes, per open bill: financial.settlements.open_bills), so it
+        cannot drift the way the POS-maintained `outstanding_balance` column can."""
+        from django.db.models import Count, Max, Sum
+        from apps.financial.settlements import open_bills
+
+        dealers = list(self.get_queryset().order_by('business_name'))
+        ids = [d.pk for d in dealers]
+        live = WholesaleInvoice.objects.filter(dealer_id__in=ids).exclude(
+            status__in=('Draft', 'Cancelled', 'draft', 'cancelled'))
+        stats = {row['dealer_id']: row for row in live.values('dealer_id').annotate(
+            invoices=Count('id'), business=Sum('grand_total'), last=Max('invoice_date'))}
+        bills_by_dealer = open_bills('dealer', party_ids=ids) if ids else {}
+        due = {pid: sum((Decimal(str(b['due'])) for b in bills), Decimal('0')) for pid, bills in bills_by_dealer.items()}
+        open_count = {pid: len(bills) for pid, bills in bills_by_dealer.items()}
+
+        rows = []
+        for d in dealers:
+            s = stats.get(d.pk, {})
+            row = DealerSerializer(d).data
+            row.update({
+                'invoice_count': s.get('invoices') or 0,
+                'total_business': str(s.get('business') or Decimal('0.00')),
+                'last_invoice_date': s.get('last'),
+                'bills_due': str(due.get(d.pk, Decimal('0.00'))),
+                'open_bill_count': open_count.get(d.pk, 0),
+            })
+            rows.append(row)
+        return Response(rows)
+
 class WholesalePriceListViewSet(viewsets.ModelViewSet):
     queryset = WholesalePriceList.objects.all()
     serializer_class = WholesalePriceListSerializer

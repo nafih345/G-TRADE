@@ -546,7 +546,9 @@ class Dealer(BaseUUIDModel):
     phone = models.CharField(max_length=20)
     whatsapp_number = models.CharField(max_length=20, blank=True, null=True)
     email = models.EmailField(blank=True, null=True)
-    address = models.TextField(blank=True, null=True)
+    address = models.TextField(blank=True, null=True)  # billing address
+    # Where goods go. Blank = ship to the billing address (rows from before this column).
+    shipping_address = models.TextField(blank=True, default='')
     city = models.CharField(max_length=100, blank=True, null=True)
     state = models.CharField(max_length=100, blank=True, null=True)
     pincode = models.CharField(max_length=20, blank=True, null=True)

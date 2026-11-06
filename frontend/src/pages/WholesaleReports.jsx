@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Box, Card, CardContent, Typography, Grid, Button, Table, TableBody,
   TableCell, TableContainer, TableHead, TableRow, TableFooter, Paper, Dialog,
   DialogTitle, DialogContent, DialogActions, TextField, MenuItem,
-  Stack, Chip, Divider, Avatar, InputAdornment
+  Stack, Chip, Divider, Avatar, InputAdornment, IconButton, Tooltip, CircularProgress
 } from '@mui/material';
 import {
   Assessment as ReportsIcon,
@@ -18,8 +19,14 @@ import {
   RequestQuote as GstIcon,
   ReceiptLong as InvoiceIcon,
   AccountBalanceWallet as OutstandingIcon,
-  TrendingUp as TrendingUpIcon
+  TrendingUp as TrendingUpIcon,
+  Edit as EditIcon,
+  Visibility as ViewIcon,
+  ExpandMore as ExpandMoreIcon,
+  ChevronRight as ChevronRightIcon
 } from '@mui/icons-material';
+import { ensureEditAccess } from '../utils/editPermissions';
+import { notify } from '../utils/notify';
 import axios from 'axios';
 import {
   LS_KEYS, WHOLESALE_API, readLS, fetchAllPages, mapDealerFromApi, syncWholesaleInvoices,
@@ -101,7 +108,37 @@ function normaliseInvoice(raw) {
 }
 
 export default function WholesaleReports() {
+  const navigate = useNavigate();
   const [invoicesRaw, setInvoicesRaw] = useState([]);
+  const [expandedCustomer, setExpandedCustomer] = useState('');
+  const [openingEdit, setOpeningEdit] = useState('');
+
+  // "Edit Bill": checks the wholesale edit permission (admin approval + reason when Direct Edit
+  // is off), then opens the invoice in the Wholesale POS, which saves the correction in place.
+  const editBill = async (inv) => {
+    const raw = inv.raw || inv;
+    if (!raw.backendId) {
+      notify(`${inv.invoiceNo} is only saved on this device so far. It can be edited once it has synced to the server.`, 'warning');
+      return;
+    }
+    setOpeningEdit(inv.invoiceNo);
+    try {
+      const allowed = await ensureEditAccess({ module: 'wholesale', recordId: raw.backendId, recordRef: inv.invoiceNo });
+      if (allowed) navigate(`/wholesale/pos?edit=${encodeURIComponent(inv.invoiceNo)}&checked=1`);
+    } finally {
+      setOpeningEdit('');
+    }
+  };
+
+  const editButton = (inv) => (
+    <Tooltip title={`Edit bill ${inv.invoiceNo}`}>
+      <span>
+        <IconButton size="small" aria-label={`Edit bill ${inv.invoiceNo}`} disabled={Boolean(openingEdit)} onClick={(e) => { e.stopPropagation(); editBill(inv); }}>
+          {openingEdit === inv.invoiceNo ? <CircularProgress size={14} /> : <EditIcon sx={{ fontSize: 17 }} />}
+        </IconButton>
+      </span>
+    </Tooltip>
+  );
   const [customers, setCustomers] = useState([]);
 
   const [activeTab, setActiveTab] = useState('sales-register');
@@ -311,7 +348,7 @@ export default function WholesaleReports() {
   const activeReport = REPORT_TABS.find(t => t.id === activeTab) || REPORT_TABS[0];
 
   return (
-    <Box sx={{ p: 2.5, bgcolor: '#f8fafc', minHeight: '100vh' }}>
+    <Box sx={{ p: 2.5, bgcolor: '#ffffff', minHeight: '100vh' }}>
       {/* HEADER */}
       <Paper
         elevation={0}
@@ -399,7 +436,7 @@ export default function WholesaleReports() {
           { label: 'OUTSTANDING DUE', value: inr0(kpi.due), sub: 'Unpaid on filtered bills', color: '#dc2626' }
         ].map((c) => (
           <Grid item xs={12} sm={6} md={2.4} key={c.label}>
-            <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: `4px solid ${c.color}`, bgcolor: '#ffffff', height: '100%' }}>
+            <Paper variant="outlined" sx={{ p: 2, borderRadius: 0, borderLeft: `4px solid ${c.color}`, bgcolor: '#ffffff', height: '100%' }}>
               <Typography variant="caption" color="text.secondary" fontWeight={800}>{c.label}</Typography>
               <Typography variant="h6" fontWeight={900} sx={{ color: c.color, mt: 0.5 }}>{c.value}</Typography>
               <Typography variant="caption" color="text.secondary">{c.sub}</Typography>
@@ -490,6 +527,7 @@ export default function WholesaleReports() {
                     <TableCell align="right">Due</TableCell>
                     <TableCell>Pay Mode</TableCell>
                     <TableCell align="center">Status</TableCell>
+                    <TableCell align="center">Actions</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
@@ -517,6 +555,10 @@ export default function WholesaleReports() {
                           sx={{ fontWeight: 800 }}
                         />
                       </TableCell>
+                      <TableCell align="center" sx={{ whiteSpace: 'nowrap' }}>
+                        <Tooltip title="Show bill"><IconButton size="small" aria-label={`Show bill ${i.invoiceNo}`} onClick={(e) => { e.stopPropagation(); setDetailInvoice(i); }}><ViewIcon sx={{ fontSize: 17 }} /></IconButton></Tooltip>
+                        {editButton(i)}
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -529,7 +571,7 @@ export default function WholesaleReports() {
                     <TableCell align="right" sx={{ color: '#b45309' }}>{inr(kpi.gst)}</TableCell>
                     <TableCell align="right" sx={{ color: 'primary.main' }}>{inr(kpi.revenue)}</TableCell>
                     <TableCell align="right" sx={{ color: '#dc2626' }}>{inr(kpi.due)}</TableCell>
-                    <TableCell colSpan={2} />
+                    <TableCell colSpan={3} />
                   </TableRow>
                 </TableFooter>
               </Table>
@@ -551,11 +593,20 @@ export default function WholesaleReports() {
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {customerSummary.map((c) => (
-                    <TableRow key={c.customerName} hover>
+                  {customerSummary.map((c) => {
+                    const open = expandedCustomer === c.customerName;
+                    const bills = open ? invoices.filter(i => i.customerName === c.customerName) : [];
+                    return (
+                    <React.Fragment key={c.customerName}>
+                    <TableRow hover sx={{ cursor: 'pointer' }} onClick={() => setExpandedCustomer(open ? '' : c.customerName)} aria-expanded={open}>
                       <TableCell sx={{ fontWeight: 700 }}>
-                        {c.customerName}
-                        {c.customerCode && <Typography variant="caption" color="text.secondary" display="block">{c.customerCode}</Typography>}
+                        <Stack direction="row" spacing={0.5} alignItems="flex-start">
+                          {open ? <ExpandMoreIcon sx={{ fontSize: 18, mt: 0.1 }} /> : <ChevronRightIcon sx={{ fontSize: 18, mt: 0.1 }} />}
+                          <Box>
+                            {c.customerName}
+                            {c.customerCode && <Typography variant="caption" color="text.secondary" display="block">{c.customerCode}</Typography>}
+                          </Box>
+                        </Stack>
                       </TableCell>
                       <TableCell>{c.salesExec}</TableCell>
                       <TableCell align="center">{c.invoices}</TableCell>
@@ -565,7 +616,46 @@ export default function WholesaleReports() {
                       <TableCell align="right" sx={{ fontWeight: 850, color: 'primary.main' }}>{inr(c.total)}</TableCell>
                       <TableCell align="right" sx={{ fontWeight: 700, color: c.due > 0 ? '#dc2626' : '#059669' }}>{inr(c.due)}</TableCell>
                     </TableRow>
-                  ))}
+                    {open && (
+                      <TableRow>
+                        <TableCell colSpan={8} sx={{ bgcolor: '#ffffff', py: 1, pl: 5 }}>
+                          <Table size="small" sx={{ border: '1px solid #e2e8f0' }}>
+                            <TableHead sx={{ '& th': { bgcolor: '#f8fafc', fontWeight: 800, fontSize: '0.74rem' } }}>
+                              <TableRow>
+                                <TableCell>Invoice No</TableCell>
+                                <TableCell>Date</TableCell>
+                                <TableCell align="center">Qty</TableCell>
+                                <TableCell align="right">Grand Total</TableCell>
+                                <TableCell align="right">Due</TableCell>
+                                <TableCell>Pay Mode</TableCell>
+                                <TableCell align="center">Status</TableCell>
+                                <TableCell align="center">Actions</TableCell>
+                              </TableRow>
+                            </TableHead>
+                            <TableBody>
+                              {bills.map(b => (
+                                <TableRow key={b.invoiceNo} hover>
+                                  <TableCell sx={{ fontWeight: 800, color: 'primary.main' }}>{b.invoiceNo}</TableCell>
+                                  <TableCell>{b.date}</TableCell>
+                                  <TableCell align="center">{b.totalQty}</TableCell>
+                                  <TableCell align="right" sx={{ fontWeight: 800 }}>{inr(b.grandTotal)}</TableCell>
+                                  <TableCell align="right" sx={{ color: b.due > 0 ? '#dc2626' : '#059669', fontWeight: 700 }}>{inr(b.due)}</TableCell>
+                                  <TableCell>{b.payMode}</TableCell>
+                                  <TableCell align="center"><Chip label={b.status} size="small" color={b.status === 'Paid' ? 'success' : b.status === 'Partial' ? 'warning' : 'error'} sx={{ fontWeight: 800, height: 20 }} /></TableCell>
+                                  <TableCell align="center" sx={{ whiteSpace: 'nowrap' }}>
+                                    <Tooltip title="Show bill"><IconButton size="small" aria-label={`Show bill ${b.invoiceNo}`} onClick={() => setDetailInvoice(b)}><ViewIcon sx={{ fontSize: 17 }} /></IconButton></Tooltip>
+                                    {editButton(b)}
+                                  </TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        </TableCell>
+                      </TableRow>
+                    )}
+                    </React.Fragment>
+                    );
+                  })}
                 </TableBody>
               </Table>
             )}
@@ -692,7 +782,18 @@ export default function WholesaleReports() {
       <Dialog open={!!detailInvoice} onClose={() => setDetailInvoice(null)} maxWidth="md" fullWidth>
         <DialogTitle sx={{ fontWeight: 850, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span>Wholesale Invoice #{detailInvoice?.invoiceNo}</span>
-          <Button size="small" variant="contained" startIcon={<PrintIcon />} onClick={() => window.print()}>Print</Button>
+          <Stack direction="row" spacing={1}>
+            {detailInvoice && (
+              <Button
+                size="small" variant="outlined" disabled={Boolean(openingEdit)}
+                startIcon={openingEdit === detailInvoice.invoiceNo ? <CircularProgress size={14} /> : <EditIcon />}
+                onClick={() => editBill(detailInvoice)}
+              >
+                Edit Bill
+              </Button>
+            )}
+            <Button size="small" variant="contained" startIcon={<PrintIcon />} onClick={() => window.print()}>Print</Button>
+          </Stack>
         </DialogTitle>
         <DialogContent dividers>
           {detailInvoice && (
