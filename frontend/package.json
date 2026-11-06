@@ -21,6 +21,7 @@
     "test:master-cache": "node --test src/utils/__tests__/masterDataCache.test.js",
     "test:product-modes": "node --test src/utils/__tests__/productModes.test.js",
     "test:local-data-reset": "node --test src/utils/__tests__/localDataReset.test.js",
+    "test:module-access": "node --test src/utils/__tests__/moduleAccess.test.js",
     "test:write-guard": "node --import ./src/utils/__tests__/viteResolve.mjs --test src/utils/__tests__/apiWriteGuard.test.js"
   },
   "dependencies": {

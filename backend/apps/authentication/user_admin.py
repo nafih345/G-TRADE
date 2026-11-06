@@ -83,7 +83,8 @@ def _payload(request, tenant):
                            and can_manage_role(actor, u['role']))
     with tenancy.use_tenant(tenant.pk):
         branches = list(Branch.objects.filter(is_active=True).order_by('-is_default', 'name').values(*BRANCH_FIELDS))
-    config = {'modules': list(tenant.modules or []), 'role_permissions': dict(tenant.role_permissions or {})}
+    config = {'modules': module_access.subscribed_modules(tenant),
+              'role_permissions': dict(tenant.role_permissions or {})}
     enabled = set(config['modules'])
     role_access = {
         role: {m: lvl for m, lvl in module_access.role_levels(role, config['role_permissions']).items()

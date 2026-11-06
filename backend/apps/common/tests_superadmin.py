@@ -149,34 +149,95 @@ class ClientManagementTests(SuperAdminFixture):
     def _users(self, tenant):
         return {u['username']: u for u in self.api.get(f'{URL}{tenant.pk}/').data['users']}
 
-    def test_packages_and_dependencies(self):
+    def test_packages_and_independent_modules(self):
         from apps.common import module_access as ma
         self.assertEqual(ma.normalize_modules('ACCOUNTS_ONLY', ['sales']),
-                         ('ACCOUNTS_ONLY', ['financial', 'admin', 'reports', 'settings']))
-        # Financial with any operational module is integrated: it brings all of them.
-        package, modules = ma.normalize_modules('CUSTOM', ['financial', 'optical'])
-        self.assertEqual(package, 'CUSTOM')
-        self.assertTrue(set(ma.OPERATIONAL) <= set(modules))
-        # ... without any it stays standalone.
+                         ('ACCOUNTS_ONLY', ['accounts', 'admin', 'reports', 'settings']))
+        self.assertEqual(ma.normalize_modules('FINANCIAL_ONLY', [])[1], ['financial', 'admin', 'reports', 'settings'])
+        # Modules are independent: nothing is pulled in or dropped along with another.
+        self.assertEqual(ma.normalize_modules('CUSTOM', ['financial', 'optical']), ('CUSTOM', ['optical', 'financial']))
+        self.assertEqual(ma.normalize_modules('CUSTOM', ['sales'])[1], ['sales'])
+        self.assertEqual(ma.normalize_modules('CUSTOM', ['wholesale', 'accounts'])[1], ['wholesale', 'accounts'])
         self.assertEqual(ma.normalize_modules('CUSTOM', ['financial', 'admin']), ('CUSTOM', ['financial', 'admin']))
-        self.assertEqual(ma.normalize_modules('CUSTOM', list(ma.MODULE_KEYS))[0], 'FULL_SUITE')
-        self.assertEqual(ma.normalize_modules('CUSTOM', ['sales'])[1], ['sales', 'inventory'])
+        everything_but_accounts = [m for m in ma.MODULE_KEYS if m != 'accounts']
+        self.assertEqual(ma.normalize_modules('CUSTOM', everything_but_accounts)[0], 'FULL_SUITE')
+        everything_but_financial = [m for m in ma.MODULE_KEYS if m != 'financial']
+        self.assertEqual(ma.normalize_modules('CUSTOM', everything_but_financial)[0], 'RETAIL')
         with self.assertRaises(ValueError):
             ma.normalize_modules('CUSTOM', ['reports'])
+        # One accounting tier per client.
+        with self.assertRaisesRegex(ValueError, 'not both'):
+            ma.normalize_modules('CUSTOM', ['sales', 'accounts', 'financial'])
+        self.assertEqual(self._onboard(package='CUSTOM', modules=['accounts', 'financial']).status_code, 400)
+        # The catalog no longer describes any cascade.
+        catalog = ma.catalog()
+        self.assertNotIn('requires', catalog)
+        self.assertNotIn('integrated', catalog)
+        self.assertEqual(catalog['exclusive'], [['accounts', 'financial']])
 
         tenant = self._new_client(package='ACCOUNTS_ONLY', max_users=3)
         self.assertEqual((tenant.package, tenant.max_users), ('ACCOUNTS_ONLY', 3))
         res = self.api.patch(f'{URL}{tenant.pk}/', {'package': 'CUSTOM', 'modules': ['optical']}, format='json')
         self.assertEqual(res.status_code, 200, res.content)
         self.assertEqual(res.data['modules'], ['optical'])
+        # Switching operations modules off leaves the accounting tier alone.
+        res = self.api.patch(f'{URL}{tenant.pk}/', {'package': 'CUSTOM', 'modules': ['wholesale', 'accounts']},
+                             format='json')
+        self.assertEqual((res.status_code, res.data['modules']), (200, ['wholesale', 'accounts']))
+        res = self.api.patch(f'{URL}{tenant.pk}/', {'package': 'CUSTOM', 'modules': ['accounts']}, format='json')
+        self.assertEqual((res.status_code, res.data['modules']), (200, ['accounts']))
+        res = self.api.patch(f'{URL}{tenant.pk}/', {'package': 'CUSTOM', 'modules': ['accounts', 'financial']},
+                             format='json')
+        self.assertEqual(res.status_code, 400)
         self.assertEqual(self.api.patch(f'{URL}{self.t1.pk}/', {'package': 'OPERATIONS'},
                                         format='json').status_code, 400)
 
+    def test_accounting_tiers_are_isolated(self):
+        from apps.common.module_access import effective_access
+        tenant = self._new_client(package='CUSTOM', modules=['sales', 'accounts'])
+        owner = self._login('cityadmin', 'Gl4sses-Dubai-77')
+        access = owner.login_payload['user']['module_access']
+        self.assertEqual((access['accounts'], access['financial'], access['inventory']), ('full', 'none', 'none'))
+        # Shared books and Accounts' own reports: open. Financial-only screens: refused, reads too.
+        self.assertEqual(owner.get('/api/financial/accounts/').status_code, 200)
+        self.assertNotEqual(owner.get('/api/financial/reports/vouchers/').status_code, 403)
+        for path in ('/api/financial/reports/trial-balance/', '/api/financial/reports/daybook/',
+                     '/api/financial/integration/status/', '/api/financial/groups/'):
+            res = owner.get(path)
+            self.assertEqual((res.status_code, res.data['code']), (403, 'module_disabled'), path)
+        self.assertEqual(owner.post('/api/financial/groups/', {'name': 'X'}, format='json').status_code, 403)
+        # Bank accounts stay readable for every screen that takes bank payments.
+        self.assertEqual(owner.get('/api/financial/bank-accounts/').status_code, 200)
+
+        # Swapped to Financial: the Accounts-only endpoints close and Financial's open.
+        res = self.api.patch(f'{URL}{tenant.pk}/', {'package': 'CUSTOM', 'modules': ['sales', 'financial']},
+                             format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+        from apps.common import hot_cache
+        hot_cache.clear()
+        self.assertEqual(owner.get('/api/financial/reports/vouchers/').status_code, 403)
+        self.assertEqual(owner.get('/api/financial/reports/trial-balance/').status_code, 200)
+        self.assertEqual(owner.get('/api/financial/accounts/').status_code, 200)
+
+        # Operations only: no books at all, but the operations modules keep working.
+        self.api.patch(f'{URL}{tenant.pk}/', {'package': 'CUSTOM', 'modules': ['sales']}, format='json')
+        hot_cache.clear()
+        self.assertEqual(owner.get('/api/financial/journals/').status_code, 403)
+        self.assertEqual(owner.get('/api/sales/customers/').status_code, 200)
+
+        # The platform account has both tiers side by side.
+        platform = get_user_model().objects.get(username='platform')
+        access = effective_access(platform)
+        self.assertEqual((access['accounts'], access['financial']), ('full', 'full'))
+        self.assertNotEqual(self.api.get('/api/financial/reports/vouchers/').status_code, 403)
+        self.assertEqual(self.api.get('/api/financial/reports/trial-balance/').status_code, 200)
+
     def test_module_gate_on_api_writes(self):
-        tenant = self._new_client(package='ACCOUNTS_ONLY')
+        tenant = self._new_client(package='FINANCIAL_ONLY')
         owner = self._login('cityadmin', 'Gl4sses-Dubai-77')
         self.assertEqual(owner.login_payload['user']['module_access']['sales'], 'none')
         self.assertEqual(owner.login_payload['user']['module_access']['financial'], 'full')
+        self.assertEqual(owner.login_payload['user']['module_access']['accounts'], 'none')
         res = owner.post('/api/sales/customers/', {'name': 'Walk-in'}, format='json')
         self.assertEqual((res.status_code, res.data['code']), (403, 'module_disabled'))
         # Reads stay open; settings (enabled) still writable.

@@ -2,8 +2,9 @@
 //
 // The rules come from the server catalog (/api/superadmin/tenants/catalog/): a named package
 // fixes the modules; flipping any switch moves to the package the result matches (usually
-// Custom). Dependencies follow utils/moduleAccess.toggleModule — the same rules the server
-// applies when it saves — and every switch it drags along is announced.
+// Custom). Every module is independent; the only linked switches are the accounting tiers
+// (catalog.exclusive — Accounts vs Financial): turning one on turns the other off, announced.
+// The rules are utils/moduleAccess.toggleModule, mirroring what the server enforces on save.
 //
 // With the Settings module on, its sections (catalog.settings_features — the Settings page tabs)
 // get their own switches; value.settings_features null means every section. Switching the last
@@ -44,7 +45,7 @@ export default function ModuleAccessEditor({ catalog, value, onChange, disabled 
     const extra = dependencyNote(catalog, modules, key, on);
     const next = toggleModule(catalog, modules, key, on);
     if (extra.length) {
-      notify(`${on ? 'Also switched on' : 'Also switched off'}: ${extra.join(', ')}.`, 'info');
+      notify(`Also switched off: ${extra.join(', ')} — a client gets one accounting tier.`, 'info');
     }
     onChange({ ...value, package: packageFor(catalog, next), modules: next, settings_features: sectionsFor(next) });
   };
@@ -62,13 +63,12 @@ export default function ModuleAccessEditor({ catalog, value, onChange, disabled 
     onChange({ ...value, settings_features: ordered.length === allSections.length ? null : ordered });
   };
 
-  const requiresText = (key) => {
-    const deps = catalog.requires?.[key];
-    const suite = catalog.integrated?.[key];
+  // The accounting tiers: one per client, so each says which one it replaces.
+  const exclusiveText = (key) => {
+    const group = (catalog.exclusive || []).find((g) => g.includes(key));
+    if (!group) return '';
     const label = (k) => catalog.modules.find((m) => m.key === k)?.label || k;
-    if (deps?.length) return `Needs ${deps.map(label).join(', ')}`;
-    if (suite?.length) return 'Standalone on its own; with any operations module it brings all of them';
-    return '';
+    return `Either this or ${group.filter((k) => k !== key).map(label).join(', ')} — a client gets one accounting tier`;
   };
 
   return (
@@ -78,7 +78,7 @@ export default function ModuleAccessEditor({ catalog, value, onChange, disabled 
         {catalog.packages.map((p) => {
           const selected = p.key === pkg;
           return (
-            <Grid item xs={6} md={3} key={p.key}>
+            <Grid item xs={6} md={4} key={p.key}>
               <Card variant="outlined" sx={{
                 height: '100%', borderColor: selected ? 'primary.main' : 'divider', borderWidth: selected ? 2 : 1,
                 bgcolor: selected ? 'action.selected' : 'background.paper',
@@ -110,7 +110,7 @@ export default function ModuleAccessEditor({ catalog, value, onChange, disabled 
               <Grid container spacing={1}>
                 {items.map((m) => {
                   const on = modules.includes(m.key);
-                  const hint = requiresText(m.key);
+                  const hint = exclusiveText(m.key);
                   return (
                     <Grid item xs={12} sm={6} md={compact ? 6 : 4} key={m.key}>
                       <Stack direction="row" alignItems="center" spacing={1}
@@ -120,7 +120,7 @@ export default function ModuleAccessEditor({ catalog, value, onChange, disabled 
                           {!compact && <Typography variant="caption" color="text.secondary" component="div">{m.description}</Typography>}
                           {hint && (
                             <Tooltip title={hint}>
-                              <Chip size="small" variant="outlined" label={catalog.integrated?.[m.key] ? 'Integrated / standalone' : hint}
+                              <Chip size="small" variant="outlined" label="One accounting tier only"
                                 sx={{ mt: 0.5, height: 20, fontSize: 11, maxWidth: '100%' }} />
                             </Tooltip>
                           )}

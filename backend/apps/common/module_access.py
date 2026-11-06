@@ -3,8 +3,9 @@
 The platform console (apps/common/superadmin_views.py) sets, per tenant:
 
   * `package` + `modules` — the modules the client is subscribed to. A named package fixes the
-    set; CUSTOM takes the toggles as given, adds whatever they depend on (REQUIRES) and fails
-    nothing: dependencies are switched on, never refused.
+    set; CUSTOM takes the toggles exactly as given. Modules are independent: no module switches
+    another on or off. The one rule is the accounting tier (ACCOUNTING_TIERS): a client gets
+    Accounts (basic) or Financial (enterprise), never both — only the platform account has both.
   * `role_permissions` — per role, per module: 'full' (use and change), 'view' (read only) or
     'none'. Missing entries fall back to DEFAULT_ROLE_LEVELS.
 
@@ -16,7 +17,9 @@ effective_access(user) folds both into {module: level}; the profile API sends it
 PATCH / DELETE under a module's endpoints needs 'full' on one of the modules that write there
 (WRITE_RULES — several modules share some endpoints, e.g. Purchase Entry creates products).
 Reads stay open so one screen can still show another module's data it depends on (New Sale
-reads products, vouchers read bills); the UI hides modules the user cannot open.
+reads products, vouchers read bills); the UI hides modules the user cannot open. The books are
+the exception (READ_RULES): Accounts and Financial share one ledger engine under /api/financial/,
+so the endpoints behind each tier's screens refuse reads too for a client without that tier.
 
 The catalog (modules, packages, roles, defaults) is served to the console from here, so the
 browser never keeps its own copy of these rules.
@@ -33,7 +36,10 @@ MODULES = (
     ('wholesale', 'Wholesale Distribution', 'Wholesale POS, dealers, collections and reports.', 'operations'),
     ('inventory', 'Inventory', 'Products, categories, brands, lens matrix and stock.', 'operations'),
     ('purchase', 'Purchase', 'Purchase entry, suppliers, purchase and lens orders, returns.', 'operations'),
-    ('financial', 'Financial Accounts', 'Vouchers, ledgers, day/cash/bank books, P&L and balance sheet.', 'accounts'),
+    ('accounts', 'Accounts (Basic)', 'Simple bookkeeping for smaller shops: vouchers, receipts, payments, '
+     'dues, P&L, transaction report and statements.', 'accounts'),
+    ('financial', 'Financial (Enterprise)', 'Full accounting: chart of accounts, ledgers, day/cash/bank books, '
+     'cheques, trial balance, balance sheet and accounting integration.', 'accounts'),
     ('admin', 'Administration', 'Users, doctors, service master, branches, import, barcodes.', 'core'),
     ('reports', 'Reports', 'Sales, purchase, finance and clinical report hubs.', 'core'),
     ('settings', 'Settings', 'Store profile, billing, tax, numbering and bank master.', 'core'),
@@ -65,28 +71,26 @@ _FEATURE_PREFIXES = sorted(((prefix, f[0]) for f in SETTINGS_FEATURES for prefix
 MODULE_LABELS = {m[0]: m[1] for m in MODULES}
 OPERATIONAL = tuple(m[0] for m in MODULES if m[3] == 'operations')
 CORE = tuple(m[0] for m in MODULES if m[3] == 'core')
+# The two accounting tiers. A client has at most one of them; the platform account has both.
+ACCOUNTING_TIERS = ('accounts', 'financial')
+BOOKS = ACCOUNTING_TIERS  # endpoints of the shared ledger engine that both tiers use
 
-FULL_SUITE, OPERATIONS, ACCOUNTS_ONLY, CUSTOM = 'FULL_SUITE', 'OPERATIONS', 'ACCOUNTS_ONLY', 'CUSTOM'
+FULL_SUITE, RETAIL, OPERATIONS, ACCOUNTS_ONLY, FINANCIAL_ONLY, CUSTOM = (
+    'FULL_SUITE', 'RETAIL', 'OPERATIONS', 'ACCOUNTS_ONLY', 'FINANCIAL_ONLY', 'CUSTOM')
 PACKAGES = (
-    (FULL_SUITE, 'Full Suite', 'Every module, with accounting integrated across operations.', MODULE_KEYS),
-    (OPERATIONS, 'Operations', 'Optical, sales, wholesale, inventory and purchase without accounts.',
+    (FULL_SUITE, 'Full Suite (Enterprise)', 'Every operations module with Financial (enterprise) accounting.',
+     OPERATIONAL + ('financial',) + CORE),
+    (RETAIL, 'Retail (Basic Accounts)', 'Every operations module with the simple Accounts module.',
+     OPERATIONAL + ('accounts',) + CORE),
+    (OPERATIONS, 'Operations', 'Optical, sales, wholesale, inventory and purchase without accounting.',
      OPERATIONAL + CORE),
-    (ACCOUNTS_ONLY, 'Accounts Only', 'Standalone financial accounting — no operational modules.',
+    (ACCOUNTS_ONLY, 'Accounts Only', 'The simple Accounts module on its own — no operations modules.',
+     ('accounts',) + CORE),
+    (FINANCIAL_ONLY, 'Financial Only', 'Financial (enterprise) accounting on its own — no operations modules.',
      ('financial',) + CORE),
-    (CUSTOM, 'Custom', 'Pick modules one by one; what they depend on switches on automatically.', None),
+    (CUSTOM, 'Custom', 'Switch modules on and off one by one; each is independent.', None),
 )
 PACKAGE_MODULES = {p[0]: p[3] for p in PACKAGES}
-
-# A CUSTOM selection that includes the key also gets these.
-REQUIRES = {
-    'sales': ('inventory',),
-    'wholesale': ('inventory',),
-    'purchase': ('inventory',),
-}
-# Financial Accounts runs either standalone (no operational module at all — the ACCOUNTS_ONLY
-# shape) or integrated: it posts journals from every operational module, so together with any
-# one of them it brings the full operational suite.
-INTEGRATED = {'financial': OPERATIONAL}
 
 # Client-side roles, in the order the console offers them; the first five are the ones a new
 # optical client usually needs.
@@ -109,6 +113,11 @@ OWNER_ROLES = ('SUPER_ADMIN',)
 
 
 def _levels(full=(), view=()):
+    # Role defaults name 'financial'; the Accounts tier gets the same level (a client has one).
+    full, view = set(full), set(view)
+    for tiers in (full, view):
+        if 'financial' in tiers:
+            tiers.add('accounts')
     return {m: FULL if m in full else VIEW if m in view else NONE for m in MODULE_KEYS}
 
 
@@ -128,6 +137,20 @@ DEFAULT_ROLE_LEVELS = {
 
 ANY = '*'  # every module may write here (shared plumbing such as numbering claims)
 
+# The ledger engine under /api/financial/ serves both accounting tiers. Its shared core (chart of
+# accounts, vouchers, journals, cheques, settlements, statements, general ledger) is BOOKS; the
+# endpoints below belong to one tier's screens only and refuse the other tier, reads included.
+FINANCIAL_ONLY_PREFIXES = tuple(f'/api/financial/{p}' for p in (
+    'groups/', 'ledger/', 'integration/', 'bankbook/',
+    'reports/trial-balance/', 'reports/profit-loss/', 'reports/balance-sheet/', 'reports/ledger-register/',
+    'reports/daybook/', 'reports/cashbook/', 'reports/bankbook/', 'reports/account-balances/',
+    'reports/source-breakdown/',
+))
+ACCOUNTS_ONLY_PREFIXES = tuple(f'/api/financial/{p}' for p in (
+    'reports/vouchers/', 'reports/expenses/', 'reports/customer-outstanding/', 'reports/supplier-outstanding/',
+    'reports/accounts-activity/', 'reports/transactions/', 'transactions/', 'reports/profit-loss-statement/',
+))
+
 # Longest prefix wins. Paths not listed (auth, security, backups, superadmin, health,
 # notifications, branch context) are not module-gated; they have their own permissions.
 WRITE_RULES = sorted((
@@ -144,10 +167,12 @@ WRITE_RULES = sorted((
     ('/api/masters/', ('inventory', 'purchase', 'settings')),
     ('/api/inventory/', ('inventory', 'purchase', 'wholesale', 'settings')),
     ('/api/purchase/', ('purchase',)),
-    ('/api/financial/banks/', ('financial', 'settings')),
-    ('/api/financial/bank-accounts/', ('financial', 'settings', 'sales', 'purchase', 'wholesale')),
-    ('/api/financial/', ('financial',)),
-    ('/api/accounts/', ('financial',)),
+    ('/api/financial/banks/', BOOKS + ('settings',)),
+    ('/api/financial/bank-accounts/', BOOKS + ('settings', 'sales', 'purchase', 'wholesale')),
+    *((prefix, ('financial',)) for prefix in FINANCIAL_ONLY_PREFIXES),
+    *((prefix, ('accounts',)) for prefix in ACCOUNTS_ONLY_PREFIXES),
+    ('/api/financial/', BOOKS),
+    ('/api/accounts/', BOOKS),
     ('/api/company/branches/', ('admin', 'settings')),
     ('/api/company/user-branch-access/', ('admin',)),
     ('/api/company/warehouses/', ('inventory', 'settings')),
@@ -165,6 +190,17 @@ WRITE_RULES = sorted((
     ('/api/backups/', ('settings',)),
 ), key=lambda r: -len(r[0]))
 
+# Reads the tenant's subscription must cover (the role's level is not checked on reads). Bank
+# accounts / Bank Master stay readable by every screen that takes bank payments (None = open).
+READ_RULES = sorted((
+    ('/api/financial/banks/', None),
+    ('/api/financial/bank-accounts/', None),
+    *((prefix, ('financial',)) for prefix in FINANCIAL_ONLY_PREFIXES),
+    *((prefix, ('accounts',)) for prefix in ACCOUNTS_ONLY_PREFIXES),
+    ('/api/financial/', BOOKS),
+    ('/api/accounts/', BOOKS),
+), key=lambda r: -len(r[0]))
+
 _SAFE = ('GET', 'HEAD', 'OPTIONS')
 # POST endpoints that only read (a request body too large for a query string), so any screen —
 # barcode printing from Sales, Purchase or Inventory — may call them like a GET.
@@ -173,18 +209,9 @@ READ_ONLY_POSTS = ('/api/products/label-data/', '/api/company/pricing-rules/floo
 
 # ---- package / module normalisation ---------------------------------------------------------
 
-def with_requirements(modules):
-    """The selection plus everything it depends on, in catalog order."""
+def in_catalog_order(modules):
+    """The selection exactly as given (modules are independent), in catalog order."""
     chosen = set(modules)
-    stack = list(chosen)
-    while stack:
-        for dep in REQUIRES.get(stack.pop(), ()):
-            if dep not in chosen:
-                chosen.add(dep)
-                stack.append(dep)
-    for module, suite in INTEGRATED.items():
-        if module in chosen and chosen & set(suite):
-            chosen |= set(suite)
     return [m for m in MODULE_KEYS if m in chosen]
 
 
@@ -198,9 +225,12 @@ def normalize_modules(package, modules):
     unknown = [m for m in (modules or []) if m not in MODULE_KEYS]
     if unknown:
         raise ValueError(f'Unknown module(s): {", ".join(map(str, unknown))}.')
-    result = with_requirements(modules or [])
+    result = in_catalog_order(modules or [])
     if not any(m not in CORE for m in result):
-        raise ValueError('Switch on at least one business module (operations or Financial Accounts).')
+        raise ValueError('Switch on at least one business module (operations, Accounts or Financial).')
+    if all(t in result for t in ACCOUNTING_TIERS):
+        raise ValueError('A client gets either Accounts (basic) or Financial (enterprise), not both. '
+                         'Switch one of them off.')
     # A custom pick that happens to be exactly a named package is that package.
     for key, _label, _desc, mods in PACKAGES:
         if mods is not None and set(mods) == set(result):
@@ -297,17 +327,28 @@ def all_role_levels(overrides=None):
 
 # ---- effective access -----------------------------------------------------------------------
 
+def subscribed_modules(tenant):
+    """A tenant row's modules. The platform account has every module — both accounting tiers —
+    whatever is stored, so the Super Admin can cross-check Accounts and Financial side by side."""
+    from apps.common import tenancy
+    if tenant.pk == tenancy.DEFAULT_TENANT_ID:
+        return list(MODULE_KEYS)
+    return list(tenant.modules or [])
+
+
 def tenant_access_config(tenant_id):
     """{'modules': [...], 'role_permissions': {...}} for a tenant, cached per request burst."""
-    from apps.common import hot_cache
+    from apps.common import hot_cache, tenancy
     from apps.common.models import Tenant
 
     def load():
         row = Tenant.objects.filter(pk=tenant_id).values('modules', 'role_permissions', 'settings_features').first()
         if row is None:
             return {'modules': [], 'role_permissions': {}, 'settings_features': []}
-        return {'modules': list(row['modules'] or []), 'role_permissions': dict(row['role_permissions'] or {}),
-                'settings_features': row['settings_features']}
+        platform = tenant_id == tenancy.DEFAULT_TENANT_ID
+        return {'modules': list(MODULE_KEYS) if platform else list(row['modules'] or []),
+                'role_permissions': dict(row['role_permissions'] or {}),
+                'settings_features': None if platform else row['settings_features']}
 
     return hot_cache.get_or_load(f'tenant:access:{tenant_id}', load)
 
@@ -336,9 +377,36 @@ def _rule_for(path):
     return None, None
 
 
+def _read_rule_for(path):
+    for prefix, readers in READ_RULES:
+        if path.startswith(prefix):
+            return readers
+    return None
+
+
+def _check_read(request):
+    """Refuse a read of an accounting tier's endpoints the tenant isn't subscribed to."""
+    readers = _read_rule_for(request.path)
+    if not readers:
+        return
+    from apps.common import tenancy
+    from apps.common.permissions import is_platform_admin
+    tenant_id = tenancy.current_tenant_id()
+    if tenant_id is None or is_platform_admin(getattr(request, 'user', None)):
+        return
+    if any(m in tenant_access_config(tenant_id)['modules'] for m in readers):
+        return
+    names = ' / '.join(MODULE_LABELS[m] for m in readers)
+    raise exceptions.PermissionDenied({
+        'detail': f'{names} is not part of this business’s plan. Ask the platform administrator to enable it.',
+        'code': 'module_disabled'})
+
+
 def check_api_access(request):
-    """Refuse an API write the tenant's modules / the user's role don't allow (403)."""
+    """Refuse an API request the tenant's modules / the user's role don't allow (403): every
+    module-gated write, plus reads of the accounting tiers' endpoints (READ_RULES)."""
     if request.method in _SAFE or request.path in READ_ONLY_POSTS:
+        _check_read(request)
         return
     prefix, writers = _rule_for(request.path)
     if writers is None:
@@ -402,8 +470,8 @@ def catalog():
         'packages': [{'key': k, 'label': l, 'description': d, 'modules': list(m) if m else None}
                      for k, l, d, m in PACKAGES],
         'settings_features': [{'key': k, 'label': l, 'description': d} for k, l, d, _p in SETTINGS_FEATURES],
-        'requires': {k: list(v) for k, v in REQUIRES.items()},
-        'integrated': {k: list(v) for k, v in INTEGRATED.items()},
+        # Modules are independent; the one rule is a single accounting tier per client.
+        'exclusive': [list(ACCOUNTING_TIERS)],
         'levels': list(LEVELS),
         'roles': [{'key': k, 'label': l, 'owner': k in OWNER_ROLES} for k, l in CLIENT_ROLES],
         'default_role_levels': DEFAULT_ROLE_LEVELS,

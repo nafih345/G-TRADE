@@ -7,8 +7,9 @@ from apps.common.tenancy import TenantManager, TenantQuerySet
 
 
 def _all_modules():
-    from apps.common.module_access import MODULE_KEYS
-    return list(MODULE_KEYS)
+    # The default package's modules (one accounting tier only — a client never gets both).
+    from apps.common.module_access import FULL_SUITE, PACKAGE_MODULES
+    return list(PACKAGE_MODULES[FULL_SUITE])
 
 
 class Tenant(models.Model):

@@ -4,7 +4,8 @@
 // /api/superadmin/tenants/catalog/. Nothing here is a second copy of those rules — only the
 // route → module mapping and the generic "switch a module on/off" helper the console uses.
 
-// Route prefix → module key. Financial and Accounts menus are the one "Financial Accounts" module.
+// Route prefix → module key. Accounts (basic) and Financial (enterprise) are separate modules: a
+// client has one of them, so the other's URLs are locked out (only the platform account has both).
 const ROUTE_MODULES = [
   ['/optical', 'optical'],
   ['/sales', 'sales'],
@@ -12,7 +13,7 @@ const ROUTE_MODULES = [
   ['/inventory', 'inventory'],
   ['/purchase', 'purchase'],
   ['/financial', 'financial'],
-  ['/accounts', 'financial'],
+  ['/accounts', 'accounts'],
   ['/admin', 'admin'],
   ['/reports', 'reports'],
   ['/settings', 'settings'],
@@ -34,44 +35,21 @@ export const moduleLevel = (user, module) => {
 
 export const canOpenModule = (user, module) => moduleLevel(user, module) !== 'none';
 
-// Console toggles, same rules as module_access.with_requirements:
-//  * on  — also switches on what the module requires (catalog.requires);
-//  * off — also switches off whatever requires it;
-//  * integrated modules (Financial Accounts) are standalone alone, but together with any module
-//    of their suite they need the whole suite: switching one suite module on brings the rest,
-//    switching one off while others remain switches the integrated module off.
+// Console toggles, same rules as module_access.normalize_modules: every module is independent —
+// switching one on or off never touches another — except the exclusive groups
+// (catalog.exclusive: Accounts vs Financial): switching one of a group on switches the others off,
+// since a client gets only one accounting tier.
 export const toggleModule = (catalog, modules, key, on) => {
   const order = catalog.modules.map((m) => m.key);
-  const requires = catalog.requires || {};
-  const integrated = catalog.integrated || {};
   const chosen = new Set(modules);
-  const addWithDeps = (start) => {
-    const stack = [start];
-    while (stack.length) {
-      const k = stack.pop();
-      if (chosen.has(k)) continue;
-      chosen.add(k);
-      (requires[k] || []).forEach((dep) => stack.push(dep));
-    }
-  };
   if (on) {
-    addWithDeps(key);
-  } else {
-    const stack = [key];
-    while (stack.length) {
-      const k = stack.pop();
-      if (!chosen.delete(k)) continue;
-      Object.entries(requires).forEach(([dependent, deps]) => {
-        if (deps.includes(k) && chosen.has(dependent)) stack.push(dependent);
-      });
-    }
-    Object.entries(integrated).forEach(([module, suite]) => {
-      if (chosen.has(module) && suite.includes(key) && suite.some((k) => chosen.has(k))) chosen.delete(module);
+    chosen.add(key);
+    (catalog.exclusive || []).forEach((group) => {
+      if (group.includes(key)) group.forEach((k) => { if (k !== key) chosen.delete(k); });
     });
+  } else {
+    chosen.delete(key);
   }
-  Object.entries(integrated).forEach(([module, suite]) => {
-    if (chosen.has(module) && suite.some((k) => chosen.has(k))) suite.forEach(addWithDeps);
-  });
   return order.filter((k) => chosen.has(k));
 };
 
@@ -83,14 +61,12 @@ export const packageFor = (catalog, modules) => {
   return hit ? hit.key : 'CUSTOM';
 };
 
-// Modules a toggle would drag along, for the confirmation hint ("also turns on …").
+// Modules a toggle would change besides itself (only the other accounting tier), for the notice.
 export const dependencyNote = (catalog, modules, key, on) => {
   const next = toggleModule(catalog, modules, key, on);
   const label = (k) => catalog.modules.find((m) => m.key === k)?.label || k;
-  const extra = on
-    ? next.filter((k) => k !== key && !modules.includes(k))
-    : modules.filter((k) => k !== key && !next.includes(k));
-  return extra.map(label);
+  // The only side effect left: the other accounting tier switching off.
+  return modules.filter((k) => k !== key && !next.includes(k)).map(label);
 };
 
 // Settings page sections (its ?tab= ids) the user may open: profile.settings_features, from the
