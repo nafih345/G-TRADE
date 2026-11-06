@@ -46,10 +46,11 @@ import {
 import axios from 'axios';
 import ConfirmActionDialog from '../components/common/ConfirmActionDialog';
 import { fetchAllPages } from '../utils/fetchAllPages';
-import { apiError, finGet, finPost, finDelete, newIdempotencyKey } from '../components/financial/financialApi';
+import { apiError, finGet, finPost, finDelete } from '../components/financial/financialApi';
 import { LedgerPanel, TrialBalancePanel, ProfitLossPanel, BalanceSheetPanel, FinancialReportsPanel } from '../components/financial/LedgerReports';
 import VoucherRegister from '../components/financial/VoucherRegister';
 import StandardVoucherForm from '../components/financial/StandardVoucherForm';
+import JournalVoucherForm from '../components/financial/JournalVoucherForm';
 import AccountingIntegrationPanel from '../components/financial/AccountingIntegrationPanel';
 import CashbookPanel from '../components/financial/Cashbook';
 import BankBookPanel from '../components/financial/BankBook';
@@ -432,59 +433,6 @@ function FinancialManagementView() {
       return (grp.includes('cash') || grp.includes('bank') || name.includes('cash') || name.includes('bank') || code === '1001' || code === '1002');
     });
   }, [accounts]);
-
-  const [journalForm, setJournalForm] = useState({
-    date: new Date().toISOString().split('T')[0],
-    reference_no: '',
-    narration: '',
-    idempotency_key: newIdempotencyKey(),
-    lines: [
-      { account: '', debit: '', credit: '' },
-      { account: '', debit: '', credit: '' }
-    ]
-  });
-
-  const handleSaveJournalVoucher = async () => {
-    const validLines = journalForm.lines.filter(l => l.account && (parseFloat(l.debit) > 0 || parseFloat(l.credit) > 0));
-    if (validLines.length < 2) {
-      showToast("Journal Voucher must contain at least 2 debit/credit lines.", "error");
-      return;
-    }
-
-    const totalD = validLines.reduce((sum, l) => sum + (parseFloat(l.debit) || 0), 0);
-    const totalC = validLines.reduce((sum, l) => sum + (parseFloat(l.credit) || 0), 0);
-
-    if (Math.abs(totalD - totalC) > 0.01) {
-      showToast(`Unbalanced Entry! Total Debits (₹${totalD.toLocaleString()}) do not equal Total Credits (₹${totalC.toLocaleString()}).`, "error");
-      return;
-    }
-
-    const lines = validLines.map(l => ({
-      account: l.account,
-      debit: parseFloat(l.debit) || 0,
-      credit: parseFloat(l.credit) || 0
-    }));
-
-    const saved = await postVoucher({
-      voucher_type_code: 'JV',
-      date: journalForm.date,
-      narration: journalForm.narration || 'General adjusting journal voucher',
-      reference_no: journalForm.reference_no,
-      idempotency_key: journalForm.idempotency_key,
-      lines
-    });
-    if (!saved) return;
-    setJournalForm({
-      date: new Date().toISOString().split('T')[0],
-      reference_no: '',
-      narration: '',
-      idempotency_key: newIdempotencyKey(),
-      lines: [
-        { account: '', debit: '', credit: '' },
-        { account: '', debit: '', credit: '' }
-      ]
-    });
-  };
 
   // Dialog & Side Drawer States
   const [accountModalOpen, setAccountModalOpen] = useState(false);
@@ -1283,114 +1231,7 @@ function FinancialManagementView() {
 
       {/* 5. JOURNAL VOUCHER VIEW */}
       {topTab === 2 && voucherSubTab === 'journal' && (
-        <Card variant="outlined" sx={{ p: 4, borderRadius: 4 }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 2 }}>
-            <JournalIcon color="action" sx={{ fontSize: 32 }} />
-            <Box>
-              <Typography variant="h6" fontWeight={850}>Journal Voucher (JV)</Typography>
-              <Typography variant="body2" color="text.secondary">
-                Flexible multi-line general journal for non-cash adjusting entries (depreciation, bad debt write-offs, opening balances).
-              </Typography>
-            </Box>
-          </Box>
-          <Alert severity="warning" sx={{ mb: 3, fontWeight: 600 }}>
-            Notice: Journal Vouchers are intended for non-cash adjustments. For cash or bank movements, please use Receipt, Payment, or Contra vouchers.
-          </Alert>
-
-          <Stack spacing={3}>
-            <Grid container spacing={2}>
-              <Grid item xs={12} sm={4}>
-                <TextField 
-                  type="date" fullWidth size="small" label="Voucher Date"
-                  value={journalForm.date}
-                  onChange={(e) => setJournalForm({ ...journalForm, date: e.target.value })}
-                  InputLabelProps={{ shrink: true }}
-                />
-              </Grid>
-              <Grid item xs={12} sm={4}>
-                <TextField 
-                  fullWidth size="small" label="Reference / Voucher No"
-                  placeholder="Auto-generated if blank"
-                  value={journalForm.reference_no}
-                  onChange={(e) => setJournalForm({ ...journalForm, reference_no: e.target.value })}
-                />
-              </Grid>
-            </Grid>
-
-            {journalForm.lines.map((line, idx) => (
-              <Grid container spacing={2} key={idx} alignItems="center">
-                <Grid item xs={12} sm={6}>
-                  <TextField 
-                    select fullWidth size="small" label={`Account Line #${idx + 1} *`}
-                    value={line.account}
-                    onChange={(e) => {
-                      const nextLines = [...journalForm.lines];
-                      nextLines[idx].account = e.target.value;
-                      setJournalForm({ ...journalForm, lines: nextLines });
-                    }}
-                  >
-                    {accounts.map(a => (
-                      <MenuItem key={a.id} value={a.code}>{a.code} - {a.name} ({a.account_type})</MenuItem>
-                    ))}
-                  </TextField>
-                </Grid>
-                <Grid item xs={12} sm={2.5}>
-                  <TextField 
-                    type="number" fullWidth size="small" label="Debit (₹)"
-                    value={line.debit}
-                    onChange={(e) => {
-                      const nextLines = [...journalForm.lines];
-                      nextLines[idx].debit = e.target.value;
-                      setJournalForm({ ...journalForm, lines: nextLines });
-                    }}
-                  />
-                </Grid>
-                <Grid item xs={12} sm={2.5}>
-                  <TextField 
-                    type="number" fullWidth size="small" label="Credit (₹)"
-                    value={line.credit}
-                    onChange={(e) => {
-                      const nextLines = [...journalForm.lines];
-                      nextLines[idx].credit = e.target.value;
-                      setJournalForm({ ...journalForm, lines: nextLines });
-                    }}
-                  />
-                </Grid>
-                <Grid item xs={12} sm={1}>
-                  {journalForm.lines.length > 2 && (
-                    <IconButton color="error" onClick={() => {
-                      setJournalForm({ ...journalForm, lines: journalForm.lines.filter((_, i) => i !== idx) });
-                    }}>
-                      <DeleteIcon />
-                    </IconButton>
-                  )}
-                </Grid>
-              </Grid>
-            ))}
-
-            <Button 
-              variant="outlined" size="small" startIcon={<AddIcon />} 
-              onClick={() => setJournalForm({ ...journalForm, lines: [...journalForm.lines, { account: '', debit: '', credit: '' }] })}
-              sx={{ alignSelf: 'flex-start', fontWeight: 700 }}
-            >
-              + Add Journal Line
-            </Button>
-
-            <TextField 
-              fullWidth multiline rows={2} size="small" label="Narration / Description"
-              placeholder="e.g. Year-end machinery depreciation entry..."
-              value={journalForm.narration}
-              onChange={(e) => setJournalForm({ ...journalForm, narration: e.target.value })}
-            />
-
-            <Button 
-              variant="contained" size="large" onClick={handleSaveJournalVoucher}
-              sx={{ backgroundColor: '#2563EB', fontWeight: 800, py: 1.2, alignSelf: 'flex-start', px: 4 }}
-            >
-              Post Journal Voucher
-            </Button>
-          </Stack>
-        </Card>
+        <JournalVoucherForm accounts={accounts} showToast={showToast} onSaveVoucher={handleSaveStandardVoucher} />
       )}
 
       {/* 6. VIEW ALL VOUCHERS VIEW */}

@@ -6,6 +6,8 @@ import { notify } from '../../utils/notify';
 import { isRealCustomerName, summarizeLines } from '../../utils/salesDocStatus';
 import { apiErrorMessage } from '../../utils/apiError';
 import { CASH_PAID, CASH_UNPAID } from '../../utils/paymentModes';
+import { offerForBarcode, offerForProduct, offerBadgeText } from '../../utils/pricingRules';
+import useLiveOffers from '../../hooks/useLiveOffers';
 import PaymentModeDetails from '../common/PaymentModeDetails';
 import { 
   Box, Grid, Card, CardContent, Typography, TextField, InputBase,
@@ -118,8 +120,15 @@ export default function PosBillingView({
     }
   }, [customers]);
 
-  // Cart State
+  // Cart State — one line per product, plus a separate line for units sold on its running offer
+  // (scanned offer tag / "Offer price" button): {key, product, qty, offer?}. An offer line's
+  // product.price is the offer price and the line is saved with `pricing_offer`.
   const [cart, setCart] = useState([]);
+  const liveOffers = useLiveOffers();
+  const lineKey = (product, offer) => (offer ? `${product.id}#offer:${offer.id}` : String(product.id));
+  const offerUnitsInCart = (offerId, rows = cart) => rows.reduce((n, i) => (i.offer?.id === offerId ? n + i.qty : n), 0);
+  const offerLeft = (offer, rows = cart) => (offer && offer.apply_to_all === false
+    ? Math.max(0, (Number(offer.remaining) || 0) - offerUnitsInCart(offer.id, rows)) : Infinity);
   const [discountAmount, setDiscountAmount] = useState(0);
   const [useLoyaltyPoints, setUseLoyaltyPoints] = useState(false);
   // Selectable per standard Indian GST slabs — applied to the whole cart's subtotal rather than
@@ -156,9 +165,14 @@ export default function PosBillingView({
     setCatalogList(products);
   }, [products]);
 
-  const announceScan = (product, rawCode) => {
-    addToCart(product);
-    setLastScannedNotice(`✅ Scanned "${product.name}" (₹${product.price}) -> Added to Bill!`);
+  const announceScan = (product, rawCode, offer = null) => {
+    const onOffer = addToCart(product, offer);
+    const live = !offer && liveOffers.enabled ? offerForProduct(liveOffers.index, product) : null;
+    setLastScannedNotice(onOffer
+      ? `✅ Scanned offer tag "${rawCode}" — "${product.name}" added at the ${offer.tag} price ₹${Number(offer.offer_price ?? product.price).toFixed(2)}!`
+      : live
+        ? `✅ Scanned "${product.name}" (₹${product.price}) -> Added to Bill! It is ${offerBadgeText(live, { left: offerLeft(live) === Infinity ? undefined : offerLeft(live) })} — use the "Offer price" button to sell it on the offer.`
+        : `✅ Scanned "${product.name}" (₹${product.price}) -> Added to Bill!`);
     setScanHistory(prev => [{ code: rawCode, item: product.name, time: new Date().toLocaleTimeString() }, ...prev]);
     setTimeout(() => setLastScannedNotice(null), 4000);
   };
@@ -167,7 +181,14 @@ export default function PosBillingView({
     if (!codeStr) return;
     const rawCode = String(codeStr).trim();
     const code = rawCode.toLowerCase();
-    const matched = catalogList.find(p =>
+    // A promotional offer tag ("1001-0001"): its product at the offer price.
+    const scannedOffer = liveOffers.enabled ? offerForBarcode(liveOffers.index, code) : null;
+    const offerProduct = scannedOffer && catalogList.find(p => String(p.id) === String(scannedOffer.product));
+    if (offerProduct) {
+      announceScan(offerProduct, rawCode, scannedOffer);
+      return;
+    }
+    const matched = !scannedOffer && catalogList.find(p =>
       barcodeMatchesProduct(p, code) ||
       String(p.id || '').toLowerCase() === code ||
       String(p.name || '').toLowerCase().includes(code)
@@ -199,7 +220,10 @@ export default function PosBillingView({
           image: catType.includes('lens') ? '🔍' : '👓'
         };
         setCatalogList(prev => (prev.some(x => String(x.id) === normalized.id) ? prev : [...prev, normalized]));
-        announceScan(normalized, rawCode);
+        announceScan(normalized, rawCode, res.data.offer || null);
+        if (res.data.offer_ended) {
+          setLastScannedNotice(`⚠️ "${rawCode}" is an old offer tag — that offer has ended. "${p.name}" added at the regular price.`);
+        }
         return;
       }
     } catch (e) {
@@ -225,25 +249,40 @@ export default function PosBillingView({
     setBarcodeInput('');
   };
 
-  const addToCart = (product) => {
-    const existing = cart.find(item => item.product.id === product.id);
-    if (existing) {
-      setCart(cart.map(item => item.product.id === product.id ? { ...item, qty: item.qty + 1 } : item));
-    } else {
-      setCart([...cart, { product, qty: 1 }]);
+  // → true when the unit went on the offer line. A partial offer with no units left adds the
+  // unit at the regular price instead (and says so).
+  const addToCart = (product, offer = null) => {
+    let useOffer = offer;
+    if (offer && offerLeft(offer) < 1) {
+      notify(`The "${offer.tag}" offer quantity for ${product.name} is sold out — added at the regular price.`, 'warning');
+      useOffer = null;
     }
+    const key = lineKey(product, useOffer);
+    const existing = cart.find(item => item.key === key);
+    if (existing) {
+      setCart(cart.map(item => item.key === key ? { ...item, qty: item.qty + 1 } : item));
+    } else {
+      const lineProduct = useOffer && useOffer.offer_price != null ? { ...product, price: Number(useOffer.offer_price) } : product;
+      setCart([...cart, { key, product: lineProduct, qty: 1, offer: useOffer || null }]);
+    }
+    return Boolean(useOffer);
   };
 
-  const updateQty = (productId, newQty) => {
+  const updateQty = (key, newQty) => {
     if (newQty <= 0) {
-      removeFromCart(productId);
+      removeFromCart(key);
       return;
     }
-    setCart(cart.map(item => item.product.id === productId ? { ...item, qty: newQty } : item));
+    const line = cart.find(item => item.key === key);
+    if (line?.offer && newQty > line.qty && offerLeft(line.offer) < newQty - line.qty) {
+      notify(`Only ${line.offer.remaining} unit(s) are on the "${line.offer.tag}" offer — add more at the regular price.`, 'warning');
+      return;
+    }
+    setCart(cart.map(item => item.key === key ? { ...item, qty: newQty } : item));
   };
 
-  const removeFromCart = (productId) => {
-    setCart(cart.filter(item => item.product.id !== productId));
+  const removeFromCart = (key) => {
+    setCart(cart.filter(item => item.key !== key));
   };
 
   const handleAddCustomItem = (e) => {
@@ -551,6 +590,25 @@ export default function PosBillingView({
                     <Typography variant="caption" color="text.secondary" display="block">
                       {item.brand || 'Generic'} • Stock: {item.stock || 10} Units
                     </Typography>
+                    {(() => {
+                      const offer = liveOffers.enabled ? offerForProduct(liveOffers.index, item) : null;
+                      if (!offer) return null;
+                      const left = offerLeft(offer);
+                      return (
+                        <Stack direction="row" spacing={0.5} alignItems="center" sx={{ mt: 0.75, flexWrap: 'wrap', gap: 0.5 }}>
+                          <Chip size="small" color={left > 0 ? 'success' : 'default'} data-offer-badge="pos"
+                            label={offerBadgeText(offer, { left: left === Infinity ? undefined : left })}
+                            sx={{ height: 20, fontSize: '0.65rem', fontWeight: 900 }} />
+                          {left > 0 && (
+                            <Button size="small" variant="outlined" color="success"
+                              onClick={(e) => { e.stopPropagation(); addToCart(item, offer); }}
+                              sx={{ py: 0, px: 1, minWidth: 0, fontSize: '0.65rem', fontWeight: 800 }}>
+                              Offer price
+                            </Button>
+                          )}
+                        </Stack>
+                      );
+                    })()}
 
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 1.5 }}>
                       <Typography variant="subtitle1" fontWeight={900} color="primary.main">
@@ -597,25 +655,30 @@ export default function PosBillingView({
               <Stack spacing={1.5} sx={{ maxH: 260, overflowY: 'auto', mb: 2, pr: 0.5 }}>
                 {cart.map(item => (
                   <Box 
-                    key={item.product.id} 
+                    key={item.key} 
                     sx={{ p: 1.5, borderRadius: 2, border: '1px solid', borderColor: 'divider', bgcolor: 'action.hover', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
                   >
                     <Box sx={{ minWidth: 0, flexGrow: 1, mr: 1 }}>
                       <Typography variant="subtitle2" fontWeight={800} noWrap>{item.product.name}</Typography>
-                      <Typography variant="caption" color="text.secondary">
+                      {item.offer && (
+                        <Chip size="small" color="success" data-offer-status="on"
+                          label={`On Offer: ${item.offer.tag}${item.offer.apply_to_all === false ? ` · ${offerLeft(item.offer)} more left` : ''}`}
+                          sx={{ height: 18, fontSize: '0.6rem', fontWeight: 900, mb: 0.3 }} />
+                      )}
+                      <Typography variant="caption" color="text.secondary" display="block">
                         ₹{parseFloat(item.product.price || 0)} x {item.qty} = <strong>₹{parseFloat(item.product.price || 0) * item.qty}</strong>
                       </Typography>
                     </Box>
 
                     <Stack direction="row" spacing={0.5} alignItems="center">
-                      <IconButton size="small" onClick={() => updateQty(item.product.id, item.qty - 1)}>
+                      <IconButton size="small" onClick={() => updateQty(item.key, item.qty - 1)}>
                         <RemoveIcon fontSize="small" />
                       </IconButton>
                       <Typography variant="subtitle2" fontWeight={800} sx={{ px: 0.5 }}>{item.qty}</Typography>
-                      <IconButton size="small" onClick={() => updateQty(item.product.id, item.qty + 1)}>
+                      <IconButton size="small" onClick={() => updateQty(item.key, item.qty + 1)}>
                         <AddIcon fontSize="small" />
                       </IconButton>
-                      <IconButton size="small" color="error" onClick={() => removeFromCart(item.product.id)}>
+                      <IconButton size="small" color="error" onClick={() => removeFromCart(item.key)}>
                         <DeleteIcon fontSize="small" />
                       </IconButton>
                     </Stack>
@@ -819,7 +882,9 @@ export default function PosBillingView({
                       unit_price: i.product.price,
                       tax_rate: taxRatePercent,
                       tax_amount: parseFloat(i.product.price || 0) * i.qty * (taxRatePercent / 100),
-                      subtotal: parseFloat(i.product.price || 0) * i.qty
+                      subtotal: parseFloat(i.product.price || 0) * i.qty,
+                      // Units sold on a running offer take from its offer quantity.
+                      pricing_offer: i.offer?.id || null,
                     }))
                   });
                   backendInvoiceId = res.data.id;

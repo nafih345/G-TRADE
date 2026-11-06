@@ -49,7 +49,7 @@ class StatementTests(APITestCase):
     def test_options_lists_every_statement_and_scope(self):
         res = self.client.get(URL + 'options/')
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(len(res.data['statements']), 11)
+        self.assertEqual(len(res.data['statements']), 13)
         self.assertIn('FIXED_ASSETS', [s['value'] for s in res.data['scopes']])
         equipment = next(a for a in res.data['accounts'] if a['code'] == '1510')
         self.assertEqual(equipment['scope'], 'FIXED_ASSETS')

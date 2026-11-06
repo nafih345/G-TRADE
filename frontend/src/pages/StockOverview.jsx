@@ -41,7 +41,7 @@ import { useDebounce } from '../hooks/useDebounce';
 import { apiErrorMessage } from '../utils/apiError';
 import { notify } from '../utils/notify';
 
-const BLANK_FILTERS = { brand: '', category: '', rack: '', supplier: '', variant_group: '', status: '', import_batch: '', source: '' };
+const BLANK_FILTERS = { brand: '', category: '', rack: '', supplier: '', variant_group: '', status: '', import_batch: '', source: '', offer: '' };
 const SOURCE_VALUES = STOCK_SOURCES.map((s) => s.value);
 const COLS_KEY = 'stock_overview_hidden_columns';
 const PAGE_SIZE_KEY = 'stock_overview_page_size';
@@ -94,6 +94,9 @@ const COLUMNS = [
   { key: 'cost_price', label: 'Purchase Cost ₹', sort: 'cost_price', align: 'right', w: 58, edit: 'money', costOnly: true },
   { key: 'retail_price', label: 'Selling Price ₹', sort: 'retail_price', align: 'right', w: 52, edit: 'money' },
   { key: 'mrp', label: 'MRP ₹', sort: 'mrp', align: 'right', w: 50, edit: 'money' },
+  // Settings → Pricing Rules & Offers: the item's running offer (read-only here).
+  { key: 'offer_price', label: 'Offer Price ₹', align: 'right', w: 48 },
+  { key: 'offer_status', label: 'Offer Qty / Status', w: 62 },
   { key: 'supplier_name', label: 'Supplier / Vendor', w: 64, edit: 'text', list: 'suppliers' },
   { key: 'last_purchase_date', label: 'Last Purchase', sort: 'last_purchase_date', w: 58 },
 ];
@@ -168,6 +171,30 @@ function SummaryCard({ icon, label, value, tone = '#6366f1', loading, hint }) {
         )}
       </Box>
     </Card>
+  );
+}
+
+// "Offer 3 · Regular 17" — what of the stock sells at the offer price vs the regular price.
+function OfferStatus({ offer, stock }) {
+  if (!offer) return <Box component="span" sx={{ color: 'text.disabled' }}>—</Box>;
+  const total = Math.max(0, Number(stock) || 0);
+  const all = offer.apply_to_all !== false;
+  const onOffer = all ? total : Math.max(0, Number(offer.remaining) || 0);
+  const title = [
+    `${offer.tag}${offer.end_date ? ` · until ${offer.end_date}` : ''}`,
+    all ? 'All stock is on the offer' : `${offer.remaining} of ${offer.offer_quantity} offer units left (${offer.sold || 0} sold)`,
+    offer.offer_barcode ? `Offer barcode ${offer.offer_barcode}` : '',
+  ].filter(Boolean).join('\n');
+  return (
+    <Box title={title} data-offer-status={offer.id} sx={{ lineHeight: 1.2 }}>
+      <Chip size="small" color={onOffer > 0 ? 'success' : 'default'} label={all ? 'Active Offer' : `${onOffer} @ offer`}
+        sx={{ height: 18, fontSize: 10, fontWeight: 800, '& .MuiChip-label': { px: 0.6 } }} />
+      {!all && (
+        <Box sx={{ fontSize: 10, color: 'text.secondary', mt: 0.2, whiteSpace: 'nowrap' }}>
+          Regular {Math.max(0, total - onOffer)}
+        </Box>
+      )}
+    </Box>
   );
 }
 
@@ -646,6 +673,12 @@ export default function StockOverview() {
           : <StatusChip status={row.status} />;
       case 'cost_price': case 'retail_price': case 'mrp':
         return <span title={formatMoney(row[col.key])} style={{ whiteSpace: 'nowrap' }}>{amount(row[col.key])}</span>;
+      case 'offer_price':
+        if (!row.offer) return muted();
+        return row.offer.offer_price == null
+          ? <Box component="span" title="May sell at any price" sx={{ fontWeight: 800, color: 'success.main' }}>Any</Box>
+          : <Box component="span" title={formatMoney(row.offer.offer_price)} sx={{ fontWeight: 800, color: 'success.main', whiteSpace: 'nowrap' }}>{amount(row.offer.offer_price)}</Box>;
+      case 'offer_status': return <OfferStatus offer={row.offer} stock={row.stock} />;
       case 'last_purchase_date': return <span title={formatDate(row.last_purchase_date)}>{shortDate(row.last_purchase_date)}</span>;
       case 'name': return (
         <>
@@ -654,6 +687,12 @@ export default function StockOverview() {
           {row.name}
           </Box>
           <SourceBadge source={row.stock_source} />
+          {row.offer && (
+            <Chip size="small" color="success" variant="outlined" data-offer-badge={row.id}
+              title={row.offer.tag}
+              label={`On Offer${row.offer.offer_price != null ? ` ₹${amount(row.offer.offer_price)}` : ''}${row.offer.apply_to_all === false ? ` · ${row.offer.remaining} left` : ''}`}
+              sx={{ mt: 0.3, height: 16, fontSize: 9.5, fontWeight: 800, '& .MuiChip-label': { px: 0.5 } }} />
+          )}
         </>
       );
       case 'variant': {
@@ -816,6 +855,10 @@ export default function StockOverview() {
             <MenuItem key="low" value="low">Low Stock</MenuItem>,
             <MenuItem key="out" value="out">Out of Stock</MenuItem>,
           ], 140)}
+          {filterSelect('offer', 'Offer', [
+            <MenuItem key="1" value="1">On Offer</MenuItem>,
+            <MenuItem key="0" value="0">Not on Offer</MenuItem>,
+          ], 120)}
           {filterSelect('brand', 'Brand', (facets?.brands || []).map((b) => <MenuItem key={b} value={b}>{b}</MenuItem>))}
           {filterSelect('category', 'Category', (facets?.categories || []).map((c) => <MenuItem key={c} value={c}>{c}</MenuItem>))}
           {filterSelect('rack', 'Rack', (facets?.racks || []).map((r) => <MenuItem key={r} value={r}>{r}</MenuItem>), 120)}

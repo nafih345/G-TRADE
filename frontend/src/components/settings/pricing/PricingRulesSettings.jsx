@@ -3,15 +3,16 @@ import axios from 'axios';
 import { getMasterSnapshot, loadMaster } from '../../../utils/masterDataCache';
 import {
   Alert, Autocomplete, Box, Button, Card, Chip, CircularProgress, Dialog, DialogActions, DialogContent,
-  DialogTitle, FormControlLabel, Grid, IconButton, InputAdornment, MenuItem, Paper, Radio, RadioGroup, Stack,
+  DialogTitle, FormControlLabel, Grid, Checkbox, IconButton, InputAdornment, MenuItem, Paper, Radio, RadioGroup, Stack,
   Switch, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TextField, ToggleButton,
   ToggleButtonGroup, Tooltip, Typography,
 } from '@mui/material';
 import {
   Add as AddIcon, Delete as DeleteIcon, Edit as EditIcon, Save as SaveIcon, LocalOffer as OfferIcon,
-  Lock as LockIcon, Search as SearchIcon,
+  Lock as LockIcon, Search as SearchIcon, QrCode2 as BarcodeIcon,
 } from '@mui/icons-material';
 import ConfirmActionDialog from '../../common/ConfirmActionDialog';
+import BarcodePrintDialog from '../../inventory/BarcodePrintDialog';
 import { GREEN, greenButtonSx } from '../store/storeUi';
 import { notify } from '../../../utils/notify';
 import { apiErrorMessage } from '../../../utils/apiError';
@@ -33,7 +34,28 @@ const STATE_CHIP = {
 
 const EMPTY_OFFER = {
   scope: 'PRODUCT', products: [], categories: [], mode: 'PRICE', offer_price: '', tag: 'Clearance Stock',
-  start_date: '', end_date: '', notes: '',
+  start_date: '', end_date: '', notes: '', apply_to_all: true, offer_quantity: '',
+};
+
+// "All stock (12)" / "3 of 10 left · 7 sold" — the offer's quantity in the list.
+const offerQtyText = (o) => {
+  if (o.scope !== 'PRODUCT') return 'All stock';
+  if (o.apply_to_all !== false) return `All stock${o.remaining != null ? ` (${o.remaining})` : ''}`;
+  return `${o.remaining ?? 0} of ${o.offer_quantity} left${o.sold ? ` · ${o.sold} sold` : ''}`;
+};
+
+// The offer tag label job for BarcodePrintDialog: the offer code, printed with the offer price as
+// the selling price; one label per offer unit still left.
+const offerLabelRows = (o) => {
+  const price = o.offer_price != null ? Number(o.offer_price).toFixed(2) : null;
+  const units = o.apply_to_all === false ? (o.remaining ?? o.offer_quantity ?? 1) : (o.stock ?? o.remaining ?? 1);
+  return [{
+    product: { id: o.product, name: o.product_name, barcode: o.offer_barcode },
+    qty: Math.max(1, Number(units) || 1),
+    barcode: o.offer_barcode,
+    fields: price != null ? { selling_price: price } : {},
+    job: price != null ? { offer_price: price } : {},
+  }];
 };
 
 const ToggleRow = ({ title, caption, checked, onChange, disabled, children }) => (
@@ -66,6 +88,7 @@ export default function PricingRulesSettings() {
   const [stateFilter, setStateFilter] = useState('ALL');
   const [dialog, setDialog] = useState(null); // null | {mode:'new'|'edit', form, offer?}
   const [deleting, setDeleting] = useState(null);
+  const [printing, setPrinting] = useState(null); // offer whose tags are being printed
 
   const loadOffers = useCallback(async () => {
     setLoadingOffers(true);
@@ -126,6 +149,23 @@ export default function PricingRulesSettings() {
     } catch (err) {
       notify(`Could not update the offer — ${apiErrorMessage(err)}`, 'error');
     }
+  };
+
+  // "Generate / Print Offer Barcode": mint the code if the offer has none yet, then open the
+  // label print dialog with it (offer price as the selling price).
+  const printOfferBarcode = async (offer) => {
+    let target = offer;
+    if (!offer.offer_barcode) {
+      try {
+        target = (await axios.post(`${OFFERS_API}${offer.id}/barcode/`)).data;
+        setOffers(list => list.map(o => (o.id === target.id ? target : o)));
+        notify(`Offer barcode ${target.offer_barcode} generated.`, 'success');
+      } catch (err) {
+        notify(`Could not generate the offer barcode — ${apiErrorMessage(err)}`, 'error');
+        return;
+      }
+    }
+    setPrinting(target);
   };
 
   const removeOffer = async () => {
@@ -262,6 +302,8 @@ export default function PricingRulesSettings() {
                 <TableCell align="right">Cost</TableCell>
                 <TableCell align="right">Retail</TableCell>
                 <TableCell align="right">Offer Price</TableCell>
+                <TableCell>Offer Qty</TableCell>
+                <TableCell>Offer Barcode</TableCell>
                 <TableCell>Tag</TableCell>
                 <TableCell>Validity</TableCell>
                 <TableCell>Status</TableCell>
@@ -270,10 +312,10 @@ export default function PricingRulesSettings() {
             </TableHead>
             <TableBody>
               {loadingOffers && (
-                <TableRow><TableCell colSpan={8} align="center" sx={{ py: 4 }}><CircularProgress size={24} /></TableCell></TableRow>
+                <TableRow><TableCell colSpan={10} align="center" sx={{ py: 4 }}><CircularProgress size={24} /></TableCell></TableRow>
               )}
               {!loadingOffers && shown.length === 0 && (
-                <TableRow><TableCell colSpan={8} align="center" sx={{ py: 4, color: 'text.secondary' }}>
+                <TableRow><TableCell colSpan={10} align="center" sx={{ py: 4, color: 'text.secondary' }}>
                   {offers.length ? 'No offers match the filter.' : 'No clearance or offer items yet.'}
                 </TableCell></TableRow>
               )}
@@ -300,6 +342,28 @@ export default function PricingRulesSettings() {
                   <TableCell align="right" sx={{ fontWeight: 800 }}>
                     {o.offer_price == null ? <Chip size="small" label="Any price" color="warning" variant="outlined" /> : money(o.offer_price)}
                   </TableCell>
+                  <TableCell sx={{ whiteSpace: 'nowrap' }} data-offer-qty={o.id}>
+                    <Typography variant="caption" fontWeight={700}
+                      color={o.apply_to_all === false && !o.remaining ? 'error.main' : 'text.primary'}>
+                      {offerQtyText(o)}
+                    </Typography>
+                  </TableCell>
+                  <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                    {o.scope === 'PRODUCT' ? (
+                      <Stack direction="row" spacing={0.5} alignItems="center">
+                        <Typography variant="caption" sx={{ fontFamily: 'monospace', fontWeight: 700 }} data-offer-barcode={o.id}>
+                          {o.offer_barcode || '—'}
+                        </Typography>
+                        {(o.offer_barcode || canEdit) && (
+                          <Tooltip title={o.offer_barcode ? 'Print offer barcode labels' : 'Generate & print the offer barcode'}>
+                            <IconButton size="small" color="success" onClick={() => printOfferBarcode(o)} data-action="print-offer-barcode">
+                              <BarcodeIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+                        )}
+                      </Stack>
+                    ) : <Typography variant="caption" color="text.secondary">—</Typography>}
+                  </TableCell>
                   <TableCell><Chip size="small" icon={<OfferIcon />} label={o.tag} sx={{ fontWeight: 700 }} /></TableCell>
                   <TableCell sx={{ whiteSpace: 'nowrap' }}>
                     <Typography variant="caption">
@@ -317,7 +381,8 @@ export default function PricingRulesSettings() {
                           mode: 'edit', offer: o,
                           form: { ...EMPTY_OFFER, scope: o.scope, mode: o.offer_price == null ? 'ANY' : 'PRICE',
                             offer_price: o.offer_price ?? '', tag: o.tag, notes: o.notes || '',
-                            start_date: o.start_date || '', end_date: o.end_date || '' },
+                            start_date: o.start_date || '', end_date: o.end_date || '',
+                            apply_to_all: o.apply_to_all !== false, offer_quantity: o.offer_quantity ?? '' },
                         })}><EditIcon fontSize="small" /></IconButton>
                       </Tooltip>
                       <Tooltip title="Remove">
@@ -336,6 +401,7 @@ export default function PricingRulesSettings() {
         <OfferDialog
           state={dialog}
           onClose={() => setDialog(null)}
+          onPrint={printOfferBarcode}
           onSaved={(rows) => {
             setOffers(list => {
               const byId = new Map(list.map(o => [o.id, o]));
@@ -344,6 +410,17 @@ export default function PricingRulesSettings() {
             });
             setDialog(null);
           }}
+        />
+      )}
+
+      {printing && (
+        <BarcodePrintDialog
+          open
+          title={`Print Offer Barcode — ${printing.product_name}`}
+          onClose={() => setPrinting(null)}
+          workflow="inventory"
+          rows={offerLabelRows(printing)}
+          qtyLabel={printing.apply_to_all === false ? 'Offer qty left' : 'Stock'}
         />
       )}
 
@@ -361,7 +438,7 @@ export default function PricingRulesSettings() {
   );
 }
 
-function OfferDialog({ state, onClose, onSaved }) {
+function OfferDialog({ state, onClose, onSaved, onPrint }) {
   const editing = state.mode === 'edit';
   const [form, setForm] = useState(state.form);
   const [errors, setErrors] = useState({});
@@ -402,8 +479,16 @@ function OfferDialog({ state, onClose, onSaved }) {
       offer_price: form.mode === 'ANY' ? null : form.offer_price,
       tag: form.tag, notes: form.notes, start_date: form.start_date || null, end_date: form.end_date || null,
     };
+    if (form.scope === 'PRODUCT') {
+      body.apply_to_all = !!form.apply_to_all;
+      if (!form.apply_to_all) body.offer_quantity = form.offer_quantity;
+    }
     if (form.mode === 'PRICE' && (form.offer_price === '' || form.offer_price == null)) {
       setErrors({ offer_price: 'Enter the offer price, or choose "Allow any price".' });
+      return;
+    }
+    if (form.scope === 'PRODUCT' && !form.apply_to_all && !(parseInt(form.offer_quantity, 10) >= 1)) {
+      setErrors({ offer_quantity: 'Enter how many units get the offer price, or tick "Apply to all stock".' });
       return;
     }
     setSaving(true);
@@ -418,7 +503,9 @@ function OfferDialog({ state, onClose, onSaved }) {
           categories: form.scope === 'CATEGORY' ? form.categories.map(c => c.id) : [],
         })).data;
       }
-      notify(editing ? 'Offer updated.' : `${rows.length} item(s) added to offers.`, 'success');
+      const codes = rows.map(r => r.offer_barcode).filter(Boolean);
+      notify(editing ? 'Offer updated.' : `${rows.length} item(s) added to offers.${codes.length
+        ? ` Offer barcode${codes.length > 1 ? 's' : ''}: ${codes.slice(0, 3).join(', ')}${codes.length > 3 ? '…' : ''} — print the tags from the list.` : ''}`, 'success');
       onSaved(rows);
     } catch (err) {
       setErrors(err?.response?.data?.errors || {});
@@ -427,6 +514,12 @@ function OfferDialog({ state, onClose, onSaved }) {
       setSaving(false);
     }
   };
+
+  // Units the partial quantity may go up to: the smallest stock among the picked products (an
+  // edited offer also gets back what it already sold).
+  const stockCap = editing
+    ? (state.offer.scope === 'PRODUCT' ? (Number(state.offer.stock) || 0) + (Number(state.offer.sold) || 0) : null)
+    : (form.products.length ? Math.min(...form.products.map(p => Number(p.stock) || 0)) : null);
 
   const below = form.scope === 'PRODUCT' && form.mode === 'PRICE' && form.offer_price !== ''
     ? form.products.filter(p => Number(p.cost_price) > 0 && Number(form.offer_price) < Number(p.cost_price)) : [];
@@ -510,6 +603,37 @@ function OfferDialog({ state, onClose, onSaved }) {
             )}
           </Box>
 
+          {form.scope === 'PRODUCT' && (
+            <Box data-offer-quantity-section>
+              <Typography variant="subtitle2" fontWeight={800} sx={{ mb: 0.5 }}>Offer quantity</Typography>
+              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ sm: 'flex-start' }}>
+                <FormControlLabel
+                  control={<Checkbox color="success" checked={!!form.apply_to_all}
+                    inputProps={{ 'data-field': 'apply_to_all' }}
+                    onChange={(e) => set('apply_to_all', e.target.checked)} />}
+                  label="Apply to all stock"
+                />
+                {!form.apply_to_all && (
+                  <TextField
+                    label="Offer Quantity" type="number" size="small" sx={{ maxWidth: 220 }}
+                    value={form.offer_quantity} onChange={(e) => set('offer_quantity', e.target.value)}
+                    inputProps={{ min: 1, step: 1, 'data-field': 'offer_quantity' }}
+                    error={!!errors.offer_quantity}
+                    helperText={errors.offer_quantity || (stockCap != null
+                      ? `Units sold at the offer price — up to ${stockCap} (in stock${form.products.length > 1 ? ', lowest of the picked items' : ''}).`
+                      : 'Units sold at the offer price; the rest sell at the regular price.')}
+                  />
+                )}
+              </Stack>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                {form.apply_to_all
+                  ? 'Every unit of the item may be sold at the offer price.'
+                  : 'Only this many units get the offer price — scan the offer barcode (or apply the offer on the bill line) to sell one; regular scans keep the regular price.'}
+                {' '}Each product offer gets its own offer barcode (e.g. 1001-0001) to tag the offer units.
+              </Typography>
+            </Box>
+          )}
+
           <Grid container spacing={2}>
             <Grid item xs={12} sm={6}>
               <Autocomplete
@@ -539,6 +663,12 @@ function OfferDialog({ state, onClose, onSaved }) {
         </Stack>
       </DialogContent>
       <DialogActions sx={{ px: 3, py: 2 }}>
+        {editing && state.offer.scope === 'PRODUCT' && (
+          <Button startIcon={<BarcodeIcon />} color="success" onClick={() => onPrint(state.offer)} disabled={saving}
+            sx={{ mr: 'auto', fontWeight: 800 }}>
+            {state.offer.offer_barcode ? 'Print Offer Barcode' : 'Generate / Print Offer Barcode'}
+          </Button>
+        )}
         <Button onClick={onClose} disabled={saving}>Cancel</Button>
         <Button variant="contained" onClick={submit} disabled={saving || (!editing && (form.scope === 'PRODUCT' ? !form.products.length : !form.categories.length))}
           startIcon={<SaveIcon />} sx={greenButtonSx}>

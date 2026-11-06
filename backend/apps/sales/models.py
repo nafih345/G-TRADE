@@ -247,6 +247,10 @@ class InvoiceItem(BaseUUIDModel):
     #  rx_source, stock_unit} — stock_unit is snapshotted from the product when the line is saved
     # so an edit / return of this line moves stock in the unit it was sold against.
     lens_details = models.JSONField(blank=True, null=True)
+    # Settings → Pricing Rules & Offers: the offer this line was sold under (scanned offer barcode
+    # or the offer price applied). An offer's sold units = its tagged lines on committed invoices.
+    pricing_offer = models.ForeignKey('company.PricingOffer', on_delete=models.SET_NULL, null=True, blank=True,
+                                      related_name='invoice_items')
 
     def __str__(self):
         return f"{self.description or (self.product.name if self.product else 'Item')} ({self.quantity}pcs)"

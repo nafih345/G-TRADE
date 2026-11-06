@@ -146,11 +146,13 @@ def preview_series(prefix_pattern, total_length, check_digit, next_number, count
 
 def find_barcode_owner(code, exclude_pk=None):
     """The product that already scans as `code` — via its primary barcode, its
-    secondary barcode or a printed label code (ProductBarcode) — or None."""
+    secondary barcode, a printed label code (ProductBarcode) or one of its offer tags'
+    promotional barcode (company.PricingOffer.offer_barcode, deleted offers included) — or None."""
     code = (code or '').strip()
     if not code:
         return None
-    qs = Product.all_objects.filter(Q(barcode=code) | Q(secondary_barcode=code) | Q(extra_barcodes__code=code))
+    qs = Product.all_objects.filter(Q(barcode=code) | Q(secondary_barcode=code) | Q(extra_barcodes__code=code)
+                                    | Q(pricing_offers__offer_barcode=code))
     if exclude_pk:
         qs = qs.exclude(pk=exclude_pk)
     return qs.first()
@@ -160,6 +162,8 @@ def taken_barcodes(codes):
     taken = set(Product.all_objects.filter(barcode__in=codes).values_list('barcode', flat=True))
     taken |= set(Product.all_objects.filter(secondary_barcode__in=codes).values_list('secondary_barcode', flat=True))
     taken |= set(ProductBarcode.objects.filter(code__in=codes).values_list('code', flat=True))
+    from apps.company.models import PricingOffer
+    taken |= set(PricingOffer.all_objects.filter(offer_barcode__in=codes).values_list('offer_barcode', flat=True))
     return taken
 
 

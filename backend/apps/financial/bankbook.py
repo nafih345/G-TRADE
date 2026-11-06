@@ -549,11 +549,12 @@ class EntryDetailSerializer(serializers.Serializer):
     remarks = serializers.CharField(required=False, allow_blank=True, max_length=500)
 
 
-def save_entry_detail(journal, account, data, user=None):
-    """Set the Bank Book details of `journal`'s movement on bank `account`."""
+def save_entry_detail(journal, account, data, user=None, check_account=True):
+    """Set the Bank Book details of `journal`'s movement on bank `account`. The Transaction Report
+    keeps cash movements' details in the same table (it checks the account itself)."""
     if journal.status not in JournalEntry.LEDGER_STATUSES or journal.is_deleted:
         raise AccountingError('Only posted entries are in the Bank Book.')
-    if not _is_bank_account(account, _mapped_bank_ids()):
+    if check_account and not _is_bank_account(account, _mapped_bank_ids()):
         raise AccountingError(f"'{_account_label(account)}' is not a bank account.")
     if not LedgerEntry.objects.filter(journal_entry=journal, account=account).exists():
         raise AccountingError(f"{journal.entry_number} does not touch {_account_label(account)}.")
@@ -573,7 +574,7 @@ def save_entry_detail(journal, account, data, user=None):
     after = {f: str(getattr(detail, f) or '') for f in ('reference', 'mode', 'value_date', 'remarks')}
     if before != after:
         audit('BANK_ENTRY_DETAIL', 'journal', journal.pk,
-              f"Bank Book {journal.entry_number} @ {account.code}: ref {detail.reference or '—'}",
+              f"{'Bank Book' if check_account else 'Transaction'} {journal.entry_number} @ {account.code}: ref {detail.reference or '—'}",
               before=before, after=after, user=user)
     return detail
 

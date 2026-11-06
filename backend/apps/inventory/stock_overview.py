@@ -48,6 +48,8 @@ from rest_framework.exceptions import NotFound, PermissionDenied
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
+from apps.company.models import PricingOffer
+from apps.company.pricing_rules import offer_resolver
 from apps.common.request_actor import actor_from_request, get_actor, reset_actor, set_actor
 from apps.common.sequences import bump_sequence
 from apps.products.barcode_utils import find_barcode_owner
@@ -176,13 +178,15 @@ def _search_q(word):
             | Q(frame_type__icontains=word) | Q(variant_key__icontains=word)
             | Q(rack_location__icontains=word) | Q(bin_location__icontains=word)
             | Q(extra_data__model_no__icontains=word)
-            | Q(Exists(ProductBarcode.objects.filter(product=OuterRef('pk'), code__icontains=word))))
+            | Q(Exists(ProductBarcode.objects.filter(product=OuterRef('pk'), code__icontains=word)))
+            | Q(Exists(PricingOffer.objects.filter(product=OuterRef('pk'), offer_barcode__icontains=word))))
 
 
 def _code_q(code):
     """A scanned code: exact on every code a product scans as, or its SKU."""
     return (Q(barcode=code) | Q(secondary_barcode=code) | Q(sku__iexact=code)
-            | Q(Exists(ProductBarcode.objects.filter(product=OuterRef('pk'), code=code))))
+            | Q(Exists(ProductBarcode.objects.filter(product=OuterRef('pk'), code=code)))
+            | Q(Exists(PricingOffer.all_objects.filter(product=OuterRef('pk'), offer_barcode=code))))
 
 
 def _is_uuid(value):
@@ -225,6 +229,13 @@ def apply_filters(qs, params, *, skip_source=False):
     status_key = (params.get('status') or '').strip().lower()
     if status_key in STATUS_FILTERS:
         qs = qs.filter(STATUS_FILTERS[status_key])
+    offer = (params.get('offer') or '').strip().lower()
+    if offer in ('1', 'true', 'on', '0', 'false', 'off'):
+        from apps.company.pricing_rules import running_offers
+        live = running_offers()
+        on_offer = (Q(pk__in=[o['product'] for o in live if o['scope'] == 'PRODUCT'])
+                    | Q(category_id__in=[o['category'] for o in live if o['scope'] == 'CATEGORY']))
+        qs = qs.filter(on_offer) if offer in ('1', 'true', 'on') else qs.exclude(on_offer)
     if not skip_source:
         source = source_param(params)
         if source in SOURCE_FILTERS:
@@ -275,6 +286,15 @@ def product_mrp(product):
     return _money(product.wholesale_price) if product.wholesale_price else None
 
 
+def offer_status_text(offer):
+    """'10 of 10 left @ offer' / 'All stock (12)' / '' — the export's Offer Qty / Status cell."""
+    if not offer:
+        return ''
+    if offer['apply_to_all']:
+        return f"{offer['tag']}: all stock ({offer['remaining'] or 0})"
+    return f"{offer['tag']}: {offer['remaining']} of {offer['offer_quantity']} left"
+
+
 def stock_status(product):
     stock = int(product.stock or 0)
     if stock <= 0:
@@ -284,7 +304,9 @@ def stock_status(product):
     return 'in'
 
 
-def serialize_row(p, caps):
+def serialize_row(p, caps, offers=None):
+    """offers: pricing_rules.offer_resolver() — the row's running offer (Offer Price / Offer Qty
+    columns); None leaves `offer` out of the decision (sent as null)."""
     color = (p.color or '').strip() or str(_extra(p, 'color', 'colour') or '')
     size = (p.size or '').strip() or str(_extra(p, 'size', 'frame_size') or '')
     model_no = str(_extra(p, 'model_no', 'model', 'model_number') or '')
@@ -319,6 +341,7 @@ def serialize_row(p, caps):
         'own_supplier_name': p.supplier_name or '',
         'last_purchase_date': p.last_purchase_date.isoformat() if getattr(p, 'last_purchase_date', None) else None,
         'status': stock_status(p),
+        'offer': offers(p) if offers else None,
         'stock_source': p.stock_source or '',
         'updated_at': p.updated_at.isoformat() if p.updated_at else None,
     }
@@ -572,14 +595,15 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
         return product
 
     def _row(self, pk):
-        return serialize_row(base_queryset().get(pk=pk), self._caps())
+        return serialize_row(base_queryset().get(pk=pk), self._caps(), offer_resolver())
 
     # -- list / summary / facets ---------------------------------------------------------------
     def list(self, request):
         qs = apply_ordering(apply_filters(self.get_queryset(), request.query_params), request.query_params)
         caps = self._caps()
         page = self.paginate_queryset(qs)
-        return self.get_paginated_response([serialize_row(p, caps) for p in page])
+        offers = offer_resolver()
+        return self.get_paginated_response([serialize_row(p, caps, offers) for p in page])
 
     @action(detail=False, methods=['get'])
     def summary(self, request):
@@ -644,7 +668,8 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
         if not code:
             return Response({'found': False, 'results': []})
         caps = self._caps()
-        rows = [serialize_row(p, caps) for p in base_queryset().filter(_code_q(code)).order_by('name')[:5]]
+        offers = offer_resolver()
+        rows = [serialize_row(p, caps, offers) for p in base_queryset().filter(_code_q(code)).order_by('name')[:5]]
         return Response({'found': bool(rows), 'results': rows})
 
     # -- export ---------------------------------------------------------------------------------
@@ -655,7 +680,7 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
         ('stock', 'Current Stock'), ('minimum_stock', 'Minimum Stock'), ('uom', 'UOM'),
         ('status_label', 'Stock Status'), ('cost_price', 'Purchase Cost'), ('retail_price', 'Selling Price'),
         ('mrp', 'MRP'), ('supplier_name', 'Supplier'), ('last_purchase_date', 'Last Purchase Date'),
-        ('source_label', 'Stock Source'),
+        ('source_label', 'Stock Source'), ('offer_price', 'Offer Price'), ('offer_status', 'Offer Qty / Status'),
     ]
     SOURCE_LABELS = {'OPENING_STOCK': 'Opening Stock', 'EXCEL_IMPORT': 'Excel Import'}
     STATUS_LABELS = {'in': 'In Stock', 'low': 'Low Stock', 'out': 'Out of Stock'}
@@ -669,9 +694,14 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
         qs = apply_ordering(apply_filters(self.get_queryset(), request.query_params), request.query_params)
         stamp = timezone.localtime().strftime('%Y%m%d-%H%M')
 
+        offers = offer_resolver()
+
         def rows():
             for p in qs[:EXPORT_ROW_LIMIT].iterator(chunk_size=2000):
-                r = serialize_row(p, caps)
+                r = serialize_row(p, caps, offers)
+                o = r['offer']
+                r['offer_price'] = o['offer_price'] if o else None
+                r['offer_status'] = offer_status_text(o)
                 r['status_label'] = self.STATUS_LABELS[r['status']]
                 r['source_label'] = self.SOURCE_LABELS.get(r['stock_source'], 'Regular')
                 yield [r.get(key) for key, _ in columns]
@@ -691,7 +721,7 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
         wb = Workbook(write_only=True)
         ws = wb.create_sheet('Stock Overview')
         ws.append([label for _, label in columns])
-        numeric = {'stock', 'minimum_stock', 'cost_price', 'retail_price', 'mrp'}
+        numeric = {'stock', 'minimum_stock', 'cost_price', 'retail_price', 'mrp', 'offer_price'}
         keys = [k for k, _ in columns]
         for row in rows():
             ws.append([
@@ -973,7 +1003,7 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
         paginator = HistoryPagination()
         page = paginator.paginate_queryset(qs, request, view=self)
         resp = paginator.get_paginated_response(describe_ledger_rows(page, product))
-        resp.data['product'] = serialize_row(base_queryset().get(pk=product.pk), self._caps())
+        resp.data['product'] = serialize_row(base_queryset().get(pk=product.pk), self._caps(), offer_resolver())
         return resp
 
 

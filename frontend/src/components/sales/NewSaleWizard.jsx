@@ -12,7 +12,11 @@ import { CASH_PAID, CASH_UNPAID, needsBank } from '../../utils/paymentModes';
 import { eyeTestFeeLine, isEyeTestFeeLine } from '../../utils/eyeTestBill';
 import PaymentModeDetails from '../common/PaymentModeDetails';
 import { getBusinessPrefs } from '../../utils/localeFormat';
-import { PRICING_FLOORS_API, findPriceViolations, violationText, offerUnitPrice } from '../../utils/pricingRules';
+import {
+  PRICING_FLOORS_API, findPriceViolations, violationText, offerUnitPrice, offerForBarcode, offerForProduct,
+  offerUnitsLeft, offerBadgeText,
+} from '../../utils/pricingRules';
+import useLiveOffers from '../../hooks/useLiveOffers';
 import PriceApprovalDialog from './PriceApprovalDialog';
 import {
   LENS_QUEUE_API, RESERVED_LENS_API, queueStatusMeta, canBillOrder, lensQueueSummary,
@@ -917,6 +921,8 @@ export default function NewSaleWizard({
   // Settings → Pricing Rules & Offers: the floors / running offer of this bill's products
   // ({productId: info}, while the below-cost lock or Offers & Clearance is on) and the manager-approval dialog ({lines, resolve} while open).
   const [priceFloors, setPriceFloors] = useState({ settings: null, floors: {}, canOverride: false });
+  // Running offers (with offer units left) — search badges + offer-barcode scans ("1001-0001").
+  const liveOffers = useLiveOffers();
   const [priceApproval, setPriceApproval] = useState(null);
   const floorsFetched = useRef(new Set());
   const [outRx, setOutRx] = useState('');
@@ -1611,15 +1617,38 @@ export default function NewSaleWizard({
       return;
     }
     const normalized = code.trim().toLowerCase();
-    const found = products.find(p =>
-      barcodeMatchesProduct(p, normalized) ||
-      (p.code && String(p.code).toLowerCase() === normalized) ||
-      (p.sku && String(p.sku).toLowerCase() === normalized)
-    );
+    // A promotional offer tag ("1001-0001") → its product, billed at the offer price.
+    const scannedOffer = liveOffers.enabled ? offerForBarcode(liveOffers.index, normalized) : null;
+    const found = scannedOffer
+      ? products.find(p => String(p.id) === String(scannedOffer.product))
+      : products.find(p =>
+        barcodeMatchesProduct(p, normalized) ||
+        (p.code && String(p.code).toLowerCase() === normalized) ||
+        (p.sku && String(p.sku).toLowerCase() === normalized)
+      );
     if (!found) {
-      alert(`No product found for barcode "${code}"`);
+      if (scannedOffer) {
+        alert(`"${code}" is the offer tag of ${scannedOffer.product_name || 'a product'}, which is not loaded on this screen yet — refresh and scan again.`);
+        return;
+      }
+      // Not a code this screen knows yet (e.g. an offer tag scanned before the running offers
+      // loaded): ask the server, which resolves product barcodes and offer tags alike.
+      axios.get('/api/products/items/resolve_barcode/', { params: { code: code.trim() } })
+        .then(({ data }) => {
+          const local = data?.found && data.product && products.find(p => String(p.id) === String(data.product.id));
+          if (!local) { alert(`No product found for barcode "${code}"`); return; }
+          if (data.offer_ended) notify(`"${code}" is an old offer tag — that offer has ended. ${local.name} added at the regular price.`, 'warning');
+          addScannedProduct(local, data.offer || null);
+          if (data.offer) liveOffers.refresh();
+        })
+        .catch(() => alert(`No product found for barcode "${code}"`));
       return;
     }
+    addScannedProduct(found, scannedOffer);
+  };
+
+  // One scanned unit → a new bill line (sold on `scannedOffer` when its tag was scanned).
+  const addScannedProduct = (found, scannedOffer = null) => {
     const price = parseFloat(found.price || found.sellingPrice || 0);
     const scanTaxPercent = resolveProductTaxPercent(found);
     const scanTaxVal = (price * scanTaxPercent) / 100;
@@ -1650,14 +1679,22 @@ export default function NewSaleWizard({
       total: price + scanTaxVal
     };
     // A scanned spectacle lens becomes a Both Eyes – 1 Pair line at the configured pair price.
-    if (isPairSellable(found)) {
-      const lens = makeLensState(found, price);
-      setItemsList(prev => [...prev, withLineAmounts({
-        ...newItem, itemType: 'LENS', lens, price: lens.pricing.pairPrice, power: lensPowerText(lens),
-      })]);
+    const line = isPairSellable(found)
+      ? (() => {
+        const lens = makeLensState(found, price);
+        return withLineAmounts({ ...newItem, itemType: 'LENS', lens, price: lens.pricing.pairPrice, power: lensPowerText(lens) });
+      })()
+      : newItem;
+    setItemsList(prev => [...prev, line]);
+    if (scannedOffer) {
+      if (applyOfferToRow(line.id, scannedOffer, [...itemsList, line])) {
+        notify(`${found.name}: ${offerBadgeText(scannedOffer, { left: offerUnitsLeft(scannedOffer, itemsList) - 1 })} — "${scannedOffer.tag}" offer price applied.`, 'success');
+      }
       return;
     }
-    setItemsList(prev => [...prev, newItem]);
+    // The regular barcode of an item that is on offer: say so (the line's badge applies it).
+    const offer = liveOffers.enabled ? offerForProduct(liveOffers.index, found) : null;
+    if (offer) notify(`${found.name} is ${offerBadgeText(offer, { left: offerUnitsLeft(offer, itemsList) })} — click the line's offer badge to apply it.`, 'info');
   };
 
   // Capture phase: the keyboard-nav chain stops Enter from bubbling while a dropdown has focus,
@@ -1676,26 +1713,60 @@ export default function NewSaleWizard({
   const [editDialogId, setEditDialogId] = useState(null);
   const editDialogRow = itemsList.find(r => r.id === editDialogId) || null;
 
+  const recalcLine = (next) => {
+    const qty = parseInt(next.qty) || 0;
+    const price = parseFloat(next.price) || 0;
+    const taxPercent = parseFloat(next.taxPercent) || 0;
+    const gross = qty * price;
+    const { disc, discPercent } = resolveDiscount(next, gross);
+    const taxable = gross - disc;
+    const tax = (taxable * taxPercent) / 100;
+    return { ...next, gross, disc, discPercent, tax, total: taxable + tax };
+  };
   const updateItemField = (id, field, value) => {
     setItemsList(prev => prev.map(item => {
       if (item.id !== id) return item;
       const next = { ...item, [field]: value };
-      if (['qty', 'price', 'discMode', 'discValue', 'taxPercent'].includes(field)) {
-        const qty = parseInt(next.qty) || 0;
-        const price = parseFloat(next.price) || 0;
-        const taxPercent = parseFloat(next.taxPercent) || 0;
-        const gross = qty * price;
-        const { disc, discPercent } = resolveDiscount(next, gross);
-        const taxable = gross - disc;
-        const tax = (taxable * taxPercent) / 100;
-        next.gross = gross;
-        next.disc = disc;
-        next.discPercent = discPercent;
-        next.tax = tax;
-        next.total = taxable + tax;
-      }
-      return next;
+      return ['qty', 'price', 'discMode', 'discValue', 'taxPercent'].includes(field) ? recalcLine(next) : next;
     }));
+  };
+
+  // Settings → Pricing Rules & Offers: sell a line under its running offer — the offer price, and
+  // the line tagged (`pricingOfferId` → InvoiceItem.pricing_offer) so it takes from the offer
+  // quantity. A partial offer with too few units left for the line is refused here (the server
+  // refuses it too). `rows` = the bill as it stands (pass the freshest copy you have).
+  const applyOfferToRow = (rowId, offer, rows = itemsList, { qty } = {}) => {
+    if (!offer) return false;
+    const row = rows.find(r => r.id === rowId);
+    const units = parseInt(qty ?? row?.qty, 10) || 1;
+    const left = offerUnitsLeft(offer, rows, rowId);
+    if (left < units) {
+      notify(left > 0
+        ? `Only ${left} unit(s) left on the "${offer.tag}" offer — lower the quantity to apply the offer price.`
+        : `The "${offer.tag}" offer quantity is sold out — billed at the regular price.`, 'warning');
+      return false;
+    }
+    setItemsList(prev => prev.map(item => {
+      if (item.id !== rowId) return item;
+      const info = priceFloors.floors[item.productId] || { lens_stock_unit: undefined };
+      const offerPrice = offer.offer_price == null ? null : offerUnitPrice(item, { ...info, offer });
+      return recalcLine({
+        ...item,
+        pricingOfferId: offer.id,
+        regularPrice: item.regularPrice ?? item.price,
+        price: offerPrice ?? item.price,
+      });
+    }));
+    return true;
+  };
+  // Back to the regular price, off the offer quantity.
+  const removeOfferFromRow = (rowId) => setItemsList(prev => prev.map(item => (item.id !== rowId ? item
+    : recalcLine({ ...item, pricingOfferId: null, price: item.regularPrice ?? item.price, regularPrice: undefined }))));
+  // The offer to badge a bill line with: the live list (fresh units left) first, then the floors'.
+  const offerForRow = (row) => {
+    if (!row.productId) return null;
+    const live = liveOffers.enabled ? offerForProduct(liveOffers.index, { id: row.productId }) : null;
+    return live || priceFloors.floors[row.productId]?.offer || null;
   };
 
   // Leaving edit mode (inline or popup): tidy any blank descriptive cell back to a dash so a
@@ -1976,6 +2047,8 @@ export default function NewSaleWizard({
       serviceDescription: isService ? (li?.serviceDescription || '') : undefined,
       qty, price, disc, gross, discMode, discValue, discPercent, tax, taxPercent,
       total: gross - disc + tax,
+      pricingOfferId: it.pricing_offer || null,
+      regularPrice: it.pricing_offer && product ? parseFloat(product.price || product.sellingPrice || 0) || undefined : undefined,
     };
   };
 
@@ -2122,9 +2195,11 @@ export default function NewSaleWizard({
   // list the dropdown shows — so the details are visible right where the line will land and a
   // single click on the row's ＋ drops it into the bill.
   const searchQuery = productSearchText.trim().toLowerCase();
+  const searchedOffer = liveOffers.enabled ? offerForBarcode(liveOffers.index, searchQuery) : null;
   const searchMatches = (() => {
     if (entryInput.item || searchQuery.length < 2) return [];
-    return products.filter(p => productHaystack(p).includes(searchQuery)).slice(0, 8);
+    return products.filter(p => productHaystack(p).includes(searchQuery)
+      || (searchedOffer && String(p.id) === String(searchedOffer.product))).slice(0, 8);
   })();
   // Same live search, extended to the Service Master so one box finds Products, Lenses & Services.
   const serviceMatches = (() => {
@@ -2150,6 +2225,11 @@ export default function NewSaleWizard({
   const addMatch = (src) => {
     const rowId = handleAddItem(src);
     setMatchIndex(-1);
+    // Found by typing its offer barcode: sell it on that offer, like a scan of the tag.
+    // (Its update is queued after the add's, so it finds the new row.)
+    if (rowId && searchedOffer && String(src.productId) === String(searchedOffer.product)) {
+      applyOfferToRow(rowId, searchedOffer, itemsList, { qty: src.qty });
+    }
     if (rowId) focusGridQtySoon(rowId);
   };
   const focusGridQtySoon = (rowId) => setTimeout(() => {
@@ -2559,6 +2639,9 @@ export default function NewSaleWizard({
             unit_price: i.price,
             // The line's own discount — the server's below-cost check prices the line net of it.
             discount: i.disc || 0,
+            // Sold under a running offer (offer tag scanned / offer price applied): takes from
+            // that offer's quantity, and its price may go down to the offer price.
+            pricing_offer: i.pricingOfferId || null,
             tax_rate: i.taxPercent,
             tax_amount: i.tax,
             subtotal: i.total,
@@ -2620,6 +2703,7 @@ export default function NewSaleWizard({
         // (an edit would leave the old bill in the database). Say why, and leave the form open to
         // fix / retry.
         console.warn('Invoice did not save to the database:', e);
+        if (String(e?.response?.data?.code || '').startsWith('offer_')) liveOffers.refresh();
         notify(editingDoc
           ? `Could not update ${editingDoc.invoiceNumber} — the changes were NOT saved. ${apiErrorMessage(e)}`
           : `The ${docType.toLowerCase()} was NOT saved. ${apiErrorMessage(e)}`);
@@ -2725,6 +2809,7 @@ export default function NewSaleWizard({
       ? `${savedMsg}\n\nPress Alt + W (or use "Show Bill") to share the receipt on WhatsApp.`
       : savedMsg);
 
+    if (itemsList.some(i => i.pricingOfferId)) liveOffers.refresh();
     if (onCheckoutComplete) {
       onCheckoutComplete(completedOrder);
     }
@@ -3715,6 +3800,19 @@ export default function NewSaleWizard({
                           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6, flexWrap: 'wrap' }}>
                             <Chip label="MATCH" size="small" color="info" variant="outlined" sx={{ fontWeight: 900, height: 18, fontSize: '0.6rem' }} />
                             {src.item}
+                            {(() => {
+                              const offer = liveOffers.enabled ? offerForProduct(liveOffers.index, p) : null;
+                              if (!offer) return null;
+                              const left = offerUnitsLeft(offer, itemsList);
+                              return (
+                                <Tooltip title={`${offer.tag}${offer.end_date ? ` · until ${offer.end_date}` : ''}${offer.offer_barcode ? ` · scan ${offer.offer_barcode} to bill at the offer price` : ''}`}>
+                                  <Chip size="small" icon={<DiscountIcon />} data-offer-badge="search"
+                                    label={offerBadgeText(offer, { left: left === Infinity ? undefined : left })}
+                                    color={left > 0 ? 'success' : 'default'}
+                                    sx={{ height: 18, fontSize: '0.6rem', fontWeight: 900, '& .MuiChip-icon': { fontSize: 12 } }} />
+                                </Tooltip>
+                              );
+                            })()}
                           </Box>
                           {(src.supplier || src.rack) && (
                             <Box sx={{ fontSize: '0.62rem', fontWeight: 700, color: 'text.secondary', mt: 0.2 }}>
@@ -3884,8 +3982,12 @@ export default function NewSaleWizard({
                       );
                       const belowCost = priceViolations[row.id];
                       const floorInfo = row.productId ? priceFloors.floors[row.productId] : null;
-                      const offerPrice = floorInfo?.offer ? offerUnitPrice(row, floorInfo) : null;
-                      const offersOn = !!priceFloors.settings?.offers_enabled;
+                      const rowOffer = isSvcRow ? null : offerForRow(row);
+                      const offerPrice = rowOffer ? offerUnitPrice(row, { ...(floorInfo || {}), offer: rowOffer }) : null;
+                      const offersOn = !!priceFloors.settings?.offers_enabled || liveOffers.enabled;
+                      const onOffer = !!rowOffer && row.pricingOfferId === rowOffer.id;
+                      const offerLeft = rowOffer ? offerUnitsLeft(rowOffer, itemsList, row.id) : Infinity;
+                      const overOffer = onOffer && offerLeft < (parseInt(row.qty, 10) || 0);
                       return (
                       <TableRow key={row.id} data-item-row={row.id} data-below-cost={belowCost ? 'true' : undefined} hover sx={{ '&:nth-of-type(even)': { bgcolor: '#f8fafc' }, ...(isSvcRow ? { bgcolor: '#fffbeb' } : {}), ...(belowCost ? { bgcolor: '#fef2f2 !important', boxShadow: 'inset 4px 0 0 #dc2626' } : {}) }}>
                         <TableCell sx={{ fontWeight: 800, color: isSvcRow ? '#b45309' : 'primary.main', fontSize: '0.8rem' }}>{row.barcode}</TableCell>
@@ -3898,18 +4000,24 @@ export default function NewSaleWizard({
                               {row.rack ? `Rack: ${row.rack}` : ''}
                             </Box>
                           )}
-                          {offersOn && !isSvcRow && floorInfo && (floorInfo.offer ? (
+                          {offersOn && !isSvcRow && (floorInfo || rowOffer) && (rowOffer ? (
                             <Tooltip title={[
-                              `On Offer — ${floorInfo.offer.tag}`,
+                              `On Offer — ${rowOffer.tag}`,
                               offerPrice != null ? `offer price ₹${offerPrice.toFixed(2)}` : 'may sell at any price',
-                              floorInfo.offer.end_date ? `until ${floorInfo.offer.end_date}` : '',
-                              offerPrice != null && Number(row.price) !== offerPrice ? 'click to apply the offer price' : '',
+                              rowOffer.apply_to_all === false ? `${Math.max(0, offerLeft === Infinity ? 0 : offerLeft)} offer unit(s) left besides this line` : '',
+                              rowOffer.end_date ? `until ${rowOffer.end_date}` : '',
+                              onOffer ? 'sold on the offer — ✕ for the regular price' : 'click to sell this line on the offer',
                             ].filter(Boolean).join(' · ')}>
                               <Chip size="small" icon={<DiscountIcon />} data-offer-status="on"
-                                label={`On Offer · ${floorInfo.offer.tag}${offerPrice != null ? ` ₹${offerPrice.toFixed(2)}` : ''}`}
-                                color="success"
-                                onClick={offerPrice != null ? () => { set('price')(offerPrice); } : undefined}
-                                sx={{ mt: 0.3, height: 18, fontSize: '0.6rem', fontWeight: 800, '& .MuiChip-icon': { fontSize: 12 } }} />
+                                data-offer-applied={onOffer ? 'true' : 'false'}
+                                label={onOffer
+                                  ? `Offer applied · ${rowOffer.tag}${offerPrice != null ? ` ₹${offerPrice.toFixed(2)}` : ''}${overOffer ? ` · only ${offerLeft} left` : ''}`
+                                  : offerBadgeText(rowOffer, { left: offerLeft === Infinity ? undefined : offerLeft })}
+                                color={overOffer ? 'warning' : 'success'}
+                                variant={onOffer ? 'filled' : 'outlined'}
+                                onClick={onOffer ? undefined : () => applyOfferToRow(row.id, rowOffer)}
+                                onDelete={onOffer ? () => removeOfferFromRow(row.id) : undefined}
+                                sx={{ mt: 0.3, height: 18, fontSize: '0.6rem', fontWeight: 800, '& .MuiChip-icon': { fontSize: 12 }, '& .MuiChip-deleteIcon': { fontSize: 13 } }} />
                             </Tooltip>
                           ) : (
                             <Chip size="small" data-offer-status="off" label="Not on Offer" variant="outlined"

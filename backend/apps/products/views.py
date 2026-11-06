@@ -497,10 +497,24 @@ class ProductViewSet(EditApprovalMixin, viewsets.ModelViewSet):
             .prefetch_related('extra_barcodes')
             .first()
         )
+        offer = None
+        if not product:
+            # A promotional tag (Settings → Pricing Rules & Offers): the product, plus the offer
+            # when it is still running — the till then bills it at the offer price.
+            from apps.company.models import PricingOffer
+            from apps.company.pricing_rules import running_offers
+            owner = PricingOffer.all_objects.filter(offer_barcode=code).values_list('pk', 'product_id').first()
+            if owner:
+                product = Product.objects.prefetch_related('extra_barcodes').filter(pk=owner[1]).first()
+                offer = next((o for o in running_offers() if o['id'] == str(owner[0])), None)
+                if product is not None and offer is None:
+                    return Response({'found': True, 'offer': None, 'offer_ended': True,
+                                     'product': ProductSerializer(product, context={'request': request}).data})
         if not product:
             return Response({'found': False, 'product': None})
         return Response({
             'found': True,
+            'offer': offer,
             'product': ProductSerializer(product, context={'request': request}).data,
         })
 

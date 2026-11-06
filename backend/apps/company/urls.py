@@ -12,6 +12,7 @@ from .tax_config import TaxConfigListView, TaxConfigDetailView
 from .custom_fields import CustomFieldListView, CustomFieldDetailView
 from .pricing_rules import (
     PricingRulesView, PricingOfferListView, PricingOfferDetailView, PricingFloorsView, PricingApproveView,
+    PricingOfferBarcodeView, PricingLiveOffersView,
 )
 
 router = DefaultRouter()
@@ -38,7 +39,9 @@ urlpatterns = [
     path('custom-fields/<int:pk>/', CustomFieldDetailView.as_view(), name='custom-field-detail'),
     path('pricing-rules/', PricingRulesView.as_view(), name='pricing-rules'),
     path('pricing-rules/offers/', PricingOfferListView.as_view(), name='pricing-offers'),
+    path('pricing-rules/offers/live/', PricingLiveOffersView.as_view(), name='pricing-offers-live'),
     path('pricing-rules/offers/<uuid:pk>/', PricingOfferDetailView.as_view(), name='pricing-offer-detail'),
+    path('pricing-rules/offers/<uuid:pk>/barcode/', PricingOfferBarcodeView.as_view(), name='pricing-offer-barcode'),
     path('pricing-rules/floors/', PricingFloorsView.as_view(), name='pricing-floors'),
     path('pricing-rules/approve/', PricingApproveView.as_view(), name='pricing-approve'),
     path('branch-context/', branch_context, name='branch-context'),

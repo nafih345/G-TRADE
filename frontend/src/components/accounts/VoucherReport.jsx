@@ -1,6 +1,7 @@
-// Accounts → Reports → Payment Voucher Report / Receipt Voucher Report.
-// One row per PV / RV journal from /api/financial/reports/vouchers/: the ledger accounts paid or
-// received against, each pay mode, party and Reference No. Reversed vouchers stay listed (marked
+// Accounts → Reports → Payment / Receipt / Contra / Journal Voucher Report.
+// One row per PV / RV / CV / JV journal from /api/financial/reports/vouchers/. PV / RV rows show the
+// ledger accounts paid or received against and each pay mode; CV / JV rows (`split`) show the debit
+// and credit sides instead (Contra: transferred to / from). Party and Reference No on every row. Reversed vouchers stay listed (marked
 // REVERSED) but are left out of the totals; the summary covers every matching row, not one page.
 import React, { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import {
@@ -24,6 +25,10 @@ const STATUS_LABELS = { POSTED: 'Posted', REVERSED: 'Reversed', DRAFT: 'Draft', 
 const META = {
   PV: { title: 'Payment Voucher Report', accent: '#b91c1c', verb: 'Paid', accountsLabel: 'Paid To (Ledger)', file: 'payment_vouchers' },
   RV: { title: 'Receipt Voucher Report', accent: '#15803d', verb: 'Received', accountsLabel: 'Received Against (Ledger)', file: 'receipt_vouchers' },
+  CV: { title: 'Contra Entry Report', accent: '#2563eb', verb: 'Transferred', split: true, debitLabel: 'Transferred To (Dr)', creditLabel: 'Transferred From (Cr)', file: 'contra_entries',
+    noun: 'contra entries', about: 'Every Contra Entry (CV) on the books: cash deposited into or withdrawn from a bank, and transfers between cash and bank accounts.' },
+  JV: { title: 'Journal Voucher Report', accent: '#7c3aed', verb: 'Adjusted', split: true, debitLabel: 'Debit Accounts', creditLabel: 'Credit Accounts', file: 'journal_vouchers',
+    noun: 'journal vouchers', about: 'Every Journal Voucher (JV) on the books: adjustments entered here and journals posted automatically (such as sales returns).' },
 };
 
 const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -35,7 +40,7 @@ const params = (voucher, f, extra = {}) => ({
   voucher, date_from: f.dateFrom, date_to: f.dateTo, branch: f.branch, origin: f.origin, status: f.status, mode: f.mode,
   account: f.account?.id, search: f.search.trim(), ...extra,
 });
-const accountsText = (r) => r.accounts.map(a => `${a.code} - ${a.name}`).join(', ');
+const accountsText = (list) => list.map(a => `${a.code} - ${a.name}`).join(', ');
 const payText = (p) => `${p.mode}${p.mode !== 'Cash' && p.account_name ? ` (${p.account_name})` : ''} ${money(p.amount)}`;
 
 const head = { color: '#3730a3', fontWeight: 700, fontSize: 12.5, whiteSpace: 'nowrap', bgcolor: '#eef2ff', borderBottom: '1px solid #c7d2fe', py: 1.25 };
@@ -61,8 +66,54 @@ const PaymentChips = ({ payments }) => (
   </Stack>
 );
 
+// First account of a list, with "+N more" under it.
+const AccountCell = ({ list }) => (
+  <>
+    <Typography variant="body2" noWrap title={accountsText(list)}>{list[0] ? `${list[0].code} - ${list[0].name}` : '—'}</Typography>
+    {list.length > 1 && <Typography variant="caption" color="text.secondary">+{list.length - 1} more</Typography>}
+  </>
+);
+
+function SideTable({ label, list }) {
+  return (
+    <Table size="small" sx={{ bgcolor: '#fff', border: '1px solid #e2e8f0', '& .MuiTableCell-root': { py: 0.4, fontSize: 12.5 } }}>
+      <TableHead>
+        <TableRow>
+          <TableCell sx={{ fontWeight: 700 }}>{label}</TableCell>
+          <TableCell sx={{ fontWeight: 700 }}>Memo</TableCell>
+          <TableCell sx={{ fontWeight: 700 }} align="right">Amount</TableCell>
+        </TableRow>
+      </TableHead>
+      <TableBody>
+        {list.map(a => (
+          <TableRow key={a.account_id}>
+            <TableCell>{a.code} - {a.name}</TableCell>
+            <TableCell sx={{ color: 'text.secondary' }}>{a.memo}</TableCell>
+            <TableCell align="right">{money(a.amount)}</TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
+
 function VoucherDetails({ row, meta }) {
   const cell = { py: 0.4, fontSize: 12.5 };
+  if (meta.split) {
+    return (
+      <Box sx={{ px: 2, py: 1.5, bgcolor: '#f8fafc', borderTop: '1px dashed #cbd5e1' }}>
+        <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
+          {row.origin_label}{row.source_number && row.origin === 'auto' ? ` · ${row.source_number}` : ''}
+          {row.branch ? ` · ${row.branch}` : ''}{row.created_by ? ` · Entered by ${row.created_by}` : ''}
+          {row.reversed_by ? ` · Reversed by ${row.reversed_by}` : ''}
+        </Typography>
+        <Grid container spacing={2}>
+          <Grid item xs={12} md={6}><SideTable label={meta.debitLabel} list={row.debits} /></Grid>
+          <Grid item xs={12} md={6}><SideTable label={meta.creditLabel} list={row.credits} /></Grid>
+        </Grid>
+      </Box>
+    );
+  }
   return (
     <Box sx={{ px: 2, py: 1.5, bgcolor: '#f8fafc', borderTop: '1px dashed #cbd5e1' }}>
       <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
@@ -205,10 +256,20 @@ export default function VoucherReport({ voucher }) {
   const exportCsv = async () => {
     try {
       const all = await fetchAll();
-      const header = ['#', 'Date', 'Time', 'Voucher No', 'Status', 'Origin', 'Reference No', 'Party', 'Narration',
-        'Ledger Code', 'Ledger Account', 'Line Memo', 'Line Amount', 'Pay Mode(s)', 'Voucher Amount', 'Branch', 'Entered By', 'Reversed By'];
+      const header = meta.split
+        ? ['#', 'Date', 'Time', 'Voucher No', 'Status', 'Origin', 'Reference No', 'Party', 'Narration',
+          'Ledger Code', 'Ledger Account', 'Line Memo', 'Debit', 'Credit', 'Voucher Amount', 'Branch', 'Entered By', 'Reversed By']
+        : ['#', 'Date', 'Time', 'Voucher No', 'Status', 'Origin', 'Reference No', 'Party', 'Narration',
+          'Ledger Code', 'Ledger Account', 'Line Memo', 'Line Amount', 'Pay Mode(s)', 'Voucher Amount', 'Branch', 'Entered By', 'Reversed By'];
       const lines = [];
       all.rows.forEach((r) => {
+        if (meta.split) {
+          const base = [r.row_no, r.date, r.time, r.voucher_no, STATUS_LABELS[r.status] || r.status, r.origin_label, r.reference, r.party, r.narration];
+          const tail = [r.amount, r.branch, r.created_by, r.reversed_by];
+          r.debits.forEach(a => lines.push([...base, a.code, a.name, a.memo, a.amount, '', ...tail]));
+          r.credits.forEach(a => lines.push([...base, a.code, a.name, a.memo, '', a.amount, ...tail]));
+          return;
+        }
         const pays = r.payments.map(payText).join(' | ');
         (r.accounts.length ? r.accounts : [{}]).forEach((a) => lines.push([
           r.row_no, r.date, r.time, r.voucher_no, STATUS_LABELS[r.status] || r.status, r.origin_label, r.reference, r.party,
@@ -216,7 +277,7 @@ export default function VoucherReport({ voucher }) {
       });
       const s = all.summary;
       lines.push([], ['', '', '', '', '', '', '', '', `Total ${meta.verb.toLowerCase()} (${s.posted} posted vouchers)`, '', '', '', '', '', s.total]);
-      s.by_mode.forEach(m => lines.push(['', '', '', '', '', '', '', '', `${m.mode} (${m.count})`, '', '', '', '', '', m.amount]));
+      if (!meta.split) s.by_mode.forEach(m => lines.push(['', '', '', '', '', '', '', '', `${m.mode} (${m.count})`, '', '', '', '', '', m.amount]));
       const csv = [header, ...lines].map(row => row.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
       const url = URL.createObjectURL(new Blob([`﻿${csv}`], { type: 'text/csv;charset=utf-8' }));
       const a = Object.assign(document.createElement('a'), { href: url, download: `${meta.file}_${applied.dateFrom}_${applied.dateTo}.csv` });
@@ -236,7 +297,9 @@ export default function VoucherReport({ voucher }) {
       <Box sx={{ px: { xs: 2, md: 3 }, py: 2, borderBottom: '1px solid #e2e8f0' }}>
         <Typography variant="h6" fontWeight={850} sx={{ letterSpacing: 0.3, color: NAVY }}>{meta.title.toUpperCase()}</Typography>
         <Typography variant="body2" color="text.secondary">
-          Every {voucher === 'PV' ? 'Payment' : 'Receipt'} Voucher ({voucher}) on the books — vouchers entered here and {voucher === 'PV' ? 'supplier payments' : 'receipts from sales, eye tests and wholesale collections'} posted automatically. Click a row for its ledger lines.
+          {meta.about ? `${meta.about} Click a row for its ledger lines.` : (
+            <>Every {voucher === 'PV' ? 'Payment' : 'Receipt'} Voucher ({voucher}) on the books — vouchers entered here and {voucher === 'PV' ? 'supplier payments' : 'receipts from sales, eye tests and wholesale collections'} posted automatically. Click a row for its ledger lines.</>
+          )}
         </Typography>
       </Box>
 
@@ -266,10 +329,12 @@ export default function VoucherReport({ voucher }) {
             <MenuItem value="REVERSED">Reversed</MenuItem>
             <MenuItem value="DRAFT">Draft</MenuItem>
           </TextField>
-          <TextField select size="small" label="Payment Mode" value={draft.mode} onChange={set('mode')} sx={{ minWidth: 140, bgcolor: '#fff' }}>
-            <MenuItem value="">All modes</MenuItem>
-            {(data?.mode_options || ['Cash', 'UPI', 'Card', 'Bank', 'Cheque']).map(m => <MenuItem key={m} value={m}>{m}</MenuItem>)}
-          </TextField>
+          {!meta.split && (
+            <TextField select size="small" label="Payment Mode" value={draft.mode} onChange={set('mode')} sx={{ minWidth: 140, bgcolor: '#fff' }}>
+              <MenuItem value="">All modes</MenuItem>
+              {(data?.mode_options || ['Cash', 'UPI', 'Card', 'Bank', 'Cheque']).map(m => <MenuItem key={m} value={m}>{m}</MenuItem>)}
+            </TextField>
+          )}
           <Autocomplete size="small" options={accountOptions} value={draft.account}
             onChange={(e, v) => setDraft(f => ({ ...f, account: v ? { id: v.id, code: v.code, name: v.name } : null }))}
             isOptionEqualToValue={(o, v) => o.id === v.id}
@@ -299,10 +364,10 @@ export default function VoucherReport({ voucher }) {
           <Grid item xs={6} md={3}><SummaryCard label="POSTED" value={s?.posted} color="#166534" accent="#16a34a" plain /></Grid>
           <Grid item xs={6} md={3}><SummaryCard label="REVERSED / DRAFT" value={s ? `${s.reversed} / ${s.drafts}` : '0 / 0'} color="#a16207" accent="#d97706" plain /></Grid>
         </Grid>
-        {(s?.by_mode?.length > 0 || s?.by_origin?.length > 1) && (
+        {((!meta.split && s?.by_mode?.length > 0) || s?.by_origin?.length > 1) && (
           <Paper variant="outlined" sx={{ p: 1.5, mb: 2, borderRadius: 2 }}>
             <Stack direction={{ xs: 'column', md: 'row' }} gap={2}>
-              {s.by_mode.length > 0 && (
+              {!meta.split && s.by_mode.length > 0 && (
                 <Box sx={{ flex: 1 }}>
                   <Typography variant="caption" color="text.secondary" fontWeight={800} sx={{ letterSpacing: 0.4 }}>BY PAYMENT MODE</Typography>
                   <Stack direction="row" flexWrap="wrap" gap={1} sx={{ mt: 0.75 }}>
@@ -344,15 +409,15 @@ export default function VoucherReport({ voucher }) {
                 {multiBranchEnabled && <TableCell sx={head}>Branch</TableCell>}
                 <TableCell sx={head}>Reference No</TableCell>
                 <TableCell sx={head}>Party</TableCell>
-                <TableCell sx={head}>{meta.accountsLabel}</TableCell>
-                <TableCell sx={head}>Payment Mode</TableCell>
+                <TableCell sx={head}>{meta.split ? meta.debitLabel : meta.accountsLabel}</TableCell>
+                <TableCell sx={head}>{meta.split ? meta.creditLabel : 'Payment Mode'}</TableCell>
                 <TableCell sx={head}>Narration</TableCell>
                 <TableCell sx={head} align="right">Amount</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
               {!loading && data && data.rows.length === 0 && (
-                <TableRow><TableCell colSpan={cols} align="center" sx={{ py: 6, color: 'text.secondary' }}>No {voucher === 'PV' ? 'payment' : 'receipt'} vouchers match these filters.</TableCell></TableRow>
+                <TableRow><TableCell colSpan={cols} align="center" sx={{ py: 6, color: 'text.secondary' }}>No {meta.noun || (voucher === 'PV' ? 'payment vouchers' : 'receipt vouchers')} match these filters.</TableCell></TableRow>
               )}
               {(data?.rows || []).map(r => {
                 const isOpen = !!open[r.id];
@@ -375,13 +440,10 @@ export default function VoucherReport({ voucher }) {
                       {multiBranchEnabled && <TableCell sx={{ whiteSpace: 'nowrap' }}>{r.branch || '—'}</TableCell>}
                       <TableCell sx={{ whiteSpace: 'nowrap', fontWeight: 600 }}>{r.reference || '—'}</TableCell>
                       <TableCell sx={{ maxWidth: 180 }}><Typography variant="body2" fontWeight={600} noWrap title={r.party}>{r.party || '—'}</Typography></TableCell>
-                      <TableCell sx={{ maxWidth: 240 }}>
-                        <Typography variant="body2" noWrap title={accountsText(r)}>
-                          {r.accounts[0] ? `${r.accounts[0].code} - ${r.accounts[0].name}` : '—'}
-                        </Typography>
-                        {r.accounts.length > 1 && <Typography variant="caption" color="text.secondary">+{r.accounts.length - 1} more</Typography>}
-                      </TableCell>
-                      <TableCell><PaymentChips payments={r.payments} /></TableCell>
+                      <TableCell sx={{ maxWidth: 240 }}><AccountCell list={meta.split ? r.debits : r.accounts} /></TableCell>
+                      {meta.split
+                        ? <TableCell sx={{ maxWidth: 240 }}><AccountCell list={r.credits} /></TableCell>
+                        : <TableCell><PaymentChips payments={r.payments} /></TableCell>}
                       <TableCell sx={{ maxWidth: 260 }}><Typography variant="body2" noWrap title={r.narration} color="text.secondary">{r.narration || '—'}</Typography></TableCell>
                       <TableCell align="right" sx={{ fontWeight: 800, whiteSpace: 'nowrap', textDecoration: r.status === 'REVERSED' ? 'line-through' : 'none' }}>{money(r.amount)}</TableCell>
                     </TableRow>
@@ -404,6 +466,8 @@ export default function VoucherReport({ voucher }) {
   );
 }
 
+const sideHtml = (list) => list.map(a => `${esc(a.code)} - ${esc(a.name)}${list.length > 1 ? ` <small>${esc(money(a.amount))}</small>` : ''}`).join('<br>');
+
 function printHtml(data, meta, { company, logo, rangeLabel, filterLabel }) {
   const s = data.summary;
   const withBranch = data.rows.some(r => r.branch);
@@ -413,13 +477,15 @@ function printHtml(data, meta, { company, logo, rangeLabel, filterLabel }) {
       <td class="nw"><b>${esc(r.voucher_no)}</b>${r.status !== 'POSTED' ? `<br><small>${esc(STATUS_LABELS[r.status] || r.status)}${r.reversed_by ? ` by ${esc(r.reversed_by)}` : ''}</small>` : ''}</td>
       ${withBranch ? `<td>${esc(r.branch)}</td>` : ''}
       <td>${esc(r.reference)}</td><td>${esc(r.party)}</td>
-      <td>${r.accounts.map(a => `${esc(a.code)} - ${esc(a.name)}${r.accounts.length > 1 ? ` <small>${esc(money(a.amount))}</small>` : ''}`).join('<br>')}</td>
-      <td>${r.payments.map(p => `<span style="color:${MODE_COLORS[p.mode]}">${esc(payText(p))}</span>`).join('<br>')}</td>
+      ${meta.split
+    ? `<td>${sideHtml(r.debits)}</td><td>${sideHtml(r.credits)}</td>`
+    : `<td>${sideHtml(r.accounts)}</td>
+      <td>${r.payments.map(p => `<span style="color:${MODE_COLORS[p.mode]}">${esc(payText(p))}</span>`).join('<br>')}</td>`}
       <td><small>${esc(r.narration)}</small></td>
       <td class="r">${esc(money(r.amount))}</td>
     </tr>`).join('');
   const cols = withBranch ? 10 : 9;
-  const modes = s.by_mode.map(m => `<div><small>${esc(m.mode.toUpperCase())} (${m.count})</small><b>${esc(money(m.amount))}</b></div>`).join('');
+  const modes = meta.split ? '' : s.by_mode.map(m => `<div><small>${esc(m.mode.toUpperCase())} (${m.count})</small><b>${esc(money(m.amount))}</b></div>`).join('');
   return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(meta.title)} ${esc(rangeLabel)}</title>
 <style>
   @page { size: A4 landscape; margin: 10mm; }
@@ -454,7 +520,7 @@ function printHtml(data, meta, { company, logo, rangeLabel, filterLabel }) {
   </div>
   <table>
     <thead><tr><th>#</th><th>Date</th><th>Voucher No</th>${withBranch ? '<th>Branch</th>' : ''}<th>Reference</th><th>Party</th>
-      <th>${esc(meta.accountsLabel)}</th><th>Pay Mode</th><th>Narration</th><th class="r">Amount</th></tr></thead>
+      <th>${esc(meta.split ? meta.debitLabel : meta.accountsLabel)}</th><th>${esc(meta.split ? meta.creditLabel : 'Pay Mode')}</th><th>Narration</th><th class="r">Amount</th></tr></thead>
     <tbody>
       ${body || `<tr><td colspan="${cols}" style="text-align:center;padding:18px;color:#64748b">No vouchers for these filters.</td></tr>`}
       ${data.rows.length ? `<tr class="tot"><td colspan="${cols - 1}">Total ${esc(meta.verb.toLowerCase())} · ${s.posted} posted voucher${s.posted === 1 ? '' : 's'}${s.reversed ? ` (${s.reversed} reversed not counted)` : ''}</td><td class="r">${esc(money(s.total))}</td></tr>` : ''}

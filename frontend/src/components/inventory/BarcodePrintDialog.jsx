@@ -52,9 +52,12 @@ function LabelThumb({ template, html, css, maxW = 300, maxH = 200 }) {
 }
 
 // products: array of product objects. rows (optional, Purchase Entry): [{ product, qty, job }].
+// A row may also carry `barcode` (print this code instead of the product's — offer tags) and
+// `fields` (label field values to print instead, e.g. the offer price as selling_price).
+// qtyLabel: name of the rows' own quantity in the Qty switch (default "Purchased qty").
 // template (optional): a template object to print with instead of the workflow default —
 // the designer passes its current (possibly unsaved) design.
-export default function BarcodePrintDialog({ open, onClose, products, rows: rowsInit, workflow = 'inventory', template: templateOverride }) {
+export default function BarcodePrintDialog({ open, onClose, products, rows: rowsInit, workflow = 'inventory', template: templateOverride, qtyLabel = 'Purchased qty', title }) {
   const { bundle, loading, error: bundleError, reload } = useLabelBundle(open);
   const [templateId, setTemplateId] = useState('');
   const [rows, setRows] = useState([]);
@@ -85,7 +88,11 @@ export default function BarcodePrintDialog({ open, onClose, products, rows: rows
     setStart({ enabled: false, row: 1, col: 1 });
     setTemplateId(templateOverride ? '__design' : '');
     const init = rowsInit?.length
-      ? rowsInit.map((r, i) => ({ key: `${rowKey(r.product, i)}-${i}`, product: r.product, qty: Math.max(0, Math.round(Number(r.qty) || 0)), purchaseQty: Math.max(0, Math.round(Number(r.qty) || 0)), job: r.job || {} }))
+      ? rowsInit.map((r, i) => ({
+        key: `${rowKey(r.product, i)}-${i}`, product: r.product, qty: Math.max(0, Math.round(Number(r.qty) || 0)),
+        purchaseQty: Math.max(0, Math.round(Number(r.qty) || 0)), job: r.job || {},
+        fieldOverrides: { ...(r.fields || {}), ...(r.barcode ? { barcode: r.barcode } : {}) },
+      }))
       : (products || []).filter(Boolean).map((p, i) => ({ key: rowKey(p, i), product: p, qty: 1, job: {} }));
     setQtyMode(rowsInit?.length ? 'purchase' : 'custom');
     setRows(init);
@@ -98,7 +105,7 @@ export default function BarcodePrintDialog({ open, onClose, products, rows: rows
       setRestrictedIncluded(res.restrictedIncluded);
       setRows((cur) => cur.map((r) => {
         const d = res.byProduct.get(r.product) || {};
-        return { ...r, data: { fields: d.fields || {} }, variantGroup: d.variantGroup, stock: d.stock ?? r.product?.stock };
+        return { ...r, data: { fields: { ...(d.fields || {}), ...(r.fieldOverrides || {}) } }, variantGroup: d.variantGroup, stock: d.stock ?? r.product?.stock };
       }));
     }).finally(() => { if (!cancelled) setDataLoading(false); });
     return () => { cancelled = true; };
@@ -214,7 +221,7 @@ export default function BarcodePrintDialog({ open, onClose, products, rows: rows
   return (
     <Dialog open={open} onClose={onClose} maxWidth="lg" fullWidth>
       <DialogTitle sx={{ fontWeight: 800, pb: 1 }}>
-        Print Barcode Labels
+        {title || 'Print Barcode Labels'}
         {workflowLabel && <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>{workflowLabel}</Typography>}
       </DialogTitle>
       {(loading || dataLoading) && <LinearProgress />}
@@ -259,7 +266,7 @@ export default function BarcodePrintDialog({ open, onClose, products, rows: rows
                 <>
                   <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems={{ sm: 'center' }}>
                     <ToggleButtonGroup exclusive size="small" value={qtyMode} onChange={(e, v) => v && applyQtyMode(v)}>
-                      {rowsInit?.length ? <ToggleButton value="purchase">Purchased qty</ToggleButton> : null}
+                      {rowsInit?.length ? <ToggleButton value="purchase">{qtyLabel}</ToggleButton> : null}
                       <ToggleButton value="custom">Same for all</ToggleButton>
                       <ToggleButton value="stock">Current stock</ToggleButton>
                     </ToggleButtonGroup>
@@ -306,7 +313,7 @@ export default function BarcodePrintDialog({ open, onClose, products, rows: rows
                               </TableCell>
                               <TableCell>
                                 <Stack direction="row">
-                                  {r.variantGroup && (
+                                  {r.variantGroup && !r.fieldOverrides?.barcode && (
                                     <Tooltip title="Add this product’s other variants"><IconButton size="small" onClick={() => addVariants(r)} data-testid="add-variants"><AccountTree fontSize="small" /></IconButton></Tooltip>
                                   )}
                                   {rows.length > 1 && (

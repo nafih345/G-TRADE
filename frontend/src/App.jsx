@@ -285,13 +285,19 @@ function MainLayout() {
                 <Route path="/accounts/vouchers" element={<Navigate to="/accounts/vouchers/payment" replace />} />
                 <Route path="/accounts/vouchers/payment" element={<AccountsVouchers />} />
                 <Route path="/accounts/vouchers/receipt" element={<AccountsVouchers />} />
+                <Route path="/accounts/vouchers/contra" element={<AccountsVouchers />} />
+                <Route path="/accounts/vouchers/journal" element={<AccountsVouchers />} />
                 <Route path="/accounts/reports" element={<Navigate to="/accounts/reports/payment-vouchers" replace />} />
                 <Route path="/accounts/reports/payment-vouchers" element={<AccountsVouchers />} />
                 <Route path="/accounts/reports/receipt-vouchers" element={<AccountsVouchers />} />
+                <Route path="/accounts/reports/contra-entries" element={<AccountsVouchers />} />
+                <Route path="/accounts/reports/journal-vouchers" element={<AccountsVouchers />} />
                 <Route path="/accounts/reports/expenses" element={<AccountsVouchers />} />
                 <Route path="/accounts/reports/customer-outstanding" element={<AccountsVouchers />} />
                 <Route path="/accounts/reports/supplier-outstanding" element={<AccountsVouchers />} />
                 <Route path="/accounts/reports/activity" element={<AccountsVouchers />} />
+                <Route path="/accounts/transactions" element={<AccountsVouchers />} />
+                <Route path="/accounts/statements" element={<AccountsVouchers />} />
                 <Route path="/accounts/profit-loss" element={<AccountsProfitLoss />} />
                 <Route path="/accounts/receipts" element={<AccountsCOA />} />
                 <Route path="/accounts/payments" element={<AccountsCOA />} />

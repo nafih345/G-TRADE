@@ -1,4 +1,4 @@
-"""Payment / Receipt Voucher Reports (Accounts → Reports): one row per RV / PV journal with its
+"""Voucher Reports (Accounts → Reports): one row per RV / PV / CV / JV journal with its
 ledger accounts, pay modes, party and Reference No; reversal entries fold into the voucher they
 reverse; totals count posted vouchers only."""
 import datetime
@@ -93,6 +93,47 @@ class VoucherReportTests(APITestCase):
         self.assertEqual([(p['mode'], p['amount']) for p in row['payments']], [('Card', '300.00')])
         self.assertEqual(self.report(voucher='RV', origin='manual')['rows'], [])
 
+    def post(self, code, lines, expect=201, **extra):
+        res = self.client.post('/api/financial/journals/', {
+            'voucher_type_code': code, 'date': JAN5, 'lines': lines, **extra}, format='json')
+        self.assertEqual(res.status_code, expect, res.content)
+        return res.data
+
+    def test_contra_entry_row_shows_from_and_to(self):
+        cash, bank = acc('1001'), acc('1002')
+        saved = self.post('CV', [{'account': str(bank.pk), 'debit': '1000', 'memo': 'Deposit'},
+                                 {'account': str(cash.pk), 'credit': '1000', 'memo': 'Cash'}],
+                          reference='SLIP-4', narration='Cash deposited')
+        row, = self.report(voucher='CV')['rows']
+        self.assertEqual((row['voucher_no'], row['reference'], row['amount'], row['origin_label']),
+                         (saved['entry_number'], 'SLIP-4', '1000.00', 'Contra Entry'))
+        self.assertEqual([(d['code'], d['amount']) for d in row['debits']], [('1002', '1000.00')])
+        self.assertEqual([(c['code'], c['amount']) for c in row['credits']], [('1001', '1000.00')])
+        self.assertEqual(self.report(voucher='CV')['title'], 'Contra Entry')
+        self.assertEqual(len(self.report(voucher='CV', search='deposit')['rows']), 1)
+
+    def test_contra_entry_refuses_non_cash_accounts(self):
+        self.post('CV', [{'account': str(acc('2001').pk), 'debit': '50'},
+                         {'account': str(acc('1001').pk), 'credit': '50'}], expect=400)
+
+    def test_journal_voucher_row_and_balance_rule(self):
+        cogs, payable, expense = acc('5001'), acc('2001'), acc('5050')
+        saved = self.post('JV', [{'account': str(cogs.pk), 'debit': '70', 'memo': 'Part A'},
+                                 {'account': str(expense.pk), 'debit': '30'},
+                                 {'account': str(payable.pk), 'credit': '100', 'memo': 'Accrual'}],
+                          reference='ADJ-1', narration='Month-end accrual')
+        row, = self.report(voucher='JV')['rows']
+        self.assertEqual((row['voucher_no'], row['reference'], row['amount'], row['origin']),
+                         (saved['entry_number'], 'ADJ-1', '100.00', 'manual'))
+        self.assertEqual(sorted((d['code'], d['amount'], d['memo']) for d in row['debits']),
+                         [('5001', '70.00', 'Part A'), ('5050', '30.00', '')])
+        self.assertEqual([(c['code'], c['amount']) for c in row['credits']], [('2001', '100.00')])
+        self.assertEqual(self.report(voucher='JV', search='accrual')['summary']['total'], '100.00')
+        # Unbalanced journals are refused by the posting service.
+        self.post('JV', [{'account': str(cogs.pk), 'debit': '70'},
+                         {'account': str(payable.pk), 'credit': '60'}], expect=400)
+        self.assertEqual(len(self.report(voucher='JV')['rows']), 1)
+
     def test_bad_params(self):
-        self.report(expect=400, voucher='JV')
+        self.report(expect=400, voucher='SV')
         self.report(expect=400, voucher='PV', date_from=JAN10, date_to=JAN5)

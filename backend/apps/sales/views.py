@@ -818,6 +818,7 @@ class InvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewsets.Model
                 invoice_number = self._mint_invoice_number(doc_type)
         self._save_items(invoice)
         self._enforce_prices(invoice)
+        self._enforce_offers(invoice)
         if fee_exam_ids(self.request.data.get('items') or []):
             sync_invoice_eye_test_fees(invoice)
         if self._commits_stock(invoice):
@@ -837,6 +838,9 @@ class InvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewsets.Model
         stock_before = self._stock_quantities(instance)
         # Read from the prefetched lines (no query) before they're replaced below.
         had_eye_fees = bool(fee_exam_ids(instance.items.all()))
+        # Offer units this document already carried — an edit only re-checks units it adds.
+        from apps.company.pricing_rules import document_offer_units
+        offers_before = document_offer_units(instance.items.all())
         # Items / receipts change from here on — drop get_queryset's prefetched copies so every
         # read below sees the new rows.
         instance._prefetched_objects_cache = {}
@@ -871,6 +875,7 @@ class InvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewsets.Model
             invoice.items.all().delete()
             self._save_items(invoice)
             self._enforce_prices(invoice)
+            self._enforce_offers(invoice, offers_before)
             self._reconcile_inventory(invoice, stock_before)
         elif not was_committed and self._commits_stock(invoice):
             # Status-only PATCH that turns this into a committed sale (e.g. DRAFT -> PAID).
@@ -1085,6 +1090,15 @@ class InvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewsets.Model
         wanted = {str(raw.get('product')) for raw in raw_items if _is_uuid(raw.get('product'))}
         known = {str(pk): extra for pk, extra in Product.objects.filter(pk__in=wanted).values_list('pk', 'extra_data')} \
             if wanted else {}
+        # Pricing offer each line was sold under (offer barcode scanned / offer price applied).
+        # Only real offers are linked; _enforce_offers then checks they fit the line's product.
+        from apps.company.models import PricingOffer
+
+        def offer_of(raw):
+            return str(raw.get('pricing_offer') or raw.get('pricingOffer') or '')
+        wanted_offers = {offer_of(raw) for raw in raw_items if _is_uuid(offer_of(raw))}
+        known_offers = {str(pk) for pk in PricingOffer.all_objects.filter(pk__in=wanted_offers)
+                        .values_list('pk', flat=True)} if wanted_offers else set()
 
         # Spectacle-lens lines carry a selling unit (Pair / Piece) and a per-eye prescription. An
         # Order or Invoice needs the prescription complete; a Quotation only needs what was entered
@@ -1116,6 +1130,7 @@ class InvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewsets.Model
                 tax_rate=raw.get('tax_rate') or raw.get('taxPercent') or 0,
                 tax_amount=raw.get('tax_amount') or raw.get('tax') or 0,
                 subtotal=raw.get('subtotal') or raw.get('total') or 0,
+                pricing_offer_id=offer_of(raw) if offer_of(raw) in known_offers else None,
                 **lens_fields,
             )
             for raw, lens_fields in zip(raw_items, lens)
@@ -1127,6 +1142,12 @@ class InvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewsets.Model
         from apps.company.pricing_rules import enforce_line_prices
         enforce_line_prices(self.request, self.request.data.get('items') or [],
                             invoice.net_amount, invoice.tax_amount, invoice.invoice_number)
+
+    def _enforce_offers(self, invoice, before=None):
+        """Settings → Pricing Rules & Offers: offer-tagged lines may not sell more offer units than
+        the offer has left (400 `offer_exhausted`; whole save rolled back)."""
+        from apps.company.pricing_rules import enforce_offer_lines
+        enforce_offer_lines(invoice, before)
 
     def _update_inventory(self, invoice):
         # Deduct stock from the invoice's branch (falls back to the default branch for rows

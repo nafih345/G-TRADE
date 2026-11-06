@@ -347,6 +347,14 @@ class PricingOffer(BaseUUIDModel):
     end_date = models.DateField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
     created_by = models.CharField(max_length=150, blank=True, default='')
+    # Product offers only: the offer covers every unit in stock (apply_to_all) or just
+    # `offer_quantity` of them. Units already sold on the offer are counted from the invoice lines
+    # tagged with it (InvoiceItem.pricing_offer), never stored, so edits / cancels stay right.
+    apply_to_all = models.BooleanField(default=True, db_default=True)
+    offer_quantity = models.PositiveIntegerField(null=True, blank=True)
+    # The promotional tag's barcode — "<product barcode>-NNNN". Scanning it sells the item at the
+    # offer price from the offer quantity. Kept on soft-deleted offers so old tags never re-point.
+    offer_barcode = models.CharField(max_length=60, blank=True, default='', db_default='', db_index=True)
 
     class Meta:
         ordering = ['-created_at']

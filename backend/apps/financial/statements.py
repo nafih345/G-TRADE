@@ -27,7 +27,7 @@ from io import BytesIO
 
 from django.db.models import Count, Q, Sum
 
-from . import bankbook, cashbook, cheques, daybook, pl_statement
+from . import bankbook, cashbook, cheques, daybook, pl_statement, transactions
 from .accounting_catalog import SOURCES
 from .models import AccountGroup, ChartOfAccount, JournalEntry, LedgerEntry, PostingFailure
 from .reports import TYPE_ORDER, posted_lines
@@ -53,7 +53,9 @@ STATEMENTS = OrderedDict([
     ('cash_book', ('Cash & Bank Books', 'Cash Book')),
     ('bank_book', ('Cash & Bank Books', 'Bank Book')),
     ('cheque_register', ('Cash & Bank Books', 'Cheque Register')),
+    ('transactions', ('Cash & Bank Books', 'Cash & Bank Transaction Report')),
     ('ledger', ('Ledgers', 'Ledger Statement')),
+    ('sub_ledgers', ('Ledgers', 'Sub-Ledger Statement')),
     ('trial_balance', ('Final Accounts', 'Trial Balance')),
     ('profit_loss', ('Final Accounts', 'Profit & Loss Statement')),
     ('balance_sheet', ('Final Accounts', 'Balance Sheet')),
@@ -113,6 +115,16 @@ def _in_scope(acc, scope):
     return TYPE_SCOPE.get(acc.account_type) == scope or account_class(acc) == scope
 
 
+def _control_accounts(accounts):
+    """Accounts that have sub-ledgers (a party control account, a parent head ...)."""
+    counts = defaultdict(int)
+    for a in accounts:
+        if a.parent_account_id:
+            counts[a.parent_account_id] += 1
+    return [{'id': str(a.pk), 'code': a.code, 'name': a.name, 'account_type': a.account_type,
+             'sub_ledgers': counts[a.pk]} for a in accounts if counts.get(a.pk)]
+
+
 def options():
     """What the Statements screen offers in its selectors."""
     accounts = list(ChartOfAccount.objects.select_related('account_group').order_by('code'))
@@ -126,6 +138,8 @@ def options():
                       'parent': str(a.parent_account_id) if a.parent_account_id else None,
                       'scope': account_class(a), 'status': a.status} for a in accounts],
         'cash_accounts': cashbook.cash_accounts(),
+        'money_accounts': transactions.money_accounts(),
+        'control_accounts': _control_accounts(accounts),
         'bank_accounts': bankbook.bank_accounts(),
         'voucher_types': [{'value': k, 'label': v} for k, v in VOUCHER_TYPES.items()],
         'cheque_statuses': [{'value': s, 'label': l} for s, l in cheques.Cheque.STATUS_CHOICES],
@@ -1049,10 +1063,187 @@ def accounting_integration(params, date_from, date_to, branch_ids):
     }
 
 
+
+# ---------------------------------------------------------------------------
+# Cash & Bank Transaction Report (transactions.py) and Sub-Ledger Statement
+# ---------------------------------------------------------------------------
+
+def transaction_report(params, date_from, date_to, branch_ids):
+    _require_range(date_from, date_to, 'transaction report')
+    channel = (params.get('channel') or 'all').lower()
+    try:
+        data = transactions.report(date_from, date_to, branch_ids=branch_ids, channel=channel,
+                                   account_id=_uuid_param(params, 'account_id'),
+                                   direction=params.get('direction') or '', origin=params.get('origin') or 'all',
+                                   search=params.get('search') or '', show_reversed=_flag(params, 'show_reversed'),
+                                   export=True)
+    except transactions.TransactionReportError as exc:
+        raise StatementError(str(exc))
+    s = data['summary']
+    filtered = bool(params.get('direction') or (params.get('origin') or 'all') != 'all' or params.get('search'))
+    rows = [] if filtered else [row({'particulars': 'Opening Balance', 'balance': s['opening_balance']}, style='opening')]
+    for r in data['rows']:
+        rows.append(row({
+            'date': r['date'], 'voucher_no': r['entry_number'], 'channel': r['channel'].title(),
+            'account': r['account'], 'kind': r['kind_label'], 'mode': r['mode_label'],
+            'particulars': r['party'] or r['particulars'], 'reference': r['reference'] or r['bill_number'],
+            'narration': ' · '.join(x for x in (r['narration'], r['remarks']) if x), 'origin': r['origin_label'],
+            'amount_in': r['amount_in'], 'amount_out': r['amount_out'],
+            'balance': None if filtered else r['balance'],
+        }, ref=ref_from(r)))
+    if not filtered:
+        rows.append(row({'particulars': 'Closing Balance', 'balance': s['closing_balance']}, style='closing'))
+    columns = [col('date', 'Date', 'date'), col('voucher_no', 'Voucher No', 'voucher'), col('channel', 'Cash/Bank'),
+               col('account', 'Account'), col('kind', 'Type'), col('mode', 'Mode'),
+               col('particulars', 'Party / Particulars'), col('reference', 'Reference'), col('narration', 'Narration'),
+               col('origin', 'Origin'), col('amount_in', 'In (Dr)', 'money'), col('amount_out', 'Out (Cr)', 'money'),
+               col('balance', 'Balance', 'money')]
+    acc_rows = [row({'name': a['label'], 'channel': a['channel'].title(), 'opening': a['opening'], 'in': a['in'],
+                     'out': a['out'], 'closing': a['closing'], 'count': a['transactions']})
+                for a in s['by_account'] if a['transactions'] or money(a['opening']) or money(a['closing'])]
+    entity = {'all': 'All cash & bank accounts', 'cash': 'All cash accounts', 'bank': 'All bank accounts'}.get(channel, '')
+    if data['account_id']:
+        entity = next((a['label'] for a in s['by_account'] if a['id'] == data['account_id']), entity)
+    notes = []
+    if s['hidden_reversals']:
+        notes.append(f"{s['hidden_reversals']} reversed entr(ies) and their reversals cancel out and are hidden.")
+    if filtered:
+        notes.append('Rows are filtered; the summary covers every transaction of the period.')
+    if data['truncated']:
+        notes.append(f'Only the first {transactions.MAX_EXPORT_ROWS} transactions are listed. Narrow the dates.')
+    return {
+        'title': 'Cash & Bank Transaction Report', 'entity': entity,
+        'summary': [{'label': 'Opening', 'value': s['opening_balance'], 'format': 'money'},
+                    {'label': 'Total in', 'value': s['total_in'], 'format': 'money'},
+                    {'label': 'Total out', 'value': s['total_out'], 'format': 'money'},
+                    {'label': 'Closing', 'value': s['closing_balance'], 'format': 'money'},
+                    {'label': 'Cash closing', 'value': s['cash']['closing'], 'format': 'money'},
+                    {'label': 'Bank closing', 'value': s['bank']['closing'], 'format': 'money'}],
+        'notes': notes, 'truncated': data['truncated'],
+        'tables': [
+            table('transactions', None, columns, rows,
+                  [row({'origin': 'Total', 'amount_in': data['matched']['in'], 'amount_out': data['matched']['out']},
+                       style='total')]),
+            table('by_account', 'By account',
+                  [col('name', 'Account'), col('channel', 'Cash/Bank'), col('opening', 'Opening', 'money'),
+                   col('in', 'In', 'money'), col('out', 'Out', 'money'), col('closing', 'Closing', 'money'),
+                   col('count', 'Transactions', 'count')], acc_rows,
+                  [row({'name': 'Total', 'opening': s['opening_balance'], 'in': s['total_in'], 'out': s['total_out'],
+                        'closing': s['closing_balance'], 'count': s['transactions']}, style='total')]),
+        ],
+    }
+
+
+def sub_ledgers(params, date_from, date_to, branch_ids):
+    """Every sub-ledger under a control / parent account: opening, debits, credits and closing per
+    sub-ledger (signed net debit). The control account's own postings get their own line, so a
+    section's total is the control account's figure on the Trial Balance. Without a parent, every
+    top-level account that has sub-ledgers gets a section; with one, the period's entries follow."""
+    _period(date_from, date_to)
+    parent_id = _uuid_param(params, 'account_id')
+    hide_zero = _flag(params, 'hide_zero')
+    all_accounts = _accounts(include_deleted=True)
+    by_id = {a.pk: a for a in all_accounts}
+    children = defaultdict(list)
+    for a in all_accounts:
+        if a.parent_account_id in by_id:
+            children[a.parent_account_id].append(a)
+    if parent_id:
+        if parent_id not in by_id:
+            raise StatementError('Account not found.')
+        if not children.get(parent_id):
+            raise StatementError(f"{_account_label(by_id[parent_id])} has no sub-ledgers.")
+        parents = [by_id[parent_id]]
+    else:
+        parents = [a for a in all_accounts if children.get(a.pk) and a.parent_account_id not in by_id]
+    open_sums = _sums(branch_ids, date_to=date_from - ONE_DAY) if date_from else {}
+    period_sums = _sums(branch_ids, date_from, date_to)
+
+    def figures(ids):
+        o = sum((open_sums.get(i, (ZERO, ZERO))[0] - open_sums.get(i, (ZERO, ZERO))[1] for i in ids), ZERO)
+        dr = sum((period_sums.get(i, (ZERO, ZERO))[0] for i in ids), ZERO)
+        cr = sum((period_sums.get(i, (ZERO, ZERO))[1] for i in ids), ZERO)
+        return o, dr, cr, o + dr - cr
+
+    cols = [col('code', 'Code'), col('name', 'Sub-Ledger'), col('group', 'Group'), col('opening', 'Opening', 'drcr'),
+            col('debit', 'Debit', 'money'), col('credit', 'Credit', 'money'), col('closing', 'Closing', 'drcr')]
+    rows, grand, count = [], [ZERO, ZERO, ZERO, ZERO], 0
+
+    def add(a, level, own_only=False):
+        nonlocal count
+        ids = {a.pk} if own_only else _descendants(a.pk, all_accounts)
+        o, dr, cr, c = figures(ids)
+        if hide_zero and not (o or dr or cr or c):
+            return
+        kids = [] if own_only else children.get(a.pk, ())
+        rows.append(row({'code': a.code, 'name': f"{a.name} (own postings)" if own_only else a.name,
+                         'group': a.account_group.name if a.account_group_id else '',
+                         'opening': m(o), 'debit': nz(dr), 'credit': nz(cr), 'closing': m(c)},
+                        style='parent' if kids else '', level=level) | {'account_id': str(a.pk)})
+        if not own_only:
+            count += 1
+        for k in sorted(kids, key=lambda x: x.code):
+            add(k, level + 1)
+
+    for p in parents:
+        o, dr, cr, c = figures(_descendants(p.pk, all_accounts))
+        rows.append(row({'name': _account_label(p), 'opening': m(o), 'debit': nz(dr), 'credit': nz(cr),
+                         'closing': m(c)}, style='section'))
+        if any(figures({p.pk})):
+            add(p, 1, own_only=True)
+        for k in sorted(children[p.pk], key=lambda x: x.code):
+            add(k, 1)
+        for i, v in enumerate((o, dr, cr, c)):
+            grand[i] += v
+
+    tables = [table('sub_ledgers', None, cols, rows,
+                    [row({'name': 'Total', 'opening': m(grand[0]), 'debit': m(grand[1]), 'credit': m(grand[2]),
+                          'closing': m(grand[3])}, style='total')])]
+    truncated = False
+    if parent_id:
+        ids = _descendants(parent_id, all_accounts)
+        lines = list(_scoped(posted_lines(date_from, date_to), branch_ids).filter(account_id__in=ids)
+                     .select_related('journal_entry', 'journal_entry__voucher_type', 'account')
+                     .order_by('journal_entry__date', 'journal_entry__created_at', 'journal_entry__entry_number', 'id')
+                     [:MAX_ROWS + 1])
+        truncated = len(lines) > MAX_ROWS
+        entry_rows, t_dr, t_cr = [], ZERO, ZERO
+        for l in lines[:MAX_ROWS]:
+            je = l.journal_entry
+            t_dr += l.debit
+            t_cr += l.credit
+            entry_rows.append(row({'date': je.date.isoformat(), 'voucher_no': je.entry_number,
+                                   'voucher_type': je.voucher_type.code if je.voucher_type_id else '',
+                                   'name': l.account.name,
+                                   'narration': ' · '.join(x for x in (je.narration, l.memo) if x),
+                                   'debit': nz(l.debit), 'credit': nz(l.credit)}, ref=ref_of(je)))
+        tables.append(table('entries', 'Entries in the period',
+                            [col('date', 'Date', 'date'), col('voucher_no', 'Voucher No', 'voucher'),
+                             col('voucher_type', 'Type'), col('name', 'Sub-Ledger'), col('narration', 'Narration'),
+                             col('debit', 'Debit', 'money'), col('credit', 'Credit', 'money')], entry_rows,
+                            [row({'narration': 'Total', 'debit': m(t_dr), 'credit': m(t_cr)}, style='total')]))
+    notes = [] if parents else ['No account in the Chart of Accounts has sub-ledgers yet.']
+    if truncated:
+        notes.append(f'Only the first {MAX_ROWS} entries are listed. Narrow the dates.')
+    return {
+        'title': 'Sub-Ledger Statement',
+        'entity': _account_label(parents[0]) if parent_id else 'All control accounts with sub-ledgers',
+        'summary': [{'label': 'Control accounts', 'value': len(parents), 'format': 'count'},
+                    {'label': 'Sub-ledgers', 'value': count, 'format': 'count'},
+                    {'label': 'Opening', 'value': m(grand[0]), 'format': 'drcr'},
+                    {'label': 'Debits', 'value': m(grand[1]), 'format': 'money'},
+                    {'label': 'Credits', 'value': m(grand[2]), 'format': 'money'},
+                    {'label': 'Closing', 'value': m(grand[3]), 'format': 'drcr'}],
+        'notes': notes, 'truncated': truncated,
+        'tables': tables,
+    }
+
+
 BUILDERS = {
     'chart_of_accounts': chart_of_accounts, 'vouchers': vouchers, 'day_book': day_book, 'cash_book': cash_book,
     'bank_book': bank_book, 'cheque_register': cheque_register, 'ledger': ledger, 'trial_balance': trial_balance,
     'profit_loss': profit_loss, 'balance_sheet': balance_sheet, 'accounting_integration': accounting_integration,
+    'transactions': transaction_report, 'sub_ledgers': sub_ledgers,
 }
 
 

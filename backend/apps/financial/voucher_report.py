@@ -1,9 +1,13 @@
-"""Payment / Receipt Voucher Reports (Accounts → Reports): one row per voucher.
+"""Voucher Reports (Accounts → Reports): one row per voucher.
 
 There is no voucher table. It reads the same journals the Ledger and Day Book read, of voucher
-type RV (Receipt Voucher) or PV (Payment Voucher): vouchers entered on the voucher screens
-(Normal and Bill to Bill) and the receipts / payments posted automatically as RV / PV (retail
-receipts, eye test fees, wholesale collections, purchase payments). `origin` narrows that down.
+type RV (Receipt Voucher), PV (Payment Voucher), CV (Contra Entry) or JV (Journal Voucher):
+vouchers entered on the voucher screens (Normal and Bill to Bill) and the entries posted
+automatically under those types (retail receipts, eye test fees, wholesale collections, purchase
+payments, sales returns). `origin` narrows that down.
+
+Every row also carries `debits` / `credits`: each ledger account on that side with its amount.
+Contra and Journal reports show those (From → To, Dr / Cr) instead of accounts vs pay modes.
 
 A row shows:
 - the ledger accounts on the other side of the cash / bank lines (what was paid for, or received
@@ -30,7 +34,7 @@ MAX_PAGE_SIZE = 500
 MAX_EXPORT_ROWS = 20000
 MANUAL = Q(source_module='financial', source_event='voucher') | Q(source_module='')
 STATUSES = ('POSTED', 'REVERSED', 'DRAFT', 'PENDING_APPROVAL')
-TITLES = {'RV': 'Receipt Voucher', 'PV': 'Payment Voucher'}
+TITLES = {'RV': 'Receipt Voucher', 'PV': 'Payment Voucher', 'CV': 'Contra Entry', 'JV': 'Journal Voucher'}
 
 
 class VoucherReportError(ValueError):
@@ -54,9 +58,16 @@ def _row(je, lines, money_ids, look):
     else:
         reference, party = _reference_and_party(je, None, look)
     accounts, payments = OrderedDict(), OrderedDict()
+    sides = {'debits': OrderedDict(), 'credits': OrderedDict()}
     for l in lines:
         acc = l.account
         amount = money(l.debit or 0) - money(l.credit or 0)
+        if amount:
+            d = sides['debits' if amount > 0 else 'credits'].setdefault(
+                acc.pk, {'account_id': str(acc.pk), 'code': acc.code, 'name': acc.name, 'amount': ZERO, 'memo': []})
+            d['amount'] += abs(amount)
+            if l.memo and l.memo not in d['memo']:
+                d['memo'].append(l.memo)
         mode = _mode(l, acc, money_ids)
         if mode:
             p = payments.setdefault((mode, acc.pk), {'mode': mode, 'account_name': acc.name, 'amount': ZERO, 'memo': []})
@@ -84,23 +95,25 @@ def _row(je, lines, money_ids, look):
         'accounts': [{**a, 'amount': str(money(a['amount'])), 'memo': ' · '.join(a['memo'])} for a in accounts.values()],
         'payments': [{**p, 'amount': str(money(p['amount'])), 'memo': ' · '.join(p['memo'])}
                      for p in sorted(payments.values(), key=lambda p: MODES.index(p['mode']))],
+        **{side: [{**d, 'amount': str(money(d['amount'])), 'memo': ' · '.join(d['memo'])} for d in rows.values()]
+           for side, rows in sides.items()},
         'bills': [{'number': a.get('number') or '', 'amount': str(a.get('amount') or '')} for a in allocations],
         'branch': je.branch.name if je.branch_id else '',
         'created_by': je.created_by.username if je.created_by_id else '',
     }
     row['_text'] = ' '.join([row['voucher_no'], row['reference'], row['party'], row['narration'], row['source_number'],
-                             *(f"{a['code']} {a['name']} {a['memo']}" for a in row['accounts']),
+                             *(f"{a['code']} {a['name']} {a['memo']}" for a in row['debits'] + row['credits']),
                              *(p['memo'] for p in row['payments'])]).lower()
     return row
 
 
 def voucher_report(voucher, date_from, date_to, branch_ids=None, search='', status='', origin='all', modes=None,
                    account=None, page=1, page_size=100, export=False):
-    """`voucher`: RV or PV. `branch_ids`: None = every branch, else the branches the vouchers must
+    """`voucher`: RV, PV, CV or JV. `branch_ids`: None = every branch, else the branches the vouchers must
     belong to. `status`: one of STATUSES or '' for all. `origin`: all / manual / auto."""
     voucher = (voucher or '').upper()
     if voucher not in TITLES:
-        raise VoucherReportError('voucher must be RV (Receipt) or PV (Payment).')
+        raise VoucherReportError('voucher must be RV (Receipt), PV (Payment), CV (Contra) or JV (Journal).')
     if not date_from or not date_to:
         raise VoucherReportError('Choose a From and To date.')
     if date_from > date_to:

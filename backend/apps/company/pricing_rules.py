@@ -6,6 +6,8 @@ exceptions to it.
     GET  /api/company/pricing-rules/offers/          every offer (?active=1: only running ones)
     POST /api/company/pricing-rules/offers/          add offers — one per product / category in the list
     PATCH/DELETE /api/company/pricing-rules/offers/<id>/
+    POST /api/company/pricing-rules/offers/<id>/barcode/   mint the offer's promotional barcode
+    GET  /api/company/pricing-rules/offers/live/     running offers for the sales screens (badges + scans)
     POST /api/company/pricing-rules/floors/          {products: [ids]} → each one's cost / floor / offer
     POST /api/company/pricing-rules/approve/         a manager's username + password → override token
 
@@ -20,8 +22,16 @@ Rules (mirrored in frontend src/utils/pricingRules.js):
   * A refused save is a 400 `below_cost`; it goes through with `override_price_floor: true` from a
     pricing admin, or a `price_override_token` a pricing admin issued at the till (approve/).
     Every override is written to the settings audit log.
+  * Offer quantity: a product offer covers all its stock (apply_to_all) or only `offer_quantity`
+    units. A partial offer lowers the floor only on lines tagged with it (`pricing_offer` — set by
+    scanning the offer barcode or applying the offer price), and a save that would sell more
+    tagged units than are left is a 400 `offer_exhausted`. Sold units are counted from tagged
+    lines on committed invoices (offer_sold_units), so edits, deletes and cancels give units back.
+  * Offer barcode: "<product barcode>-NNNN" (assign_offer_barcode), unique against every code a
+    product scans as (barcode_utils.find_barcode_owner knows offer codes too).
 """
 import datetime
+import re
 from decimal import Decimal, InvalidOperation
 
 from django.contrib.auth import get_user_model
@@ -167,7 +177,122 @@ def offer_state(offer, today=None):
     return 'RUNNING'
 
 
-def _offer_json(o, today=None):
+# ---------------------------------------------------------------------------
+# Offer quantity (sold / remaining) and the promotional barcode
+# ---------------------------------------------------------------------------
+
+def line_stock_units(quantity, selling_unit='', physical_quantity=None, lens_details=None):
+    """Stock units an invoice line takes (a single lens of pair-counted stock = 1/2)."""
+    qty = _dec(quantity)
+    unit = str(selling_unit or '').upper()
+    if unit not in ('PAIR', 'PIECE'):
+        return qty
+    pieces = _dec(physical_quantity, None)
+    if pieces is None:
+        pieces = qty * (2 if unit == 'PAIR' else 1)
+    stock_unit = str((lens_details or {}).get('stock_unit') or 'PAIR').upper()
+    return pieces if stock_unit == 'PIECE' else pieces / 2
+
+
+def _units_by_offer(rows):
+    out = {}
+    for offer_id, qty, unit, physical, details in rows:
+        out[offer_id] = out.get(offer_id, Decimal('0')) + line_stock_units(qty, unit, physical, details)
+    return out
+
+
+def offer_sold_units(offer_ids, exclude_invoice=None):
+    """{offer_id: units sold on it} — its tagged lines on committed (stock-moving) invoices."""
+    from apps.sales.models import InvoiceItem
+    ids = [i for i in offer_ids if i]
+    if not ids:
+        return {}
+    qs = (InvoiceItem.objects.filter(pricing_offer_id__in=ids, invoice__document_type='INVOICE',
+                                     invoice__is_deleted=False)
+          .exclude(invoice__status__in=('DRAFT', 'CANCELLED')))
+    if exclude_invoice is not None:
+        qs = qs.exclude(invoice_id=exclude_invoice)
+    return _units_by_offer(qs.values_list('pricing_offer_id', 'quantity', 'selling_unit',
+                                          'physical_quantity', 'lens_details'))
+
+
+def document_offer_units(items):
+    """{offer_id: units} carried by one document's InvoiceItem rows."""
+    return _units_by_offer((i.pricing_offer_id, i.quantity, i.selling_unit, i.physical_quantity, i.lens_details)
+                           for i in items if i.pricing_offer_id)
+
+
+def is_limited(offer):
+    return offer.scope == 'PRODUCT' and not offer.apply_to_all and offer.offer_quantity is not None
+
+
+def _num(d):
+    d = _dec(d)
+    return int(d) if d == d.to_integral_value() else float(d)
+
+
+def offer_quantity_info(offer, sold, stock):
+    """sold / remaining offer units. remaining = None when there is no stock figure to show
+    (category offers); for an all-stock offer it is the stock itself."""
+    sold = _dec(sold)
+    stock = max(int(stock or 0), 0) if stock is not None else None
+    if is_limited(offer):
+        left = max(_dec(offer.offer_quantity) - sold, Decimal('0'))
+        remaining = min(left, stock) if stock is not None else left
+    else:
+        remaining = stock
+    return {
+        'apply_to_all': not is_limited(offer),
+        'offer_quantity': offer.offer_quantity if is_limited(offer) else None,
+        'sold': _num(sold),
+        'remaining': _num(remaining) if remaining is not None else None,
+    }
+
+
+def offer_compact(o, sold=0, stock=None):
+    """What New Sale / POS / Stock Overview need about a running offer."""
+    return {
+        'id': str(o.pk), 'tag': o.tag, 'scope': o.scope,
+        'product': str(o.product_id) if o.product_id else None,
+        'category': str(o.category_id) if o.category_id else None,
+        'offer_price': float(o.offer_price) if o.offer_price is not None else None,
+        'end_date': o.end_date.isoformat() if o.end_date else None,
+        'offer_barcode': o.offer_barcode or '',
+        **offer_quantity_info(o, sold, stock),
+    }
+
+
+def _barcode_base(product):
+    base = re.sub(r'[^A-Za-z0-9]', '', str(product.barcode or '') or str(product.sku or ''))[:40]
+    return base or str(product.pk).replace('-', '')[:8].upper()
+
+
+def assign_offer_barcode(offer):
+    """Give a product offer its promotional barcode — "<product barcode>-0001", the next free
+    suffix for that base (soft-deleted offers count, so a reprinted old tag never re-points), and
+    never a code any product already scans as. Returns the code ('' for category offers)."""
+    from apps.products.barcode_utils import find_barcode_owner
+    if offer.offer_barcode or offer.scope != 'PRODUCT' or offer.product is None:
+        return offer.offer_barcode or ''
+    base = _barcode_base(offer.product)
+    used = set(PricingOffer.all_objects.filter(offer_barcode__startswith=f'{base}-')
+               .values_list('offer_barcode', flat=True))
+    n = 0
+    for code in used:
+        tail = code[len(base) + 1:]
+        if tail.isdigit():
+            n = max(n, int(tail))
+    for _ in range(200):
+        n += 1
+        code = f'{base}-{n:04d}'
+        if code not in used and find_barcode_owner(code) is None:
+            offer.offer_barcode = code
+            offer.save(update_fields=['offer_barcode', 'updated_at'])
+            return code
+    raise ValidationError({'detail': 'Could not find a free offer barcode for this product.'})
+
+
+def _offer_json(o, today=None, sold=0):
     p, c = o.product, o.category
     return {
         'id': str(o.pk), 'scope': o.scope,
@@ -185,7 +310,15 @@ def _offer_json(o, today=None):
         'end_date': o.end_date.isoformat() if o.end_date else None,
         'is_active': o.is_active, 'state': offer_state(o, today),
         'created_by': o.created_by, 'created_at': o.created_at.isoformat(),
+        'offer_barcode': o.offer_barcode or '',
+        **offer_quantity_info(o, sold, p.stock if p else None),
     }
+
+
+def _offers_json(qs, today=None):
+    offers = list(qs)
+    sold = offer_sold_units([o.pk for o in offers])
+    return [_offer_json(o, today, sold.get(o.pk, 0)) for o in offers]
 
 
 def _parse_date(value, label, errors):
@@ -225,7 +358,43 @@ def _clean_offer_fields(data, errors, partial=False):
             errors['is_active'] = 'Must be on or off.'
         else:
             out['is_active'] = data['is_active']
+    if 'apply_to_all' in data or not partial:
+        flag = data.get('apply_to_all', True)
+        if not isinstance(flag, bool):
+            errors['apply_to_all'] = 'Must be on or off.'
+        else:
+            out['apply_to_all'] = flag
+            if flag:
+                out['offer_quantity'] = None
+            else:
+                try:
+                    qty = int(str(data.get('offer_quantity', '')).strip())
+                except (TypeError, ValueError):
+                    qty = 0
+                if qty < 1:
+                    errors['offer_quantity'] = 'Enter how many units get the offer price (1 or more).'
+                else:
+                    out['offer_quantity'] = qty
     return out
+
+
+def _check_quantity(fields, products, errors, sold=None):
+    """A partial offer quantity can't exceed what is in stock (plus what it already sold), nor
+    go under what it already sold. `sold` = {product_id: units already sold on its offer}."""
+    qty = fields.get('offer_quantity')
+    if fields.get('apply_to_all', True) or qty is None:
+        return
+    sold = sold or {}
+    short = []
+    for p in products:
+        already = int(_dec(sold.get(p.pk, 0)))
+        if qty < already:
+            errors['offer_quantity'] = f'{already} unit(s) of {p.name} were already sold on this offer.'
+            return
+        if qty > int(p.stock or 0) + already:
+            short.append(f'{p.name} has {int(p.stock or 0) + already}')
+    if short:
+        errors['offer_quantity'] = 'More than the stock — ' + '; '.join(short) + '.'
 
 
 def _check_dates(start, end, errors):
@@ -240,8 +409,7 @@ class PricingOfferListView(APIView):
         qs = PricingOffer.objects.select_related('product', 'category')
         if request.query_params.get('active') in ('1', 'true'):
             qs = qs.filter(running_offers_q())
-        today = _today()
-        return Response([_offer_json(o, today) for o in qs])
+        return Response(_offers_json(qs, _today()))
 
     def post(self, request):
         """One offer per product id in `products` (and/or category id in `categories`), all with
@@ -264,6 +432,12 @@ class PricingOfferListView(APIView):
         categories = ProductCategory.objects.in_bulk(category_ids) if category_ids else {}
         if not products and not categories:
             errors['products'] = 'Pick at least one product or category.'
+        if categories and fields.get('apply_to_all') is False:
+            errors['offer_quantity'] = 'A partial offer quantity is only for specific products, not whole categories.'
+        existing = list(PricingOffer.objects.filter(scope='PRODUCT', product__in=list(products.values())))
+        sold = offer_sold_units([o.pk for o in existing])
+        _check_quantity(fields, products.values(), errors,
+                        {o.product_id: sold.get(o.pk, 0) for o in existing})
         if errors:
             return Response({'detail': 'Please fix the highlighted fields.', 'errors': errors},
                             status=status.HTTP_400_BAD_REQUEST)
@@ -280,13 +454,14 @@ class PricingOfferListView(APIView):
                     for k, v in fields.items():
                         setattr(offer, k, v)
                     offer.save()
+                    if scope == 'PRODUCT':
+                        assign_offer_barcode(offer)
                     saved.append(offer)
             audit(request, 'PRICING', 'CREATE',
                   f"Offer '{fields['tag']}' set on {len(saved)} item(s)",
                   {'offers': [str(o.pk) for o in saved], 'offer_price': str(fields.get('offer_price'))})
-        today = _today()
         rows = PricingOffer.objects.select_related('product', 'category').filter(pk__in=[o.pk for o in saved])
-        return Response([_offer_json(o, today) for o in rows], status=status.HTTP_201_CREATED)
+        return Response(_offers_json(rows, _today()), status=status.HTTP_201_CREATED)
 
 
 class PricingOfferDetailView(APIView):
@@ -303,6 +478,11 @@ class PricingOfferDetailView(APIView):
         errors = {}
         fields = _clean_offer_fields(data, errors, partial=True)
         _check_dates(fields.get('start_date', offer.start_date), fields.get('end_date', offer.end_date), errors)
+        if offer.scope != 'PRODUCT' and fields.get('apply_to_all') is False:
+            errors['offer_quantity'] = 'A partial offer quantity is only for specific products, not whole categories.'
+        elif offer.product is not None and 'apply_to_all' in fields:
+            _check_quantity(fields, [offer.product], errors,
+                            {offer.product_id: offer_sold_units([offer.pk]).get(offer.pk, 0)})
         if errors:
             return Response({'detail': 'Please fix the highlighted fields.', 'errors': errors},
                             status=status.HTTP_400_BAD_REQUEST)
@@ -312,7 +492,8 @@ class PricingOfferDetailView(APIView):
         offer.save()
         if changes:
             audit(request, 'PRICING', 'UPDATE', f"Offer '{offer.tag}' updated", changes)
-        return Response(_offer_json(offer))
+        assign_offer_barcode(offer)
+        return Response(_offers_json([offer])[0])
 
     def delete(self, request, pk):
         offer = self._get(pk)
@@ -322,6 +503,86 @@ class PricingOfferDetailView(APIView):
               {'product': str(offer.product_id or ''), 'category': str(offer.category_id or '')})
         offer.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PricingOfferBarcodeView(APIView):
+    """The "Generate / Print Offer Barcode" button: mints the offer's code if it has none yet and
+    returns the offer (with the code) for the label print dialog."""
+    permission_classes = [PricingAdminWrite]
+
+    def post(self, request, pk):
+        offer = PricingOffer.objects.select_related('product', 'category').filter(pk=pk).first()
+        if offer is None:
+            return Response({'detail': 'Offer not found.'}, status=status.HTTP_404_NOT_FOUND)
+        if offer.scope != 'PRODUCT' or offer.product is None:
+            return Response({'detail': 'Offer barcodes are for product offers, not whole categories.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        had = bool(offer.offer_barcode)
+        with transaction.atomic():
+            code = assign_offer_barcode(offer)
+            if not had:
+                audit(request, 'PRICING', 'UPDATE', f"Offer barcode {code} generated for {offer.product.name}",
+                      {'offer': str(offer.pk), 'offer_barcode': code})
+        return Response(_offers_json([offer])[0])
+
+
+def _running_offer_maps(products, today=None):
+    """({product_id: offer}, {category_id: offer}) of the running offers for these products."""
+    by_product, by_category = {}, {}
+    cat_ids = {p.category_id for p in products if p.category_id}
+    q = Q(scope='PRODUCT', product_id__in=[p.pk for p in products])
+    if cat_ids:
+        q |= Q(scope='CATEGORY', category_id__in=cat_ids)
+    for o in PricingOffer.objects.filter(running_offers_q(today)).filter(q).order_by('created_at'):
+        target = by_product if o.scope == 'PRODUCT' else by_category
+        target[o.product_id if o.scope == 'PRODUCT' else o.category_id] = o   # latest wins
+    return by_product, by_category
+
+
+def running_offers(settings=None, today=None):
+    """Running offers (Offers & Clearance on) with sold / remaining units. [] when the module is off."""
+    settings = settings or get_settings()
+    if not settings['offers_enabled']:
+        return []
+    offers = list(PricingOffer.objects.select_related('product', 'category').filter(running_offers_q(today)))
+    sold = offer_sold_units([o.pk for o in offers])
+    out = []
+    for o in offers:
+        row = offer_compact(o, sold.get(o.pk, 0), o.product.stock if o.product else None)
+        row['product_name'] = o.product.name if o.product else ''
+        row['product_barcode'] = (o.product.barcode or '') if o.product else ''
+        row['category_name'] = o.category.name if o.category else ''
+        out.append(row)
+    return out
+
+
+class PricingLiveOffersView(APIView):
+    """Sales screens load this once (and on focus / after each sale): which items are on offer
+    for the search badges, and which offer barcode a scan belongs to."""
+
+    def get(self, request):
+        settings = get_settings()
+        return Response({'offers_enabled': bool(settings['offers_enabled']), 'offers': running_offers(settings)})
+
+
+def offer_resolver(settings=None):
+    """product → its running offer (product beats category) as offer_compact, or None. Loads the
+    running offers once, so a whole Stock Overview page / export costs two queries."""
+    offers = running_offers(settings)
+    by_product = {o['product']: o for o in offers if o['scope'] == 'PRODUCT'}
+    by_category = {o['category']: o for o in offers if o['scope'] == 'CATEGORY'}
+
+    def resolve(product):
+        o = by_product.get(str(product.pk)) or (by_category.get(str(product.category_id))
+                                                 if product.category_id else None)
+        if o is None:
+            return None
+        o = dict(o)
+        if o['apply_to_all']:
+            o['remaining'] = max(int(product.stock or 0), 0)
+        return o
+    resolve.offers = offers
+    return resolve
 
 
 # ---------------------------------------------------------------------------
@@ -340,14 +601,8 @@ def floors_for(products, settings=None, today=None):
     products = list(products)
     offers_by_product, offers_by_category = {}, {}
     if settings['offers_enabled'] and products:
-        cat_ids = {p.category_id for p in products if p.category_id}
-        q = Q(scope='PRODUCT', product_id__in=[p.pk for p in products])
-        if cat_ids:
-            q |= Q(scope='CATEGORY', category_id__in=cat_ids)
-        for o in PricingOffer.objects.filter(running_offers_q(today)).filter(q).order_by('created_at'):
-            target = offers_by_product if o.scope == 'PRODUCT' else offers_by_category
-            key = o.product_id if o.scope == 'PRODUCT' else o.category_id
-            target[key] = o   # latest wins; at most one per target is created anyway
+        offers_by_product, offers_by_category = _running_offer_maps(products, today)
+    sold = offer_sold_units({o.pk for o in [*offers_by_product.values(), *offers_by_category.values()]})
     margin = _dec(settings['min_margin_percent'])
     profit = _dec(settings['min_profit_amount'])
     out = {}
@@ -360,13 +615,13 @@ def floors_for(products, settings=None, today=None):
         floor = base
         if offer is not None and base is not None:
             floor = None if offer.offer_price is None else min(base, offer.offer_price)
+        # `floor` is the offer floor; a partial-quantity offer only grants it to lines tagged
+        # with the offer — every other line of the product keeps `base_floor`.
         out[str(p.pk)] = {
             'cost': float(cost), 'base_floor': float(base) if base is not None else None,
             'floor': float(floor) if floor is not None else None,
             'lens_stock_unit': lens_stock_unit(p),
-            'offer': {'id': str(offer.pk), 'tag': offer.tag, 'scope': offer.scope,
-                      'offer_price': float(offer.offer_price) if offer.offer_price is not None else None,
-                      'end_date': offer.end_date.isoformat() if offer.end_date else None} if offer else None,
+            'offer': offer_compact(offer, sold.get(offer.pk, 0), p.stock) if offer else None,
         }
     return out
 
@@ -504,10 +759,15 @@ def price_violations(raw_items, net_amount, tax_amount, settings=None):
     for i, raw, qty, net in lines:
         pid = str(raw.get('product'))
         info = floors.get(pid)
-        if info is None or info['floor'] is None or qty <= 0:
+        if info is None or qty <= 0:
+            continue
+        floor, offer = info['floor'], info['offer']
+        if offer and not offer['apply_to_all'] and str(raw.get('pricing_offer') or '') != offer['id']:
+            floor, offer = info['base_floor'], None    # outside the offer quantity: the normal floor
+        if floor is None:
             continue
         units = _cost_units(raw, qty, products[pid])
-        line_floor = _dec(info['floor']) * units
+        line_floor = _dec(floor) * units
         line_net = net * factor
         if line_net + TOLERANCE < line_floor:
             out.append({
@@ -518,7 +778,7 @@ def price_violations(raw_items, net_amount, tax_amount, settings=None):
                 'floor_unit': float((line_floor / qty).quantize(CENT)),
                 'cost_unit': float((_dec(info['cost']) * units / qty).quantize(CENT)),
                 'margin_applied': info['base_floor'] is not None and info['base_floor'] > info['cost'],
-                'offer': info['offer'],
+                'offer': offer,
             })
     return out
 
@@ -564,3 +824,54 @@ def enforce_line_prices(request, raw_items, net_amount, tax_amount, document_lab
           {'approver': approver.username, 'cashier': actor_name(request), 'document': document_label,
            'lines': messages})
     return approver
+
+
+def enforce_offer_lines(invoice, before=None):
+    """After a sales document's lines are saved: each line's `pricing_offer` tag must be an offer
+    for that line's product (else the tag is dropped), and an Order / Invoice may not take more
+    offer units than the offer has left — 400 `offer_exhausted`, or `offer_ended` once the offer
+    stopped running. `before` = {offer_id: units} the document carried before an edit: units it
+    already had are never re-checked, so reopening an old bill still saves."""
+    from apps.sales.models import InvoiceItem
+    items = list(InvoiceItem.objects.filter(invoice=invoice, pricing_offer__isnull=False).select_related('product'))
+    if not items:
+        return
+    # Locked so two tills can't both sell the last offer unit.
+    offers = {o.pk: o for o in PricingOffer.all_objects.select_for_update()
+              .filter(pk__in={i.pricing_offer_id for i in items})}
+    stray = []
+    for i in items:
+        o, p = offers.get(i.pricing_offer_id), i.product
+        fits = o is not None and p is not None and (
+            (o.scope == 'PRODUCT' and o.product_id == p.pk)
+            or (o.scope == 'CATEGORY' and o.category_id is not None and o.category_id == p.category_id))
+        if not fits:
+            stray.append(i.pk)
+    if stray:
+        InvoiceItem.objects.filter(pk__in=stray).update(pricing_offer=None)
+        items = [i for i in items if i.pk not in stray]
+    if invoice.document_type not in ('ORDER', 'INVOICE') or not items:
+        return
+    before = before or {}
+    settings = get_settings()
+    today = _today()
+    for offer_id, units in document_offer_units(items).items():
+        if units <= _dec(before.get(offer_id, 0)):
+            continue
+        o = offers[offer_id]
+        name = next((i.product.name for i in items if i.pricing_offer_id == offer_id), 'this item')
+        if o.is_deleted or not settings['offers_enabled'] or offer_state(o, today) != 'RUNNING':
+            raise ValidationError({
+                'detail': f"The '{o.tag}' offer on {name} is no longer running — sell it at the regular price.",
+                'code': 'offer_ended', 'offer': str(o.pk),
+            })
+        if not is_limited(o):
+            continue
+        others = _dec(offer_sold_units([o.pk], exclude_invoice=invoice.pk).get(o.pk, 0))
+        left = max(_dec(o.offer_quantity) - others, Decimal('0'))
+        if units > left:
+            raise ValidationError({
+                'detail': f"Only {_num(left)} unit(s) of {name} are left on the '{o.tag}' offer "
+                          f"(this bill has {_num(units)}). Sell the rest at the regular price.",
+                'code': 'offer_exhausted', 'offer': str(o.pk), 'remaining': _num(left),
+            })

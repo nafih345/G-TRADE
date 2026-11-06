@@ -43,14 +43,15 @@ const presetRange = (key) => {
 const asOnOnly = (f) => f.type === 'trial_balance' && f.tbMode !== 'detailed';
 const STATUS_OPTIONS = ['PENDING', 'DEPOSITED', 'CLEARED', 'BOUNCED', 'CANCELLED'];
 
-const defaultFilters = () => {
+const defaultFilters = (type = 'chart_of_accounts') => {
   const [from, to] = presetRange('month');
   return {
-    type: 'chart_of_accounts', preset: 'month', dateFrom: from, dateTo: to, branch: 'all',
+    type, preset: 'month', dateFrom: from, dateTo: to, branch: 'all',
     scope: 'ALL', accountGroup: '', coaAccount: '', hideZero: false,
     voucherType: 'ALL', origin: 'all', showReversed: false,
     cashAccount: '', bankAccount: '', chequeDirection: '', chequeStatus: '',
     ledgerAccount: '', tbMode: 'summary', compare: false, layout: 'vertical', source: '',
+    channel: 'all', moneyAccount: '', direction: '', controlAccount: '',
   };
 };
 
@@ -71,6 +72,10 @@ function toParams(f) {
       return { ...p, direction: f.chequeDirection, status: f.chequeStatus, account_id: f.bankAccount === 'all' ? '' : f.bankAccount };
     case 'ledger':
       return { ...p, account_id: f.ledgerAccount };
+    case 'transactions':
+      return { ...p, channel: f.channel, account_id: f.moneyAccount, direction: f.direction, origin: f.origin, show_reversed: f.showReversed ? 1 : '' };
+    case 'sub_ledgers':
+      return { ...p, account_id: f.controlAccount, hide_zero: f.hideZero ? 1 : '' };
     case 'trial_balance':
       return { ...p, mode: f.tbMode };
     case 'profit_loss':
@@ -213,12 +218,12 @@ const PRINT_CSS = `<style>
   .bal { font-weight:800; margin:6px 0; } .bal.ok { color:#15803d; } .bal.bad { color:#b91c1c; }
 </style>`;
 
-export default function FinancialStatements() {
+export default function FinancialStatements({ defaultType = 'chart_of_accounts' }) {
   const { multiBranchEnabled, branches, isAdmin } = useBranch();
   const storeProfile = useStoreProfile();
   const company = useMemo(() => companyFromProfile(storeProfile), [storeProfile]);
   const [options, setOptions] = useState(null);
-  const [draft, setDraft] = useState(defaultFilters);
+  const [draft, setDraft] = useState(() => defaultFilters(defaultType));
   const [applied, setApplied] = useState(null);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -244,7 +249,7 @@ export default function FinancialStatements() {
     setLoading(false);
   }, []);
 
-  useEffect(() => { run(defaultFilters()); }, [run]);
+  useEffect(() => { run(defaultFilters(defaultType)); }, [run, defaultType]);
 
   const set = (key) => (e) => {
     const value = e?.target ? (e.target.type === 'checkbox' ? e.target.checked : e.target.value) : e;
@@ -253,6 +258,7 @@ export default function FinancialStatements() {
       if (key === 'preset' && value !== 'custom') [next.dateFrom, next.dateTo] = presetRange(value);
       if (key === 'dateFrom' || key === 'dateTo') next.preset = 'custom';
       if (key === 'scope') { next.accountGroup = ''; next.coaAccount = ''; }
+      if (key === 'channel') next.moneyAccount = '';
       return next;
     });
   };
@@ -390,6 +396,38 @@ export default function FinancialStatements() {
         </>);
       case 'ledger':
         return accountPicker('ledgerAccount', 'Ledger Account', accounts, true);
+      case 'transactions':
+        return (<>
+          <TextField select size="small" label="Cash / Bank" value={draft.channel} onChange={set('channel')} sx={{ minWidth: 150, ...fieldSx }}>
+            <MenuItem value="all">Cash + Bank</MenuItem>
+            <MenuItem value="cash">Cash only</MenuItem>
+            <MenuItem value="bank">Bank only</MenuItem>
+          </TextField>
+          <TextField select size="small" label="Account" value={draft.moneyAccount} onChange={set('moneyAccount')} sx={{ minWidth: 220, ...fieldSx }}>
+            <MenuItem value="">All accounts</MenuItem>
+            {(options?.money_accounts || []).filter(a => draft.channel === 'all' || a.channel === draft.channel.toUpperCase())
+              .map(a => <MenuItem key={a.id} value={a.id}>{a.label}</MenuItem>)}
+          </TextField>
+          <TextField select size="small" label="Direction" value={draft.direction} onChange={set('direction')} sx={{ minWidth: 130, ...fieldSx }}>
+            <MenuItem value="">In + Out</MenuItem>
+            <MenuItem value="IN">Money In</MenuItem>
+            <MenuItem value="OUT">Money Out</MenuItem>
+          </TextField>
+          <TextField select size="small" label="Origin" value={draft.origin} onChange={set('origin')} sx={{ minWidth: 170, ...fieldSx }}>
+            <MenuItem value="all">Manual + automated</MenuItem>
+            <MenuItem value="manual">Manual vouchers</MenuItem>
+            <MenuItem value="auto">Auto-posted</MenuItem>
+          </TextField>
+          <FormControlLabel control={<Checkbox size="small" checked={draft.showReversed} onChange={set('showReversed')} />} label="Show reversed" />
+        </>);
+      case 'sub_ledgers':
+        return (<>
+          <TextField select size="small" label="Control Account" value={draft.controlAccount} onChange={set('controlAccount')} sx={{ minWidth: 280, ...fieldSx }}>
+            <MenuItem value="">All control accounts</MenuItem>
+            {(options?.control_accounts || []).map(a => <MenuItem key={a.id} value={a.id}>{accountLabel(a)} ({a.sub_ledgers})</MenuItem>)}
+          </TextField>
+          <FormControlLabel control={<Checkbox size="small" checked={draft.hideZero} onChange={set('hideZero')} />} label="Hide zero balances" />
+        </>);
       case 'trial_balance':
         return (
           <TextField select size="small" label="Format" value={draft.tbMode} onChange={set('tbMode')} sx={{ minWidth: 220, ...fieldSx }}>
@@ -424,7 +462,7 @@ export default function FinancialStatements() {
     run(draft);
   };
 
-  const drillable = data && ['chart_of_accounts', 'trial_balance', 'profit_loss', 'balance_sheet'].includes(data.type);
+  const drillable = data && ['chart_of_accounts', 'trial_balance', 'profit_loss', 'balance_sheet', 'sub_ledgers'].includes(data.type);
   const sideBySide = data?.layout === 'horizontal' && data.tables.length === 2;
 
   return (

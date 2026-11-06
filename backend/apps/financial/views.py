@@ -14,7 +14,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
 from . import (accounts_reports, bankbook, cashbook, cheques, daybook, integration, reports, settlements, statements,
-               voucher_report)
+               transactions, voucher_report)
 from .accounting_catalog import SOURCES, ROLES
 from .mapping import role_status, save_mapping, deactivate_mapping, accounts_in_active_mappings
 from .models import (
@@ -173,7 +173,7 @@ class JournalEntryViewSet(EditApprovalMixin, FinanceViewSetMixin, viewsets.Model
     # Direct Edit switch 'accounts': changing a draft is free; reversing a posted voucher (the
     # ledger's only correction) needs an approved edit request when the switch is OFF.
     edit_module = 'accounts'
-    edit_actions = ('update', 'partial_update', 'reverse')
+    edit_actions = ('update', 'partial_update', 'reverse', 'correct')
     edit_ref_fields = ('entry_number',)
     edit_draft_statuses = ('DRAFT', 'PENDING_APPROVAL')
 
@@ -312,6 +312,43 @@ class JournalEntryViewSet(EditApprovalMixin, FinanceViewSetMixin, viewsets.Model
               user=request.user)
         return Response({'message': 'Journal entry reversed successfully.', 'reversal_entry_number': reversal.entry_number,
                          'reversal': JournalEntrySerializer(reversal).data})
+
+
+    @action(detail=True, methods=['get'])
+    def correction(self, request, pk=None):
+        """The voucher as an editable payload (Transaction Report → Edit starts from it)."""
+        return Response(transactions.correction_template(self.get_object()))
+
+    @action(detail=True, methods=['post'])
+    def correct(self, request, pk=None):
+        """Administrative correction of a posted journal.
+
+        mode=text: narration / reference changed in place (no figure moves; audited).
+        mode=voucher: a manual voucher is reversed and the corrected voucher posted in one
+        transaction (the ledger's only way to change an amount, account or date)."""
+        entry = self.get_object()
+        mode = (request.data.get('mode') or 'text').lower()
+        try:
+            if mode == 'text':
+                with transaction.atomic():
+                    entry, changed = transactions.edit_text(entry, narration=request.data.get('narration'),
+                                                            reference=request.data.get('reference'), user=request.user)
+                return Response({'changed': changed, 'entry': JournalEntrySerializer(entry).data})
+            if mode != 'voucher':
+                return _error('mode must be text or voucher.')
+            data = self._voucher_payload(request)
+            if data['status'] != 'POSTED':
+                return _error('A correction posts the corrected voucher; status must be POSTED.')
+            with transaction.atomic():
+                reversal, corrected = transactions.correct_entry(
+                    entry, data, request.data.get('reason') or '', user=request.user,
+                    branch=_branch(data.get('branch')) if data.get('branch') else None)
+        except AccountingError as exc:
+            return _error(exc)
+        return Response({'message': f"{entry.entry_number} corrected: reversed by {reversal.entry_number}, "
+                                    f"replaced by {corrected.entry_number}.",
+                         'reversal_entry_number': reversal.entry_number,
+                         'corrected': JournalEntrySerializer(corrected).data})
 
 
 def _branch(pk):
@@ -488,7 +525,7 @@ def daybook_view(request):
 
 @_report
 def voucher_report_view(request):
-    """Accounts → Reports → Payment / Receipt Voucher Report (?voucher=PV|RV)."""
+    """Accounts → Reports → Payment / Receipt / Contra / Journal Voucher Report (?voucher=PV|RV|CV|JV)."""
     p = request.query_params
     today = timezone.localdate()
     date_from = _date_param(request, 'date_from', today.replace(day=1))
@@ -509,6 +546,62 @@ def voucher_report_view(request):
     data['branch'] = {'id': (p.get('branch') or 'all') if getattr(request, 'multi_branch_enabled', False) else 'all',
                       'label': branch_label}
     return data
+
+
+# ---------------------------------------------------------------------------
+# Accounts → Transaction Report (transactions.py): every cash & bank movement
+# ---------------------------------------------------------------------------
+
+@_report
+def transaction_report_view(request):
+    p = request.query_params
+    today = timezone.localdate()
+    date_from = _date_param(request, 'date_from', today.replace(day=1))
+    date_to = _date_param(request, 'date_to', today)
+    if (date_to - date_from).days > 366:
+        raise AccountingError('The transaction report covers at most one year at a time. Narrow the dates.')
+    branch_ids, branch_label = _cashbook_branches(request)
+    split = lambda v: [x.strip().upper() for x in (v or '').split(',') if x.strip()]  # noqa: E731
+    try:
+        data = transactions.report(
+            date_from, date_to, branch_ids=branch_ids, channel=p.get('channel') or 'all',
+            account_id=_uuid_or_none(p.get('account')), direction=p.get('direction') or '',
+            modes=split(p.get('mode')), kinds=split(p.get('kind')), origin=p.get('origin') or 'all',
+            search=p.get('search') or '', show_reversed=p.get('show_reversed') in ('1', 'true'),
+            page=_int(p.get('page'), 1), page_size=_int(p.get('page_size'), 100),
+            export=p.get('export') in ('1', 'true'))
+    except transactions.TransactionReportError as exc:
+        raise AccountingError(str(exc))
+    data['branch'] = _branch_label(request, branch_label)
+    return data
+
+
+@_report
+def transaction_options_view(request):
+    return transactions.options()
+
+
+@_report
+def transaction_stamp_view(request):
+    return {'stamp': transactions.stamp()}
+
+
+@api_view(['PUT', 'PATCH'])
+@permission_classes([FinancePermission])
+def transaction_detail_view(request, journal_id, account_id):
+    """Reference / UTR, mode, value date and remarks of one cash or bank movement (tracking only)."""
+    journal = get_object_or_404(JournalEntry, pk=journal_id)
+    if not _check_branch_access(request, journal.branch_id):
+        return _error('You do not have access to this entry.', status.HTTP_403_FORBIDDEN)
+    account = get_object_or_404(ChartOfAccount.all_objects.select_related('account_group'), pk=account_id)
+    ser = bankbook.EntryDetailSerializer(data=request.data, partial=True)
+    ser.is_valid(raise_exception=True)
+    try:
+        with transaction.atomic():
+            d = transactions.save_detail(journal, account, ser.validated_data, user=request.user)
+    except AccountingError as exc:
+        return _error(exc)
+    return Response({'reference': d.reference, 'mode': d.mode, 'value_date': d.value_date, 'remarks': d.remarks})
 
 
 def _accounts_report(request, fn, *args, max_days=366, dated=True, **kwargs):
