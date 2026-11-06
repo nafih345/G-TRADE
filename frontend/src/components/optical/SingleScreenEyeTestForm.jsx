@@ -79,6 +79,7 @@ export default function SingleScreenEyeTestForm({
   // see onClearAll) or by clicking the history table's Edit icon (see onSelectExamFromHistory),
   // both of which clear this from the parent.
   isLocked = false,
+  lockedLabel = '',
   // Runs the parent's save checks (patient name, some test detail) before the payment screen
   // opens, so nobody fills in a payment for a record that then can't be saved.
   onValidateSave,
@@ -316,8 +317,8 @@ export default function SingleScreenEyeTestForm({
             {isLocked && (
               <Chip
                 size="small"
-                color="success"
-                label="Saved — locked. Use Edit (in the table below) or New Patient to change."
+                color={lockedLabel ? 'warning' : 'success'}
+                label={lockedLabel || 'Saved — locked. Use Edit (in the table below) or New Patient to change.'}
                 sx={{ fontWeight: 700 }}
               />
             )}

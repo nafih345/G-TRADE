@@ -6,6 +6,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from apps.authentication.edit_permissions import EditApprovalMixin
 from apps.common.pagination import PageSizePagination
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
@@ -164,11 +165,17 @@ class VoucherTypeViewSet(FinanceViewSetMixin, viewsets.ModelViewSet):
 # Journals / vouchers
 # ---------------------------------------------------------------------------
 
-class JournalEntryViewSet(FinanceViewSetMixin, viewsets.ModelViewSet):
+class JournalEntryViewSet(EditApprovalMixin, FinanceViewSetMixin, viewsets.ModelViewSet):
     """Register of all journals. Manual vouchers are created here (through the posting
     service); automated entries are read-only. Posted entries are corrected by reversal."""
     serializer_class = JournalEntrySerializer
     http_method_names = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options']
+    # Direct Edit switch 'accounts': changing a draft is free; reversing a posted voucher (the
+    # ledger's only correction) needs an approved edit request when the switch is OFF.
+    edit_module = 'accounts'
+    edit_actions = ('update', 'partial_update', 'reverse')
+    edit_ref_fields = ('entry_number',)
+    edit_draft_statuses = ('DRAFT', 'PENDING_APPROVAL')
 
     def get_queryset(self):
         qs = (JournalEntry.objects.select_related('voucher_type', 'reversed_entry', 'created_by', 'posted_by')
@@ -988,12 +995,20 @@ def cheque_detail_view(request, pk):
     if request.method == 'PATCH':
         ser = cheques.ChequeUpdateSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
+        # Cheque detail edits rewrite the posted voucher's memo / receipt notes: Direct Edit
+        # 'accounts'. Status tracking (deposited / cleared / bounced + dates) stays free.
+        from apps.authentication import edit_permissions
+        clearance = None
+        if set(request.data) - {'status', 'deposited_date', 'cleared_date', 'status_note'}:
+            clearance = edit_permissions.require_clearance(
+                request, 'accounts', cheque.pk, f'Cheque {cheque.cheque_number}', cheque.created_by_id, cheque.created_at)
         try:
             with transaction.atomic():
                 cheques.update_cheque(Cheque.objects.select_for_update().get(pk=cheque.pk),
                                       ser.validated_data, user=request.user)
         except AccountingError as exc:
             return _error(exc)
+        edit_permissions.complete(clearance)
         cheque = Cheque.objects.select_related('bank_account', 'branch', 'created_by').get(pk=cheque.pk)
     return Response(cheques.cheque_row(cheque))
 

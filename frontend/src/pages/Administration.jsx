@@ -5,7 +5,7 @@ import {
   Grid, Table, TableBody, TableCell, TableContainer, 
   TableHead, TableRow, Paper, Chip, Dialog, 
   DialogTitle, DialogContent, DialogActions, TextField, 
-  MenuItem, Stack, IconButton, Switch, FormControlLabel, Checkbox, Divider, Alert
+  MenuItem, Stack, IconButton, Switch, FormControlLabel, Checkbox, Divider, Alert, Badge
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -29,7 +29,8 @@ import {
   GroupAdd as GroupAddIcon,
   ToggleOn as ToggleOnIcon,
   ToggleOff as ToggleOffIcon,
-  Build as ServiceIcon
+  Build as ServiceIcon,
+  LockClock as EditRequestIcon
 } from '@mui/icons-material';
 import axios from 'axios';
 import { useBranch } from '../context/BranchContext';
@@ -37,6 +38,8 @@ import ExcelImportManager from '../components/admin/import/ExcelImportManager';
 import BarcodePrintingManager from '../components/admin/BarcodePrintingManager';
 import ServiceMasterDialog from '../components/sales/ServiceMasterDialog';
 import StaffUsersManager from '../components/admin/StaffUsersManager';
+import EditPermissionsManager from '../components/admin/EditPermissionsManager';
+import { fetchPendingEditCount } from '../utils/editPermissions';
 
 export default function Administration() {
   const location = useLocation();
@@ -52,6 +55,7 @@ export default function Administration() {
     if (pathname.includes('/admin/branches')) return 'branches';
     if (pathname.includes('/admin/roles')) return 'roles';
     if (pathname.includes('/admin/permissions')) return 'permissions';
+    if (pathname.includes('/admin/edit-requests')) return 'edit-requests';
     if (pathname.includes('/admin/audit')) return 'audit';
     return 'users';
   };
@@ -61,6 +65,16 @@ export default function Administration() {
   useEffect(() => {
     setActiveTab(getTabFromPath(location.pathname));
   }, [location.pathname]);
+
+  // Pending edit requests waiting for an admin (badge on the Edit Permissions tab).
+  const [pendingEditCount, setPendingEditCount] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    const load = () => fetchPendingEditCount().then((n) => { if (alive) setPendingEditCount(n); });
+    load();
+    const timer = setInterval(load, 60000);
+    return () => { alive = false; clearInterval(timer); };
+  }, []);
 
   const handleTabChange = (event, newValue) => {
     setActiveTab(newValue);
@@ -72,6 +86,7 @@ export default function Administration() {
     if (newValue === 'barcode-settings') navigate('/admin/barcode-settings');
     if (newValue === 'roles') navigate('/admin/roles');
     if (newValue === 'permissions') navigate('/admin/permissions');
+    if (newValue === 'edit-requests') navigate('/admin/edit-requests');
     if (newValue === 'audit') navigate('/admin/audit');
   };
 
@@ -488,12 +503,17 @@ export default function Administration() {
           <Tab value="barcode-settings" label="Barcode Settings" icon={<BarcodeIcon />} iconPosition="start" sx={{ fontWeight: 700, color: '#7c3aed' }} />
           <Tab value="roles" label="System Roles & Titles" icon={<AdminIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab value="permissions" label="Module Access Matrix" icon={<SecurityIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
+          <Tab value="edit-requests" iconPosition="start" sx={{ fontWeight: 700, color: '#b45309' }}
+            icon={<Badge color="error" badgeContent={pendingEditCount} max={99}><EditRequestIcon /></Badge>}
+            label="Edit Permissions & Requests" />
           <Tab value="audit" label="Security Audit Logs" icon={<AuditIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
         </Tabs>
       </Card>
 
       {/* 1. USERS TAB — real accounts, created directly by admin staff */}
       {activeTab === 'users' && <StaffUsersManager />}
+
+      {activeTab === 'edit-requests' && <EditPermissionsManager onPendingCountChange={setPendingEditCount} />}
 
       {/* 2. DOCTORS & OPTOMETRISTS MASTER TAB */}
       {activeTab === 'doctors' && (() => {

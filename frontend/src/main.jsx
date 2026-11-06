@@ -9,6 +9,7 @@ import { resolveApiBaseUrl, installBackendHealthWatch } from './utils/backendSta
 import { installSessionGuard } from './utils/sessionGuard'
 import { installMasterCacheInvalidation } from './utils/masterDataCache'
 import { installApiWriteGuard } from './utils/apiWriteGuard'
+import { installEditApprovalInterceptor } from './utils/editPermissions'
 import './index.css'
 
 // Every alert(...) in the app shows as an in-page notice at the bottom of the screen
@@ -41,6 +42,10 @@ installBackendHealthWatch()
 // (utils/masterDataCache.js); any write to one of them marks it stale. AuthContext warms them
 // as soon as a session exists.
 installMasterCacheInvalidation()
+
+// A save the server refuses because the user's Direct Edit is OFF for that module opens the
+// "Edit Permission Required" dialog for the record (utils/editPermissions.js).
+installEditApprovalInterceptor()
 
 // Idempotency keys + double-submit guard + request timeout + a notice for every failed write
 // the screen itself doesn't report. Installed last so its failure notice runs after the

@@ -46,6 +46,7 @@ import {
 
 import axios from 'axios';
 import { getMasterSnapshot, loadMaster } from '../utils/masterDataCache';
+import { ensureEditAccess } from '../utils/editPermissions';
 
 // Pre-cache key of the last supplier list; read once as a seed until the shared master cache
 // (utils/masterDataCache.js) has its own copy.
@@ -123,7 +124,11 @@ export default function Purchases() {
   };
 
   // Reports → Edit: reopen a saved Purchase Entry in the entry form with its items intact.
-  const goToEditPurchaseEntry = (invoiceId) => {
+  // Direct Edit 'purchase' OFF: a posted entry opens only once an admin approved an edit request
+  // for it (drafts and entries this user just saved are free — the server decides).
+  const goToEditPurchaseEntry = async (invoiceId, ref = '') => {
+    const ok = await ensureEditAccess({ module: 'purchase', recordId: String(invoiceId || ''), recordRef: ref });
+    if (!ok) return;
     setEntryPrefillSupplierId('');
     setEntryPrefillPoId('');
     setEntryLensPoId('');
@@ -1405,7 +1410,7 @@ export default function Purchases() {
                                 variant="contained"
                                 startIcon={<EditIcon />}
                                 sx={{ backgroundColor: '#2563EB' }}
-                                onClick={() => goToEditPurchaseEntry(p.id)}
+                                onClick={() => goToEditPurchaseEntry(p.id, p.invoice_number || p.invoiceNumber || '')}
                               >
                                 Edit
                               </Button>

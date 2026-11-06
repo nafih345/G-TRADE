@@ -1,3 +1,4 @@
+from apps.authentication.edit_permissions import EditApprovalMixin
 from apps.common.pagination import PageSizePagination
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
@@ -248,7 +249,12 @@ class ProductSerializer(ModelSerializer):
         return super().update(instance, validated_data)
 
 
-class ProductViewSet(viewsets.ModelViewSet):
+class ProductViewSet(EditApprovalMixin, viewsets.ModelViewSet):
+    # Direct Edit switch 'inventory'. The image / barcode follow-ups and a category merge's
+    # reassignment are housekeeping, not product edits.
+    edit_module = 'inventory'
+    edit_ref_fields = ('name', 'sku')
+    edit_exempt_fields = ('image', 'barcode', 'secondary_barcode', 'category', 'category_name')
     queryset = Product.objects.all().select_related('tax', 'category', 'brand').prefetch_related('extra_barcodes').order_by('-created_at')
     serializer_class = ProductSerializer
     authentication_classes = []

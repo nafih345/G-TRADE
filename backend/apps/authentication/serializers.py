@@ -17,7 +17,7 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = ('id', 'username', 'email', 'first_name', 'last_name', 'role', 'role_display', 'phone', 'is_active',
                   'tenant', 'is_platform_admin', 'workspace', 'module_access',
-                  'settings_features')
+                  'settings_features', 'edit_permissions')
         read_only_fields = ('id', 'is_active', 'tenant')
 
     # {module: 'full'|'view'|'none'} from the tenant's subscription and this role's levels
@@ -44,6 +44,14 @@ class UserSerializer(serializers.ModelSerializer):
     def get_module_access(self, obj):
         from apps.common.module_access import effective_access
         return effective_access(obj)
+
+    # {module: bool} Direct Edit switches (apps/authentication/edit_permissions.py); False means a
+    # saved record of that module opens only after an admin approves an edit request.
+    edit_permissions = serializers.SerializerMethodField()
+
+    def get_edit_permissions(self, obj):
+        from .edit_permissions import user_edit_permissions
+        return user_edit_permissions(obj)
 
     def get_settings_features(self, obj):
         from apps.common.module_access import settings_features_for

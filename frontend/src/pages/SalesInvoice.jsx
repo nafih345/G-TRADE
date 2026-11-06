@@ -5,6 +5,7 @@ import { normalizeSalesRow, summarizeLines, rowCustomerName, rowPayment } from '
 import { apiErrorMessage } from '../utils/apiError';
 import { fetchAllPages } from '../utils/fetchAllPages';
 import { notify } from '../utils/notify';
+import { ensureEditAccess } from '../utils/editPermissions';
 import { describeApiError } from '../utils/apiWriteGuard';
 import PaymentModeDetails from '../components/common/PaymentModeDetails';
 import { needsBank } from '../utils/paymentModes';
@@ -885,6 +886,19 @@ export default function SalesInvoice() {
 
   // Apply a patch from UpdateDocumentDialog (or a bulk / Mark-Delivered action) to one row:
   // optimistic state + localStorage, then PATCH the backend invoice for real records.
+  // Orders ✏️ Edit / "Bill this order": open the saved document in New Sale. With Direct Edit
+  // 'sales' OFF it opens only after an admin approved an edit request for it (otherwise the
+  // "Edit Permission Required" dialog asks for one and the document stays as it is).
+  const openSavedDocForEdit = async (doc, convertTo = null) => {
+    if (!doc?.id) return;
+    const ok = await ensureEditAccess({
+      module: 'sales', recordId: String(doc.id),
+      recordRef: doc.invoiceNumber || doc.invoice_number || doc.orderNumber || '',
+    });
+    if (!ok) return;
+    navigate('/sales/new', { state: convertTo ? { editDocumentId: doc.id, convertTo } : { editDocumentId: doc.id } });
+  };
+
   const applyDocumentUpdate = async (order, patch) => {
     setOrders(prev => prev.map(o => (rowMatches(o, order) ? normalizeSalesRow(mergePatchOntoRow(o, patch)) : o)));
     patchLocalStorageRow(order, patch);
@@ -959,7 +973,7 @@ export default function SalesInvoice() {
           editDocumentId={location.state?.editDocumentId || null}
           editConvertTo={location.state?.convertTo || null}
           // A lens order whose lenses are in stock: open it as the tax invoice it becomes.
-          onBillLensOrder={(id) => navigate('/sales/new', { state: { editDocumentId: id, convertTo: 'Invoice' } })}
+          onBillLensOrder={(id) => openSavedDocForEdit({ id }, 'Invoice')}
           // Eye Test "Pay After Sale" → Go to Sales: load that visit's patient + Rx by Test No
           // (its pending eye test fee then joins the bill).
           prefillTestNo={location.state?.eyeTestNo || null}
@@ -1065,13 +1079,13 @@ export default function SalesInvoice() {
         <OrdersManagerView
           orders={orders}
           onNavigateToNewSale={() => { setActiveTab('new-sale'); navigate('/sales/new'); }}
-          onEditInNewSale={(ord) => navigate('/sales/new', { state: { editDocumentId: ord.id } })}
+          onEditInNewSale={(ord) => openSavedDocForEdit(ord)}
           // Orders > Lenses: the supplier purchase / receiving / stock entry happen in Purchase,
           // billing back in New Sale (the Order opens as its tax invoice).
           onCreateLensPurchase={(row) => navigate('/purchase/entry', { state: { lensForSalesOrder: row.id } })}
           onReceiveLensPO={(po) => navigate('/purchase/lens-orders', { state: { receiveLensPo: po.id, search: po.po_number } })}
           onStockLensPO={(po) => navigate('/purchase/entry', { state: { convertLensPo: po.id } })}
-          onBillLensOrder={(row) => navigate('/sales/new', { state: { editDocumentId: row.id, convertTo: 'Invoice' } })}
+          onBillLensOrder={(row) => openSavedDocForEdit(row, 'Invoice')}
           onNavigateToEyeTest={() => navigate('/optical/eyetest')}
           // + beside Search Customer: open Register Customer; the saved customer comes back
           // through registeredCustomer and is loaded into the bill.

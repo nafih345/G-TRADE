@@ -33,6 +33,7 @@ import SingleScreenEyeTestForm from '../components/optical/SingleScreenEyeTestFo
 import { expectedFeeStatus, feePayload, isFreeEyeTest } from '../utils/eyeTestBill';
 import { EYE_TEST_SHORTCUTS, EYE_TEST_LENS_OPTIONS, useEyeTestShortcuts, focusEyeTestField } from '../components/optical/eyeTestShortcuts';
 import { ShortcutHelpDialog } from './wholesale/WholesaleDialogs';
+import { ensureEditAccess, hasDirectEdit } from '../utils/editPermissions';
 const ExaminationStepper = lazy(() => import('../components/optical/ExaminationStepper'));
 const ExaminationSummarySidebar = lazy(() => import('../components/optical/ExaminationSummarySidebar'));
 const PatientSearchModal = lazy(() => import('../components/optical/PatientSearchModal'));
@@ -202,6 +203,26 @@ export default function OpticalServices() {
   // silently mutated after the fact. Cleared by "New Patient" (handleResetAll) or by using the
   // history table's Edit icon (onSelectExamFromHistory) to intentionally resume that record.
   const [isRecordLocked, setIsRecordLocked] = useState(false);
+  // Set while a loaded visit is read-only because the user's Direct Edit for Eye Test is OFF.
+  const [editLockNotice, setEditLockNotice] = useState('');
+  const editGateRef = useRef(0);
+  // Unlock a reopened saved visit for editing — at once with Direct Edit ON, otherwise only once
+  // an admin has approved an edit request for it (the form stays locked meanwhile).
+  const gateExamEdit = (backendId, ref) => {
+    const ticket = ++editGateRef.current;
+    if (!backendId || hasDirectEdit('eye_test')) {
+      setEditLockNotice('');
+      setIsRecordLocked(false);
+      return;
+    }
+    setIsRecordLocked(true);
+    setEditLockNotice('Read-only — edit permission required. Checking…');
+    ensureEditAccess({ module: 'eye_test', recordId: backendId, recordRef: ref ? `Test No ${ref}` : '' }).then((ok) => {
+      if (ticket !== editGateRef.current) return; // another record was loaded meanwhile
+      setIsRecordLocked(!ok);
+      setEditLockNotice(ok ? '' : 'Read-only — edit permission required. Request sent / awaiting admin approval.');
+    });
+  };
   // Guards handleSavePatient against firing twice before the first call's POST resolves — two
   // near-simultaneous calls (e.g. an Enter keypress bouncing, or a stray double click) both read
   // the same not-yet-assigned patientData.id, both compute the same "next" patient_code via
@@ -532,13 +553,52 @@ export default function OpticalServices() {
   // happened to load), so two different patients registered in different sessions could both
   // land on the same "next" number — which is exactly how two unrelated patients ended up
   // sharing the same Patient ID.
+  //
+  // That local scan is only a fallback now: on the hosted build the patient list is often still
+  // loading (or the backend is waking up) when the form opens, so the scan saw nothing and
+  // every new patient showed P-1001. The preview comes from the server
+  // (/customers/next-patient-code/ = highest code in use + 1 for this store), and the REAL code
+  // is assigned by the server at save time and reconciled back from the response — whatever
+  // this function returns is display only.
+  const [nextPatientIdPreview, setNextPatientIdPreview] = useState('');
+  const fetchNextPatientId = async () => {
+    try {
+      const res = await axios.get('/api/sales/customers/next-patient-code/');
+      if (res.data?.patient_code) setNextPatientIdPreview(res.data.patient_code);
+    } catch (e) {}
+  };
+  useEffect(() => { fetchNextPatientId(); }, []);
   const getNextPatientId = () => {
     const allIds = [...(dbPatients || []), ...(pastExaminations || [])]
       .map(p => String(p.id || p.patientId || '').match(/^p-?(\d+)$/i))
       .filter(Boolean)
       .map(m => parseInt(m[1], 10));
-    const maxId = allIds.length > 0 ? Math.max(...allIds) : 1000;
-    return `P-${maxId + 1}`;
+    const localMax = allIds.length > 0 ? Math.max(...allIds) : 1000;
+    // Server preview first (it sees every device's patients); local scan only when offline.
+    return nextPatientIdPreview || `P-${localMax + 1}`;
+  };
+
+  // A blank new-patient form filled before the preview arrived (Render waking up) holds the
+  // local fallback — swap in the server's number once it lands.
+  useEffect(() => {
+    if (!nextPatientIdPreview) return;
+    setPatientData(prev => (
+      !prev.customerId && !prev.name && (!prev.id || /^p-?\d+$/i.test(prev.id))
+        ? { ...prev, id: nextPatientIdPreview } : prev
+    ));
+  }, [nextPatientIdPreview]);
+
+  // The server may hand out a different code than the on-screen preview (another device saved
+  // first, or the preview was stale). Move every local copy of this patient onto the real code.
+  const reconcilePatientCode = (shownId, realId, customerId) => {
+    if (!realId || realId === shownId) return;
+    setPatientData(prev => (prev.id === shownId || !prev.id ? { ...prev, id: realId } : prev));
+    const fix = (c) => (c.id === shownId ? { ...c, id: realId, customerId: customerId || c.customerId } : c);
+    setDbPatients(prev => (prev || []).map(fix));
+    try {
+      const cached = JSON.parse(localStorage.getItem('optical_sales_customers') || '[]');
+      localStorage.setItem('optical_sales_customers', JSON.stringify(cached.map(fix)));
+    } catch (e) {}
   };
 
   // Real backend-tracked Test No preview (replaces the old `pastExaminations.length + 1`
@@ -559,6 +619,7 @@ export default function OpticalServices() {
     // otherwise a fresh "new patient" form would still silently PATCH over that old record.
     setEditingExamId(null);
     setIsRecordLocked(false);
+    editGateRef.current += 1; setEditLockNotice('');
     setPatientData({
       id: getNextPatientId(),
       customerId: null,
@@ -977,6 +1038,7 @@ export default function OpticalServices() {
     // visit stays untouched in history.
     setEditingExamId(null);
     setIsRecordLocked(false);
+    editGateRef.current += 1; setEditLockNotice('');
     fetchNextTestNo();
 
     setPatientData(prev => ({
@@ -1074,7 +1136,7 @@ export default function OpticalServices() {
       const lockedTestNo = editExam.test_no || editExam.testNo || raw.diagnosisData?.testNo || raw.diagnosis?.testNo || '';
       const lockedPatientId = editExam.patient_id || editExam.patientId || raw.patientData?.id || '';
       setEditingExamId(editExam.backendId || null);
-      setIsRecordLocked(false);
+      gateExamEdit(editExam.backendId, editExam.test_no || editExam.testNo || editExam.patient_id);
       setPatientData(prev => ({
         ...prev,
         ...(raw.patientData || {}),
@@ -1230,16 +1292,18 @@ export default function OpticalServices() {
         medical_aid_scheme: patientData?.medicalAidScheme || '',
         medical_aid_member_number: patientData?.medicalAidMemberNumber || ''
       };
-      if (customerId) {
-        await axios.patch(`/api/sales/customers/${customerId}/`, customerApiPayload);
-      } else {
-        const res = await axios.post('/api/sales/customers/', customerApiPayload);
-        if (res.data?.id) {
-          customerId = res.data.id;
-          setPatientData(prev => ({ ...prev, customerId }));
-        }
+      const res = customerId
+        ? await axios.patch(`/api/sales/customers/${customerId}/`, customerApiPayload)
+        : await axios.post('/api/sales/customers/', customerApiPayload);
+      if (res.data?.id && !customerId) {
+        customerId = res.data.id;
+        setPatientData(prev => ({ ...prev, customerId }));
       }
-      alert(`Patient "${patientData.name}" (${effectivePatientId}) saved successfully!`);
+      // The server assigns the real code — show and keep that, not the preview.
+      const savedCode = res.data?.patient_code || effectivePatientId;
+      reconcilePatientCode(effectivePatientId, savedCode, customerId);
+      fetchNextPatientId();
+      alert(`Patient "${patientData.name}" (${savedCode}) saved successfully!`);
     } catch (e) {
       // Surface the real reason (validation error / offline / server error) instead of a
       // generic message — a silent guess here is what made this failure impossible to
@@ -1329,6 +1393,11 @@ export default function OpticalServices() {
   };
 
   const handleSaveDraft = async () => {
+    // A reopened visit waiting for edit approval is read-only (see gateExamEdit).
+    if (editingExamId && editLockNotice) {
+      alert('This examination is read-only until an admin approves your edit request.');
+      return;
+    }
     if (!validateClinicalRecord()) return;
 
     // See savingDraftRef's declaration — refuse a second overlapping call so a bounced
@@ -1512,21 +1581,23 @@ export default function OpticalServices() {
         medical_aid_scheme: patientData?.medicalAidScheme || '',
         medical_aid_member_number: patientData?.medicalAidMemberNumber || ''
       };
+      // The Customer's server-assigned code is the Patient ID this visit is filed under.
+      let customerCode = '';
       try {
-        if (customerId) {
-          await axios.patch(`/api/sales/customers/${customerId}/`, customerApiPayload);
-        } else {
-          const res = await axios.post('/api/sales/customers/', customerApiPayload);
-          if (res.data?.id) {
-            customerId = res.data.id;
-            setPatientData(prev => ({ ...prev, customerId }));
-          }
+        const res = customerId
+          ? await axios.patch(`/api/sales/customers/${customerId}/`, customerApiPayload)
+          : await axios.post('/api/sales/customers/', customerApiPayload);
+        if (res.data?.id && !customerId) {
+          customerId = res.data.id;
+          setPatientData(prev => ({ ...prev, customerId }));
         }
+        customerCode = res.data?.patient_code || '';
+        if (customerCode) reconcilePatientCode(effectivePatientId, customerCode, customerId);
       } catch (e) {}
 
       const dbPayload = {
         customer: customerId || null,
-        patient_id: effectivePatientId,
+        patient_id: customerCode || effectivePatientId,
         // Test No is assigned by the server from the shared atomic sequence at submit time
         // (EyeExaminationViewSet.perform_create) — never predicted here. We only pass a value
         // through when it was already minted by the backend for the appointment this exam was
@@ -1631,8 +1702,9 @@ export default function OpticalServices() {
         // screen after saving, clicking Save again for the same patient must PATCH this same
         // exam instead of silently POSTing a second duplicate one.
         if (res.data?.id) setEditingExamId(res.data.id);
-        alert(`Clinical Examination & Prescription for ${patientData.name} (${effectivePatientId}) saved to database!`);
+        alert(`Clinical Examination & Prescription for ${patientData.name} (${savedExam?.patient_id || effectivePatientId}) saved to database!`);
         fetchNextTestNo();
+        fetchNextPatientId();
       }
 
       // The server owns Test No / Patient ID (perform_create assigns Test No from the shared
@@ -1680,6 +1752,8 @@ export default function OpticalServices() {
       // Lock the form now that this visit is on record — re-enabled by "New Patient" or by
       // reopening this exact record via the history table's Edit icon.
       setIsRecordLocked(true);
+      editGateRef.current += 1;
+      setEditLockNotice('');
     } catch (e) {
       console.warn("API database save notice:", e);
       alert(`Saved locally, but syncing "${patientData.name}"'s record to the database failed. Please check your connection and try Save again.`);
@@ -1852,6 +1926,7 @@ export default function OpticalServices() {
             nextPatientId={getNextPatientId()}
             testNo={diagnosis?.testNo}
             isLocked={isRecordLocked}
+            lockedLabel={isRecordLocked ? editLockNotice : ''}
             onSelectExamFromHistory={(exam) => {
               // Loading a past exam here means "resume/correct this exact visit" — it must
               // mark the form as editing that record (and restore its real test_no) so Save
@@ -1862,7 +1937,9 @@ export default function OpticalServices() {
               // Also this is the app's "Edit" action — unlock the form so this record's fields
               // become editable again (see isRecordLocked).
               setEditingExamId(exam.backendId || null);
-              setIsRecordLocked(false);
+              // Direct Edit 'eye_test' OFF: the visit loads read-only and the "Edit Permission
+              // Required" dialog asks for approval (utils/editPermissions.js).
+              gateExamEdit(exam.backendId, exam.testNo || exam.test_no || exam.patientId);
               // This visit's identity — take it from whichever field carries it, never leave it
               // blank, or the next Save would mint a brand-new Patient ID / Test No.
               const lockedPatientId = exam.patientId || exam.patientData?.id || exam.patient_id || '';

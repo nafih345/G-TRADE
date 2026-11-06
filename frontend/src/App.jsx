@@ -7,6 +7,7 @@ import { BranchProvider } from './context/BranchContext';
 import Sidebar from './components/Sidebar';
 import Header from './components/Header';
 import NotificationHost from './components/NotificationHost';
+import EditPermissionHost from './components/EditPermissionHost';
 import ReauthDialogHost from './components/security/ReauthDialogHost';
 import SessionActivityMonitor from './components/security/SessionActivityMonitor';
 import { loadBusinessPrefs } from './utils/businessPrefs';
@@ -332,6 +333,7 @@ function MainLayout() {
                 <Route path="/admin/barcode-settings" element={<Administration />} />
                 <Route path="/admin/barcode-printing" element={<Navigate to="/admin/barcode-settings" replace />} />
                 <Route path="/admin/roles" element={<Administration />} />
+                <Route path="/admin/edit-requests" element={<Administration />} />
                 <Route path="/admin/permissions" element={<Administration />} />
                 <Route path="/admin/audit" element={<Administration />} />
                 <Route
@@ -374,6 +376,7 @@ function MainLayout() {
         </Box>
       </Box>
       <NotificationHost />
+      <EditPermissionHost />
       <ReauthDialogHost />
       <SessionActivityMonitor />
     </ThemeProvider>

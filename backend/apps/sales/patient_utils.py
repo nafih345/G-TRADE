@@ -9,34 +9,101 @@ A single UPDATE statement has no such window on either Postgres or SQLite.
 
 Mirrors apps.products.barcode_utils.reserve_barcodes.
 """
+import re
+
 from django.db import transaction, connection
 
-from .models import PatientCodeSequence, TestNoSequence, EyeExamination, Appointment
+from .models import PatientCodeSequence, TestNoSequence, EyeExamination, Appointment, Customer
 from apps.common.sequences import bump_sequence
 
 DEFAULT_PREFIX = 'P'
 TEST_NO_PREFIX = ''  # Test No is displayed as a bare number (1001, 1002…), unlike patient_code's "P-" prefix
 
 
-def reserve_patient_codes(prefix=DEFAULT_PREFIX, count=1):
-    """Atomically reserves `count` sequential patient codes (e.g. P-1001) for `prefix`."""
-    new_last = bump_sequence(PatientCodeSequence, {'prefix': prefix}, count, defaults={'last_number': 1000})
-    start = new_last - count + 1
-    return [f"{prefix}-{start + i}" for i in range(count)]
+PATIENT_CODE_BASE = 1000  # first code handed out is P-1001
+
+
+def is_auto_patient_code(code, prefix=DEFAULT_PREFIX):
+    """True for a code in the auto-generated series shape ("P-1004", "p1004")."""
+    return bool(re.fullmatch(rf'{re.escape(prefix)}-?\d+', str(code or '').strip(), re.IGNORECASE))
+
+
+def _code_number(code, prefix=DEFAULT_PREFIX):
+    m = re.fullmatch(rf'{re.escape(prefix)}-?(\d+)', str(code or '').strip(), re.IGNORECASE)
+    return int(m.group(1)) if m else None
+
+
+def max_used_patient_number(prefix=DEFAULT_PREFIX):
+    """Highest numeric suffix of any "P-NNNN" code already in use in the current tenant — on
+    a Customer (soft-deleted ones too: they still hold the UNIQUE slot) or on an EyeExamination
+    (exams saved before their Customer existed carry the code only in patient_id). Both managers
+    are tenant-scoped. This is what keeps the series correct even when the counter row lags
+    (codes accepted from a client, imported, renumbered, or a freshly created counter)."""
+    codes = list(
+        Customer.all_objects.filter(patient_code__istartswith=prefix)
+        .values_list('patient_code', flat=True)
+    ) + list(
+        EyeExamination.all_objects.filter(patient_id__istartswith=prefix)
+        .values_list('patient_id', flat=True).distinct()
+    )
+    nums = [n for n in (_code_number(c, prefix) for c in codes) if n is not None]
+    return max(nums, default=PATIENT_CODE_BASE)
+
+
+def _patient_code_in_use(code):
+    return (
+        Customer.all_objects.filter(patient_code__iexact=code).exists()
+        or EyeExamination.all_objects.filter(patient_id__iexact=code).exists()
+    )
+
+
+def sync_patient_code_sequence(number, prefix=DEFAULT_PREFIX):
+    """Advance the tenant's patient-code counter so it is at least `number` (never moves back)."""
+    # bump by 0 = "make sure the tenant's row exists" without consuming a number.
+    bump_sequence(PatientCodeSequence, {'prefix': prefix}, 0, defaults={'last_number': PATIENT_CODE_BASE})
+    # One conditional UPDATE (tenant-scoped manager) — concurrent syncs can only raise it.
+    PatientCodeSequence.objects.filter(prefix=prefix, last_number__lt=number).update(last_number=number)
+
+
+def reserve_patient_codes(prefix=DEFAULT_PREFIX, count=1, heal=False):
+    """Atomically reserves `count` sequential patient codes (e.g. P-1004) for `prefix`.
+
+    Steady state is ONE atomic UPDATE ... RETURNING (race-safe on Postgres and SQLite; one
+    round trip on the hosted DB). The counter stays ahead of every code in use because auto
+    codes only ever come from here (the client's preview is never stored — see
+    CustomerViewSet.perform_create) and migration 0031 lifted every tenant's counter past its
+    existing codes. `heal=True` (the IntegrityError retry path) additionally re-syncs the
+    counter to the highest code in use and skips any number still taken."""
+    if heal:
+        sync_patient_code_sequence(max_used_patient_number(prefix), prefix)
+    out = []
+    guard = 0
+    while len(out) < count and guard < 10000:
+        guard += 1
+        new_last = bump_sequence(PatientCodeSequence, {'prefix': prefix}, 1,
+                                 defaults={'last_number': PATIENT_CODE_BASE})
+        code = f"{prefix}-{new_last}"
+        if heal and _patient_code_in_use(code):
+            continue
+        out.append(code)
+    return out
 
 
 def peek_next_patient_code(prefix=DEFAULT_PREFIX):
     """
-    Read-only preview of the code reserve_patient_codes would hand out next — does NOT
-    consume the sequence. Lets the New Appointment dialog show the front desk a real,
-    always-current "next patient ID" before a patient is actually saved, instead of the old
-    client-side approach of scanning whatever patient list happened to be loaded in the
-    browser and guessing the max+1 — which visibly got stuck repeating the same ID whenever
-    that scan missed a recently-added patient (stale/incomplete local list, a save that
-    failed silently, etc).
+    Preview of the code reserve_patient_codes will hand out next — does NOT consume a
+    number. The Eye Test and New Appointment screens show this as the "next patient ID"; it is
+    only a preview — the real code is assigned at save time (CustomerViewSet.perform_create),
+    so two devices showing the same preview still get different codes.
+
+    Inspects the highest code actually in use in this tenant, so with P-1001..P-1003 on file it
+    answers P-1004 even if the counter row lags; a lagging counter is lifted here as well.
     """
-    seq, _ = PatientCodeSequence.objects.get_or_create(prefix=prefix, defaults={'last_number': 1000})
-    return f"{prefix}-{seq.last_number + 1}"
+    seq = PatientCodeSequence.objects.filter(prefix=prefix).values_list('last_number', flat=True).first()
+    used = max_used_patient_number(prefix)
+    if seq is None or used > seq:
+        sync_patient_code_sequence(used, prefix)
+    return f"{prefix}-{max(seq or PATIENT_CODE_BASE, used) + 1}"
 
 
 def reserve_test_numbers(count=1):

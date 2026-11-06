@@ -7,6 +7,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import DecimalField as ModelDecimalField, Prefetch, Q, prefetch_related_objects
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
+from apps.authentication.edit_permissions import EditApprovalMixin
 from apps.common.pagination import PageSizePagination
 from rest_framework import viewsets, permissions, serializers
 from rest_framework.decorators import action
@@ -23,7 +24,7 @@ from .lens_units import (
     PAIR, SELLING_UNITS, clean_lens_line, incomplete_lens_lines, stock_units_by_product,
 )
 from .patient_utils import (
-    reserve_patient_codes, peek_next_patient_code, peek_next_test_no,
+    reserve_patient_codes, peek_next_patient_code, peek_next_test_no, is_auto_patient_code,
     reserve_unused_test_numbers, sync_test_no_sequence,
     find_duplicate_customer, find_duplicate_exam,
 )
@@ -45,6 +46,13 @@ class SalesListPagination(PageSizePagination):
 
 
 class CustomerSerializer(ModelSerializer):
+    # No auto UniqueValidator: a client's patient_code is only its on-screen preview, and
+    # CustomerViewSet.perform_create/perform_update replace a taken one with a fresh code.
+    # Rejecting it with 400 here made the Eye Test save silently skip creating the Customer and
+    # file the exam under the stale preview — several patients ended up as P-1001.
+    patient_code = serializers.CharField(required=False, allow_blank=True, allow_null=True,
+                                         max_length=20, validators=[])
+
     class Meta:
         model = Customer
         fields = '__all__'
@@ -481,8 +489,15 @@ class CustomerViewSet(viewsets.ModelViewSet):
         # Checking only the active manager let a client-previewed code that collided with a
         # soft-deleted row sail past this check and then hit an unhandled IntegrityError (500)
         # on the actual INSERT.
-        patient_code = serializer.validated_data.get('patient_code')
-        if not patient_code or Customer.all_objects.filter(patient_code=patient_code).exists():
+        #
+        # A code in the auto series ("P-1004") from the client is only ever its on-screen
+        # preview — possibly stale (another device saved meanwhile) or guessed from an
+        # incomplete patient list, which is how several patients ended up as P-1001. It is
+        # never trusted: the next number always comes from the server's sequence. Only a
+        # custom, non-series code (e.g. a legacy card number typed in) is kept when free.
+        patient_code = (serializer.validated_data.get('patient_code') or '').strip()
+        if (not patient_code or is_auto_patient_code(patient_code)
+                or Customer.all_objects.filter(patient_code__iexact=patient_code).exists()):
             patient_code = reserve_patient_codes()[0]
 
         # The exists()-then-insert check above still has a TOCTOU race window: two requests
@@ -500,13 +515,34 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 attempts_left -= 1
                 if attempts_left <= 0:
                     raise
-                patient_code = reserve_patient_codes()[0]
+                patient_code = reserve_patient_codes(heal=True)[0]
+
+    def perform_update(self, serializer):
+        # A patient's code is their permanent ID: an edit can never move it onto another
+        # patient's code (or a guessed series number). A legacy row with no code gets one.
+        instance = serializer.instance
+        requested = (serializer.validated_data.get('patient_code') or '').strip()
+        current = instance.patient_code
+        if current:
+            keep = (not requested or requested == current or is_auto_patient_code(requested)
+                    or Customer.all_objects.filter(patient_code__iexact=requested)
+                    .exclude(pk=instance.pk).exists())
+            code = current if keep else requested
+        else:
+            code = requested if (requested and not is_auto_patient_code(requested) and not
+                                 Customer.all_objects.filter(patient_code__iexact=requested).exists()) \
+                else reserve_patient_codes()[0]
+        serializer.save(patient_code=code)
 
     @action(detail=False, methods=['get'], url_path='next-patient-code')
     def next_patient_code(self, request):
         return Response({'patient_code': peek_next_patient_code()})
 
-class EyeExaminationViewSet(viewsets.ModelViewSet):
+class EyeExaminationViewSet(EditApprovalMixin, viewsets.ModelViewSet):
+    # Direct Edit switch 'eye_test' (Administration → Edit Permissions): with it OFF a saved visit
+    # is changed only through an approved edit request.
+    edit_module = 'eye_test'
+    edit_ref_fields = ('test_no', 'patient_id')
     queryset = EyeExamination.objects.all().order_by('-examination_date')
     serializer_class = EyeExaminationSerializer
     permission_classes = [permissions.AllowAny]
@@ -586,10 +622,11 @@ class EyeExaminationViewSet(viewsets.ModelViewSet):
         # (migration 0016). If two requests race past the checks above onto the same number
         # the loser lands here instead of persisting a duplicate — re-roll and retry, the
         # same recovery CustomerViewSet.perform_create uses for patient_code.
+        patient_id = self._resolve_patient_id(serializer)
         for attempts_left in (2, 1, 0):
             try:
                 with transaction.atomic():
-                    serializer.save(test_no=test_no)
+                    serializer.save(test_no=test_no, **patient_id)
                 return
             except IntegrityError:
                 if attempts_left <= 0:
@@ -607,7 +644,34 @@ class EyeExaminationViewSet(viewsets.ModelViewSet):
             preserved['test_no'] = instance.test_no
         if 'patient_id' in data and not data.get('patient_id'):
             preserved['patient_id'] = instance.patient_id
+        customer = data.get('customer', instance.customer)
+        if customer is not None and customer.patient_code:
+            # The linked patient's permanent code wins over whatever the form held.
+            preserved['patient_id'] = customer.patient_code
         serializer.save(**preserved)
+
+    @staticmethod
+    def _resolve_patient_id(serializer):
+        """Patient ID for a new exam. The client's value is its on-screen preview and can be a
+        stale guess (that is how several exams ended up as P-1001), so: a linked Customer's
+        patient_code always wins; an auto-series code with no linked Customer is only kept when
+        it already belongs to a Customer of the same name (then the exam is linked to them),
+        otherwise a fresh code is reserved from the sequence. Custom codes pass through."""
+        data = serializer.validated_data
+        customer = data.get('customer')
+        if customer is not None and customer.patient_code:
+            return {'patient_id': customer.patient_code}
+        requested = (data.get('patient_id') or '').strip()
+        if customer is not None or not is_auto_patient_code(requested):
+            return {}
+        owner = Customer.objects.filter(patient_code__iexact=requested).first()
+        name = ' '.join(str(data.get('patient_name') or '').split()).lower()
+        if owner is not None and ' '.join(owner.name.split()).lower() == name:
+            return {'patient_id': owner.patient_code, 'customer': owner}
+        if owner is None and name and EyeExamination.objects.filter(
+                patient_id__iexact=requested, patient_name__iexact=data.get('patient_name', '').strip()).exists():
+            return {}  # a returning patient whose earlier visits carry this code
+        return {'patient_id': reserve_patient_codes()[0]}
 
     @action(detail=False, methods=['get'], url_path='next-test-no')
     def next_test_no(self, request):
@@ -669,7 +733,11 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         test_no = reserve_unused_test_numbers()[0]
         serializer.save(appointment_code=appointment_code, test_no=test_no)
 
-class InvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
+class InvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewsets.ModelViewSet):
+    edit_module = 'sales'
+    edit_ref_fields = ('invoice_number',)
+    # Orders' "Update payment / delivery status" dialog and Mark Delivered aren't bill edits.
+    edit_exempt_fields = ('fulfillment_status', 'delivered_at', 'fulfillment_notes', 'paid_amount', 'payment_method')
     queryset = Invoice.objects.all()
     serializer_class = InvoiceSerializer
     pagination_class = SalesListPagination
@@ -1377,7 +1445,16 @@ class WholesaleDeliveryChallanViewSet(viewsets.ModelViewSet):
     serializer_class = WholesaleDeliveryChallanSerializer
     permission_classes = [permissions.AllowAny]
 
-class WholesaleInvoiceViewSet(viewsets.ModelViewSet):
+class WholesaleInvoiceViewSet(EditApprovalMixin, viewsets.ModelViewSet):
+    edit_module = 'wholesale'
+    edit_ref_fields = ('invoice_number',)
+    edit_draft_statuses = ('Draft',)
+    edit_exempt_fields = ('details',)
+
+    def edit_is_exempt(self, request, row):
+        # The sync's one-off backfill of `details` onto a row posted before details existed.
+        return set(request.data or {}) == {'details'} and not row.get('details')
+
     queryset = WholesaleInvoice.objects.select_related('dealer').order_by('-invoice_date', '-created_at')
     serializer_class = WholesaleInvoiceSerializer
     permission_classes = [permissions.AllowAny]

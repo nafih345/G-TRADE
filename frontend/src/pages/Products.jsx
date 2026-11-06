@@ -29,6 +29,7 @@ import ConfirmActionDialog from '../components/common/ConfirmActionDialog';
 import BarcodePrintDialog from '../components/inventory/BarcodePrintDialog';
 import BarcodeManageDialog from '../components/inventory/BarcodeManageDialog';
 import ProductMasterDialog from '../components/inventory/ProductMasterDialog';
+import { ensureEditAccess } from '../utils/editPermissions';
 import ProductVariantMaster from '../components/inventory/variants/ProductVariantMaster';
 import VariantImportDialog from '../components/inventory/variants/VariantImportDialog';
 
@@ -201,7 +202,14 @@ export default function Products() {
     setAddProductCategory('Frames');
     setOpen(true);
   };
-  const handleOpenEdit = (product) => {
+  const handleOpenEdit = async (product) => {
+    // Direct Edit 'inventory' OFF: the product opens for editing only once an admin approved an
+    // edit request for it (utils/editPermissions.js).
+    const ok = await ensureEditAccess({
+      module: 'inventory', recordId: String(product?.id || ''),
+      recordRef: [product?.name, product?.sku].filter(Boolean).join(' · '),
+    });
+    if (!ok) return;
     setEditProduct(product);
     setAddProductCategory(product.category || 'Frames');
     setOpen(true);

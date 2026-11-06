@@ -29,6 +29,7 @@ import { useBranch } from '../context/BranchContext';
 import GreensolLogo from './GreensolLogo';
 import { confirmLeave } from '../utils/navigationGuard';
 import { canOpenModule } from '../utils/moduleAccess';
+import { fetchPendingEditCount } from '../utils/editPermissions';
 
 const DRAWER_WIDTH = 280;
 
@@ -175,6 +176,7 @@ const menuItems = [
       { text: 'Barcode Settings', path: '/admin/barcode-settings' },
       { text: 'Roles', path: '/admin/roles' },
       { text: 'Permissions', path: '/admin/permissions' },
+      { text: 'Edit Requests', path: '/admin/edit-requests', badgeKey: 'editRequests' },
       { text: 'Audit Logs', path: '/admin/audit' }
     ]
   },
@@ -207,6 +209,19 @@ export default function Sidebar({ open, toggleSidebar, isMobile = false }) {
   const location = useLocation();
   const [expanded, setExpanded] = useState({});
   const [nestedExpanded, setNestedExpanded] = useState({ Vouchers: true });
+
+  // Pending edit requests for admin staff (Administration → Edit Requests badge).
+  const [badges, setBadges] = useState({});
+  const isAdminStaff = ['SUPER_ADMIN', 'ADMINISTRATOR', 'BRANCH_ADMIN'].includes((user?.role || '').toUpperCase())
+    || Boolean(user?.is_platform_admin);
+  useEffect(() => {
+    if (!isAdminStaff) return undefined;
+    let alive = true;
+    const load = () => fetchPendingEditCount().then((n) => { if (alive) setBadges(b => ({ ...b, editRequests: n })); });
+    load();
+    const timer = setInterval(load, 60000);
+    return () => { alive = false; clearInterval(timer); };
+  }, [isAdminStaff, location.pathname]);
 
   // On mobile the drawer is a full-screen overlay, so a nav click should dismiss it as well as
   // navigate — otherwise the menu would still be covering the page after selecting a route.
@@ -372,6 +387,12 @@ export default function Sidebar({ open, toggleSidebar, isMobile = false }) {
                             }}
                           >
                             <ListItemText primary={sub.text} primaryTypographyProps={{ fontSize: '0.82rem', fontWeight: isSubActive ? 700 : 500 }} />
+                            {sub.badgeKey && badges[sub.badgeKey] > 0 && (
+                              <Box component="span" sx={{ ml: 1, px: 0.9, minWidth: 20, height: 20, borderRadius: 10, bgcolor: 'error.main',
+                                color: '#fff', fontSize: 11, fontWeight: 800, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
+                                {badges[sub.badgeKey] > 99 ? '99+' : badges[sub.badgeKey]}
+                              </Box>
+                            )}
                             {hasChildren && (isNestedExpanded ? <ExpandLess sx={{ fontSize: 16 }} /> : <ExpandMore sx={{ fontSize: 16 }} />)}
                           </ListItemButton>
 

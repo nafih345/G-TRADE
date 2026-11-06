@@ -19,6 +19,7 @@ import { useBranch } from '../../context/BranchContext';
 import { useStoreProfile, companyFromProfile } from '../../utils/storeProfile';
 import { formatDate, formatMoney } from '../../utils/localeFormat';
 import { notify } from '../../utils/notify';
+import { ensureEditAccess } from '../../utils/editPermissions';
 import { CHEQUE_STATUSES, chequeEditPayload, daysLeftLabel, localYmd } from '../../utils/cheques';
 
 const NAVY = '#0f1e3d';
@@ -158,6 +159,12 @@ export default function ChequeRegister() {
   const [menu, setMenu] = useState(null);         // { anchor, row }
   const [statusTarget, setStatusTarget] = useState(null);
   const [editRow, setEditRow] = useState(null);
+  // Correcting a cheque's details rewrites its posted voucher: Direct Edit 'accounts' or an approved request.
+  const openChequeEdit = async (row) => {
+    if (!row) return;
+    if (!(await ensureEditAccess({ module: 'accounts', recordId: String(row.id), recordRef: `Cheque ${row.cheque_number || ''}`.trim() }))) return;
+    setEditRow(row);
+  };
   const [editSaving, setEditSaving] = useState(false);
   const [printing, setPrinting] = useState(false);
 
@@ -396,7 +403,7 @@ export default function ChequeRegister() {
                     <Tooltip title={r.status === 'CANCELLED' ? 'A cancelled cheque cannot be edited' : 'Edit cheque details'}>
                       <span>
                         <IconButton size="small" color="primary" disabled={r.status === 'CANCELLED'} aria-label={`Edit cheque ${r.cheque_number}`}
-                          onClick={() => setEditRow(r)}>
+                          onClick={() => openChequeEdit(r)}>
                           <EditIcon fontSize="small" />
                         </IconButton>
                       </span>
@@ -435,7 +442,7 @@ export default function ChequeRegister() {
           </MenuItem>
         ))}
         {menu && (
-          <MenuItem onClick={() => { setEditRow(menu.row); setMenu(null); }}>
+          <MenuItem onClick={() => { openChequeEdit(menu.row); setMenu(null); }}>
             <ListItemText primary="Edit Cheque Details" secondary="Correct the number, dates, bank, drawer / payee, status or remarks." />
           </MenuItem>
         )}

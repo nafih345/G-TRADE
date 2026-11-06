@@ -11,6 +11,7 @@ import {
   CheckCircle as CheckIcon, Delete as DeleteIcon,
 } from '@mui/icons-material';
 import { apiError, finDelete, finGet, finPost, inr, sourceLabel } from './financialApi';
+import { ensureEditAccess } from '../../utils/editPermissions';
 
 const head = { fontWeight: 700 };
 const TYPE_COLORS = { RV: 'success', PV: 'error', CV: 'info', JV: 'secondary' };
@@ -180,7 +181,11 @@ export default function VoucherRegister({ showToast, onChanged, refreshKey }) {
                             ? 'Posted automatically — correct or cancel the source document instead where possible'
                             : 'Create an immutable reversal entry'}>
                             <Button size="small" variant="outlined" color="warning" startIcon={<ReverseIcon />}
-                              onClick={() => { setReverseTarget(j); setReason(''); }}
+                              onClick={async () => {
+                                // Reversing changes the ledger: Direct Edit 'accounts' or an approved request.
+                                if (!(await ensureEditAccess({ module: 'accounts', recordId: String(j.id), recordRef: j.entry_number }))) return;
+                                setReverseTarget(j); setReason('');
+                              }}
                               sx={{ textTransform: 'none', fontWeight: 700, fontSize: '0.72rem' }}>Reverse</Button>
                           </Tooltip>
                         )}

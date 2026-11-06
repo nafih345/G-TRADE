@@ -8,6 +8,7 @@ from django.db.models import Prefetch
 from django.utils import timezone
 from .models import Supplier, PurchaseOrder, PurchaseOrderItem, PurchaseInvoice, PurchaseInvoiceItem
 from .supplier_utils import reserve_supplier_codes, get_or_create_supplier_ledger_account
+from apps.authentication.edit_permissions import EditApprovalMixin
 from apps.inventory.models import StockLedger
 from apps.inventory.stock_utils import adjust_branch_stock, adjust_branch_stock_many
 from apps.products.models import Product
@@ -296,7 +297,11 @@ def _accounting_status(invoice_id):
     }
 
 
-class PurchaseInvoiceViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
+class PurchaseInvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewsets.ModelViewSet):
+    edit_module = 'purchase'
+    edit_ref_fields = ('invoice_number', 'supplier_invoice_number')
+    edit_draft_statuses = ('DRAFT',)
+    edit_exempt_fields = ('attachment',)
     # Joined/prefetched so serializing a list (or the save response) costs a few queries
     # instead of supplier + bank + every line's product, one round trip each.
     queryset = PurchaseInvoice.objects.all().order_by('-purchase_date', '-created_at') \
