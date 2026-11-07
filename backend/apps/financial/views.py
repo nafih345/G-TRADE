@@ -13,7 +13,7 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
-from . import (accounts_reports, bankbook, cashbook, cheques, daybook, integration, reports, settlements, statements,
+from . import (accounts_reports, bankbook, cashbook, cheques, daybook, expense_categories, integration, reports, settlements, statements,
                transactions, voucher_report)
 from .accounting_catalog import SOURCES, ROLES
 from .mapping import role_status, save_mapping, deactivate_mapping, accounts_in_active_mappings
@@ -144,6 +144,23 @@ class ChartOfAccountViewSet(FinanceViewSetMixin, viewsets.ModelViewSet):
         acc.save(update_fields=['is_deleted', 'updated_at'])
         audit('ACCOUNT_DELETED', 'account', acc.pk, f"{acc.code} - {acc.name}", user=request.user)
         return Response({'message': f"Account '{acc.code}' deleted successfully."})
+
+    @action(detail=False, methods=['post'], url_path='expense-category')
+    def expense_category(self, request):
+        """Quick-add an expense category from Record Expense = a new Expense ledger under
+        Indirect (default) or Direct Expenses, so it shows in the P&L, Trial Balance and Ledger."""
+        from rest_framework import serializers as drf_serializers
+        try:
+            acc = expense_categories.create_expense_category(request.data, request.user)
+        except drf_serializers.ValidationError as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {'error': exc.detail}
+            flat = {k: (v[0] if isinstance(v, list) and v else v) for k, v in detail.items()}
+            flat.setdefault('error', flat.get('name') or flat.get('expense_type') or 'Invalid category.')
+            return Response(flat, status=status.HTTP_400_BAD_REQUEST)
+        audit('ACCOUNT_CREATED', 'account', acc.pk, f"{acc.code} - {acc.name} (expense category)", user=request.user)
+        data = ChartOfAccountSerializer(acc).data
+        data['expense_type'] = expense_categories.expense_type_of(acc)
+        return Response(data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['get'])
     def ledger(self, request, pk=None):

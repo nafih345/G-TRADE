@@ -280,6 +280,9 @@ class Payment(BaseUUIDModel):
     # BANK / UPI payments: which bank ledger (a BANK-subtype Chart of Accounts row) the money
     # went to or came from. Blank = the generic Bank / UPI role mapping (see financial/banks.py).
     bank_account = models.ForeignKey('financial.ChartOfAccount', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    # Card / UPI / Bank Transfer: the optional Reference / UTR number typed at the counter. Bank
+    # Book shows it as the row's reference (a Bank Book ✎ detail still overrides it).
+    reference_no = models.CharField(max_length=80, blank=True, default='')
 
     class Meta:
         ordering = ['-payment_date', '-created_at']

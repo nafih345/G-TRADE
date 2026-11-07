@@ -28,7 +28,10 @@ const PAY_MODES = [
   { value: 'Bank', label: 'Bank Transfer', method: 'Bank Transfer' },
   { value: 'Cheque', label: 'Cheque', method: 'Cheque' },
   { value: 'UPI', label: 'UPI / Digital', method: 'UPI' },
+  { value: 'Card', label: 'Card', method: 'Card' },
 ];
+// Placeholder of the Ref column per pay mode (all optional).
+const REF_HINT = { Bank: 'UTR No', UPI: 'UPI Ref / UTR No', Card: 'Card Approval / Ref No', Cheque: 'Cheque No' };
 const methodOf = (payMode) => (PAY_MODES.find(m => m.value === payMode) || PAY_MODES[0]).method;
 const PARTY_KIND_LABEL = { customer: 'Customer', dealer: 'Dealer', supplier: 'Supplier' };
 
@@ -167,7 +170,9 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
     }
     paymentLines.forEach((p, i) => {
       if (num(p.amount) < 0) out.push(`Payment ${i + 1}: amount cannot be negative.`);
-      if (num(p.amount) > 0 && p.payMode !== 'Cash' && !bankFor(p) && !isBill) out.push(`Payment ${i + 1}: choose the bank account.`);
+      if (num(p.amount) > 0 && p.payMode !== 'Cash' && !bankFor(p)) {
+        out.push(`Payment ${i + 1} (${(PAY_MODES.find(m => m.value === p.payMode) || {}).label}): select the bank account it was ${isReceipt ? 'received in' : 'paid from'}.`);
+      }
       if (num(p.amount) > 0 && isChequeLine(p)) {
         const issues = validateCheque(p.cheque, p.amount);
         if (issues.length) out.push(`Payment ${i + 1} (Cheque): ${issues[0]}.`);
@@ -906,7 +911,9 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
                 <TableCell sx={{ fontWeight: 700, minWidth: 150 }}>Pay Mode *</TableCell>
                 <TableCell sx={{ fontWeight: 700, minWidth: 160 }}>{refHeader}</TableCell>
                 <TableCell sx={{ fontWeight: 700, minWidth: 140 }}>{refDateHeader}</TableCell>
-                <TableCell sx={{ fontWeight: 700, minWidth: 220 }}>Bank Account (Non-Cash)</TableCell>
+                <TableCell sx={{ fontWeight: 700, minWidth: 220 }}>
+                  {isReceipt ? 'Received In (Bank Account)' : isPayment ? 'Paid From (Bank Account)' : 'Bank Account'} * <Typography component="span" variant="caption" color="text.secondary">(non-cash)</Typography>
+                </TableCell>
                 <TableCell sx={{ fontWeight: 700, width: 50 }} align="center">Act</TableCell>
               </TableRow>
             </TableHead>
@@ -934,7 +941,7 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
                         onChange={(e) => setCheque(line, { chequeNumber: e.target.value })} />
                     ) : (
                       <TextField size="small" fullWidth disabled={locked} value={line.refNo} sx={cellInput}
-                        placeholder={line.payMode === 'Cheque' ? 'Cheque No' : line.payMode === 'UPI' ? 'UTR / Ref No' : 'Ref No'}
+                        placeholder={line.payMode === 'Cash' ? 'Ref No' : `${REF_HINT[line.payMode] || 'Ref No'} (optional)`}
                         onChange={(e) => setPayment(line.id, { refNo: e.target.value })} />
                     )}
                   </TableCell>
@@ -953,7 +960,7 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
                     {line.payMode === 'Cash' ? (
                       <Typography variant="body2" color="text.secondary">{cashAccount ? `${cashAccount.code} - ${cashAccount.name}` : 'N/A (Cash)'}</Typography>
                     ) : (
-                      <PaymentModeDetails compact method={methodOf(line.payMode)} bankAccount={line.bankAccount} disabled={locked}
+                      <PaymentModeDetails compact required={num(line.amount) > 0} method={methodOf(line.payMode)} bankAccount={line.bankAccount} disabled={locked}
                         onBankAccountChange={(id) => setPayment(line.id, { bankAccount: id })} />
                     )}
                   </TableCell>

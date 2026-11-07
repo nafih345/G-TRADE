@@ -130,12 +130,45 @@ class BankApiTests(APITestCase):
             res = self.client.post('/api/sales/invoices/', body, format='json')
         self.assertEqual(res.status_code, 201, res.content)
         again = self.client.get(f"/api/sales/invoices/{res.data['id']}/").data
-        self.assertEqual(again['payment_banks'], {'upi': str(bank.pk), 'bank': None})
+        self.assertEqual(again['payment_banks'], {'card': None, 'upi': str(bank.pk), 'bank': None})
         self.assertEqual(balance('100201'), D('200'))
 
         cash = ChartOfAccount.objects.get(code='1001')
         bad = self.client.post('/api/sales/invoices/', {**body, 'payment_banks': {'upi': str(cash.pk)}}, format='json')
         self.assertEqual(bad.status_code, 400)
+
+    def test_card_upi_bank_need_a_bank_and_keep_their_utr(self):
+        hdfc, sbi = make_bank(), make_bank('SBI Savings', '100202')
+        body = {'document_type': 'INVOICE', 'invoice_date': TODAY.isoformat(), 'status': 'PAID',
+                'total_amount': 1000, 'net_amount': 1000, 'items': [], 'customer_name': 'Ravi',
+                'payment_splits': {'cash': 100, 'card': 400, 'upi': 300, 'bank': 200},
+                'payment_banks': {'card': str(hdfc.pk), 'upi': str(sbi.pk), 'bank': None},
+                'payment_references': {'card': 'APPR-77', 'upi': 'UTR123456', 'bank': ''}}
+        # A digital amount without its bank is refused, and nothing is saved.
+        missing = self.client.post('/api/sales/invoices/', body, format='json')
+        self.assertEqual(missing.status_code, 400)
+        self.assertIn('Bank Transfer', str(missing.data['payment_banks']))
+        self.assertFalse(Invoice.objects.filter(customer_name='Ravi').exists())
+
+        body['payment_banks']['bank'] = str(sbi.pk)
+        with self.captureOnCommitCallbacks(execute=True):
+            res = self.client.post('/api/sales/invoices/', body, format='json')
+        self.assertEqual(res.status_code, 201, res.content)
+        self.assertEqual(res.data['payment_banks'], {'card': str(hdfc.pk), 'upi': str(sbi.pk), 'bank': str(sbi.pk)})
+        self.assertEqual(res.data['payment_references'], {'card': 'APPR-77', 'upi': 'UTR123456', 'bank': ''})
+        self.assertEqual(balance('100201'), D('400'))   # card settles into HDFC
+        self.assertEqual(balance('100202'), D('500'))   # UPI + transfer into SBI
+        self.assertEqual(balance('1002'), 0)
+        upi = Payment.objects.get(invoice_id=res.data['id'], method='UPI')
+        self.assertEqual(upi.reference_no, 'UTR123456')
+
+        # A bank-less request (older client, no payment_banks) still falls back to the mapping.
+        legacy = {k: v for k, v in body.items() if k not in ('payment_banks', 'payment_references')}
+        legacy['customer_name'] = 'Legacy'
+        self.assertEqual(self.client.post('/api/sales/invoices/', legacy, format='json').status_code, 201)
+        self.client.force_authenticate(make_user('ACCOUNTANT'))
+        book = self.client.get('/api/financial/reports/bankbook/', {'account': str(sbi.pk)}).data
+        self.assertIn('UTR123456', [r['reference'] for r in book['rows']])
 
     def test_purchase_serializer_drops_stale_bank_and_zeroes_unpaid_cash(self):
         supplier = Supplier.objects.create(name='Hoya', supplier_code='SUP-10')

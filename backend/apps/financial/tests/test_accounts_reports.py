@@ -8,7 +8,7 @@ from apps.financial.services import reverse_entry
 from apps.purchasing.models import PurchaseInvoice, Supplier
 from apps.sales.models import Customer, Dealer, Invoice, Payment, WholesaleInvoice
 
-from .helpers import D, TODAY, make_user
+from .helpers import D, TODAY, balance, make_user
 
 API = '/api/financial/reports'
 JAN5, JAN10, JAN20 = datetime.date(2026, 1, 5), datetime.date(2026, 1, 10), datetime.date(2026, 1, 20)
@@ -167,3 +167,29 @@ class AccountsActivityTests(ReportBase):
                          ('-1000.00', '200.00', '-1200.00'))
         s = data['summary']
         self.assertEqual(s['total_debit'], s['total_credit'])
+
+
+class RecordExpenseBankTests(ReportBase):
+    """Record Expense / Payment Voucher: a non-cash expense credits the chosen bank ledger itself."""
+
+    def test_upi_expense_credits_the_paid_from_bank_and_shows_in_bank_book(self):
+        from .test_payment_banks import make_bank
+        hdfc = make_bank()
+        res = self.client.post('/api/financial/journals/', {
+            'voucher_type_code': 'PV', 'date': JAN5, 'narration': 'Expense — Shop rent', 'reference_no': 'Shop rent',
+            'reference': 'UTR998877',
+            'lines': [{'account': str(acc('5100').pk), 'debit': '1500', 'credit': 0, 'memo': 'Shop rent'},
+                      {'account': str(hdfc.pk), 'debit': 0, 'credit': '1500', 'memo': 'UPI UTR998877'}]},
+            format='json')
+        self.assertEqual(res.status_code, 201, res.content)
+        self.assertEqual(balance('100201'), D('-1500'))
+        self.assertEqual(balance('1001'), 0)
+        row = self.get('expenses', date_from=JAN5, date_to=JAN5)['rows'][0]
+        self.assertEqual((row['account_code'], row['paid_via']), ('5100', ['UPI']))
+        book = self.get('bankbook', account=str(hdfc.pk), date_from=JAN5, date_to=JAN5)
+        self.assertEqual([r['reference'] for r in book['rows']], ['UTR998877'])
+
+    def test_bill_to_bill_non_cash_line_needs_a_bank(self):
+        from apps.financial.settlements import PayLineSerializer
+        self.assertFalse(PayLineSerializer(data={'method': 'UPI', 'amount': '100'}).is_valid())
+        self.assertTrue(PayLineSerializer(data={'method': 'Cash', 'amount': '100'}).is_valid())

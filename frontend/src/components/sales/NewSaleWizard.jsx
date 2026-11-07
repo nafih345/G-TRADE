@@ -425,8 +425,10 @@ const EMPTY_SERVICE_REPAIR = {
   customerItem: '', problemDescription: '', estimatedDelivery: '', technician: '', serviceStatus: 'RECEIVED'
 };
 const EMPTY_MULTI_PAY = { cash: '', cards: '', gpay: '', bank: '' };
-// Bank picked for the UPI and Bank Transfer boxes, keyed like payment_banks ({upi, bank}).
-const EMPTY_PAY_BANKS = { upi: '', bank: '' };
+// Bank picked for the Card / UPI / Bank Transfer boxes, keyed like payment_banks ({card, upi, bank}),
+// and the optional Reference / UTR typed with each (payment_references).
+const EMPTY_PAY_BANKS = { card: '', upi: '', bank: '' };
+const EMPTY_PAY_REFS = { card: '', upi: '', bank: '' };
 
 // Document number for a new bill, e.g. INV-2026-4821 / ORD-… / QTN-….
 const DOC_NUMBER_PREFIX = { Order: 'ORD', Quotation: 'QTN', Invoice: 'INV' };
@@ -929,6 +931,7 @@ export default function NewSaleWizard({
   
   const [multiPay, setMultiPay] = useState({ ...EMPTY_MULTI_PAY });
   const [payBanks, setPayBanks] = useState({ ...EMPTY_PAY_BANKS });
+  const [payRefs, setPayRefs] = useState({ ...EMPTY_PAY_REFS });
   // Cash marked Unpaid = no cash taken on this bill: the Cash box is ignored (kept, not wiped,
   // so flipping back to Paid restores it) and the amount stays in Balance Due.
   const [cashStatus, setCashStatus] = useState(CASH_PAID);
@@ -1908,6 +1911,7 @@ export default function NewSaleWizard({
     setOutRx('');
     setMultiPay({ ...EMPTY_MULTI_PAY });
     setPayBanks({ ...EMPTY_PAY_BANKS });
+    setPayRefs({ ...EMPTY_PAY_REFS });
     setCashStatus(CASH_PAID);
     setAdvanceDraft(null);
     setEditDialogId(null);
@@ -2133,7 +2137,8 @@ export default function NewSaleWizard({
       split[k] = round2(split[k] + unsplit);
     }
     setMultiPay(Object.fromEntries(PAY_MODES.map(m => [m.key, split[m.key] > 0 ? split[m.key].toFixed(2) : ''])));
-    setPayBanks({ upi: backend?.payment_banks?.upi || '', bank: backend?.payment_banks?.bank || '' });
+    setPayBanks(Object.fromEntries(Object.keys(EMPTY_PAY_BANKS).map(k => [k, backend?.payment_banks?.[k] || ''])));
+    setPayRefs(Object.fromEntries(Object.keys(EMPTY_PAY_REFS).map(k => [k, backend?.payment_references?.[k] || ''])));
     setCashStatus(CASH_PAID);
   };
 
@@ -2511,6 +2516,13 @@ export default function NewSaleWizard({
         + "OK: continue.   Cancel: go back (set the product's stock unit to Pieces to count single lenses)."
       )) return;
     }
+    // Card / UPI / Bank Transfer money must say which bank account it was deposited into.
+    const unbanked = PAY_MODES.find(m => needsBank(m.label) && paySettlement.recorded[m.key] > 0 && !payBanks[m.apiKey]);
+    if (unbanked) {
+      notify(`Select the bank account for the ${unbanked.caption} payment before completing the sale.`, 'error');
+      document.querySelector(`[data-ns-field="pay-${unbanked.key}"]`)?.focus();
+      return;
+    }
     // More tendered than the bill: go ahead only once the cashier confirms the excess is being
     // handed back as change / refund. The bill then records just what the shop keeps.
     if (changeDue > 0.009) {
@@ -2623,9 +2635,12 @@ export default function NewSaleWizard({
           // Each pay mode's amount — the backend records one receipt per mode against this bill
           // (and sets paid_amount to their sum).
           payment_splits: Object.fromEntries(PAY_MODES.map(m => [m.apiKey, paySettlement.recorded[m.key]])),
-          // Which bank each UPI / Bank Transfer amount went into (blank = default bank mapping).
+          // Which bank each Card / UPI / Bank Transfer amount went into — required for any
+          // amount; the receipt's debit posts straight to that bank ledger.
           payment_banks: Object.fromEntries(PAY_MODES.filter(m => needsBank(m.label)).map(m =>
             [m.apiKey, paySettlement.recorded[m.key] > 0 ? (payBanks[m.apiKey] || null) : null])),
+          payment_references: Object.fromEntries(PAY_MODES.filter(m => needsBank(m.label)).map(m =>
+            [m.apiKey, paySettlement.recorded[m.key] > 0 ? String(payRefs[m.apiKey] || '').trim() : ''])),
           items: itemsList.map(i => ({
             product: i.productId || null,
             service: i.serviceId || null,
@@ -4440,6 +4455,9 @@ export default function NewSaleWizard({
                                 cashStatus={cashStatus} onCashStatusChange={setCashStatus}
                                 bankAccount={payBanks[m.apiKey] || ''}
                                 onBankAccountChange={(id) => setPayBanks(prev => ({ ...prev, [m.apiKey]: id || '' }))}
+                                required
+                                reference={payRefs[m.apiKey] || ''}
+                                onReferenceChange={(v) => setPayRefs(prev => ({ ...prev, [m.apiKey]: v }))}
                               />
                             </TableCell>
                           </TableRow>

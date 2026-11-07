@@ -130,7 +130,8 @@ class BillToBillChequeTests(ChequeApiBase):
         self.assertEqual(Payment.objects.get(receipt_no__startswith=res.data['number'], method='Cash').notes.count('445566'), 0)
         self.assertTrue(ledger_is_balanced())
         self.assertEqual(self.receipt([{'method': 'Cash', 'amount': '400'},
-                                       {'method': 'Cheque', 'amount': '600', 'cheque': cheque('445566')}]).status_code, 200)
+                                       {'method': 'Cheque', 'amount': '600', 'bank_account': str(self.bank.pk),
+                                        'ref_no': '445566', 'cheque': cheque('445566')}]).status_code, 200)
         self.assertEqual(Cheque.objects.count(), 1)
 
     def test_cheque_method_needs_details_and_only_cheques_take_them(self):

@@ -279,6 +279,9 @@ class PayLineSerializer(serializers.Serializer):
             raise serializers.ValidationError('Enter the cheque details for the Cheque payment.')
         if attrs['method'] != CHEQUE_METHOD and attrs.get('cheque'):
             raise serializers.ValidationError('Cheque details belong on a Cheque payment only.')
+        # UPI / Bank Transfer / Card / Cheque money moves through a specific bank ledger.
+        if attrs['method'] != 'Cash' and not attrs.get('bank_account'):
+            raise serializers.ValidationError(f"Select the bank account for the {attrs['method']} payment.")
         return attrs
 
 

@@ -235,9 +235,9 @@ class PurchaseInvoiceSerializer(ModelSerializer):
     def validate(self, attrs):
         attrs = super().validate(attrs)
         method = attrs.get('payment_method', self.instance.payment_method if self.instance else 'CASH')
-        # A bank only means something for BANK / UPI, Paid/Unpaid only for CASH — drop stale
-        # values left over from switching the pay mode, so the books never use them.
-        if method not in ('BANK', 'UPI'):
+        # A bank only means something for BANK / UPI / CARD, Paid/Unpaid only for CASH — drop
+        # stale values left over from switching the pay mode, so the books never use them.
+        if method not in ('BANK', 'UPI', 'CARD'):
             attrs['bank_account'] = None
         if method != 'CASH':
             attrs['payment_status'] = ''

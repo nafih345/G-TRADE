@@ -131,7 +131,9 @@ def expense_report(date_from, date_to, branch_ids=None, search='', bucket='', gr
     look = _source_lookups(list(entries.values()))
     money_ids = _money_account_ids()
     paid_via = defaultdict(list)  # journal -> pay modes of its cash / bank lines
-    for l in (LedgerEntry.objects.filter(journal_entry_id__in=list(entries), account_id__in=money_ids)
+    # Every non-expense line of these journals: _mode keeps the cash / bank ones, including banks
+    # added in Bank Master that no role mapping points at.
+    for l in (LedgerEntry.objects.filter(journal_entry_id__in=list(entries)).exclude(account_id__in=list(accounts))
               .select_related('account__account_group')):
         m = _mode(l, l.account, money_ids)
         if m and m not in paid_via[l.journal_entry_id]:

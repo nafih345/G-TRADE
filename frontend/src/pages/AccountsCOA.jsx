@@ -21,6 +21,9 @@ import {
 } from '@mui/icons-material';
 import axios from 'axios';
 import ConfirmActionDialog from '../components/common/ConfirmActionDialog';
+import RecordExpenseDialog from '../components/accounts/RecordExpenseDialog';
+import { apiError, finGet } from '../components/financial/financialApi';
+import { notify } from '../utils/notify';
 
 const initialReceipts = [];
 const initialPayments = [];
@@ -47,6 +50,20 @@ export default function AccountsCOA() {
   const [expenses, setExpenses] = useState(initialExpenses);
   const [customerDue, setCustomerDue] = useState(initialCustomerDue);
   const [supplierDue, setSupplierDue] = useState(initialSupplierDue);
+  const [expenseOpen, setExpenseOpen] = useState(false);
+  const [expensesError, setExpensesError] = useState('');
+
+  // Expenses are real Payment Vouchers on the books: this month's expense lines, newest first.
+  const loadExpenses = async () => {
+    try {
+      const data = await finGet('reports/expenses/', { page_size: 200 });
+      setExpenses((data.rows || data.results || []).filter(r => !r.is_reversal && r.status !== 'REVERSED'));
+      setExpensesError('');
+    } catch (e) {
+      setExpensesError(apiError(e, 'Could not load expenses.'));
+    }
+  };
+  useEffect(() => { loadExpenses(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     setCurrentTab(getTabFromPath(location.pathname));
@@ -256,6 +273,7 @@ export default function AccountsCOA() {
   }, []);
 
   const handleOpenDialog = (type) => {
+    if (type === 'expense') { setExpenseOpen(true); return; }
     setDialogType(type);
     setOpenDialog(true);
   };
@@ -784,19 +802,20 @@ export default function AccountsCOA() {
               <Table size="small">
                 <TableHead sx={{ backgroundColor: 'rgba(0,0,0,0.02)' }}>
                   <TableRow>
-                    <TableCell sx={{ fontWeight: 700 }}>Expense ID</TableCell>
+                    <TableCell sx={{ fontWeight: 700 }}>Voucher No</TableCell>
                     <TableCell sx={{ fontWeight: 700 }}>Description</TableCell>
                     <TableCell sx={{ fontWeight: 700 }}>Category</TableCell>
                     <TableCell sx={{ fontWeight: 700 }}>Date</TableCell>
+                    <TableCell sx={{ fontWeight: 700 }}>Paid Via</TableCell>
                     <TableCell sx={{ fontWeight: 700 }}>Amount</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
                   {expenses.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={5} align="center" sx={{ py: 8 }}>
-                        <Typography variant="body2" color="text.secondary" fontWeight={500}>
-                          No clinic expense records logged in the database.
+                      <TableCell colSpan={6} align="center" sx={{ py: 8 }}>
+                        <Typography variant="body2" color={expensesError ? 'error' : 'text.secondary'} fontWeight={500}>
+                          {expensesError || 'No expenses posted this month.'}
                         </Typography>
                         <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
                           Click '+ Record Expense' to add operational expenses.
@@ -816,11 +835,12 @@ export default function AccountsCOA() {
                   ) : (
                     expenses.map((row) => (
                       <TableRow key={row.id} hover>
-                        <TableCell sx={{ fontWeight: 600, color: 'primary.main' }}>{row.id}</TableCell>
-                        <TableCell sx={{ fontWeight: 600 }}>{row.name}</TableCell>
-                        <TableCell>{row.category}</TableCell>
+                        <TableCell sx={{ fontWeight: 600, color: 'primary.main' }}>{row.voucher_no}</TableCell>
+                        <TableCell sx={{ fontWeight: 600 }}>{row.memo || row.party || row.narration}</TableCell>
+                        <TableCell>{row.account_name}</TableCell>
                         <TableCell>{row.date}</TableCell>
-                        <TableCell sx={{ fontWeight: 700, color: 'error.main' }}>₹{(row.amount || 0).toFixed(2)}</TableCell>
+                        <TableCell>{(row.paid_via || []).join(', ')}</TableCell>
+                        <TableCell sx={{ fontWeight: 700, color: 'error.main' }}>₹{(parseFloat(row.amount) || 0).toFixed(2)}</TableCell>
                       </TableRow>
                     ))
                   )}
@@ -977,6 +997,12 @@ export default function AccountsCOA() {
           </Button>
         </DialogActions>
       </Dialog>
+
+      <RecordExpenseDialog
+        open={expenseOpen}
+        onClose={() => setExpenseOpen(false)}
+        onSaved={(entry) => { notify(`Expense posted as ${entry.entry_number}.`, 'success'); loadExpenses(); }}
+      />
 
       {/* Styled MUI Confirm Dialog */}
       <ConfirmActionDialog 

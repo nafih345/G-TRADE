@@ -153,7 +153,8 @@ BILLING_PAY_MODES = (
 )
 BILLING_SOURCE = 'BILLING'
 # Split modes whose money lands in a bank the cashier picks (see financial/banks.py).
-BANK_PAY_MODES = ('upi', 'bank')
+# Digital / transfer modes: each must name the bank ledger the money lands in.
+BANK_PAY_MODES = ('card', 'upi', 'bank')
 _CENT = Decimal('0.01')
 
 
@@ -330,6 +331,7 @@ class InvoiceSerializer(ModelSerializer):
     payment_splits = SerializerMethodField()
     # Bank picked for the UPI / Bank Transfer boxes ({upi, bank}: ChartOfAccount id or None).
     payment_banks = SerializerMethodField()
+    payment_references = SerializerMethodField()
     # Derived from paid_amount (Total Paid) vs net_amount on every read, so the badge can't
     # disagree with the figures: PAID (paid covers net) / PARTIAL / UNPAID (nothing paid).
     payment_status = SerializerMethodField()
@@ -379,6 +381,15 @@ class InvoiceSerializer(ModelSerializer):
             if p.source == BILLING_SOURCE and (p.status or '').upper() != 'CANCELLED':
                 totals[_pay_mode_key(p.method)] += p.amount or 0
         return {key: str(val.quantize(_CENT)) for key, val in totals.items()}
+
+    def get_payment_references(self, obj):
+        refs = {key: '' for key in BANK_PAY_MODES}
+        for p in obj.payments.all():
+            key = _pay_mode_key(p.method)
+            if (p.source == BILLING_SOURCE and key in refs and p.reference_no
+                    and (p.status or '').upper() != 'CANCELLED'):
+                refs[key] = p.reference_no
+        return refs
 
     def get_payment_banks(self, obj):
         banks = {key: None for key in BANK_PAY_MODES}
@@ -792,6 +803,7 @@ class InvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewsets.Model
     @transaction.atomic
     def perform_create(self, serializer):
         splits = self._payment_splits(serializer)
+        banks, refs = self._payment_banks(splits)
         data = serializer.validated_data
         doc_type = data.get('document_type') or 'INVOICE'
         # With a split, the bill's paid_amount IS its sum — never a separately typed figure.
@@ -824,13 +836,14 @@ class InvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewsets.Model
         if self._commits_stock(invoice):
             self._update_inventory(invoice)
         if splits is not None:
-            self._sync_billing_receipts(invoice, splits, self._payment_banks())
+            self._sync_billing_receipts(invoice, splits, banks, refs)
         self._prefetch_for_response(invoice)
 
     @transaction.atomic
     def perform_update(self, serializer):
         instance = serializer.instance
         splits = self._payment_splits(serializer)
+        banks, refs = self._payment_banks(splits)
         # Snapshot what this document had already taken out of stock BEFORE the save changes
         # its type/status or the item list is replaced (serializer.instance is still the
         # pre-edit row here).
@@ -865,7 +878,7 @@ class InvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewsets.Model
 
         invoice = serializer.save(**extra)
         if splits is not None:
-            self._sync_billing_receipts(invoice, splits, self._payment_banks())
+            self._sync_billing_receipts(invoice, splits, banks, refs)
         # Item list is optional on update (e.g. a status-only PATCH from the Orders tab won't
         # include it) — only replace items when the client actually sent a new list.
         if 'items' in self.request.data:
@@ -976,26 +989,43 @@ class InvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewsets.Model
             })
         return splits
 
-    def _payment_banks(self):
-        """{upi, bank}: the validated bank ledger picked for each split box (None = default)."""
+    def _payment_banks(self, splits=None):
+        """({card, upi, bank}: validated bank ledger, {card, upi, bank}: Reference / UTR no.).
+
+        A bank of None posts to the mode's default role mapping. When the screen sends
+        `payment_banks` (New Sale, POS Billing), every Card / UPI / Bank Transfer amount must name
+        its bank: the debit goes straight to that ledger in Accounts / Financial reports."""
         from apps.financial.models import ChartOfAccount
+        sent = 'payment_banks' in self.request.data
         raw = self.request.data.get('payment_banks') or {}
         if not isinstance(raw, dict):
-            raise serializers.ValidationError({'payment_banks': 'Expected {upi, bank} bank account ids.'})
-        banks = {}
+            raise serializers.ValidationError({'payment_banks': 'Expected {card, upi, bank} bank account ids.'})
+        raw_refs = self.request.data.get('payment_references') or {}
+        if not isinstance(raw_refs, dict):
+            raise serializers.ValidationError({'payment_references': 'Expected {card, upi, bank} reference numbers.'})
+        labels = {key: label for key, label, _ in BILLING_PAY_MODES}
+        banks, refs = {}, {}
         for key in BANK_PAY_MODES:
+            ref = str(raw_refs.get(key) or '').strip()
+            if len(ref) > 80:
+                raise serializers.ValidationError({'payment_references': f'{labels[key]} reference is longer than 80 characters.'})
+            refs[key] = ref
             value = raw.get(key)
             if not value:
+                if sent and splits is not None and splits.get(key, Decimal('0')) > 0:
+                    raise serializers.ValidationError({
+                        'payment_banks': f'Select the bank account the {labels[key]} payment was deposited into.'
+                    })
                 banks[key] = None
                 continue
             acc = ChartOfAccount.objects.filter(pk=value).first() if _is_uuid(value) else None
             if acc is None:
-                raise serializers.ValidationError({'payment_banks': f'Unknown bank account for {key.upper()}.'})
+                raise serializers.ValidationError({'payment_banks': f'Unknown bank account for {labels[key]}.'})
             try:
                 banks[key] = validate_bank_account(acc)
             except serializers.ValidationError as exc:
                 raise serializers.ValidationError({'payment_banks': exc.detail})
-        return banks
+        return banks, refs
 
     _SEQUENCE_TYPE = {'INVOICE': 'SALES_INVOICE', 'ORDER': 'SALES_ORDER', 'QUOTATION': 'QUOTATION'}
 
@@ -1039,7 +1069,7 @@ class InvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewsets.Model
             receipt_no = f"RCP-{uuid.uuid4().hex[:10].upper()}"
         return receipt_no
 
-    def _sync_billing_receipts(self, invoice, splits, banks=None):
+    def _sync_billing_receipts(self, invoice, splits, banks=None, refs=None):
         """Keep one BILLING receipt per pay mode in step with the bill's split. Each receipt posts
         its own Dr Cash-or-Bank / Cr Receivable entry (signals.py), so cash and card/UPI/bank
         takings land in the right account. Receipts recorded later from the Payments tab (no
@@ -1070,6 +1100,7 @@ class InvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewsets.Model
                 )
             keep.amount = amount
             keep.bank_account = (banks or {}).get(key)
+            keep.reference_no = (refs or {}).get(key, '') if key in BANK_PAY_MODES else ''
             keep.status = 'Completed'
             keep.customer = customer
             keep.customer_name = customer_name

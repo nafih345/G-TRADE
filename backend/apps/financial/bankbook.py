@@ -269,10 +269,13 @@ def _lookups(entries):
     look = _source_lookups(entries)
     pay_ids = [je.reference_id for je in entries if je.source_key == 'sales.payment' and je.reference_id]
     col_ids = [je.reference_id for je in entries if je.source_key == 'sales.wholesale_collection' and je.reference_id]
-    look['payment_notes'], look['collection_notes'] = {}, {}
+    look['payment_notes'], look['collection_notes'], look['payment_refs'] = {}, {}, {}
     if pay_ids:
         from apps.sales.models import Payment
-        look['payment_notes'] = dict(Payment.all_objects.filter(pk__in=pay_ids).values_list('pk', 'notes'))
+        rows = list(Payment.all_objects.filter(pk__in=pay_ids).values_list('pk', 'notes', 'reference_no'))
+        look['payment_notes'] = {pk: notes for pk, notes, _ in rows}
+        # Reference / UTR typed with the Card / UPI / Bank Transfer amount at billing.
+        look['payment_refs'] = {pk: ref for pk, _, ref in rows if ref}
     if col_ids:
         from apps.sales.models import WholesalePaymentCollection
         look['collection_notes'] = dict(WholesalePaymentCollection.all_objects.filter(pk__in=col_ids)
@@ -349,6 +352,8 @@ def _detail_rows(moves, accounts):
         mode = (detail.mode if detail and detail.mode else derived_mode) or ('' if kind == 'OPENING' else 'BANK_TRANSFER')
 
         derived_ref = ', '.join(dict.fromkeys(c.cheque_number for c in chqs))
+        if not derived_ref and je.source_key == 'sales.payment':
+            derived_ref = look['payment_refs'].get(je.reference_id) or ''
         if not derived_ref:
             derived_ref = next((r for r in (_memo_reference(x) for x in line_memos) if r), '')
         if not derived_ref and je.source_module in ('financial', '') and je.source_number:

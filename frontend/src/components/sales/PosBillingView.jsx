@@ -140,6 +140,9 @@ export default function PosBillingView({
   const [multiPay, setMultiPay] = useState({ cash: '', upi: '', card: '', credit: '' });
   // Bank linked to the UPI amount, and whether the Cash amount was actually handed over.
   const [upiBank, setUpiBank] = useState('');
+  const [cardBank, setCardBank] = useState('');
+  // Optional Reference / UTR typed with the UPI / Card amount.
+  const [payRefs, setPayRefs] = useState({ upi: '', card: '' });
   const [cashStatus, setCashStatus] = useState(CASH_PAID);
   const cashUnpaid = cashStatus === CASH_UNPAID;
 
@@ -776,7 +779,10 @@ export default function PosBillingView({
                     value={multiPay.upi} onChange={(e) => setMultiPay({ ...multiPay, upi: e.target.value })}
                   />
                   {parseFloat(multiPay.upi) > 0 && (
-                    <PaymentModeDetails compact method="UPI" bankAccount={upiBank} onBankAccountChange={(id) => setUpiBank(id || '')} sx={{ mt: 0.5 }} />
+                    <PaymentModeDetails
+                      compact method="UPI" required bankAccount={upiBank} onBankAccountChange={(id) => setUpiBank(id || '')}
+                      reference={payRefs.upi} onReferenceChange={(v) => setPayRefs(prev => ({ ...prev, upi: v }))} sx={{ mt: 0.5 }}
+                    />
                   )}
                 </Grid>
                 <Grid item xs={6}>
@@ -784,6 +790,12 @@ export default function PosBillingView({
                     fullWidth size="small" label="Card (₹)" type="number"
                     value={multiPay.card} onChange={(e) => setMultiPay({ ...multiPay, card: e.target.value })}
                   />
+                  {parseFloat(multiPay.card) > 0 && (
+                    <PaymentModeDetails
+                      compact method="Card" required bankAccount={cardBank} onBankAccountChange={(id) => setCardBank(id || '')}
+                      reference={payRefs.card} onReferenceChange={(v) => setPayRefs(prev => ({ ...prev, card: v }))} sx={{ mt: 0.5 }}
+                    />
+                  )}
                 </Grid>
                 <Grid item xs={6}>
                   <TextField
@@ -849,6 +861,13 @@ export default function PosBillingView({
                   excess -= back;
                 });
                 const paidNow = Math.round((splits.cash + splits.upi + splits.card) * 100) / 100;
+                // UPI / Card money must say which bank account it was deposited into.
+                const unbanked = [['upi', upiBank, 'UPI / GPay'], ['card', cardBank, 'Card']]
+                  .find(([k, bank]) => splits[k] > 0 && !bank);
+                if (unbanked) {
+                  notify(`Select the bank account for the ${unbanked[2]} payment before billing.`, 'error');
+                  return;
+                }
 
                 // A real UUID from /api/sales/customers/ can be used as the Invoice.customer FK
                 // directly; a legacy localStorage-only id (e.g. "P-1003") can't, so such a sale is
@@ -872,9 +891,16 @@ export default function PosBillingView({
                     paid_amount: paidNow,
                     payment_method: nothingTyped && !cashUnpaid ? 'Cash' : paymentMethod,
                     // One BILLING receipt per mode (server-side), each posted to its own account —
-                    // UPI to the linked bank picked above.
+                    // UPI / Card to the bank picked above.
                     payment_splits: splits,
-                    payment_banks: { upi: splits.upi > 0 ? (upiBank || null) : null },
+                    payment_banks: {
+                      upi: splits.upi > 0 ? (upiBank || null) : null,
+                      card: splits.card > 0 ? (cardBank || null) : null,
+                    },
+                    payment_references: {
+                      upi: splits.upi > 0 ? payRefs.upi.trim() : '',
+                      card: splits.card > 0 ? payRefs.card.trim() : '',
+                    },
                     items: cart.map(i => ({
                       product: i.product.id,
                       description: i.product.name,
@@ -967,6 +993,8 @@ export default function PosBillingView({
                 setWalkInName('');
                 setMultiPay({ cash: '', upi: '', card: '', credit: '' });
                 setUpiBank('');
+                setCardBank('');
+                setPayRefs({ upi: '', card: '' });
                 setCashStatus(CASH_PAID);
                 setDiscountAmount(0);
               }}

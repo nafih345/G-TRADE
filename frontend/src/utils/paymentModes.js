@@ -18,8 +18,10 @@ export const paymentKind = (method) => {
   return hit ? hit[1] : 'other';
 };
 
-// BANK and UPI money lands in a bank the user picks; CASH can be marked Paid / Unpaid.
-export const needsBank = (method) => ['bank', 'upi'].includes(paymentKind(method));
+// Card, UPI and Bank Transfer money lands in a bank the user picks (mandatory on sale screens);
+// CASH can be marked Paid / Unpaid.
+export const BANK_KINDS = ['card', 'upi', 'bank'];
+export const needsBank = (method) => BANK_KINDS.includes(paymentKind(method));
 export const isCashMode = (method) => paymentKind(method) === 'cash';
 
 export const CASH_PAID = 'PAID';

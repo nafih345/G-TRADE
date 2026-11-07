@@ -6,15 +6,18 @@ import {
 import { AccountBalance as BankIcon, Check as CheckIcon, Edit as EditIcon } from '@mui/icons-material';
 import useBankAccounts from '../../hooks/useBankAccounts';
 import { notify } from '../../utils/notify';
-import { CASH_PAID, CASH_UNPAID, isCashMode, paymentKind } from '../../utils/paymentModes';
+import { CASH_PAID, CASH_UNPAID, isCashMode, needsBank, paymentKind } from '../../utils/paymentModes';
 
 /**
  * The extra details a pay mode needs, the same on every screen:
  *   CASH -> Paid / Unpaid toggle (only when the screen passes onCashStatusChange)
  *   BANK -> which bank the money went to / came from
  *   UPI  -> the bank linked to the UPI ID
- * Renders nothing for Card / Credit / anything else. Bank / UPI show the chosen bank (the
+ *   CARD -> the bank the card machine settles into
+ * Renders nothing for Credit / anything else. Card / Bank / UPI show the chosen bank (the
  * Bank Master default unless changed) with an "Add / Change Bank Account" button.
+ * Passing onReferenceChange adds an optional "Ref / UTR No." box under the bank; `label` renames
+ * the bank field (e.g. "Paid From (Bank Account)" on expenses).
  *
  * `compact` drops the field labels for tight table rows (New Sale / POS pay-mode tables).
  */
@@ -24,6 +27,10 @@ export default function PaymentModeDetails({
   onBankAccountChange,
   cashStatus = CASH_PAID,
   onCashStatusChange,
+  reference = '',
+  onReferenceChange,
+  required = false,
+  label: labelOverride,
   size = 'small',
   compact = false,
   disabled = false,
@@ -33,7 +40,7 @@ export default function PaymentModeDetails({
   const { banks, loading, addBank } = useBankAccounts();
   const [picking, setPicking] = useState(false);
   const [adding, setAdding] = useState(false);
-  const wantsBank = (kind === 'bank' || kind === 'upi') && !!onBankAccountChange;
+  const wantsBank = needsBank(method) && !!onBankAccountChange;
   const defaultBank = defaultBankFor(banks, kind);
 
   // Choosing Bank (or UPI) pre-selects the default bank from Settings > Bank Master; the full
@@ -60,8 +67,9 @@ export default function PaymentModeDetails({
 
   if (!wantsBank) return null;
 
-  const label = kind === 'upi' ? 'Linked Bank (UPI)' : 'Bank';
+  const label = labelOverride || (kind === 'upi' ? 'Linked Bank (UPI)' : kind === 'card' ? 'Card Settlement Bank' : 'Bank');
   const current = banks.find((b) => b.id === bankAccount) || (!bankAccount ? defaultBank : null);
+  const missing = required && !current && !disabled;
   const isDefault = !!current && current.id === defaultBank?.id;
   const emptyText = loading ? 'Loading banks…' : (bankAccount ? 'Bank no longer active' : 'No bank in Bank Master');
   const openPicker = () => { if (!disabled) setPicking(true); };
@@ -71,8 +79,8 @@ export default function PaymentModeDetails({
       {compact ? (
         <Stack direction="row" alignItems="center" spacing={0.25}>
           <Typography noWrap title={current ? `${current.name}${isDefault ? ' (default)' : ''}` : emptyText}
-            sx={{ flex: 1, minWidth: 0, fontSize: '0.68rem', fontWeight: 700, opacity: current ? 1 : 0.6 }}>
-            {current ? current.name : emptyText}
+            sx={{ flex: 1, minWidth: 0, fontSize: '0.68rem', fontWeight: 700, opacity: current ? 1 : 0.6, color: missing ? 'error.main' : undefined }}>
+            {current ? current.name : (missing ? `Select bank account *` : emptyText)}
           </Typography>
           <Tooltip title="Add / Change Bank Account">
             <span>
@@ -86,12 +94,12 @@ export default function PaymentModeDetails({
         <Box>
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.25 }}>{label}</Typography>
           <Stack direction="row" alignItems="center" spacing={1}
-            sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 1, px: 1.25, py: size === 'small' ? 0.5 : 1, opacity: disabled ? 0.6 : 1 }}>
+            sx={{ border: '1px solid', borderColor: missing ? 'error.main' : 'divider', borderRadius: 1, px: 1.25, py: size === 'small' ? 0.5 : 1, opacity: disabled ? 0.6 : 1 }}>
             <BankIcon fontSize="small" color={current ? 'primary' : 'disabled'} />
             <Box sx={{ flex: 1, minWidth: 0 }}>
               <Stack direction="row" alignItems="center" spacing={0.75}>
                 <Typography variant="body2" fontWeight={700} noWrap sx={{ opacity: current ? 1 : 0.6 }}>
-                  {current ? current.name : emptyText}
+                  {current ? current.name : (missing ? 'Select bank account *' : emptyText)}
                 </Typography>
                 {isDefault && <Chip size="small" label="Default" color="warning" sx={{ height: 18, fontSize: '0.62rem', fontWeight: 800 }} />}
               </Stack>
@@ -103,9 +111,19 @@ export default function PaymentModeDetails({
           </Stack>
         </Box>
       )}
+      {onReferenceChange && (
+        <TextField
+          size="small" fullWidth placeholder="Ref / UTR No. (optional)" value={reference || ''} disabled={disabled}
+          label={compact ? undefined : 'Reference / UTR No.'}
+          onChange={(e) => onReferenceChange(e.target.value.slice(0, 80))}
+          inputProps={{ 'aria-label': `${label} reference / UTR number`, maxLength: 80,
+            style: compact ? { padding: '2px 4px', fontSize: '0.66rem' } : undefined }}
+          sx={{ mt: compact ? 0.25 : 1 }}
+        />
+      )}
       <BankPickerDialog
         open={picking}
-        title={kind === 'upi' ? 'Select Linked Bank (UPI)' : 'Select Bank Account'}
+        title={labelOverride ? `Select ${labelOverride}` : kind === 'upi' ? 'Select Linked Bank (UPI)' : kind === 'card' ? 'Select Card Settlement Bank' : 'Select Bank Account'}
         banks={banks}
         selectedId={current?.id || ''}
         defaultId={defaultBank?.id || ''}
@@ -133,10 +151,11 @@ export default function PaymentModeDetails({
   );
 }
 
-// UPI prefers the bank mapped for UPI settlements, then the default bank; Bank uses the default.
-// With a single bank on the books that one is the default either way.
+// UPI prefers the bank mapped for UPI settlements and Card the one mapped for card settlements,
+// then the default bank; Bank uses the default. With a single bank that one is the default.
 export function defaultBankFor(banks, kind) {
   return (kind === 'upi' && banks.find((b) => b.is_default_upi))
+    || (kind === 'card' && banks.find((b) => b.is_default_card))
     || banks.find((b) => b.is_default_bank)
     || (banks.length === 1 ? banks[0] : null);
 }
