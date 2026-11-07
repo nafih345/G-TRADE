@@ -22,6 +22,9 @@ import {
 import axios from 'axios';
 import ConfirmActionDialog from '../components/common/ConfirmActionDialog';
 import RecordExpenseDialog from '../components/accounts/RecordExpenseDialog';
+import PaymentModeDetails from '../components/common/PaymentModeDetails';
+import useBankAccounts from '../hooks/useBankAccounts';
+import { needsBank } from '../utils/paymentModes';
 import { apiError, finGet } from '../components/financial/financialApi';
 import { notify } from '../utils/notify';
 
@@ -85,8 +88,16 @@ export default function AccountsCOA() {
   });
 
   const [newTransaction, setNewTransaction] = useState({
-    party: '', category: 'Ophthalmic Supply', method: 'Cash', amount: '', date: new Date().toISOString().split('T')[0]
+    party: '', category: 'Ophthalmic Supply', method: 'Cash', amount: '', bankAccount: '', reference: '', date: new Date().toISOString().split('T')[0]
   });
+  const { banks } = useBankAccounts();
+  // Pay-mode label shown in the tables: "UPI · HDFC Bank (Ref 1234)" for non-cash modes.
+  const describeMethod = (t) => {
+    if (!needsBank(t.method)) return t.method;
+    const bank = banks.find((b) => b.id === t.bankAccount);
+    const bankName = bank?.name || '';
+    return [t.method, bankName && `· ${bankName}`, t.reference && `(Ref ${t.reference})`].filter(Boolean).join(' ');
+  };
 
   // Backend Sync & Automatic Cross-Module Sync
   useEffect(() => {
@@ -284,12 +295,18 @@ export default function AccountsCOA() {
       alert("Please enter Description/Party Name and a valid Amount.");
       return;
     }
+    if (dialogType !== 'expense' && needsBank(newTransaction.method) && !newTransaction.bankAccount) {
+      notify(`Choose the bank account for ${newTransaction.method}.`, 'error');
+      return;
+    }
     if (dialogType === 'receipt') {
       const entry = {
         id: `REC-${Math.floor(500 + Math.random() * 500)}`,
         patient: newTransaction.party,
         date: newTransaction.date,
-        method: newTransaction.method,
+        method: describeMethod(newTransaction),
+        bankAccount: needsBank(newTransaction.method) ? newTransaction.bankAccount : '',
+        reference: newTransaction.reference || '',
         amount: amt,
         status: 'Completed'
       };
@@ -299,7 +316,9 @@ export default function AccountsCOA() {
         id: `PAY-${Math.floor(400 + Math.random() * 500)}`,
         supplier: newTransaction.party,
         date: newTransaction.date,
-        method: newTransaction.method,
+        method: describeMethod(newTransaction),
+        bankAccount: needsBank(newTransaction.method) ? newTransaction.bankAccount : '',
+        reference: newTransaction.reference || '',
         amount: amt,
         status: 'Completed'
       };
@@ -316,7 +335,7 @@ export default function AccountsCOA() {
     }
     setOpenDialog(false);
     setNewTransaction({
-      party: '', category: 'Ophthalmic Supply', method: 'Cash', amount: '', date: new Date().toISOString().split('T')[0]
+      party: '', category: 'Ophthalmic Supply', method: 'Cash', amount: '', bankAccount: '', reference: '', date: new Date().toISOString().split('T')[0]
     });
     alert('Ledger entry recorded successfully!');
   };
@@ -969,7 +988,7 @@ export default function AccountsCOA() {
                 <TextField label="Amount (₹)" type="number" fullWidth required value={newTransaction.amount} onChange={(e) => setNewTransaction({...newTransaction, amount: e.target.value})} />
               </Grid>
               <Grid item xs={6}>
-                <TextField select label="Payment Method" fullWidth value={newTransaction.method} onChange={(e) => setNewTransaction({...newTransaction, method: e.target.value})}>
+                <TextField select label="Payment Method" fullWidth value={newTransaction.method} onChange={(e) => setNewTransaction({...newTransaction, method: e.target.value, bankAccount: '', reference: ''})}>
                   <MenuItem value="Cash">Cash</MenuItem>
                   <MenuItem value="UPI">UPI/QR Code</MenuItem>
                   <MenuItem value="Card">Credit/Debit Card</MenuItem>
@@ -977,6 +996,17 @@ export default function AccountsCOA() {
                 </TextField>
               </Grid>
             </Grid>
+            {dialogType !== 'expense' && (
+              <PaymentModeDetails
+                method={newTransaction.method}
+                required
+                label={dialogType === 'payment' ? 'Paid From (Bank Account)' : 'Received In (Bank Account)'}
+                bankAccount={newTransaction.bankAccount}
+                onBankAccountChange={(id) => setNewTransaction((t) => ({ ...t, bankAccount: id || '' }))}
+                reference={newTransaction.reference}
+                onReferenceChange={(ref) => setNewTransaction((t) => ({ ...t, reference: ref }))}
+              />
+            )}
             <QuickDatePickerField 
               label="Date" 
               fullWidth 
