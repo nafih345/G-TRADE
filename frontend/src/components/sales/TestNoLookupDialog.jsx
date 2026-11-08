@@ -24,6 +24,24 @@ const dayBounds = (dateStr) => {
   return { from: new Date(y, m - 1, d).toISOString(), to: new Date(y, m - 1, d + 1).toISOString() };
 };
 const timeOf = (iso) => (iso ? new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '');
+// "32" → "32 yrs"; leaves values that already carry a unit ("6 months") alone.
+const ageLabel = (age) => {
+  const s = String(age || '').trim();
+  return /^\d+(\.\d+)?$/.test(s) ? `${s} yrs` : s;
+};
+
+// One labelled demographic value (Age / Gender / Place) — sized for reading at a POS counter.
+function Fact({ label, value, color }) {
+  return (
+    <Box component="span" sx={{ display: 'inline-flex', alignItems: 'baseline', gap: 0.5, whiteSpace: 'nowrap' }}>
+      <Box component="span" sx={{ fontSize: '0.78rem', fontWeight: 700, color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 0.4 }}>
+        {label}
+      </Box>
+      <Box component="span" sx={{ fontSize: '0.98rem', fontWeight: 800, color }}>{value || '—'}</Box>
+    </Box>
+  );
+}
+
 const docLabel = (b) => `${b.document_type === 'ORDER' ? 'Order' : 'Bill'} ${b.invoice_number || ''}`.trim();
 
 // The browser's exam caches New Sale's Test No field also reads — a discarded test must not
@@ -97,7 +115,7 @@ export default function TestNoLookupDialog({ open, onClose, onSelect }) {
       if (filter === 'SOLD' && r.sale_status !== 'SOLD') return false;
       if (filter === 'PENDING' && r.sale_status === 'SOLD') return false;
       if (!q) return true;
-      return [r.test_no, r.patient_name, r.patient_code, r.phone].some((v) => String(v || '').toLowerCase().includes(q));
+      return [r.test_no, r.patient_name, r.patient_code, r.phone, r.place, r.address].some((v) => String(v || '').toLowerCase().includes(q));
     });
   }, [rows, filter, search]);
 
@@ -135,7 +153,7 @@ export default function TestNoLookupDialog({ open, onClose, onSelect }) {
   };
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
+    <Dialog open={open} onClose={onClose} maxWidth="lg" fullWidth>
       <DialogTitle sx={{ fontWeight: 900, pb: 1 }}>Eye Tests — pick a Test No</DialogTitle>
       <DialogContent dividers sx={{ pt: 1.5 }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ sm: 'center' }} sx={{ mb: 1.5 }}>
@@ -153,7 +171,7 @@ export default function TestNoLookupDialog({ open, onClose, onSelect }) {
             inputProps={{ max: daysAgo(0) }} InputLabelProps={{ shrink: true }} sx={{ width: 170 }}
           />
           <TextField
-            size="small" label="Find" placeholder="Name, Test No, phone" value={search} autoFocus
+            size="small" label="Find" placeholder="Name, Test No, phone, place" value={search} autoFocus
             onChange={(e) => setSearch(e.target.value)} onKeyDown={focusFirstRow} sx={{ flex: 1, minWidth: 160 }}
           />
           <Tooltip title="Reload">
@@ -174,12 +192,13 @@ export default function TestNoLookupDialog({ open, onClose, onSelect }) {
           </Typography>
         )}
 
-        <TableContainer ref={tableRef} sx={{ maxHeight: 420, border: '1px solid #e2e8f0', borderRadius: 2 }}>
+        <TableContainer ref={tableRef} sx={{ maxHeight: '60vh', border: '1px solid #e2e8f0', borderRadius: 2,
+                                             '& .MuiTableCell-body': { py: 1.25, verticalAlign: 'top', fontSize: '0.95rem' } }}>
           <Table size="small" stickyHeader>
             <TableHead>
               <TableRow>
-                {['Test No', 'Time', 'Patient', 'Phone', 'Status', ''].map((h) => (
-                  <TableCell key={h} sx={{ fontWeight: 900, bgcolor: '#f8fafc' }}>{h}</TableCell>
+                {[['Test No', 90], ['Time', 80], ['Patient', undefined], ['Phone', 130], ['Status', 200], ['', 56]].map(([h, w]) => (
+                  <TableCell key={h} sx={{ fontWeight: 900, bgcolor: '#f8fafc', width: w }}>{h}</TableCell>
                 ))}
               </TableRow>
             </TableHead>
@@ -205,15 +224,30 @@ export default function TestNoLookupDialog({ open, onClose, onSelect }) {
                     sx={{ cursor: 'pointer', '&:focus': { outline: `2px solid ${SOLD_BLUE}`, outlineOffset: -2 },
                           bgcolor: sold ? '#eff6ff' : undefined }}
                   >
-                    <TableCell sx={{ fontWeight: 900, color: ink }}>{row.test_no}</TableCell>
-                    <TableCell sx={{ color: ink }}>{timeOf(row.examination_date)}</TableCell>
-                    <TableCell sx={{ color: ink }}>
-                      <Box sx={{ fontWeight: 700 }}>{row.patient_name || '—'}</Box>
-                      <Typography variant="caption" color="text.secondary">
-                        {[row.patient_code, row.age && `${row.age} yrs`, row.gender].filter(Boolean).join(' · ')}
-                      </Typography>
+                    <TableCell sx={{ fontWeight: 900, color: ink, whiteSpace: 'nowrap' }}>{row.test_no}</TableCell>
+                    <TableCell sx={{ color: ink, whiteSpace: 'nowrap' }}>{timeOf(row.examination_date)}</TableCell>
+                    <TableCell sx={{ color: ink, minWidth: 260 }}>
+                      <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 1, flexWrap: 'wrap' }}>
+                        <Box component="span" sx={{ fontWeight: 900, fontSize: '1.05rem' }}>{row.patient_name || '—'}</Box>
+                        {row.patient_code && (
+                          <Box component="span" sx={{ fontSize: '0.8rem', fontWeight: 700, color: 'text.secondary' }}>{row.patient_code}</Box>
+                        )}
+                      </Box>
+                      <Box sx={{ display: 'flex', flexWrap: 'wrap', columnGap: 2, rowGap: 0.25, mt: 0.5 }}>
+                        <Fact label="Age" value={ageLabel(row.age)} color={ink} />
+                        <Fact label="Gender" value={row.gender} color={ink} />
+                        {row.place && <Fact label="Place" value={row.place} color={ink} />}
+                      </Box>
+                      {row.address && (
+                        <Box sx={{ mt: 0.5, fontSize: '0.92rem', fontWeight: 600, lineHeight: 1.4, wordBreak: 'break-word' }}>
+                          <Box component="span" sx={{ fontSize: '0.78rem', fontWeight: 700, color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 0.4, mr: 0.5 }}>
+                            Address
+                          </Box>
+                          {row.address}
+                        </Box>
+                      )}
                     </TableCell>
-                    <TableCell sx={{ color: ink }}>{row.phone}</TableCell>
+                    <TableCell sx={{ color: ink, whiteSpace: 'nowrap', fontWeight: 700 }}>{row.phone || '—'}</TableCell>
                     <TableCell>
                       <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
                         {sold ? (

@@ -93,6 +93,7 @@ def lookup_rows(exams):
     rows = []
     for e in exams:
         link = links[str(e.id)]
+        cust = e.customer if e.customer_id else None
         rows.append({
             'id': str(e.id),
             'test_no': e.test_no or '',
@@ -102,8 +103,12 @@ def lookup_rows(exams):
             'patient_code': (e.customer.patient_code if e.customer_id and e.customer else '') or e.patient_id or '',
             'patient_name': e.patient_name or '',
             'phone': e.phone or '',
-            'age': e.age or '',
-            'gender': e.gender or '',
+            # The exam's own snapshot wins; the linked Customer fills gaps (customer is
+            # select_related by the lookup view, so this adds no queries).
+            'age': e.age or (cust.age if cust else '') or '',
+            'gender': e.gender or (cust.gender if cust else '') or '',
+            'address': (e.address or (cust.address if cust else '') or '').strip(),
+            'place': ((cust.place if cust else '') or '').strip(),
             'fee_status': e.fee_status or '',
             'fee_amount': _money(e.fee_amount),
             'sale_status': 'SOLD' if link['sales'] else 'PENDING',
