@@ -92,7 +92,16 @@ function UserDialog({ catalog, tenant, usersUrl, user, onClose, onSaved }) {
   const [saving, setSaving] = useState(false);
   const set = (key, value) => { setForm((f) => ({ ...f, [key]: value })); setErrors((e) => ({ ...e, [key]: undefined })); };
 
-  const toggleBranch = (id, on) => set('branch_ids', on ? [...form.branch_ids, id] : form.branch_ids.filter((b) => b !== id));
+  // The default branch is always one of the user's branches (the server enforces the same), so
+  // they sign in bound to it without choosing.
+  const toggleBranch = (id, on) => setForm((f) => {
+    const branchIds = on ? [...f.branch_ids, id] : f.branch_ids.filter((b) => b !== id);
+    const keep = f.access_all_branches || branchIds.includes(String(f.default_branch_id));
+    return { ...f, branch_ids: branchIds, default_branch_id: keep ? f.default_branch_id : (branchIds[0] || f.default_branch_id) };
+  });
+  const defaultChoices = form.access_all_branches
+    ? tenant.branches
+    : tenant.branches.filter((b) => form.branch_ids.includes(String(b.id)));
 
   const submit = async (e) => {
     e.preventDefault();
@@ -179,8 +188,9 @@ function UserDialog({ catalog, tenant, usersUrl, user, onClose, onSaved }) {
             value={form.default_branch_id ? String(form.default_branch_id) : ''}
             onChange={(e) => set('default_branch_id', e.target.value || null)}
             error={Boolean(errors.default_branch_id)} helperText={errors.default_branch_id || ' '}>
-            <MenuItem value="">— none —</MenuItem>
-            {tenant.branches.map((b) => <MenuItem key={b.id} value={String(b.id)}>{b.name}</MenuItem>)}
+            {(defaultChoices.length ? defaultChoices : tenant.branches).map((b) => (
+              <MenuItem key={b.id} value={String(b.id)}>{b.name}{b.is_default ? ' (Main)' : ''}</MenuItem>
+            ))}
           </TextField>
         </DialogContent>
         <DialogActions>

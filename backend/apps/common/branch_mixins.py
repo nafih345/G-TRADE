@@ -31,11 +31,14 @@ class BranchScopedViewSetMixin:
         return val == 'all' and getattr(self.request, 'is_branch_admin', False)
 
     def _model_has_branch(self, model):
+        """True only for a real FK to company.Branch: eye examinations and appointments keep a
+        free-text `branch` name, which a `branch_id` filter would 500 on (multi-branch dashboard)."""
         try:
-            model._meta.get_field(self.branch_field)
-            return True
+            field = model._meta.get_field(self.branch_field)
         except Exception:
             return False
+        related = getattr(field, 'related_model', None)
+        return bool(field.many_to_one and related is not None and related._meta.label == 'company.Branch')
 
     def get_queryset(self):
         qs = super().get_queryset()

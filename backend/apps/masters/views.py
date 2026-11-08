@@ -110,6 +110,15 @@ DEFAULT_CATEGORIES = [
     {'name': 'Eye Drops', 'code': 'EYD', 'description': 'Lubricating Artificial Tears, Anti-Allergy Eye Drops & Contact Lens Relief Drops', 'hsn_code': '30049099', 'gst_percentage': '12%'}
 ]
 
+def seed_default_categories():
+    """The starter categories, for the current tenant, when it has none (one bulk insert).
+    Called by client onboarding and lazily by the category list on a fresh install."""
+    if ProductCategory.all_objects.exists():
+        return 0
+    ProductCategory.objects.bulk_create([ProductCategory(**cat) for cat in DEFAULT_CATEGORIES])
+    return len(DEFAULT_CATEGORIES)
+
+
 class ProductCategoryViewSet(viewsets.ModelViewSet):
     queryset = ProductCategory.objects.all().order_by('name')
     serializer_class = ProductCategorySerializer
@@ -122,8 +131,7 @@ class ProductCategoryViewSet(viewsets.ModelViewSet):
             # and re-seeding here would undo the wipe on the very next page load.
             from apps.common.models import DataResetMarker
             if not ProductCategory.objects.exists() and DataResetMarker.current() is None:
-                for cat in DEFAULT_CATEGORIES:
-                    ProductCategory.objects.get_or_create(code=cat['code'], defaults=cat)
+                seed_default_categories()
         except Exception:
             pass
         return ProductCategory.objects.all().order_by('name')

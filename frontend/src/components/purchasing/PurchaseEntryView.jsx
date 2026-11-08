@@ -31,6 +31,7 @@ import { lensItemsFromRequirements } from '../../utils/lensPurchaseOrders';
 import { printLensPO } from '../../utils/printLensPO';
 import { poQtyLabel } from '../../utils/lensPurchaseOrders';
 import { notify } from '../../utils/notify';
+import { useBranch } from '../../context/BranchContext';
 import { PURCHASE_ENTRY_SHORTCUTS } from './lensPoShortcuts';
 import { navScopeProps, navDialogProps, enterOpensSelectProps, focusNextAfterRender } from '../../pages/wholesale/keyboardNav';
 import { ShortcutHelpDialog } from '../../pages/wholesale/WholesaleDialogs';
@@ -585,6 +586,16 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
     });
   }, []);
 
+  // No generic "Default" choice: an unpicked Branch is the session's branch (the client's
+  // Head Office / the user's assigned branch) and an unpicked Warehouse is that branch's own, so
+  // the entry always shows — and saves — the real ones.
+  const { activeBranch } = useBranch();
+  const effectiveBranchId = branchId
+    || (activeBranch && branches.some(b => String(b.id) === String(activeBranch.id)) ? String(activeBranch.id) : '')
+    || String((branches.find(b => b.is_default) || branches[0] || {}).id || '');
+  const effectiveWarehouseId = warehouseId
+    || String((warehouses.find(w => String(w.branch) === effectiveBranchId) || warehouses[0] || {}).id || '');
+
   // --- Totals ---
   const totals = useMemo(() => {
     const totalItems = rows.length;
@@ -862,8 +873,8 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
     purchase_date: purchaseDate,
     due_date: dueDate || null,
     purchase_type: purchaseType,
-    warehouse: warehouseId || null,
-    branch: branchId || null,
+    warehouse: effectiveWarehouseId || null,
+    branch: effectiveBranchId || null,
     gst_type: gstType,
     status: saveStatus,
     purchase_order_ref: poRef || null,
@@ -1174,15 +1185,13 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
           </Grid>
 
           <Grid item xs={6} sm={3} md={1.5}>
-            <TextField select fullWidth size="small" label="Warehouse" value={warehouseId} onChange={(e) => setWarehouseId(e.target.value)} SelectProps={{ ...enterOpensSelectProps }}>
-              <MenuItem value="">Default</MenuItem>
-              {warehouses.map(w => <MenuItem key={w.id} value={w.id}>{w.name}</MenuItem>)}
+            <TextField select fullWidth size="small" label="Warehouse" value={warehouses.some(w => String(w.id) === effectiveWarehouseId) ? effectiveWarehouseId : ''} onChange={(e) => setWarehouseId(e.target.value)} SelectProps={{ ...enterOpensSelectProps }}>
+              {warehouses.map(w => <MenuItem key={w.id} value={String(w.id)}>{w.name}</MenuItem>)}
             </TextField>
           </Grid>
           <Grid item xs={6} sm={3} md={1.5}>
-            <TextField select fullWidth size="small" label="Branch" value={branchId} onChange={(e) => setBranchId(e.target.value)} SelectProps={{ ...enterOpensSelectProps }}>
-              <MenuItem value="">Default</MenuItem>
-              {branches.map(b => <MenuItem key={b.id} value={b.id}>{b.name}</MenuItem>)}
+            <TextField select fullWidth size="small" label="Branch" value={branches.some(b => String(b.id) === effectiveBranchId) ? effectiveBranchId : ''} onChange={(e) => { setBranchId(e.target.value); setWarehouseId(''); }} SelectProps={{ ...enterOpensSelectProps }}>
+              {branches.map(b => <MenuItem key={b.id} value={String(b.id)}>{b.name}{b.is_default ? ' (Main)' : ''}</MenuItem>)}
             </TextField>
           </Grid>
           <Grid item xs={6} sm={3} md={1.5}>

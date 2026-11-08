@@ -124,20 +124,9 @@ export default function Administration() {
       }
     } catch (e) {}
 
-    return [
-      {
-        id: 'main',
-        code: 'MAIN',
-        name: 'Main Branch',
-        phone: '—',
-        email: '—',
-        manager: '—',
-        address: '—',
-        gstin: '—',
-        status: 'Active',
-        createdDate: new Date().toISOString().split('T')[0]
-      }
-    ];
+    // Nothing until the API answers — never a made-up "Main Branch": every client has its real
+    // Head Office branch (created when the client is provisioned).
+    return [];
   });
 
   // Branch Management uses the backend as the source of truth (spec sections 2, 3, 8).
@@ -544,7 +533,7 @@ export default function Administration() {
               <Grid item xs={12} sm={4}>
                 <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: '4px solid #8b5cf6' }}>
                   <Typography variant="caption" color="text.secondary" fontWeight={800}>PRIMARY BRANCH</Typography>
-                  <Typography variant="h4" fontWeight={850} sx={{ color: '#7c3aed' }}>Main Branch</Typography>
+                  <Typography variant="h4" fontWeight={850} sx={{ color: '#7c3aed' }}>{(branches.find(b => b.isDefault) || branches[0] || {}).name || '—'}</Typography>
                 </Paper>
               </Grid>
             </Grid>

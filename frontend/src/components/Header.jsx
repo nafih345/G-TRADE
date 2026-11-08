@@ -151,8 +151,20 @@ export default function Header({ toggleTheme, mode, onMenuClick }) {
         {/* Right side controls */}
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
           
-          {/* 📌 BRANCH SWITCHER — only shown when Multi-Branch Mode is ON (spec section 4) */}
-          {multiBranchEnabled && branches.length > 0 && (
+          {/* 📌 BRANCH — the branch this session is bound to. A switcher only when Multi-Branch
+              Mode is ON and the user has more than one branch (spec section 4); otherwise a
+              fixed label, so staff see their assigned branch without selecting it. */}
+          {!(multiBranchEnabled && branches.length > 1) && activeBranch && (
+            <Tooltip title="Your branch for this session">
+              <Box data-testid="header-branch" sx={{ display: { xs: 'none', md: 'flex' }, alignItems: 'center', gap: 1, bgcolor: mode === 'dark' ? 'rgba(255,255,255,0.04)' : '#f1f5f9', px: 1.5, py: 0.75, borderRadius: 2.5 }}>
+                <BranchIcon sx={{ color: 'primary.main', fontSize: 18 }} />
+                <Typography sx={{ fontSize: '0.875rem', fontWeight: 800, color: 'text.primary' }} noWrap>
+                  {activeBranch.name}
+                </Typography>
+              </Box>
+            </Tooltip>
+          )}
+          {multiBranchEnabled && branches.length > 1 && (
             <Box sx={{ display: { xs: 'none', md: 'flex' }, alignItems: 'center', gap: 1, bgcolor: mode === 'dark' ? 'rgba(255,255,255,0.04)' : '#f1f5f9', px: 1.5, py: 0.5, borderRadius: 2.5 }}>
               <BranchIcon sx={{ color: 'primary.main', fontSize: 18 }} />
               <Select
@@ -313,10 +325,10 @@ export default function Header({ toggleTheme, mode, onMenuClick }) {
             </Avatar>
             <Box sx={{ display: { xs: 'none', sm: 'block' }, textAlign: 'left' }}>
               <Typography variant="subtitle2" sx={{ fontWeight: 600, lineHeight: 1 }}>
-                {user?.first_name} {user?.last_name}
+                {[user?.first_name, user?.last_name].filter(Boolean).join(' ') || user?.username}
               </Typography>
-              <Typography variant="caption" color="text.secondary">
-                {user?.role_display}
+              <Typography variant="caption" color="text.secondary" data-testid="header-role">
+                {user?.role_display || user?.role}
               </Typography>
             </Box>
           </Box>

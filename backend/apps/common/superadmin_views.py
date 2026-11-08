@@ -131,6 +131,13 @@ def _save_branch_access(tenant, username, data):
             if default_id and default is None:
                 raise OnboardingError('default_branch_id', 'That branch does not belong to this client.')
             access.default_branch = default
+        # Every user signs in bound to a branch: with none picked (or one no longer assigned),
+        # use their first assigned branch, or the client's default when they may use all.
+        assigned = branches if branches is not None else (list(access.branches.all()) if access.pk else [])
+        if not access.access_all_branches and assigned and access.default_branch not in assigned:
+            access.default_branch = sorted(assigned, key=lambda b: (not b.is_default, b.created_at))[0]
+        elif access.default_branch is None:
+            access.default_branch = Branch.get_default()
         access.save()
         if branches is not None:
             access.branches.set(branches)

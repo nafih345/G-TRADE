@@ -3,7 +3,7 @@
     manage.py create_tenant "Client Two" --code client2 --admin client2admin --password '...'
 
 Same rows as Administration → Client Management (apps/common/tenant_onboarding.py): the tenant,
-its Super Admin, and a Company + default branch. Everything else is created on first use.
+its Super Admin, and its default masters (see tenant_onboarding.ensure_tenant_defaults).
 """
 from django.core.management.base import BaseCommand, CommandError
 

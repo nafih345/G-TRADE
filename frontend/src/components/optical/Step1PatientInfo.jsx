@@ -1,4 +1,5 @@
 import React from 'react';
+import { useBranch } from '../../context/BranchContext';
 import { 
   Box, Card, Typography, Grid, TextField, MenuItem, 
   Button, Chip, Divider, InputAdornment, Autocomplete 
@@ -12,6 +13,7 @@ import {
 } from '@mui/icons-material';
 
 export default function Step1PatientInfo({ patientData, setPatientData, onOpenSearchModal, doctorsList = [] }) {
+  const { activeBranch } = useBranch();
   const handleChange = (field, value) => {
     setPatientData(prev => ({ ...prev, [field]: value }));
   };
@@ -144,7 +146,7 @@ export default function Step1PatientInfo({ patientData, setPatientData, onOpenSe
           <TextField
             fullWidth
             label="Clinic Branch"
-            value={patientData.branch || 'Main Branch'}
+            value={patientData.branch || activeBranch?.name || ''}
             onChange={(e) => handleChange('branch', e.target.value)}
             size="small"
           />

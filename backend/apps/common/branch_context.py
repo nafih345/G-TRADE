@@ -105,15 +105,19 @@ def _resolve(request):
     else:
         request.allowed_branch_ids = set(access[1])
 
+    # The branch this user is assigned to (UserBranchAccess.default_branch), else the client's
+    # default branch: where a session starts, and where it falls back to.
+    request.home_branch = home = (access[2] if access else None) or default_branch
+
     requested_id = request.headers.get('X-Branch-Id') or None
     if requested_id:
         if request.allowed_branch_ids is not None and str(requested_id) not in request.allowed_branch_ids:
             request.branch_denied = True
             request.active_branch = None
             return
-        request.active_branch = _branch_by_id(requested_id) or default_branch
+        request.active_branch = _branch_by_id(requested_id) or home
     else:
-        request.active_branch = (access[2] if access else None) or default_branch
+        request.active_branch = home
 
 
 class BranchContextMiddleware:
@@ -126,6 +130,7 @@ class BranchContextMiddleware:
         request.allowed_branch_ids = None
         request.is_branch_admin = False
         request.branch_denied = False
+        request.home_branch = None
 
         # Only branch-aware API traffic needs resolution; skip admin/static/migrations noise.
         if request.path.startswith('/api/'):

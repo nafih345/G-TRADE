@@ -63,7 +63,7 @@ class TenantFixture(TestCase):
     def create_set(self, client, tag):
         """Category, brand, product, customer, supplier, purchase, sale. Returns their ids."""
         ids = {}
-        res = self.call(client, 'post', '/api/masters/categories/', {'name': f'Frames {tag}', 'code': f'FR{tag}'})
+        res = self.call(client, 'post', '/api/masters/categories/', {'name': f'Test Frames {tag}', 'code': f'TFR{tag}'})
         self.assertEqual(res.status_code, 201, res.data)
         ids['category'] = res.data['id']
         res = self.call(client, 'post', '/api/masters/brands/', {'name': f'Brand {tag}', 'code': f'BR{tag}'})

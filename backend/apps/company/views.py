@@ -366,7 +366,9 @@ def branch_context(request):
 def _branch_context_payload(request, get_allowed_branch_ids):
     settings_obj = BusinessSettings.load()
     default_branch = settings_obj.default_branch or Branch.get_default()
-    active = getattr(request, 'active_branch', None) or default_branch
+    # A stored branch the user may not use (another user's pick on this browser) resolves to the
+    # user's own assigned branch, so the session binds to it without a manual re-selection.
+    active = getattr(request, 'active_branch', None) or getattr(request, 'home_branch', None) or default_branch
     is_admin = bool(getattr(request, 'is_branch_admin', False))
 
     branches = Branch.objects.filter(is_active=True)

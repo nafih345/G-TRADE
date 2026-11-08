@@ -2,9 +2,15 @@
 branch its store profile and billing start from.
 
 Shared by the platform console (POST /api/superadmin/tenants/) and `manage.py create_tenant`,
-so both create exactly the same rows. Everything else a tenant needs (numbering series,
-business settings, chart of accounts, bill templates) is created by the app on first use, as on
-a fresh install.
+so both create exactly the same rows. The default masters a client's first save or search
+depends on (ensure_tenant_defaults: Head Office branch, Main Warehouse, chart of accounts,
+business settings, the owner's branch binding, starter categories / services / templates) are
+created here, in the platform owner's request — not lazily inside the client's first requests,
+where on the hosted database they cost tens of round trips each.
+
+Clients created before a default existed get it at their next sign-in: Tenant.defaults_version
+records which generation of defaults a client has (DEFAULTS_VERSION), and the login gate fills
+in a client that is behind (apps.authentication.serializers.ensure_login_tenant).
 
 Usernames are global (User is not tenant-owned), so the admin username must not exist in any
 tenant. The new account can sign in straight away: login reads User.tenant and signs it into
@@ -12,6 +18,7 @@ the token as `tenant_id` (security.policy.issue_tokens) — nothing is cached pe
 new tenant would have to wait for.
 """
 import datetime
+import logging
 
 from django.contrib.auth import get_user_model
 from django.db import transaction
@@ -19,6 +26,13 @@ from django.utils.text import slugify
 
 from apps.common import module_access, tenancy
 from apps.common.models import Tenant, TenantAuditLog
+
+logger = logging.getLogger('django')
+
+# Bump when ensure_tenant_defaults learns a new default, so existing clients receive it at their
+# next sign-in.
+DEFAULTS_VERSION = 1
+HEAD_OFFICE = 'Head Office'
 
 
 class OnboardingError(ValueError):
@@ -71,9 +85,8 @@ def check_seat_available(tenant, adding=1):
 def onboard_tenant(*, name, admin_username, password, admin_email='', contact_phone='',
                    branch_name='', code=None, package=module_access.FULL_SUITE, modules=None,
                    settings_features=None, max_users=5, actor=''):
-    """Create the tenant and its Super Admin in one transaction; returns (tenant, admin)."""
-    from apps.company.models import Branch, BusinessSettings, Company, Warehouse
-
+    """Create the tenant, its Super Admin and its default masters in one transaction; returns
+    (tenant, admin)."""
     User = get_user_model()
     name = (name or '').strip()
     admin_username = (admin_username or '').strip()
@@ -109,26 +122,139 @@ def onboard_tenant(*, name, admin_username, password, admin_email='', contact_ph
         admin = User.objects.create_user(username=admin_username, email=admin_email or None,
                                          password=password, role='SUPER_ADMIN', tenant=tenant,
                                          phone=contact_phone or None)
-        with tenancy.use_tenant(tenant.pk):
-            today = datetime.date.today()
-            start_year = today.year if today.month >= 4 else today.year - 1
-            company = Company.objects.create(
-                name=name, email=admin_email or None, phone=contact_phone or None,
-                fiscal_year_start=datetime.date(start_year, 4, 1),
-                fiscal_year_end=datetime.date(start_year + 1, 3, 31),
-            )
-            branch = Branch.objects.create(company=company, name=(branch_name or '').strip() or 'Head Office',
-                                           code='HO', phone=contact_phone or None, is_default=True,
-                                           is_active=True)
-            # Stock ledger rows, stock adjustments, racks and opening stock all need a warehouse;
-            # without one a new client's stock movements were silently left out of the ledger.
-            Warehouse.objects.create(branch=branch, name='Main Warehouse', code='WH-MAIN')
-            # Chart of accounts + posting-role mappings now, in the platform owner's request,
-            # rather than lazily inside the client's first Supplier / Customer / sale save.
-            from apps.financial.defaults import ensure_accounting_defaults
-            ensure_accounting_defaults()
-            # Created on first use otherwise — inside the client's first request.
-            BusinessSettings.load()
+        ensure_tenant_defaults(tenant, branch_name=branch_name, fresh=True)
         log_event(tenant, 'ONBOARDED', actor, admin=admin.username, package=package, modules=modules,
                   max_users=max_users)
     return tenant, admin
+
+
+def _fiscal_year(today=None):
+    today = today or datetime.date.today()
+    start = today.year if today.month >= 4 else today.year - 1
+    return datetime.date(start, 4, 1), datetime.date(start + 1, 3, 31)
+
+
+def _free_value(taken, base, limit=20):
+    value, n = base[:limit], 2
+    while value in taken:
+        suffix = f'-{n}'
+        value = f'{base[:limit - len(suffix)]}{suffix}'
+        n += 1
+    return value
+
+
+def ensure_tenant_defaults(tenant, *, branch_name='', fresh=False):
+    """Give `tenant` every default master its first saves and searches rely on. Idempotent: only
+    what is missing is created; nothing existing is changed except binding a default branch where
+    none is set. Returns the names of the defaults it had to create.
+
+      * Company (store profile) and exactly one default, active branch — "Head Office" unless
+        named. A client has one primary branch, never a separate generic "Default".
+      * A Main Warehouse for every active branch without one (stock ledger, racks, adjustments).
+      * Chart of accounts + posting-role mappings (the ledger groups every save posts to).
+      * BusinessSettings pointing at the default branch.
+      * The client's owners (role SUPER_ADMIN) bound to the default branch, with every branch.
+      * Starter product categories and services, bill + barcode-label templates, barcode series.
+
+    `fresh` marks a brand-new client: starter lists are seeded even when the database was wiped
+    before (a wipe's "deliberately empty" marker concerns the businesses it wiped).
+    """
+    from apps.company.models import Branch, BusinessSettings, Company, UserBranchAccess, Warehouse
+
+    created = []
+    User = get_user_model()
+    with tenancy.use_tenant(tenant.pk), transaction.atomic():
+        company = Company.objects.order_by('created_at').first()
+        if company is None:
+            start, end = _fiscal_year()
+            company = Company.objects.create(name=tenant.name, email=tenant.contact_email or None,
+                                             phone=tenant.contact_phone or None,
+                                             fiscal_year_start=start, fiscal_year_end=end)
+            created.append('company')
+
+        branches = list(Branch.objects.filter(is_active=True).order_by('created_at'))
+        default = next((b for b in branches if b.is_default), None)
+        if default is None and branches:
+            default = branches[0]
+            default.is_default = True
+            default.save()  # Branch.save() clears the flag on every other row
+            created.append('default branch')
+        if default is None:
+            taken = set(Branch.all_objects.values_list('code', flat=True))
+            default = Branch.objects.create(company=company, name=(branch_name or '').strip() or HEAD_OFFICE,
+                                            code=_free_value(taken, 'HO'), phone=tenant.contact_phone or None,
+                                            is_default=True, is_active=True)
+            branches = [default]
+            created.append('branch')
+
+        # Stock ledger rows, stock adjustments, racks and opening stock all need a warehouse;
+        # without one a client's stock movements were silently left out of the ledger.
+        with_warehouse = set(Warehouse.objects.values_list('branch_id', flat=True))
+        taken = set(Warehouse.all_objects.values_list('code', flat=True))
+        for branch in branches:
+            if branch.pk in with_warehouse:
+                continue
+            base = 'WH-MAIN' if branch.pk == default.pk else f'WH-{branch.code}'.upper()
+            code = _free_value(taken, base)
+            taken.add(code)
+            Warehouse.objects.create(branch=branch, name='Main Warehouse', code=code)
+            created.append(f'warehouse {code}')
+
+        # Chart of accounts + posting-role mappings now, rather than lazily inside the client's
+        # first Supplier / Customer / sale save.
+        from apps.financial.defaults import ensure_accounting_defaults
+        ensure_accounting_defaults()
+
+        business = BusinessSettings.load()
+        if business.default_branch_id not in {b.pk for b in branches}:
+            business.default_branch = default
+            business.save(update_fields=['default_branch'])
+            created.append('business settings default branch')
+
+        # Owners sign in to the default branch through an explicit binding, so the header, the
+        # branch switcher and new documents never fall back to a guessed or generic branch.
+        for username in User.objects.filter(tenant=tenant, role='SUPER_ADMIN').values_list('username', flat=True):
+            access = UserBranchAccess.objects.filter(username__iexact=username).first()
+            if access is None:
+                UserBranchAccess.objects.create(username=username, access_all_branches=True, default_branch=default)
+                created.append(f'branch access {username}')
+            elif access.default_branch_id is None:
+                access.default_branch = default
+                access.save(update_fields=['default_branch', 'updated_at'])
+                created.append(f'default branch for {username}')
+
+        from apps.common.models import DataResetMarker
+        if fresh or DataResetMarker.current() is None:
+            from apps.masters.views import seed_default_categories
+            from apps.sales.views import seed_default_services
+            if seed_default_categories():
+                created.append('categories')
+            if seed_default_services():
+                created.append('services')
+
+        # Bill / label templates and the barcode series are otherwise created inside the first
+        # print or product save.
+        from apps.billing.views import ensure_seeded as ensure_bill_templates
+        from apps.products.label_views import ensure_seeded as ensure_label_templates
+        from apps.products.models import BarcodeSeriesConfig
+        ensure_bill_templates()
+        ensure_label_templates()
+        BarcodeSeriesConfig.load()
+
+    if tenant.defaults_version < DEFAULTS_VERSION:
+        Tenant.objects.filter(pk=tenant.pk).update(defaults_version=DEFAULTS_VERSION)
+        tenant.defaults_version = DEFAULTS_VERSION
+    return created
+
+
+def heal_tenant_defaults(tenant):
+    """Sign-in catch-up for a client created before one of the defaults existed (one cheap
+    version check otherwise). Never blocks the sign-in."""
+    if tenant is None or tenant.defaults_version >= DEFAULTS_VERSION:
+        return
+    try:
+        created = ensure_tenant_defaults(tenant)
+        if created:
+            log_event(tenant, 'DEFAULTS_PROVISIONED', 'system', created=created, version=DEFAULTS_VERSION)
+    except Exception:
+        logger.exception('Could not provision the default masters of tenant %s', tenant.pk)

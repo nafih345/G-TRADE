@@ -79,6 +79,10 @@ def ensure_login_tenant(user):
             'detail': 'This account is not linked to an active business. Access denied.',
             'code': 'no_tenant' if tenant is None else 'tenant_inactive',
         })
+    # A client created before one of its default masters existed (branch, warehouse, ledger
+    # groups, owner's branch binding, …) gets it now, before its first save or search needs it.
+    from apps.common.tenant_onboarding import heal_tenant_defaults
+    heal_tenant_defaults(tenant)
 
 
 def login_user_payload(user, tenant_id=None):

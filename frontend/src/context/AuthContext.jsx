@@ -153,6 +153,9 @@ export const AuthProvider = ({ children }) => {
 
     // Another client signing in on this browser must not see the last one's cached records.
     clearLocalDataIfScopeChanged('tenant', tokenTenantId(data.access));
+    // A fresh sign-in starts at the branch the server binds this user to (their assigned branch;
+    // Head Office for the owner) — never the branch the previous user picked on this browser.
+    localStorage.removeItem('active_branch_id');
     localStorage.setItem('access_token', data.access);
     if (data.refresh) localStorage.setItem('refresh_token', data.refresh);
     localStorage.setItem('user_profile', JSON.stringify(profile));

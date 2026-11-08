@@ -1306,6 +1306,26 @@ def _next_service_code():
     return f"SRV{n + 1:03d}"
 
 
+DEFAULT_SERVICES = (
+    ('SRV001', 'Frame Repair', 'Repair of broken hinge, temple or frame front', 250, 18),
+    ('SRV002', 'Frame Fitting', 'Fitting and alignment of new spectacles', 100, 18),
+    ('SRV003', 'Frame Adjustment', 'Re-adjustment of frame for comfortable fit', 50, 18),
+    ('SRV004', 'Cleaning Service', 'Ultrasonic cleaning of frame and lenses', 50, 18),
+    ('SRV005', 'Parts Replacement', 'Replacement of nose pads, screws or temple tips', 0, 18),
+)
+
+
+def seed_default_services():
+    """The common optical services, for the current tenant, when it has none (one bulk insert).
+    Called by client onboarding and lazily by the service list."""
+    if Service.all_objects.exists():
+        return 0
+    Service.objects.bulk_create([
+        Service(service_code=code, name=name, description=desc, default_price=price, tax_percentage=tax)
+        for code, name, desc, price, tax in DEFAULT_SERVICES])
+    return len(DEFAULT_SERVICES)
+
+
 class ServiceViewSet(viewsets.ModelViewSet):
     queryset = Service.objects.all()
     serializer_class = ServiceSerializer
@@ -1315,18 +1335,7 @@ class ServiceViewSet(viewsets.ModelViewSet):
         # Seed the common optical services once so the New Sale service picker and the
         # Service Master both open with a usable list instead of a blank table.
         if not Service.objects.exists():
-            defaults = [
-                ('SRV001', 'Frame Repair', 'Repair of broken hinge, temple or frame front', 250, 18),
-                ('SRV002', 'Frame Fitting', 'Fitting and alignment of new spectacles', 100, 18),
-                ('SRV003', 'Frame Adjustment', 'Re-adjustment of frame for comfortable fit', 50, 18),
-                ('SRV004', 'Cleaning Service', 'Ultrasonic cleaning of frame and lenses', 50, 18),
-                ('SRV005', 'Parts Replacement', 'Replacement of nose pads, screws or temple tips', 0, 18),
-            ]
-            for code, name, desc, price, tax in defaults:
-                Service.objects.get_or_create(
-                    service_code=code,
-                    defaults={'name': name, 'description': desc, 'default_price': price, 'tax_percentage': tax},
-                )
+            seed_default_services()
         return Service.objects.all()
 
     def perform_create(self, serializer):

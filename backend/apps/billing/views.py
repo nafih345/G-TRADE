@@ -100,7 +100,15 @@ class OpenReadsMixin:
 # Seeding
 # ---------------------------------------------------------------------------
 
-_seeded = False
+# Tenants whose starter templates are known to be current in this process. Per tenant: a single
+# process-wide flag meant a client onboarded after another tenant had been seeded never received
+# any bill templates until the server restarted.
+_seeded = set()
+
+
+def _seed_key():
+    from apps.common import tenancy
+    return tenancy.current_tenant_id()
 
 
 def _create_from_spec(spec, *, name=None, is_default=False, actor=''):
@@ -132,8 +140,8 @@ def ensure_seeded():
     type its recommended starter. Existing install: add only the presets it is missing and
     assign starters to document types that had no assignment row at all (new types) — the
     user's existing choices, including "use default", are never changed."""
-    global _seeded
-    if _seeded:
+    key = _seed_key()
+    if key in _seeded:
         return
     try:
         pk = BillingSettings.load().pk
@@ -143,7 +151,7 @@ def ensure_seeded():
             BillingSettings.objects.filter(pk=pk).update(updated_at=timezone.now())
             settings_row = BillingSettings.objects.get(pk=pk)
             if settings_row.presets_generation >= PRESET_GENERATION:
-                _seeded = True
+                _seeded.add(key)
                 return
             fresh = not BillTemplate.all_objects.exists()
             have = set(BillTemplate.all_objects.exclude(preset_key='').values_list('preset_key', flat=True))
@@ -167,15 +175,14 @@ def ensure_seeded():
                     tpl.save()
             settings_row.presets_generation = PRESET_GENERATION
             settings_row.save(update_fields=['presets_generation', 'updated_at'])
-        _seeded = True
+        _seeded.add(key)
     except (ProgrammingError, OperationalError):
         # Billing tables not migrated yet — /api/health/ reports the pending migration.
         pass
 
 
 def reset_seed_flag():
-    global _seeded
-    _seeded = False
+    _seeded.clear()
 
 
 def _snapshot(tpl, actor):

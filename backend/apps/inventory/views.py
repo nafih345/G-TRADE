@@ -14,6 +14,8 @@ class StockAdjustmentSerializer(ModelSerializer):
     class Meta:
         model = StockAdjustment
         fields = '__all__'
+        # Optional: the viewset fills in the active branch's warehouse.
+        extra_kwargs = {'warehouse': {'required': False}}
 
 class WarehouseTransferSerializer(ModelSerializer):
     class Meta:
@@ -41,7 +43,16 @@ class StockAdjustmentViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
         refused = guard_legacy_pos_adjustment(serializer.validated_data.get('reason'))
         if refused:
             raise ValidationError({'detail': refused, 'code': 'wholesale_stock_handled'})
-        adj = serializer.save(**self._branch_stamp_kwargs(serializer))
+        stamp = self._branch_stamp_kwargs(serializer)
+        if serializer.validated_data.get('warehouse') is None:
+            from apps.company.models import Warehouse
+            branch = serializer.validated_data.get('branch') or stamp.get('branch') or Branch.get_default()
+            warehouse = (Warehouse.objects.filter(branch=branch).order_by('created_at').first()
+                         or Warehouse.objects.order_by('created_at').first())
+            if warehouse is None:
+                raise ValidationError({'warehouse': 'This business has no warehouse yet.'})
+            stamp['warehouse'] = warehouse
+        adj = serializer.save(**stamp)
         tx_type = 'ADJ_ADD' if adj.adjustment_type == 'ADD' else 'ADJ_SUB'
         qty = adj.quantity if adj.adjustment_type == 'ADD' else -adj.quantity
         adjust_branch_stock(

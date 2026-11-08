@@ -36,6 +36,10 @@ class Tenant(models.Model):
     settings_features = models.JSONField(null=True, blank=True, default=None)
     # Seat limit: how many *active* user accounts the client may have (its owner included).
     max_users = models.PositiveIntegerField(default=5)
+    # Which generation of default masters (branch, warehouse, chart of accounts, templates, …)
+    # tenant_onboarding.ensure_tenant_defaults has given this client; behind = filled in at the
+    # next sign-in.
+    defaults_version = models.PositiveSmallIntegerField(default=0)
 
     # Deactivation record. Filled when the platform admin deactivates (or schedules it): the
     # account stops working from `deactivation_effective_date` (see is_effectively_active).
