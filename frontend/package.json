@@ -18,6 +18,7 @@
     "test:cheques": "node --test src/utils/__tests__/cheques.test.js",
     "test:purchase-labels": "node --test src/utils/__tests__/purchaseLabels.test.js",
     "test:pricing": "node --test src/utils/__tests__/pricingRules.test.js",
+    "test:wholesale-pricing": "node --test src/utils/__tests__/wholesalePricing.test.js",
     "test:stock-value": "node --test src/utils/__tests__/stockValue.test.js",
     "test:master-cache": "node --test src/utils/__tests__/masterDataCache.test.js",
     "test:product-modes": "node --test src/utils/__tests__/productModes.test.js",

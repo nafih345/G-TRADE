@@ -39,6 +39,7 @@ import {
   Person as PersonIcon,
   Search as SearchIcon,
   Add as AddIcon,
+  Block as BlockIcon,
   OpenInFull as WindowEditIcon,
   Delete as DeleteIcon,
   Print as PrintIcon,
@@ -159,7 +160,7 @@ const StockBadge = ({ stock }) => {
   return (
     <Chip
       size="small"
-      label={inStock ? `Stock: ${stock}` : `${Number.isFinite(n) ? stock : 0} · Out of Stock`}
+      label={inStock ? `Stock: ${stock}` : `Out of Stock / ${Number.isFinite(n) ? stock : 0} Qty`}
       sx={{
         fontWeight: 900, height: 22, fontSize: '0.7rem', whiteSpace: 'nowrap',
         bgcolor: inStock ? '#dcfce7' : '#fee2e2',
@@ -2225,9 +2226,25 @@ export default function NewSaleWizard({
   const showStockCol = matchEntries.length > 0;
   const gridCols = showStockCol ? 16 : 15;
   const activeMatch = matchIndex >= 0 && matchIndex < matchEntries.length ? matchIndex : -1;
+  const isOutOfStockMatch = (src) => {
+    if (!src || src.itemType === 'SERVICE' || src.category === 'SERVICE') return false;
+    const stock = liveStock(src.productId, src.stock);
+    if (stock == null || stock === '') return false;
+    const n = parseFloat(stock);
+    return Number.isFinite(n) && n <= 0;
+  };
   // Picking a match (click or Enter) drops the line into the bill and puts the cursor straight in
   // that line's Qty cell, so the count can be typed without reaching for the mouse.
   const addMatch = (src) => {
+    // A product with no stock can't be picked from the search list (Enter or click): warn and
+    // leave the cursor in the search box with the typed text intact. Zero-stock back-orders go
+    // through the "+ Add Item" / "+ NEW Lens" custom-item workflow instead. Services (no stock
+    // figure) and products whose stock is unknown are not blocked.
+    if (isOutOfStockMatch(src)) {
+      notify('This product is currently out of stock (0 Qty).', 'warning');
+      focusNsFieldSoon('search');
+      return;
+    }
     const rowId = handleAddItem(src);
     setMatchIndex(-1);
     // Found by typing its offer barcode: sell it on that offer, like a scan of the tag.
@@ -3797,16 +3814,18 @@ export default function NewSaleWizard({
                     const line = computeEntryLine(src);
                     const stock = p.stock ?? p.qty;
                     const active = activeMatch === i;
+                    const outOfStock = isOutOfStockMatch(src);
                     return (
                       <TableRow
                         key={`match-${p.id || p.barcode || src.item}`}
                         data-match-idx={i}
+                        data-out-of-stock={outOfStock ? 'true' : undefined}
                         onMouseEnter={() => setMatchIndex(i)}
                         onClick={() => addMatch(src)}
                         sx={{
-                          cursor: 'pointer',
-                          bgcolor: active ? '#bfdbfe' : '#f0f9ff',
-                          outline: active ? '2px solid #2563eb' : 'none', outlineOffset: -2,
+                          cursor: outOfStock ? 'not-allowed' : 'pointer',
+                          bgcolor: outOfStock ? (active ? '#fecaca' : '#fef2f2') : (active ? '#bfdbfe' : '#f0f9ff'),
+                          outline: active ? `2px solid ${outOfStock ? '#dc2626' : '#2563eb'}` : 'none', outlineOffset: -2,
                           '& td': { borderBottom: '1px dashed #bfdbfe' },
                         }}
                       >
@@ -3859,9 +3878,9 @@ export default function NewSaleWizard({
                         <TableCell align="right" sx={{ fontSize: '0.8rem', color: '#0f766e' }}>₹{line.tax.toFixed(2)} ({line.taxPercent || 0}%)</TableCell>
                         <TableCell align="right" sx={{ fontWeight: 900, color: 'primary.main', fontSize: '0.85rem' }}>₹{line.total.toFixed(2)}</TableCell>
                         <TableCell align="center">
-                          <Tooltip title="Add to bill">
-                            <IconButton size="small" color="success" onClick={(e) => { e.stopPropagation(); addMatch(src); }}>
-                              <AddIcon fontSize="small" />
+                          <Tooltip title={outOfStock ? 'Out of stock — use + Add Item for a back-order' : 'Add to bill'}>
+                            <IconButton size="small" color={outOfStock ? 'error' : 'success'} onClick={(e) => { e.stopPropagation(); addMatch(src); }}>
+                              {outOfStock ? <BlockIcon fontSize="small" /> : <AddIcon fontSize="small" />}
                             </IconButton>
                           </Tooltip>
                         </TableCell>

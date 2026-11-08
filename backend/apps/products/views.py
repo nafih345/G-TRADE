@@ -72,6 +72,9 @@ class ProductSerializer(ModelSerializer):
     supplier = SerializerMethodField()
     rack = SerializerMethodField()
     tax_rate = SerializerMethodField()
+    mrp = SerializerMethodField()
+    tax_treatment = SerializerMethodField()
+    tax_category = SerializerMethodField()
     gst = SerializerMethodField()
     extra_barcodes = SerializerMethodField()
     colour = SerializerMethodField()
@@ -170,6 +173,25 @@ class ProductSerializer(ModelSerializer):
 
     def get_selling_price(self, obj):
         return float(obj.retail_price or 0.0)
+
+    def get_tax_treatment(self, obj):
+        # 'INCLUSIVE' / 'EXCLUSIVE' from the linked Tax master; None when the rate only
+        # lives in extra_data (sales screens then treat the price as tax-exclusive).
+        tax = getattr(obj, 'tax', None)
+        return tax.treatment if tax else None
+
+    def get_tax_category(self, obj):
+        # STANDARD / ZERO_RATED / EXEMPT / NIL_RATED / NON_TAXABLE — lets a 0% line be
+        # labelled correctly on the Wholesale POS.
+        tax = getattr(obj, 'tax', None)
+        return tax.category if tax else None
+
+    def get_mrp(self, obj):
+        # Same resolution as Stock Overview: extra_data.mrp first, then the (misnamed)
+        # wholesale_price column. None when unknown — never guessed from the sale price.
+        from apps.inventory.stock_overview import product_mrp
+        val = float(product_mrp(obj) or 0)
+        return val or None
 
     def get_supplier(self, obj):
         return obj.supplier_name or ''

@@ -132,7 +132,10 @@ def resolve_product_fields(product, include_restricted=False):
     }
     values['internal_code'] = short_internal_code(product)
     if include_restricted:
-        values['wholesale_price'] = _money(product.wholesale_price)
+        # The real wholesale tier (Wholesale POS); rows saved before it existed keep the old
+        # wholesale_price column value.
+        values['wholesale_price'] = _money(
+            product.wholesale_sale_price if product.wholesale_sale_price is not None else product.wholesale_price)
         values['cost_price'] = _money(product.cost_price)
     return values
 

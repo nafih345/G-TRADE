@@ -172,6 +172,8 @@ export default function Products() {
             product_code: p.product_code || p.sku || p.code || '',
             purchasePrice: parseFloat(p.cost_price || p.purchasePrice || 0),
             sellingPrice: parseFloat(p.price || p.sellingPrice || 0),
+            mrp: p.mrp ?? null,
+            wholesaleRate: p.wholesale_sale_price ?? null,
             gst: p.gst || '18%',
             stock: parseInt(p.stock || p.quantity || 0),
             rack: p.rack || 'A1',

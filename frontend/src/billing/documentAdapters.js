@@ -424,7 +424,7 @@ function adaptWholesale(doc, documentType) {
       qty: qty ?? 0,
       freeQty: null,
       unit: str(it.unit),
-      mrp: null,
+      mrp: numOrNull(it.mrp),
       rate,
       discount: null,
       discountPercent: numOrNull(it.discount),

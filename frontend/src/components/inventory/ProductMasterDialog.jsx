@@ -40,7 +40,7 @@ const blankProduct = (overrides = {}) => ({
   size: '', color: '', material: '', frameShape: '',
   frameType: '', lensType: '', coating: '', powerRange: '',
   supplier: '', warehouse: 'Main', rack: '', stock: '',
-  purchasePrice: '', mrp: '', salePrice: '', gst: '0%',
+  purchasePrice: '', mrp: '', salePrice: '', wholesaleRate: '', gst: '0%',
   barcode: '',
   secondaryBarcode: '',
   // Spectacle lenses: what the sale price is per, what stock is counted in, and the single-lens
@@ -358,7 +358,10 @@ const productToForm = (ep) => {
   rack: ep.rack || '',
   stock: (ep.stock ?? '') === '' ? '' : String(ep.stock),
   purchasePrice: (ep.purchasePrice ?? '') === '' ? '' : String(ep.purchasePrice),
-  mrp: (ep.mrp ?? '') === '' ? '' : String(ep.mrp),
+  // Callers that pass a mapped row without `mrp` (Products list) used to open with a blank
+  // MRP — and saving then wrote MRP 0. Fall back to where the API keeps it.
+  mrp: (() => { const v = ep.mrp ?? ex.mrp ?? ep.wholesale_price; return (v ?? '') === '' || !(parseFloat(v) > 0) ? '' : String(v); })(),
+  wholesaleRate: (() => { const v = ep.wholesaleRate ?? ep.wholesale_sale_price; return (v ?? '') === '' || v === null ? '' : String(v); })(),
   salePrice: (ep.salePrice ?? ep.sellingPrice ?? '') === '' ? '' : String(ep.salePrice ?? ep.sellingPrice),
   gst: ep.gst || '0%',
   barcode: ep.barcode || '',
@@ -572,6 +575,13 @@ export default function ProductMasterDialog({
       stock,
       extra_data
     };
+    // Wholesale tier: sent only when this form knows it, so a caller that opened the dialog
+    // with a row lacking the field can't wipe a price set elsewhere. Blank = not set.
+    const wsKnown = !isEdit || editProduct.wholesaleRate !== undefined || editProduct.wholesale_sale_price !== undefined;
+    if (wsKnown || String(p.wholesaleRate).trim() !== '') {
+      const ws = parseFloat(p.wholesaleRate);
+      payload.wholesale_sale_price = ws > 0 ? ws : null;
+    }
     if (!isEdit) payload.opening_stock = stock;
 
     let savedId = isEdit ? String(editProduct.id) : String(Date.now());
@@ -807,16 +817,16 @@ export default function ProductMasterDialog({
             </Section>
 
             {/* ── Pricing (MRP & Sale price as their own part) ── */}
-            <Section title="Pricing — MRP & Sale Price" icon={<PriceIcon fontSize="small" />}>
+            <Section title="Pricing — Cost, MRP, Sale & Wholesale Price" icon={<PriceIcon fontSize="small" />}>
               <Grid container spacing={2}>
-                <Grid item xs={12} sm={6} md={3}>
+                <Grid item xs={12} sm={6} md={2.4}>
                   <TextField
                     label="Purchase Cost Price (₹)" fullWidth size="small" type="number"
                     value={p.purchasePrice} onChange={(e) => set({ purchasePrice: e.target.value })}
                     inputProps={{ style: { fontWeight: 800 } }}
                   />
                 </Grid>
-                <Grid item xs={12} sm={6} md={3}>
+                <Grid item xs={12} sm={6} md={2.4}>
                   <TextField
                     label="MRP Price (₹)" fullWidth size="small" type="number"
                     value={p.mrp}
@@ -825,7 +835,7 @@ export default function ProductMasterDialog({
                     helperText="Printed maximum retail price"
                   />
                 </Grid>
-                <Grid item xs={12} sm={6} md={3}>
+                <Grid item xs={12} sm={6} md={2.4}>
                   <TextField
                     label="Sale Price (₹)" fullWidth size="small" type="number"
                     value={p.salePrice} onChange={(e) => set({ salePrice: e.target.value })}
@@ -833,7 +843,15 @@ export default function ProductMasterDialog({
                     helperText="Actual selling / billing price"
                   />
                 </Grid>
-                <Grid item xs={12} sm={6} md={3}>
+                <Grid item xs={12} sm={6} md={2.4}>
+                  <TextField
+                    label="Wholesale Price (₹)" fullWidth size="small" type="number"
+                    value={p.wholesaleRate} onChange={(e) => set({ wholesaleRate: e.target.value })}
+                    inputProps={{ style: { fontWeight: 800, color: '#4f46e5' }, 'data-testid': 'pm-wholesale-price' }}
+                    helperText="Wholesale POS rate (blank = MRP)"
+                  />
+                </Grid>
+                <Grid item xs={12} sm={6} md={2.4}>
                   <TextField select label="GST Tax Rate" fullWidth size="small" value={p.gst} onChange={(e) => set({ gst: e.target.value })} SelectProps={{ ...enterOpensSelectProps }} helperText="Enter, then ↑/↓ + Enter">
                     <MenuItem value="0%">0% (Exempt)</MenuItem>
                     <MenuItem value="5%">5% GST</MenuItem>

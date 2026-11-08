@@ -85,6 +85,10 @@ import {
   NewDealerDialog, LedgerDialog, RecordPaymentDialog, DealerProfileDialog, PreviousOrdersDialog, BulkAddDialog,
   ExcelImportDialog, SchemeDialog, CreditNoteDialog, CompletionDialog, ShortcutHelpDialog, Kbd,
 } from './wholesale/WholesaleDialogs';
+import {
+  parseTaxPercent, productPriceTiers, shownPrice, setLinePrice, setLineTax, setLineTaxMode, pricedLine,
+  zeroTaxLabel, lineMargin, priceChoices, taxBreakup, round2,
+} from '../utils/wholesalePricing';
 
 // One "label: value" row used in the credit panel.
 function SummaryLine({ label, value, valueColor, dense }) {
@@ -306,6 +310,7 @@ export default function WholesaleSales() {
   const [completionOpen, setCompletionOpen] = useState(false);
   const [creditNoteOpen, setCreditNoteOpen] = useState(false);
   const [moreActionsAnchor, setMoreActionsAnchor] = useState(null);
+  const [priceMenu, setPriceMenu] = useState(null); // { anchor, idx } — Unit Price choice menu
 
   const [clearCartConfirmOpen, setClearCartConfirmOpen] = useState(false);
   const [cancelInvoiceConfirmOpen, setCancelInvoiceConfirmOpen] = useState(false);
@@ -402,7 +407,10 @@ export default function WholesaleSales() {
 
     const mapBackendProduct = (p) => {
       const stock = parseInt(p.stock ?? p.quantity ?? 0) || 0;
-      const gstNum = parseFloat(String(p.gst ?? p.tax_rate ?? '').replace('%', '').trim());
+      // tax_rate is the numeric resolver output; 0 is a real (zero-tax) rate, only an
+      // unknown rate falls back to the 18% default slab.
+      const gstNum = parseTaxPercent(p.tax_rate, p.gst);
+      const tiers = productPriceTiers(p);
       const extra = p.extra_data && typeof p.extra_data === 'object' ? p.extra_data : {};
       return {
         id: String(p.id),
@@ -422,10 +430,16 @@ export default function WholesaleSales() {
         availableStock: stock,
         stock,
         minStock: parseInt(p.minimum_stock ?? 5) || 5,
-        retailPrice: parseFloat(p.retail_price || p.price || 0) || 0,
-        wholesalePrice: parseFloat(p.wholesale_price || p.price || p.retail_price || 0) || 0,
+        retailPrice: tiers.retailPrice,
+        // Base for the dealer-tier resolver: wholesale tier → MRP → retail sale price.
+        wholesalePrice: tiers.wholesaleBase,
+        wholesaleRate: tiers.wholesaleRate,
+        mrp: tiers.mrp,
+        costPrice: tiers.costPrice,
         price: parseFloat(p.price || p.retail_price || 0) || 0,
-        gst: Number.isFinite(gstNum) ? gstNum : 18,
+        gst: gstNum ?? 18,
+        taxInclusive: p.tax_treatment === 'INCLUSIVE',
+        taxCategory: p.tax_category || '',
         unit: p.unit || 'Pcs',
         barcode: p.barcode || '',
         hsn: p.hsn_code || extra.hsn_code || '',
@@ -619,6 +633,8 @@ export default function WholesaleSales() {
     // Taxable additional charges are assumed GST-18% (matches the rest of this module's default rate).
     const chargesGst = taxableCharges * 0.18;
     const totalGst = productGst + chargesGst;
+    // Per-slab view (0% / exempt lines included) for the GST tooltip and the zero-tax row.
+    const { slabs: gstBreakup, zeroTaxValue } = taxBreakup(cartItems, factor, computeLineTotals);
 
     const rawTotal = taxableAmount + totalGst + nonTaxableCharges;
     const grandTotal = Math.round(rawTotal);
@@ -628,6 +644,8 @@ export default function WholesaleSales() {
       totalItems, totalQty, totalFreeQty, subtotal, productDiscount, schemeDiscount, schemeLabel, schemeActive,
       totalDiscount: productDiscount + schemeDiscount, // kept for WholesaleReports.jsx parity
       taxableAmount, totalGst, additionalCharges: totalCharges, taxableCharges, nonTaxableCharges, roundOff, grandTotal,
+      gstBreakup: gstBreakup.map(b => ({ rate: b.rate, taxable: round2(b.taxable), tax: round2(b.tax) })),
+      zeroTaxValue: round2(zeroTaxValue),
     };
   }, [cartItems, chargesList, invoiceDiscount]);
 
@@ -761,7 +779,7 @@ export default function WholesaleSales() {
   const buildCartLine = (prod, qty = 1) => {
     const avail = parseFloat(prod.availableStock ?? prod.stock ?? 0) + heldFor(prod.id);
     const { rate, tier } = priceForProduct(prod, qty);
-    return {
+    const line = {
       itemType: 'PRODUCT',
       id: prod.id || prod.code,
       barcode: prod.barcode || prod.code,
@@ -785,13 +803,31 @@ export default function WholesaleSales() {
       availableStock: avail,
       qty,
       freeQty: 0,
-      rate,
       priceTier: tier,
       discount: 0,
-      gst: parseFloat(prod.gst || 18),
+      // `prod.gst || 18` turned every 0% (zero-tax) product into 18%.
+      gst: parseTaxPercent(prod.gst) ?? 18,
+      taxCategory: prod.taxCategory || '',
+      // Price hierarchy snapshot (reference only — never billed): cost for margin, MRP benchmark.
+      costPrice: parseFloat(prod.costPrice ?? prod.purchasePrice ?? 0) || 0,
+      mrp: parseFloat(prod.mrp ?? 0) || null,
+      wholesaleRate: prod.wholesaleRate ?? null,
       notes: '',
       isFreeGift: false,
     };
+    // List prices follow the product's tax treatment (Tax master Inclusive / Exclusive).
+    return pricedLine(line, rate, Boolean(prod.taxInclusive));
+  };
+
+  // Typed price / tax from the bulk entry: tax first so an inclusive price is split on the
+  // final slab; a price different from the list price marks the line CUSTOM.
+  const applyLineOverrides = (line, overrides) => {
+    if (!overrides) return line;
+    const { rate, gst, ...rest } = overrides;
+    let next = { ...line, ...rest };
+    if (gst !== undefined) next = setLineTax(next, gst);
+    if (rate !== undefined && rate !== shownPrice(line)) next = { ...setLinePrice(next, rate), priceTier: 'CUSTOM' };
+    return next;
   };
 
   // Adds `qty` of a product. `overrides` ({ rate, discount, gst }) come from the entry row; a
@@ -810,17 +846,10 @@ export default function WholesaleSales() {
       if (existingIdx !== -1) {
         const next = [...prev];
         const line = next[existingIdx];
-        next[existingIdx] = { ...line, ...(overrides || {}), qty: (parseFloat(line.qty) || 0) + addQty };
-        if (overrides && overrides.rate !== undefined && overrides.rate !== line.rate) next[existingIdx].priceTier = 'CUSTOM';
+        next[existingIdx] = applyLineOverrides({ ...line, qty: (parseFloat(line.qty) || 0) + addQty }, overrides);
         return next;
       }
-      const line = buildCartLine(prod, addQty);
-      if (overrides) {
-        const listRate = line.rate;
-        Object.assign(line, overrides);
-        if (overrides.rate !== undefined && overrides.rate !== listRate) line.priceTier = 'CUSTOM';
-      }
-      return [...prev, line];
+      return [...prev, applyLineOverrides(buildCartLine(prod, addQty), overrides)];
     });
     return true;
   };
@@ -1024,7 +1053,8 @@ export default function WholesaleSales() {
     const e = {};
     const qty = Number(it.qty);
     if (it.qty === '' || !Number.isFinite(qty) || qty < 1) e.qty = 'Quantity must be at least 1';
-    if (it.rate === '' || !Number.isFinite(Number(it.rate)) || Number(it.rate) < 0) e.rate = 'Price must be 0 or more';
+    const price = shownPrice(it);
+    if (price === '' || price === undefined || !Number.isFinite(Number(price)) || Number(price) < 0) e.rate = 'Price must be 0 or more';
     const d = Number(it.discount);
     if (!it.isFreeGift && (!Number.isFinite(d) || d < 0 || d > 100)) e.disc = 'Discount must be 0 – 100%';
     const g = Number(it.gst);
@@ -1035,10 +1065,37 @@ export default function WholesaleSales() {
   const handleUpdateItemField = (index, field, value) => {
     setCartItems(prev => {
       const next = [...prev];
-      next[index] = { ...next[index], [field]: value };
-      if (field === 'rate' && !isServiceLine(next[index])) next[index].priceTier = 'CUSTOM';
+      const line = next[index];
+      if (field === 'rate') {
+        // The Unit Price cell holds the inclusive price on an inclusive line; `rate` is derived.
+        next[index] = setLinePrice(line, value);
+        if (!isServiceLine(line)) next[index].priceTier = 'CUSTOM';
+      } else if (field === 'gst') {
+        next[index] = setLineTax(line, value);
+      } else {
+        next[index] = { ...line, [field]: value };
+      }
       return next;
     });
+  };
+
+  // Price choice menu: wholesale tier / dealer tier / retail / MRP. MRP is a tax-inclusive
+  // figure, so picking it makes the line inclusive at exactly the MRP.
+  const applyPriceChoice = (index, choice) => {
+    setCartItems(prev => prev.map((line, i) => {
+      if (i !== index) return line;
+      const moded = choice.inclusive ? setLineTaxMode(line, true) : line;
+      return { ...setLinePrice(moded, choice.price), priceTier: choice.tier || 'CUSTOM' };
+    }));
+  };
+
+  const setItemTaxMode = (index, inclusive) => {
+    setCartItems(prev => prev.map((line, i) => (i === index ? setLineTaxMode(line, inclusive) : line)));
+  };
+
+  // Bill-level switch: every line's price read as incl. / excl. of tax (service lines too).
+  const setAllTaxMode = (inclusive) => {
+    setCartItems(prev => prev.map(line => setLineTaxMode(line, inclusive)));
   };
 
   const handleRemoveItem = (index) => {
@@ -1462,7 +1519,7 @@ export default function WholesaleSales() {
       // Cells may still hold half-typed text ("12."); the saved line always carries numbers.
       items: cartItems.map(it => {
         const line = { ...it };
-        ['rate', 'discount', 'gst'].forEach(k => { if (typeof line[k] === 'string' && line[k] !== '') line[k] = Number(line[k]) || 0; });
+        ['rate', 'inclRate', 'discount', 'gst'].forEach(k => { if (typeof line[k] === 'string' && line[k] !== '') line[k] = Number(line[k]) || 0; });
         return { ...line, taxPercent: line.gst, total: computeLineTotals(line).total };
       }),
       summary,
@@ -2051,7 +2108,7 @@ export default function WholesaleSales() {
     ? ([selectedCustomer.city, selectedCustomer.state, selectedCustomer.pincode].filter(Boolean).join(', ') || selectedCustomer.shippingAddress || selectedCustomer.billingAddress || '')
     : '';
   const showPowerCol = cartItems.some(i => cellText(i.power));
-  const gridColCount = showPowerCol ? 16 : 15;
+  const gridColCount = showPowerCol ? 17 : 16;
   const totalPaid = paymentCalc.paidNow;
   const balanceDue = paymentCalc.dueAmount;
   const changeDue = paymentCalc.balanceAmount;
@@ -2131,6 +2188,54 @@ export default function WholesaleSales() {
       </Card>
 
       {/* MORE ACTIONS MENU — Cancel/Credit Note/Replacement/Return need the Manager+/override role. */}
+      {/* Unit Price choice: the pricing hierarchy for the line (wholesale tier / dealer tier /
+          retail / MRP) — typing in the cell instead sets a custom agreed price. */}
+      {(() => {
+        const line = priceMenu ? cartItems[priceMenu.idx] : null;
+        if (!line) return null;
+        const live = products.find(p => p.id === line.id || (line.code && p.code === line.code));
+        const prod = live || { wholesaleRate: line.wholesaleRate, wholesalePrice: line.wholesaleRate || line.mrp, mrp: line.mrp, retailPrice: 0 };
+        const choices = priceChoices(prod, live ? priceForProduct(live, parseFloat(line.qty) || 1) : {});
+        const current = round2(parseFloat(shownPrice(line)) || 0);
+        const close = () => setPriceMenu(null);
+        return (
+          <Menu anchorEl={priceMenu.anchor} open onClose={close} MenuListProps={{ dense: true, 'aria-label': `Price options for ${line.name}` }}>
+            <Box sx={{ px: 2, py: 0.5 }}>
+              <Typography variant="caption" fontWeight={800} color="text.secondary" display="block">
+                {line.name}
+              </Typography>
+              {(line.costPrice > 0) && (
+                <Typography variant="caption" color="text.secondary" display="block">
+                  Cost {fmtINR(line.costPrice)}
+                </Typography>
+              )}
+            </Box>
+            <Divider />
+            {choices.map(c => {
+              const selected = Math.abs(c.price - current) < 0.005 && (!c.inclusive || line.taxInclusive);
+              return (
+                <MenuItem key={c.key} selected={selected} data-price-choice={c.key} onClick={() => { applyPriceChoice(priceMenu.idx, c); close(); }}>
+                  <Box sx={{ flex: 1, pr: 3 }}>
+                    <Typography variant="body2" fontWeight={700}>{c.label}</Typography>
+                    {line.costPrice > 0 && (
+                      <Typography variant="caption" color={c.price < line.costPrice ? 'error' : 'text.secondary'}>
+                        {c.price < line.costPrice ? 'Below cost' : `Margin ${(((c.inclusive ? c.price / (1 + (parseFloat(line.gst) || 0) / 100) : c.price) - line.costPrice) / line.costPrice * 100).toFixed(1)}%`}
+                      </Typography>
+                    )}
+                  </Box>
+                  <Typography variant="body2" fontWeight={900}>{fmtINR(c.price)}</Typography>
+                </MenuItem>
+              );
+            })}
+            {!choices.length && <MenuItem disabled>No master prices on file</MenuItem>}
+            <Divider />
+            <MenuItem onClick={() => { close(); setTimeout(() => focusField(document.querySelector(`input[data-cell-row="${priceMenu.idx}"][data-cell-col="rate"]`)), 30); }}>
+              <Typography variant="body2" color="primary" fontWeight={700}>Custom agreed price… (type in the cell)</Typography>
+            </MenuItem>
+          </Menu>
+        );
+      })()}
+
       <Menu anchorEl={moreActionsAnchor} open={Boolean(moreActionsAnchor)} onClose={() => setMoreActionsAnchor(null)}>
         <MenuItem disabled={cartItems.length === 0} onClick={() => { setMoreActionsAnchor(null); handleSaveDraft(); }}><SaveIcon fontSize="small" sx={{ mr: 1 }} /> Save Draft <Box sx={{ ml: 'auto', pl: 2 }}><Kbd>Alt+S</Kbd></Box></MenuItem>
         <MenuItem disabled={cartItems.length === 0} onClick={() => { setMoreActionsAnchor(null); handleHoldInvoice(); }}><HoldIcon fontSize="small" sx={{ mr: 1 }} /> Hold Invoice <Box sx={{ ml: 'auto', pl: 2 }}><Kbd>Alt+H</Kbd></Box></MenuItem>
@@ -2447,6 +2552,7 @@ export default function WholesaleSales() {
                 <TableCell sx={HEAD_CELL_SX}>Category</TableCell>
                 {showPowerCol && <TableCell sx={HEAD_CELL_SX}>Power</TableCell>}
                 <TableCell align="center" sx={HEAD_CELL_SX}>Qty</TableCell>
+                <TableCell align="right" sx={HEAD_CELL_SX}>MRP</TableCell>
                 <TableCell align="center" sx={HEAD_CELL_SX}>Unit Price</TableCell>
                 <TableCell align="center" sx={HEAD_CELL_SX}>Disc %</TableCell>
                 <TableCell align="center" sx={HEAD_CELL_SX}>Tax %</TableCell>
@@ -2473,7 +2579,8 @@ export default function WholesaleSales() {
                 const svc = itemMode === 'service';
                 const stock = svc ? null : parseFloat(p.availableStock ?? p.stock ?? 0);
                 const price = svc ? (parseFloat(p.price) || 0) : priceForProduct(p).rate;
-                const tax = parseFloat(p.gst) || 0;
+                const tax = parseTaxPercent(p.gst) ?? 0;
+                const previewLine = pricedLine({ qty: 1, discount: 0, gst: tax }, price, Boolean(p.taxInclusive));
                 const inBill = cartItems.find(it => !it.isFreeGift && (svc ? isServiceLine(it) : !isServiceLine(it)) && it.id === p.id);
                 return (
                   <TableRow
@@ -2517,10 +2624,16 @@ export default function WholesaleSales() {
                     </TableCell>
                     {showPowerCol && <TableCell sx={{ color: '#2563eb', fontWeight: 700 }}>{cellText(p.power)}</TableCell>}
                     <TableCell align="center" sx={{ fontWeight: 900 }}>1</TableCell>
-                    <TableCell align="center" sx={{ fontWeight: 800 }}>{fmtINR(price)}</TableCell>
+                    <TableCell align="right" sx={{ color: '#64748b', fontWeight: 700 }}>{p.mrp ? fmtINR(p.mrp) : ''}</TableCell>
+                    <TableCell align="center" sx={{ fontWeight: 800 }}>
+                      {fmtINR(price)}
+                      {!svc && p.taxInclusive && <Typography component="span" sx={{ fontSize: '0.58rem', color: '#64748b', ml: 0.3 }}>incl.</Typography>}
+                    </TableCell>
                     <TableCell align="center" sx={{ color: '#94a3b8' }}>0%</TableCell>
-                    <TableCell align="center" sx={{ color: '#0f766e', fontWeight: 700 }}>{tax}%</TableCell>
-                    <TableCell align="right" sx={{ fontWeight: 900, color: '#2563eb' }}>{fmtINR(computeLineTotals({ qty: 1, rate: price, discount: 0, gst: tax }).total)}</TableCell>
+                    <TableCell align="center" sx={{ color: '#0f766e', fontWeight: 700 }}>
+                      {tax}%{tax === 0 && <Typography component="span" sx={{ fontSize: '0.58rem', color: '#64748b', ml: 0.3 }}>{zeroTaxLabel(0, p.taxCategory)}</Typography>}
+                    </TableCell>
+                    <TableCell align="right" sx={{ fontWeight: 900, color: '#2563eb' }}>{fmtINR(computeLineTotals(previewLine).total)}</TableCell>
                     <TableCell align="center">
                       {active
                         ? <Chip label="Enter ↵ add" size="small" color="primary" sx={{ height: 20, fontSize: '0.62rem', fontWeight: 900 }} />
@@ -2543,6 +2656,8 @@ export default function WholesaleSales() {
                 const avail = parseFloat(item.availableStock) || 0;
                 const isStockExceeded = !svc && !item.isFreeGift && ((parseFloat(item.qty) || 0) + (parseFloat(item.freeQty) || 0)) > avail;
                 const t = computeLineTotals(item);
+                const m = svc ? null : lineMargin(item);
+                const zeroTag = zeroTaxLabel(item.gst, item.taxCategory);
                 const expired = isExpired(item.expiry);
                 const nearExpiry = !expired && isNearExpiry(item.expiry);
                 const rowSelected = selectedRowIndex === idx;
@@ -2612,23 +2727,44 @@ export default function WholesaleSales() {
                           <IconButton size="small" tabIndex={-1} aria-label={`Increase quantity of ${item.name}`} sx={{ p: 0.2 }} onClick={() => handleUpdateItemQty(idx, 1)}><AddIcon sx={{ fontSize: 15 }} /></IconButton>
                         </Stack>
                       </TableCell>
+                      <TableCell align="right" sx={{ color: '#64748b', fontWeight: 700 }}>{item.mrp ? fmtINR(item.mrp) : ''}</TableCell>
                       <TableCell align="center" onClick={(e) => e.stopPropagation()}>
                         {canOverride && !item.isFreeGift ? (
-                          <Tooltip title={errs.rate || ''} placement="top">
-                            <TextField
-                              size="small" type="number" value={zeroAsBlank(item.rate)} placeholder="0" error={Boolean(errs.rate)}
-                              onChange={(e) => handleUpdateItemField(idx, 'rate', typedNumber(e.target.value))}
-                              inputProps={cellProps('rate', { min: 0, step: '0.01', ...selectOnFocusProps })}
-                              sx={cellInputSx(82)}
-                            />
-                          </Tooltip>
+                          <Stack direction="row" spacing={0.25} alignItems="center" justifyContent="center">
+                            <Tooltip title={errs.rate || (item.taxInclusive ? `Price incl. ${parseFloat(item.gst) || 0}% tax · taxable ${fmtINR(item.rate)}` : '')} placement="top">
+                              <TextField
+                                size="small" type="number" value={zeroAsBlank(shownPrice(item))} placeholder="0" error={Boolean(errs.rate)}
+                                onChange={(e) => handleUpdateItemField(idx, 'rate', typedNumber(e.target.value))}
+                                inputProps={cellProps('rate', { min: 0, step: '0.01', ...selectOnFocusProps })}
+                                sx={cellInputSx(82)}
+                              />
+                            </Tooltip>
+                            {!svc && (
+                              <Tooltip title="Choose price: wholesale / dealer / retail / MRP">
+                                <IconButton
+                                  size="small" tabIndex={-1} aria-label={`Price options for ${item.name}`} data-testid="ws-price-choice"
+                                  sx={{ p: 0.1 }} onClick={(e) => setPriceMenu({ anchor: e.currentTarget, idx })}
+                                >
+                                  <ExpandMoreIcon sx={{ fontSize: 16, color: '#64748b' }} />
+                                </IconButton>
+                              </Tooltip>
+                            )}
+                          </Stack>
                         ) : (
                           <Tooltip title={item.isFreeGift ? 'Free line' : 'Only Managers/Admins can override price'}>
                             <Stack direction="row" spacing={0.25} alignItems="center" justifyContent="center">
                               <LockIcon sx={{ fontSize: 11, color: '#cbd5e1' }} />
-                              <Typography variant="body2" fontWeight={800} sx={{ fontSize: '0.8rem' }}>{fmtINR(item.rate)}</Typography>
+                              <Typography variant="body2" fontWeight={800} sx={{ fontSize: '0.8rem' }}>{fmtINR(shownPrice(item))}</Typography>
                             </Stack>
                           </Tooltip>
+                        )}
+                        {m && (m.aboveMrp || (canOverride && (m.belowCost || m.marginPct !== null))) && (
+                          <Typography
+                            variant="caption" display="block" data-testid="ws-price-hint"
+                            sx={{ fontSize: '0.6rem', fontWeight: 700, lineHeight: 1.2, color: m.aboveMrp || m.belowCost ? '#dc2626' : '#64748b' }}
+                          >
+                            {m.aboveMrp ? 'Above MRP' : m.belowCost ? `Below cost ${fmtINR(m.cost)}` : `Margin ${m.marginPct.toFixed(1)}%`}
+                          </Typography>
                         )}
                       </TableCell>
                       <TableCell align="center" onClick={(e) => e.stopPropagation()}>
@@ -2643,7 +2779,7 @@ export default function WholesaleSales() {
                       </TableCell>
                       <TableCell align="center" onClick={(e) => e.stopPropagation()}>
                         {canOverride ? (
-                          <Tooltip title={errs.gst || `GST ${fmtINR(t.gst)}`} placement="top">
+                          <Tooltip title={errs.gst || (zeroTag ? `${zeroTag} — no GST on this line` : `GST ${fmtINR(t.gst)}`)} placement="top">
                             <TextField
                               size="small" type="number" value={zeroAsBlank(item.gst)} placeholder="0" error={Boolean(errs.gst)}
                               onChange={(e) => handleUpdateItemField(idx, 'gst', typedNumber(e.target.value))}
@@ -2654,6 +2790,17 @@ export default function WholesaleSales() {
                         ) : (
                           <Typography variant="body2" sx={{ fontSize: '0.78rem', color: '#0f766e', fontWeight: 700 }}>{parseFloat(item.gst) || 0}%</Typography>
                         )}
+                        <Stack direction="row" spacing={0.4} justifyContent="center" alignItems="center">
+                          {zeroTag && <Typography variant="caption" data-testid="ws-zero-tax" sx={{ fontSize: '0.58rem', fontWeight: 800, color: '#0f766e' }}>{zeroTag}</Typography>}
+                          <Box
+                            component={canOverride ? 'button' : 'span'} type={canOverride ? 'button' : undefined} tabIndex={-1}
+                            data-testid="ws-tax-mode" aria-label={`${item.taxInclusive ? 'Price includes tax' : 'Tax added on price'}${canOverride ? ' — click to switch' : ''}`}
+                            onClick={canOverride ? () => setItemTaxMode(idx, !item.taxInclusive) : undefined}
+                            sx={{ fontSize: '0.58rem', fontWeight: 800, color: item.taxInclusive ? '#7c3aed' : '#94a3b8', border: 0, bgcolor: 'transparent', p: 0, cursor: canOverride ? 'pointer' : 'default', fontFamily: 'inherit' }}
+                          >
+                            {item.taxInclusive ? 'incl.' : 'excl.'}
+                          </Box>
+                        </Stack>
                       </TableCell>
                       <TableCell align="right" sx={{ fontWeight: '900 !important', color: 'primary.main' }}>{fmtINR(t.total)}</TableCell>
                       <TableCell align="center" onClick={(e) => e.stopPropagation()} sx={{ whiteSpace: 'nowrap' }}>
@@ -2705,6 +2852,25 @@ export default function WholesaleSales() {
           <Typography variant="caption" fontWeight={800} color="#475569">
             {summary.totalItems} line{summary.totalItems === 1 ? '' : 's'} · {summary.totalQty} unit{summary.totalQty === 1 ? '' : 's'}{summary.totalFreeQty ? ` + ${summary.totalFreeQty} free` : ''}
           </Typography>
+          {cartItems.length > 0 && (() => {
+            const allIncl = cartItems.every(it => it.taxInclusive);
+            const allExcl = cartItems.every(it => !it.taxInclusive);
+            return (
+              <Stack direction="row" spacing={0.75} alignItems="center">
+                <Typography variant="caption" fontWeight={800} color="#475569">Rates</Typography>
+                <ToggleButtonGroup
+                  size="small" exclusive value={allIncl ? 'INCL' : allExcl ? 'EXCL' : null}
+                  onChange={(_, v) => { if (v) setAllTaxMode(v === 'INCL'); }}
+                  disabled={!canOverride} aria-label="Line prices include or exclude tax"
+                  sx={{ '& .MuiToggleButton-root': { py: 0, px: 0.8, fontSize: '0.62rem', fontWeight: 800, textTransform: 'none' } }}
+                >
+                  <ToggleButton value="EXCL" data-testid="ws-rates-excl">Excl. tax</ToggleButton>
+                  <ToggleButton value="INCL" data-testid="ws-rates-incl">Incl. tax</ToggleButton>
+                </ToggleButtonGroup>
+                {!allIncl && !allExcl && <Typography variant="caption" color="text.secondary">mixed</Typography>}
+              </Stack>
+            );
+          })()}
           <Typography variant="caption" color="text.secondary" fontWeight={600}>
             <Kbd>Enter</Kbd> next cell · <Kbd>↑</Kbd><Kbd>↓</Kbd> rows · <Kbd>+</Kbd><Kbd>−</Kbd> qty · <Kbd>Ctrl+Del</Kbd> remove
           </Typography>
@@ -2722,7 +2888,20 @@ export default function WholesaleSales() {
               <SumRow label="Item Discount" value={`−${fmtINR(summary.productDiscount)}`} color="#dc2626" />
               <SumRow label="Scheme Discount" value={`−${fmtINR(summary.schemeDiscount)}`} color="#dc2626" />
               <SumRow label="Taxable Amount" value={fmtINR(summary.taxableAmount)} />
-              <SumRow label="GST" value={fmtINR(summary.totalGst)} color="#0f766e" />
+              {summary.zeroTaxValue > 0 && <SumRow label="incl. 0% / Exempt Value" value={fmtINR(summary.zeroTaxValue)} color="#64748b" />}
+              <Tooltip
+                placement="right"
+                title={summary.gstBreakup.length ? (
+                  <Box sx={{ fontSize: '0.72rem' }}>
+                    {summary.gstBreakup.map(b => (
+                      <div key={b.rate}>{b.rate}%: {fmtINR(b.tax)} on {fmtINR(b.taxable)}{b.rate === 0 ? ' (zero tax)' : ''}</div>
+                    ))}
+                    {summary.taxableCharges > 0 && <div>Charges 18%: {fmtINR(summary.taxableCharges * 0.18)}</div>}
+                  </Box>
+                ) : ''}
+              >
+                <Box data-testid="ws-gst-row"><SumRow label="GST" value={fmtINR(summary.totalGst)} color="#0f766e" /></Box>
+              </Tooltip>
               <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ py: 0.2 }}>
                 <Button
                   size="small" onClick={() => setChargesOpen(v => !v)} aria-expanded={chargesOpen}

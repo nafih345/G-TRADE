@@ -264,7 +264,12 @@ class Product(BaseUUIDModel):
 
     cost_price = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.0'))
     retail_price = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.0'))
+    # NOTE: despite its name this column holds the product's MRP (ProductMasterDialog /
+    # variant_service / opening stock all write MRP here; the serializer exposes it as `mrp`).
     wholesale_price = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.0'))
+    # The pre-configured wholesale selling tier used by the Wholesale POS. Null = not set
+    # (the POS then falls back to MRP, then the retail sale price).
+    wholesale_sale_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     
     minimum_stock = models.IntegerField(default=5)
     maximum_stock = models.IntegerField(default=100)
