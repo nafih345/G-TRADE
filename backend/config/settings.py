@@ -321,6 +321,30 @@ if IS_CLOUD and str(DATABASES['default'].get('ENGINE', '')).endswith('sqlite3'):
 # app's red status banner shows to every user. It never stops the service.
 EXPECTED_DATABASE_NAME = (os.environ.get('EXPECTED_DATABASE_NAME') or '').strip() or None
 
+if DATABASE_URL and str(DATABASES['default'].get('ENGINE', '')).startswith('django.db.backends.postgresql'):
+    _db_options = DATABASES['default'].setdefault('OPTIONS', {})
+    # Never wait forever for a connection. libpq's default is "no timeout", so while Neon was
+    # waking up — or a packet path stalled — a worker thread sat in connect() until gunicorn's
+    # request timeout killed the whole worker (every request on it failing with a 502 / "Cannot
+    # reach the server"). A failed connect now raises in seconds and the request answers 5xx
+    # cleanly; the next request reconnects. Neon's own cold start is well under this.
+    _db_options.setdefault('connect_timeout', int(os.environ.get('DB_CONNECT_TIMEOUT', '10')))
+    # A pooled (CONN_MAX_AGE) connection whose peer silently vanished — NAT idle expiry, a Neon
+    # compute restart — otherwise hangs the next query until the OS gives up (~15 min on Linux).
+    # TCP keepalives detect the dead socket in about a minute and the query fails fast instead.
+    _db_options.setdefault('keepalives', 1)
+    _db_options.setdefault('keepalives_idle', 30)
+    _db_options.setdefault('keepalives_interval', 10)
+    _db_options.setdefault('keepalives_count', 3)
+    # Neon's `-pooler` host is PgBouncer in *transaction* mode. Django's QuerySet.iterator() uses
+    # a server-side cursor (DECLARE … then FETCH), and under transaction pooling the FETCH can
+    # land on a different server connection than the DECLARE: "cursor … does not exist", at
+    # random. Django's documented setting for transaction poolers turns those cursors off
+    # (iterator() then reads in client-side chunks). Exports, Excel imports and variant screens
+    # use iterator().
+    if '-pooler' in (_database_hostname(DATABASE_URL) or '') or os.environ.get('DB_TRANSACTION_POOLER', '').lower() in ('1', 'true', 'yes'):
+        DATABASES['default']['DISABLE_SERVER_SIDE_CURSORS'] = True
+
 # Pooled connections with health checks: use the backend that skips the per-request `SELECT 1`
 # on a connection that was used moments ago (one round trip saved on every request — see
 # apps/common/db_backends/postgresql/base.py).

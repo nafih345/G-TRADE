@@ -112,11 +112,19 @@ def materialize(plan):
     return {**plan, 'lines': resolved}
 
 
-def build_plan(source_key, doc):
-    module, event = split_key(source_key)
-    previous = live_entry(module, event, doc.pk) if doc is not None else None
+_LOOK_UP = object()
+
+
+def build_plan(source_key, doc, previous=_LOOK_UP):
+    """`previous` is the document's live journal entry. Callers walking many documents pass the
+    one they already loaded (or None when they know there is none) — looking it up here, once per
+    document, made reconciliation one query per product: 3,000+ queries for a 3,000-item catalogue,
+    minutes on the hosted database, long past the server's request timeout."""
     if doc is None:
         return None
+    if previous is _LOOK_UP:
+        module, event = split_key(source_key)
+        previous = live_entry(module, event, doc.pk)
     return materialize(REGISTRY[source_key][1](doc, previous=previous))
 
 
@@ -308,39 +316,51 @@ def reconcile_source(source_key, date_from=None, date_to=None, limit=50):
     """Compare operational documents with the ledger for one source: documents that should
     be booked but aren't (missing), are booked but shouldn't be (stale), or are booked with
     different figures than the rule produces now (mismatched)."""
-    from .services import lines_fingerprint, _parsed_from_entry
+    from django.db.models import Prefetch
+    from .models import LedgerEntry
+    from .services import lines_fingerprint
     module, event = split_key(source_key)
     policy = AccountingPolicy.get()
+    # Oldest first, so the dict keeps the newest live entry per document (as live_entry() does);
+    # lines prefetched in one query instead of one per entry.
     live = {e.reference_id: e for e in JournalEntry.objects.filter(
-        source_module=module, source_event=event, status='POSTED', is_reversal=False)}
+        source_module=module, source_event=event, status='POSTED', is_reversal=False).order_by('created_at')
+        .prefetch_related(Prefetch('lines', queryset=LedgerEntry.objects.select_related('account__account_group')))}
+
+    def parsed(entry):
+        return [{'account': l.account, 'debit': l.debit, 'credit': l.credit, 'memo': l.memo} for l in entry.lines.all()]
+
     report = {'source_key': source_key, 'label': SOURCES[source_key][0], 'documents': 0, 'posted': 0,
               'missing': [], 'stale': [], 'mismatched': [], 'errors': [], 'historical_unposted': 0,
               'start_date': (policy.source_start_dates or {}).get(source_key)}
-    for doc in _eligible_documents(source_key, date_from, date_to).iterator():
-        report['documents'] += 1
-        entry = live.get(doc.pk)
-        try:
-            plan = build_plan(source_key, doc)
-        except AccountingError as exc:
-            if len(report['errors']) < limit:
-                report['errors'].append({'id': str(doc.pk), 'number': document_number(source_key, doc), 'error': error_text(exc)})
-            continue
-        info = {'id': str(doc.pk), 'number': document_number(source_key, doc),
-                'date': document_date(source_key, doc).isoformat()}
-        if plan is None:
-            if entry and len(report['stale']) < limit:
-                report['stale'].append({**info, 'entry': entry.entry_number})
-            continue
-        if entry is None:
-            if is_historical(policy, source_key, doc):
-                report['historical_unposted'] += 1
-            elif len(report['missing']) < limit:
-                report['missing'].append({**info, 'amount': str(sum((l['debit'] for l in plan['lines']), Decimal('0')))})
-            continue
-        report['posted'] += 1
-        if lines_fingerprint(_parsed_from_entry(entry)) != lines_fingerprint(plan['lines']) or entry.date != plan['date']:
-            if len(report['mismatched']) < limit:
-                report['mismatched'].append({**info, 'entry': entry.entry_number})
+    # One read-only pass: memoise role → account resolution (materialize) for this request only,
+    # instead of re-reading the mappings for every document's plan.
+    with (nullcontext() if batch.current() is not None else batch.active(batch.Batch())):
+        for doc in _eligible_documents(source_key, date_from, date_to).iterator():
+            report['documents'] += 1
+            entry = live.get(doc.pk)
+            try:
+                plan = build_plan(source_key, doc, previous=entry)
+            except AccountingError as exc:
+                if len(report['errors']) < limit:
+                    report['errors'].append({'id': str(doc.pk), 'number': document_number(source_key, doc), 'error': error_text(exc)})
+                continue
+            info = {'id': str(doc.pk), 'number': document_number(source_key, doc),
+                    'date': document_date(source_key, doc).isoformat()}
+            if plan is None:
+                if entry and len(report['stale']) < limit:
+                    report['stale'].append({**info, 'entry': entry.entry_number})
+                continue
+            if entry is None:
+                if is_historical(policy, source_key, doc):
+                    report['historical_unposted'] += 1
+                elif len(report['missing']) < limit:
+                    report['missing'].append({**info, 'amount': str(sum((l['debit'] for l in plan['lines']), Decimal('0')))})
+                continue
+            report['posted'] += 1
+            if lines_fingerprint(parsed(entry)) != lines_fingerprint(plan['lines']) or entry.date != plan['date']:
+                if len(report['mismatched']) < limit:
+                    report['mismatched'].append({**info, 'entry': entry.entry_number})
     return report
 
 
@@ -355,7 +375,7 @@ def backfill(source_key, date_from=None, date_to=None, dry_run=True, user=None, 
         if doc.pk in posted_ids or len(rows) >= limit:
             continue
         try:
-            plan = build_plan(source_key, doc)
+            plan = build_plan(source_key, doc, previous=None)  # not in posted_ids: it has no live entry
         except AccountingError as exc:
             rows.append({'id': str(doc.pk), 'number': document_number(source_key, doc), 'outcome': 'error', 'error': error_text(exc)})
             continue

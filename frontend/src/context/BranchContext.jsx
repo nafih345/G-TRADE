@@ -52,7 +52,11 @@ export const BranchProvider = ({ children }) => {
     }
   }, []);
 
-  useEffect(() => { refresh(); }, [refresh, user]);
+  // Signed out there is no branch to ask about (the request would only come back 403).
+  useEffect(() => {
+    if (user) refresh();
+    else setLoaded(true);
+  }, [refresh, user]);
 
   const setActiveBranch = useCallback((branchId) => {
     localStorage.setItem(ACTIVE_BRANCH_KEY, branchId);

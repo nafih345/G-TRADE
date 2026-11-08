@@ -1,6 +1,6 @@
 import React, { createContext, useState, useContext, useEffect } from 'react';
 import axios from 'axios';
-import { SESSION_ENDED_EVENT, TOKEN_REFRESHED_EVENT } from '../utils/sessionGuard';
+import { SESSION_ENDED_EVENT, TOKEN_REFRESHED_EVENT, refreshAccessToken, UNAVAILABLE } from '../utils/sessionGuard';
 import { prefetchMasters } from '../utils/masterDataCache';
 import { clearLocalDataIfScopeChanged } from '../utils/localDataReset';
 
@@ -41,6 +41,14 @@ function isUsableToken(token) {
   }
 }
 
+// The access token lives 24 h, the refresh token 7 days (SIMPLE_JWT). Opening the app the next
+// morning used to find an expired access token and wipe the session — a forced sign-in every day
+// although the server would have renewed it. An expired access token with a live refresh token is
+// still a session; it is renewed before the first request (see the effect below).
+function hasLiveRefreshToken() {
+  return isUsableToken(localStorage.getItem('refresh_token'));
+}
+
 function tokenTenantId(token) {
   try {
     return JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).tenant_id ?? null;
@@ -73,9 +81,16 @@ function reloadAt(hash) {
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  // The Authorization header is set the moment a token exists — here and in finishLogin — not in
+  // the effect below: React runs child effects before parent ones, so the Sidebar, branch context
+  // and session monitor sent their first requests without it (401/403) and, in production where
+  // effects run once, never asked again until a reload.
   const [token, setToken] = useState(() => {
     const t = localStorage.getItem('access_token');
-    if (isUsableToken(t)) return t;
+    if (isUsableToken(t) || (t && !t.startsWith('mock_jwt_token') && hasLiveRefreshToken())) {
+      axios.defaults.headers.common['Authorization'] = `Bearer ${t}`;
+      return t;
+    }
     clearSession();
     return null;
   });
@@ -88,6 +103,24 @@ export const AuthProvider = ({ children }) => {
       return;
     }
     axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+    if (!isUsableToken(token)) {
+      // Expired access token, live refresh token: renew first, so the screen's first requests
+      // don't each fail with 401 and queue behind the refresh.
+      let cancelled = false;
+      refreshAccessToken().then((access) => {
+        if (cancelled) return;
+        if (access === null) {
+          clearSession(); setToken(null);
+        } else if (access === UNAVAILABLE) {
+          // Server unreachable right now: stay signed in on the cached profile; the session guard
+          // renews the token on the first request that gets through.
+          try { const saved = JSON.parse(localStorage.getItem('user_profile') || 'null'); if (saved) setUser(withRoleLabel(saved)); } catch { /* ignore */ }
+          setLoading(false);
+        }
+        // A new token arrives through TOKEN_REFRESHED_EVENT → setToken → this effect runs again.
+      });
+      return () => { cancelled = true; };
+    }
     // Fetch the master lists every form needs (suppliers, categories, brands, units) now, so
     // pickers are already filled when a form opens.
     prefetchMasters();
@@ -114,7 +147,12 @@ export const AuthProvider = ({ children }) => {
         localStorage.setItem('user_profile', JSON.stringify(profile));
         setUser(profile);
       })
-      .catch(() => { clearSession(); setToken(null); })
+      .catch((err) => {
+        // Only the server rejecting the token ends the session. A network failure or a sleeping
+        // backend is not a sign-out: keep the token, the next request will try again.
+        const status = err?.response?.status;
+        if (status === 401 || status === 403) { clearSession(); setToken(null); }
+      })
       .finally(() => setLoading(false));
   }, [token]);
 
@@ -159,6 +197,7 @@ export const AuthProvider = ({ children }) => {
     localStorage.setItem('access_token', data.access);
     if (data.refresh) localStorage.setItem('refresh_token', data.refresh);
     localStorage.setItem('user_profile', JSON.stringify(profile));
+    axios.defaults.headers.common['Authorization'] = `Bearer ${data.access}`;
     setUser(profile);
     setToken(data.access);
     return { success: true };

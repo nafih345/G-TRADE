@@ -1,6 +1,6 @@
 // Safety net for every API write (POST / PUT / PATCH / DELETE) made through the shared axios.
 //
-//  1. Idempotency-Key — each POST gets a random key that stays with that request config, so
+//  1. Idempotency-Key — each JSON write gets a random key that stays with that request config, so
 //     every automatic re-send of it (the proxy fallback in backendStatus.js, the token refresh
 //     and password re-confirmation replays in sessionGuard.js) is recognised by the backend
 //     (apps/common/idempotency.py) and answered with the first attempt's result instead of
@@ -170,7 +170,11 @@ export function installApiWriteGuard() {
     if (!config.__busyToken) {
       config.__busyToken = busyBegin({ background: config.__background || BACKGROUND_WRITES.test(config.url || '') });
     }
-    if (method === 'post' && !isFormData(config.data) && config.headers
+    // Every JSON write, not only POST: a PATCH or DELETE whose answer was lost is replayed by the
+    // network fallback too, and only the key lets the backend answer that replay from the first
+    // attempt's result (apps/common/idempotency.py covers POST/PUT/PATCH/DELETE). FormData is
+    // left out: the browser picks a new multipart boundary per send, so the body hash differs.
+    if (!isFormData(config.data) && config.headers && !config.__skipIdempotencyKey
         && !config.headers['Idempotency-Key']) {
       config.headers['Idempotency-Key'] = newKey();
     }

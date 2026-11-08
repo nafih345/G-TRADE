@@ -132,8 +132,10 @@ class BranchContextMiddleware:
         request.branch_denied = False
         request.home_branch = None
 
-        # Only branch-aware API traffic needs resolution; skip admin/static/migrations noise.
-        if request.path.startswith('/api/'):
+        # Only branch-aware API traffic needs resolution; skip admin/static/migrations noise, and
+        # the health endpoints — liveness must never touch the database (Render calls it every
+        # few seconds), and /api/health/ reads what it reports itself.
+        if request.path.startswith('/api/') and not request.path.startswith('/api/health/'):
             try:
                 _resolve(request)
             except Exception:

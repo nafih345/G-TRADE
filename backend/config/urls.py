@@ -42,6 +42,23 @@ def _database_instance_id():
     return _db_instance
 
 
+def health_live_view(request):
+    """Liveness only: "this process is up and serving". Touches no database, on purpose.
+
+    Render's health checker calls its healthCheckPath every few seconds for as long as the
+    service runs. Pointed at /api/health/ (≈10 queries, each a cross-region round trip) that
+    meant: Neon could never suspend while Render was awake (burning the free compute quota),
+    and whenever the database answered slowly — Neon waking, a network blip — the *web*
+    service failed its health check and Render pulled it from routing or restarted it, turning
+    a slow database into "Cannot reach the server". Restarting the web process never fixes a
+    database problem, so the database is not part of liveness. /api/health/ keeps reporting
+    database, migrations and the rest for people and the frontend banner.
+    """
+    response = JsonResponse({"status": "ok", "commit": (os.environ.get('RENDER_GIT_COMMIT') or '')[:7] or None})
+    response['Cache-Control'] = 'no-store'
+    return response
+
+
 def health_check_view(request):
     from django.db import connection
     db_status = "connected"
@@ -172,6 +189,7 @@ urlpatterns = [
     path('', home_api_status),
     path('favicon.ico', favicon_silent_view),
     path('admin/', admin.site.urls),
+    path('api/health/live/', health_live_view),
     path('api/health/', health_check_view),
     path('api/auth/', include('apps.authentication.urls')),
     path('api/superadmin/', include('apps.common.superadmin_urls')),

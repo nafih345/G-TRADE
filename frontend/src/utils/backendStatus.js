@@ -165,6 +165,8 @@ async function probeHealth() {
 
 let installed = false;
 let lastProbeAt = 0;
+// Last successful API answer of any kind (the keep-awake ping is skipped while traffic flows).
+let lastTrafficAt = 0;
 // The address resolveApiBaseUrl() chose at boot; null until installBackendHealthWatch runs.
 let primaryBaseUrl = null;
 
@@ -202,6 +204,27 @@ const canFallBackToSameOrigin = () => {
 const isNetworkFailure = (error) =>
   !error?.response && error?.code !== 'ECONNABORTED' && !axios.isCancel?.(error);
 
+const SAFE_METHODS = new Set(['get', 'head', 'options']);
+const headerOf = (config, name) =>
+  (typeof config?.headers?.get === 'function' ? config.headers.get(name) : undefined) ?? config?.headers?.[name];
+
+/**
+ * May this request be sent a second time after a failure that left its fate unknown? A dead
+ * socket can mean "never sent" or "the server saved it and the answer was lost", and the browser
+ * cannot tell which. Reads are always safe. A write is safe only when it carries an
+ * Idempotency-Key (utils/apiWriteGuard.js adds one to every JSON write): the backend then answers
+ * the repeat with the first attempt's stored result instead of saving twice. A write without one
+ * — a file upload — is never replayed; the user sees the error and decides.
+ */
+export const isSafeToReplay = (config) =>
+  SAFE_METHODS.has(String(config?.method || 'get').toLowerCase()) || Boolean(headerOf(config, 'Idempotency-Key'));
+
+// Gateway answers that mean "the app process is restarting / being deployed / not up yet" — the
+// request never reached Django. Render returns these for a few seconds around every restart.
+const TRANSIENT_GATEWAY = new Set([502, 503, 504]);
+const READ_RETRY_DELAYS_MS = [1500, 4000];
+const wait = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+
 // A single successful response is not proof the outage is over — with a half-broken
 // database plenty of endpoints still answer 200. So rather than clearing the banner on
 // one success, re-ask the endpoint that actually knows, at most every 30s.
@@ -225,6 +248,7 @@ export function installBackendHealthWatch() {
 
   axios.interceptors.response.use(
     (response) => {
+      lastTrafficAt = Date.now();
       reprobeIfBroken();
       return response;
     },
@@ -233,12 +257,12 @@ export function installBackendHealthWatch() {
       // Offline (net::ERR_INTERNET_DISCONNECTED): the proxy is no more reachable than the
       // backend, so switching roads would only strand the session on the proxy afterwards.
       if (config && !config.__sameOriginRetry && !config.__noFallback && isNetworkFailure(error)
-          && !isOffline() && canFallBackToSameOrigin()) {
+          && !isOffline() && canFallBackToSameOrigin() && isSafeToReplay(config)) {
         console.warn(
           `[api] ${axios.defaults.baseURL} unreachable (${error.message}); switching to the same-origin /api proxy`
         );
         axios.defaults.baseURL = '';
-        return axios.request({ ...config, baseURL: '', __sameOriginRetry: true });
+        return axios.request({ ...config, adapter: undefined, baseURL: '', __sameOriginRetry: true });
       }
       // On the proxy and the backend has gone to sleep: the proxy cannot wake it, a direct
       // request can. Go back to the direct road and retry there.
@@ -246,7 +270,18 @@ export function installBackendHealthWatch() {
           && config.baseURL === '' && isHibernating(error)) {
         console.warn('[api] backend asleep behind the proxy; retrying directly to wake it');
         axios.defaults.baseURL = primaryBaseUrl;
-        return axios.request({ ...config, baseURL: primaryBaseUrl, __directRetry: true, timeout: Math.max(config.timeout || 0, 90000) });
+        // A 429 from the hibernating router never reached the app, so any method may be re-sent.
+        return axios.request({ ...config, adapter: undefined, baseURL: primaryBaseUrl, __directRetry: true, timeout: Math.max(config.timeout || 0, 90000) });
+      }
+      // Reads only: a short, bounded retry through a restart/deploy window (502/503/504) or a
+      // dropped connection, instead of an empty screen and a red banner for a few-second blip.
+      // Writes are never retried here — a save that may have landed is the user's call.
+      const attempt = config?.__readRetry || 0;
+      if (config && !config.__noFallback && attempt < READ_RETRY_DELAYS_MS.length && !isOffline()
+          && SAFE_METHODS.has(String(config.method || 'get').toLowerCase()) && !config.signal?.aborted
+          && (TRANSIENT_GATEWAY.has(error?.response?.status) || isNetworkFailure(error))) {
+        return wait(READ_RETRY_DELAYS_MS[attempt]).then(() =>
+          axios.request({ ...config, adapter: undefined, __readRetry: attempt + 1 }));
       }
 
       // A 4xx is the API working and saying no; only a 5xx or a dead socket is an outage.
@@ -307,10 +342,16 @@ function installKeepAwake() {
     return;
   }
   if (!/\.onrender\.com$/i.test(host)) return;
+  // The ping only has to reach the web process, so it uses the database-free liveness route.
+  // It used to run the full /api/health/ (~10 queries), which also stopped Neon from ever
+  // suspending while a tab was open. A full health check still runs whenever traffic fails.
+  let lastPingAt = Date.now();
   const pingIfDue = () => {
-    if (document.visibilityState !== 'visible') return;
-    if (Date.now() - lastProbeAt < KEEP_AWAKE_INTERVAL_MS) return;
-    checkBackendHealth();
+    if (document.visibilityState !== 'visible' || isOffline()) return;
+    if (Date.now() - Math.max(lastPingAt, lastProbeAt, lastTrafficAt) < KEEP_AWAKE_INTERVAL_MS) return;
+    lastPingAt = Date.now();
+    axios.get('/api/health/live/', { baseURL: primaryBaseUrl || undefined, timeout: 90000, __noFallback: true, __silentError: true })
+      .catch(() => { /* a failed ping is not a verdict; real traffic and the health probe decide */ });
   };
   setInterval(pingIfDue, 60 * 1000);
   document.addEventListener('visibilitychange', pingIfDue);

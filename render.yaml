@@ -29,8 +29,12 @@ services:
     # `bash ./build.sh` rather than `./build.sh` — the repo is authored on Windows, where
     # git does not track the executable bit, so the script would not be runnable directly.
     buildCommand: bash ./build.sh
-    startCommand: gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120
-    healthCheckPath: /api/health/
+    # Workers, threads, timeouts, preload and keep-alive live in backend/gunicorn.conf.py (loaded
+    # automatically from rootDir). Don't add --workers/--timeout flags here: they override it.
+    startCommand: gunicorn config.wsgi:application
+    # Liveness only — no database. /api/health/ runs ~10 queries; as the health check it kept
+    # Neon from ever suspending and failed the *web* service whenever the database was slow.
+    healthCheckPath: /api/health/live/
     envVars:
       # Set these in the Render dashboard (sync:false = never committed).
       #

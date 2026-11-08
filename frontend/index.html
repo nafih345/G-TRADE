@@ -9,6 +9,9 @@
     <title>GreenSol Optical ERP</title>
     
     <!-- Google Fonts -->
+    <!-- The hosted app calls the API directly (utils/backendStatus.js DEFAULT_DEPLOYED_API_URL):
+         open DNS + TLS to it while the scripts download, not after. Harmless elsewhere. -->
+    <link rel="preconnect" href="https://g-trade-backend.onrender.com" crossorigin>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">

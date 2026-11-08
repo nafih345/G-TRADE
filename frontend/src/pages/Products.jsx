@@ -3,7 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useDebounce } from '../hooks/useDebounce';
 import {
   Box, Card, CardContent, Typography, Button, Tab, Tabs,
-  Table, TableBody, TableCell, TableContainer,
+  Table, TableBody, TableCell, TableContainer, TablePagination,
   TableHead, TableRow, Paper, Chip, TextField,
   MenuItem, Stack, IconButton, Checkbox
 } from '@mui/material';
@@ -410,6 +410,19 @@ export default function Products() {
     });
   }, [products, debouncedSearchQuery, categoryFilter]);
 
+  // Search and filters run over the whole catalogue, but only one page of rows is rendered. Every
+  // row mounts ~40 MUI components (checkbox, chips, five icon buttons), so a 3,000-product catalogue
+  // meant ~120k components in one render — the tab froze for many seconds or hung outright.
+  const [page, setPage] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(100);
+  useEffect(() => { setPage(0); }, [debouncedSearchQuery, categoryFilter]);
+  const lastPage = Math.max(0, Math.ceil(filteredProducts.length / rowsPerPage) - 1);
+  const currentPage = Math.min(page, lastPage);
+  const pagedProducts = useMemo(
+    () => filteredProducts.slice(currentPage * rowsPerPage, (currentPage + 1) * rowsPerPage),
+    [filteredProducts, currentPage, rowsPerPage],
+  );
+
   return (
     <Box sx={{ p: 4 }}>
       {/* Header section */}
@@ -558,7 +571,7 @@ export default function Products() {
                           </TableCell>
                         </TableRow>
                       ) : (
-                        filteredProducts.map((product) => {
+                        pagedProducts.map((product) => {
                           const isLowStock = product.stock <= (product.minimumStock ?? 10);
                           return (
                             <TableRow key={product.id} hover selected={selectedProductIds.has(product.id)}>
@@ -640,6 +653,17 @@ export default function Products() {
                     </TableBody>
                   </Table>
                 </TableContainer>
+                {filteredProducts.length > 50 && (
+                  <TablePagination
+                    component="div"
+                    count={filteredProducts.length}
+                    page={currentPage}
+                    onPageChange={(e, p) => setPage(p)}
+                    rowsPerPage={rowsPerPage}
+                    rowsPerPageOptions={[50, 100, 250]}
+                    onRowsPerPageChange={(e) => { setRowsPerPage(parseInt(e.target.value, 10)); setPage(0); }}
+                  />
+                )}
               </CardContent>
             </Card>
           </Stack>

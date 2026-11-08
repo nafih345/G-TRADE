@@ -76,8 +76,11 @@ function MainLayout() {
   }, [isMobile]);
 
   // Business & Localization preferences: formatting, posting confirmation and number previews
-  // read the cached copy synchronously, so refresh it once per app start.
-  useEffect(() => { loadBusinessPrefs(); }, []);
+  // read the cached copy synchronously, so refresh it once per signed-in user. (It used to run once
+  // per app start — on a fresh browser that was the login page, where it got 403 and was never
+  // retried after signing in.)
+  const prefsUserKey = user ? `${user.id || user.username}:${user.tenant_id ?? ''}` : null;
+  useEffect(() => { if (prefsUserKey) loadBusinessPrefs(); }, [prefsUserKey]);
 
   // 🚀 GLOBAL ENTER KEY SMART HANDLER (Form navigation, modal submission & search execution)
   useEffect(() => {

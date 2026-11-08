@@ -45,23 +45,32 @@ let pendingRefresh = null;
  * The access token lives 24h (SIMPLE_JWT.ACCESS_TOKEN_LIFETIME). A tab left open past that used
  * to get 401 `token_not_valid` on every request — empty screens, nothing saved — until the user
  * reloaded. Trade the refresh token for a new access token instead; concurrent 401s share one
- * refresh. Resolves to the new access token, or null when the session really is over.
+ * refresh. Resolves to the new access token, null when the session really is over (the server
+ * refused the refresh token), or UNAVAILABLE when the server could not be asked — asleep,
+ * restarting, network down. Only the server saying no ends a session: a sign-out because the
+ * Wi-Fi blinked while the token happened to expire threw away whatever the user was typing.
  */
-function refreshAccessToken() {
+export const UNAVAILABLE = Symbol('refresh-unavailable');
+
+export function refreshAccessToken() {
   if (!pendingRefresh) {
     pendingRefresh = (async () => {
       const refresh = localStorage.getItem('refresh_token');
       if (!refresh) return null;
       try {
-        const { data } = await axios.post('/api/auth/token/refresh/', { refresh }, { __skipAuthRefresh: true });
+        const { data } = await axios.post('/api/auth/token/refresh/', { refresh }, { __skipAuthRefresh: true, __silentError: true });
         if (!data?.access) return null;
         localStorage.setItem('access_token', data.access);
         if (data.refresh) localStorage.setItem('refresh_token', data.refresh);
         axios.defaults.headers.common.Authorization = `Bearer ${data.access}`;
         window.dispatchEvent(new CustomEvent(TOKEN_REFRESHED_EVENT, { detail: { access: data.access } }));
         return data.access;
-      } catch {
-        return null;
+      } catch (err) {
+        const status = err?.response?.status;
+        // 400/401/403: the refresh token is expired, revoked or its session ended — really over.
+        if (status === 400 || status === 401 || status === 403) return null;
+        // No answer, a timeout, 429 (asleep behind the proxy / rate limit) or 5xx: unknown.
+        return UNAVAILABLE;
       }
     })().finally(() => { pendingRefresh = null; });
   }
@@ -78,7 +87,17 @@ export function installSessionGuard() {
     // Expired access token: refresh once and replay the request; if that fails, sign out cleanly.
     if (res?.status === 401 && code === 'token_not_valid' && config && !config.__skipAuthRefresh
         && !config.__authRetried && axios.defaults.headers.common.Authorization) {
+      // Sent with a token that has already been replaced (a refresh finished while this request
+      // was in flight): just re-send it with the current one — no second refresh.
+      const sentWith = typeof config.headers?.get === 'function' ? config.headers.get('Authorization') : config.headers?.Authorization;
+      const current = axios.defaults.headers.common.Authorization;
+      if (sentWith && current && sentWith !== current && !pendingRefresh) {
+        return axios.request({ ...config, headers: { ...config.headers, Authorization: current }, __authRetried: true });
+      }
       const access = await refreshAccessToken();
+      // Server unreachable: keep the session and fail just this request; the next one retries
+      // the refresh once the backend answers again.
+      if (access === UNAVAILABLE) return Promise.reject(error);
       if (access) {
         return axios.request({
           ...config,

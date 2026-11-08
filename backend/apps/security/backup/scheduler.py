@@ -82,6 +82,7 @@ def refresh_next_run(schedule, save=True):
     schedule.next_run_at = compute_next_run(schedule, tz=tz) if schedule.enabled else None
     if save:
         BackupSchedule.objects.filter(pk=schedule.pk).update(timezone=name, next_run_at=schedule.next_run_at)
+        wake_scheduler()
     return schedule
 
 
@@ -123,6 +124,7 @@ def refresh_client_next_run(schedule):
     schedule.timezone = name
     schedule.next_run_at = compute_next_run(schedule, tz=tz) if schedule.enabled else None
     TenantBackupSchedule.objects.filter(pk=schedule.pk).update(timezone=name, next_run_at=schedule.next_run_at)
+    wake_scheduler()
     return schedule
 
 
@@ -158,18 +160,59 @@ def run_due_client_backups(now=None):
     return started
 
 
+# Longest the thread sleeps when nothing is due and no job is running. Polling every minute kept
+# the database busy around the clock — Neon suspends a compute only after 5 idle minutes, so a
+# once-a-minute query meant it never suspended while the web service was up, spending the free
+# plan's compute hours on an idle app. Schedules are daily/weekly/monthly, so sleeping until the
+# next due time loses nothing; a schedule edited in this process wakes the thread at once
+# (wake_scheduler), and one edited in another worker is picked up within this cap.
+IDLE_MAX_SECONDS = int(getattr(settings, 'BACKUP_SCHEDULER_IDLE_SECONDS', 1800))
+_wake = threading.Event()
+
+
+def wake_scheduler(*args, **kwargs):
+    """Re-plan now (a schedule changed). Usable directly as a signal receiver."""
+    _wake.set()
+
+
+def seconds_until_next_check(now=None):
+    """How long the thread may sleep: a minute while any backup/restore job is live (stale-job
+    recovery must stay prompt — a dead restore holds writes in maintenance), otherwise until the
+    earliest enabled schedule is due, capped at IDLE_MAX_SECONDS."""
+    from django.db.models import Min
+    from ..models import BackupRecord, RestoreJob
+    now = now or timezone.now()
+    live = ('QUEUED', 'RUNNING')
+    if BackupRecord.objects.filter(status__in=live).exists() or RestoreJob.objects.filter(status__in=live).exists():
+        return TICK_SECONDS
+    due = [s.next_run_at for s in BackupSchedule.objects.filter(enabled=True, next_run_at__isnull=False)]
+    client_due = TenantBackupSchedule.objects.filter(enabled=True, next_run_at__isnull=False).aggregate(
+        m=Min('next_run_at'))['m']
+    if client_due is not None:
+        due.append(client_due)
+    if not due:
+        return IDLE_MAX_SECONDS
+    wait = (min(due) - now).total_seconds()
+    return int(max(TICK_SECONDS, min(IDLE_MAX_SECONDS, wait + 1)))
+
+
 def _loop():
     # Let the server finish booting (and migrations land) before the first check.
-    stop = threading.Event()
-    stop.wait(30)
+    _wake.wait(30)
     while True:
+        _wake.clear()
         for step in (service.recover_stale, run_due, run_due_client_backups):
             try:
                 step()  # one failing step (say, the whole-DB schedule) must not starve the others
             except Exception:
                 logger.exception('Scheduled backup tick failed (%s)', step.__name__)
+        try:
+            wait = seconds_until_next_check()
+        except Exception:
+            logger.exception('Could not plan the next backup check')
+            wait = TICK_SECONDS
         connections.close_all()
-        stop.wait(TICK_SECONDS)
+        _wake.wait(wait)
 
 
 def start_scheduler():
@@ -181,6 +224,9 @@ def start_scheduler():
         if _started:
             return False
         _started = True
+    from django.db.models.signals import post_save
+    post_save.connect(wake_scheduler, sender=BackupSchedule, dispatch_uid='backup-scheduler-wake')
+    post_save.connect(wake_scheduler, sender=TenantBackupSchedule, dispatch_uid='backup-client-scheduler-wake')
     threading.Thread(target=_loop, name='backup-scheduler', daemon=True).start()
     logger.info('Backup scheduler started.')
     return True

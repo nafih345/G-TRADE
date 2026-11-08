@@ -382,8 +382,11 @@ added as a third storage class in `apps/security/backup/storage.py`. That is not
 
 ### Scheduled backups
 
-Every server process starts a scheduler thread (`config/wsgi.py`) that checks once a minute. Each
-run is claimed with a conditional UPDATE, so Render's 2 gunicorn workers never run it twice.
+Every gunicorn worker runs a scheduler thread (started by `backend/gunicorn.conf.py`'s `post_fork`,
+or by `config/wsgi.py` elsewhere). It sleeps until the next backup is due (at most 30 minutes,
+`BACKUP_SCHEDULER_IDLE_SECONDS`), checking every minute only while a backup/restore job is live —
+it used to query the database every minute, which kept Neon from ever suspending. Each run is
+claimed with a conditional UPDATE, so Render's 2 gunicorn workers never run it twice.
 **Render's free plan sleeps after 15 idle minutes**, and a sleeping service runs nothing. A backup
 missed this way runs once when the service next wakes. If backups must run on time, either keep
 the service awake or call this from any cron (Render Cron Job, GitHub Actions, Windows Task
@@ -414,6 +417,34 @@ can upload, restore or delete backups, and every restore needs the operator's pa
   user-permission and restore endpoints (`SENSITIVE_WRITES` in `apps/security/policy.py`).
 - 2FA is TOTP (any authenticator app). It can only be *enforced* once the admin enforcing it has
   set it up. Users without an authenticator then enrol at their next sign-in.
+
+## Web process: gunicorn and the health check
+
+`backend/gunicorn.conf.py` holds the web server settings and is loaded automatically, so the
+Render **Start Command** must be just:
+
+    gunicorn config.wsgi:application
+
+(any `--workers/--threads/--timeout` flags there override the file). What it sets, each overridable
+by an environment variable: 2 workers × 4 threads (`WEB_CONCURRENCY`, `GUNICORN_THREADS`),
+`preload_app` (Django and every URLconf are imported once in the master — the boot-time migration
+check runs once, workers fork in milliseconds; `GUNICORN_PRELOAD=False` turns it off), 120 s
+request timeout, 30 s graceful shutdown, 120 s keep-alive (longer than the router's, so it never
+closes a connection the router is about to reuse → no stray 502s), worker recycling every
+~2000 requests, heartbeat files in `/dev/shm`, and the request duration in milliseconds at the
+end of every access-log line (find slow endpoints in Render → Logs).
+
+Render's **Health Check Path** must be `/api/health/live/`. It answers from the web process
+alone, with no database query. `/api/health/` (≈10 queries) stays the diagnostic page and the
+app's own status probe, but as Render's health check it ran every few seconds — Neon could never
+suspend, and a slow database (Neon waking up) failed the web service's health check, which is
+what Render answers by pulling the instance from routing or restarting it.
+
+Database connections (`settings.py`): `connect_timeout=10` (`DB_CONNECT_TIMEOUT`) so a stalled
+connect fails in seconds instead of pinning a worker until gunicorn kills it; TCP keepalives so a
+silently dropped pooled connection is detected in ~1 minute; and on Neon's `-pooler` host
+(PgBouncer, transaction mode) server-side cursors are disabled, as Django requires for
+transaction pooling.
 
 ## Keep the database in the backend's region
 
