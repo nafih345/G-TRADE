@@ -350,6 +350,12 @@ class PurchaseInvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewse
         if lens_po is not None:
             from .lens_orders import link_purchase_invoice
             link_purchase_invoice(lens_po, invoice)
+        # Customer orders pulled in by Order Number: their waiting lenses are received on the
+        # actual received date and their Lens POs billed by this entry — or the whole save rolls back.
+        lens_orders = self.request.data.get('lens_sales_orders')
+        if isinstance(lens_orders, list) and lens_orders:
+            from .lens_orders import receive_orders_into_invoice
+            receive_orders_into_invoice(invoice, lens_orders, self.request.data.get('lens_received_date'))
         self._reload_for_response(serializer)
 
     @transaction.atomic

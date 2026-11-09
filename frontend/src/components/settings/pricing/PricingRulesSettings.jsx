@@ -80,6 +80,10 @@ export default function PricingRulesSettings() {
   const [settings, setSettings] = useState(null);
   const [saved, setSaved] = useState(null);
   const [canEdit, setCanEdit] = useState(false);
+  // Show Cost Price: only the Main Admin (tenant owner / Super Admin) changes it or sees the list.
+  const [canEditCost, setCanEditCost] = useState(false);
+  const [costUsers, setCostUsers] = useState([]);
+  const [userQuery, setUserQuery] = useState('');
   const [errors, setErrors] = useState({});
   const [saving, setSaving] = useState(false);
   const [offers, setOffers] = useState([]);
@@ -103,7 +107,10 @@ export default function PricingRulesSettings() {
 
   useEffect(() => {
     axios.get(PRICING_RULES_API)
-      .then(res => { setSettings(res.data.settings); setSaved(res.data.settings); setCanEdit(!!res.data.can_edit); })
+      .then(res => {
+        setSettings(res.data.settings); setSaved(res.data.settings); setCanEdit(!!res.data.can_edit);
+        setCanEditCost(!!res.data.can_edit_cost_visibility); setCostUsers(res.data.cost_users || []);
+      })
       .catch(err => notify(`Could not load pricing rules — ${apiErrorMessage(err)}`, 'error'));
     loadOffers();
   }, [loadOffers]);
@@ -114,11 +121,18 @@ export default function PricingRulesSettings() {
   const save = async () => {
     setSaving(true);
     try {
-      const res = await axios.put(PRICING_RULES_API, settings);
+      const body = canEditCost ? settings : Object.fromEntries(
+        Object.entries(settings).filter(([k]) => k !== 'show_cost_price' && k !== 'cost_viewers'));
+      const res = await axios.put(PRICING_RULES_API, body);
+      const visibilityChanged = saved?.show_cost_price !== res.data.settings.show_cost_price
+        || JSON.stringify(saved?.cost_viewers || []) !== JSON.stringify(res.data.settings.cost_viewers || []);
       setSettings(res.data.settings);
       setSaved(res.data.settings);
+      if (res.data.cost_users) setCostUsers(res.data.cost_users);
       setErrors({});
-      notify('Pricing rules saved.', 'success');
+      notify(visibilityChanged
+        ? 'Pricing rules saved. Cost price visibility applies to each user from their next page load.'
+        : 'Pricing rules saved.', 'success');
     } catch (err) {
       setErrors(err?.response?.data?.errors || {});
       notify(`Pricing rules NOT saved — ${apiErrorMessage(err)}`, 'error');
@@ -134,6 +148,17 @@ export default function PricingRulesSettings() {
       cost + (Number(settings.min_profit_amount) || 0));
     return `Example: cost ₹${cost.toFixed(2)} → lowest selling price ₹${floor.toFixed(2)}`;
   }, [settings]);
+
+  const viewers = useMemo(() => new Set((settings?.cost_viewers || []).map(String)), [settings]);
+  const toggleViewer = (id, on) => {
+    const next = new Set(viewers);
+    if (on) next.add(String(id)); else next.delete(String(id));
+    set('cost_viewers', costUsers.filter(u => next.has(String(u.id))).map(u => String(u.id)));
+  };
+  const shownUsers = useMemo(() => {
+    const q = userQuery.trim().toLowerCase();
+    return costUsers.filter(u => !q || [u.username, u.name, u.role].some(v => String(v || '').toLowerCase().includes(q)));
+  }, [costUsers, userQuery]);
 
   const shown = useMemo(() => {
     const q = filter.trim().toLowerCase();
@@ -201,7 +226,7 @@ export default function PricingRulesSettings() {
               Stop products being sold below their cost price, and set a minimum margin.
             </Typography>
           </Box>
-          {canEdit && (
+          {(canEdit || canEditCost) && (
             <Button variant="contained" startIcon={<SaveIcon />} onClick={save} disabled={!dirty || saving} sx={greenButtonSx}>
               {saving ? 'Saving…' : 'Save Rules'}
             </Button>
@@ -209,6 +234,79 @@ export default function PricingRulesSettings() {
         </Box>
 
         <Stack spacing={2}>
+          <ToggleRow
+            title="Show Cost Price"
+            caption="OFF: cost price columns and values are hidden everywhere, for every user (the server leaves them out). ON: the Main Admin always sees cost price, plus the users ticked below."
+            checked={settings.show_cost_price !== false}
+            onChange={(v) => set('show_cost_price', v)}
+            disabled={!canEditCost}
+          >
+            {!canEditCost && (
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+                Only the Main Admin can change who sees the cost price.
+              </Typography>
+            )}
+            {canEditCost && settings.show_cost_price !== false && (
+              <Box sx={{ mt: 2 }} data-testid="cost-viewers">
+                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 2, flexWrap: 'wrap', mb: 1 }}>
+                  <Typography variant="subtitle2" fontWeight={800}>
+                    Authorized Users to View Cost Price
+                    <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 1 }}>
+                      {viewers.size} of {costUsers.filter(u => !u.main_admin).length} staff selected
+                    </Typography>
+                  </Typography>
+                  <TextField
+                    size="small" placeholder="Search users" value={userQuery} onChange={(e) => setUserQuery(e.target.value)}
+                    InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon fontSize="small" /></InputAdornment> }}
+                    sx={{ width: { xs: '100%', sm: 240 } }}
+                  />
+                </Box>
+                {errors.cost_viewers && <Alert severity="error" sx={{ mb: 1 }}>{errors.cost_viewers}</Alert>}
+                <TableContainer component={Paper} variant="outlined" sx={{ borderRadius: 2, maxHeight: 320 }}>
+                  <Table size="small" stickyHeader>
+                    <TableHead>
+                      <TableRow>
+                        <TableCell padding="checkbox" />
+                        <TableCell sx={{ fontWeight: 800 }}>User</TableCell>
+                        <TableCell sx={{ fontWeight: 800 }}>Role</TableCell>
+                        <TableCell sx={{ fontWeight: 800 }}>Cost Price</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {shownUsers.map(u => {
+                        const on = u.main_admin || viewers.has(String(u.id));
+                        return (
+                          <TableRow key={u.id} hover={!u.main_admin}>
+                            <TableCell padding="checkbox">
+                              <Checkbox
+                                size="small" checked={on} disabled={u.main_admin}
+                                onChange={(e) => toggleViewer(u.id, e.target.checked)}
+                                inputProps={{ 'aria-label': `Allow ${u.username} to view cost price` }}
+                              />
+                            </TableCell>
+                            <TableCell>
+                              <Typography variant="body2" fontWeight={700}>{u.name}</Typography>
+                              {u.name !== u.username && <Typography variant="caption" color="text.secondary">{u.username}</Typography>}
+                            </TableCell>
+                            <TableCell>{String(u.role || '').replace(/_/g, ' ')}</TableCell>
+                            <TableCell>
+                              {u.main_admin
+                                ? <Chip size="small" label="Always · Main Admin" color="success" variant="outlined" />
+                                : <Chip size="small" label={on ? 'Can view' : 'Hidden'} color={on ? 'success' : 'default'} />}
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                      {!shownUsers.length && (
+                        <TableRow><TableCell colSpan={4} sx={{ textAlign: 'center', color: 'text.secondary' }}>No users found.</TableCell></TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+              </Box>
+            )}
+          </ToggleRow>
+
           <ToggleRow
             title="Enable Selling Below Cost Lock"
             caption="ON: a product's selling price (after discounts, before tax) cannot be lower than its cost price plus the minimum margin below — billing staff need a manager's approval. OFF: any selling price is accepted."

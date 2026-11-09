@@ -82,7 +82,8 @@ const DOC_VIEWS = {
   }
 };
 
-const docTypeOf = (o) => (o.documentType || o.docType || 'INVOICE').toUpperCase();
+const isUuid = (v) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(v || ''));
+const docTypeOf = (o) =>(o.documentType || o.docType || 'INVOICE').toUpperCase();
 
 export default function OrdersManagerView({
   orders = [],
@@ -97,6 +98,8 @@ export default function OrdersManagerView({
   onFetchDocument,
   // Opens the document in Sales > New Sale with every field (customer, items, payment) editable.
   onEditInNewSale,
+  // Order → Invoice: opens the order read-only in New Sale with the payment / delivery pop-up.
+  onSettleOrder,
   // Orders > Lenses actions (see LensOrdersQueue).
   onCreateLensPurchase,
   onReceiveLensPO,
@@ -297,6 +300,12 @@ export default function OrdersManagerView({
   };
 
   const handleConvert = (ord, targetType) => {
+    // Order → Invoice on a saved order: opens it read-only in New Sale with the Payment & Delivery
+    // pop-up (collect the balance, bill it, mark it delivered) instead of converting blind.
+    if (targetType === 'INVOICE' && docTypeOf(ord) === 'ORDER' && onSettleOrder && isUuid(ord.id)) {
+      onSettleOrder(ord);
+      return;
+    }
     const targetLabel = DOC_VIEWS[targetType].label.replace(/s$/, '');
     if (!window.confirm(`Convert ${ord.invoiceNumber || ord.id} into a ${targetLabel}?`)) return;
     onConvertDocument?.(ord, targetType);

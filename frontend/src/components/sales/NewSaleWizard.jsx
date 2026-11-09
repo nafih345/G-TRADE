@@ -60,9 +60,11 @@ import {
   CheckCircle as DoneIcon,
   AddCircleOutline as NewSaleIcon,
   Edit as EditIcon,
-  GppMaybe as PriceLockIcon
+  GppMaybe as PriceLockIcon,
+  Lock as LockIcon
 } from '@mui/icons-material';
 import PrintInvoiceModal from './PrintInvoiceModal';
+import OrderSettlementDialog from './OrderSettlementDialog';
 import TestNoLookupDialog from './TestNoLookupDialog';
 import ServiceMasterDialog from './ServiceMasterDialog';
 import ProductMasterDialog from '../inventory/ProductMasterDialog';
@@ -615,6 +617,10 @@ function PatientSearchField({
 }
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const localDateISO = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
 
 // --- Split advance (footer pay-mode boxes) ---
 // Wizard state key, `payment_splits` key sent to the backend (one receipt per mode), the label
@@ -846,7 +852,12 @@ export default function NewSaleWizard({
     return () => { alive = false; };
   }, [docType, editingDoc, lastCompletedOrder]);
   const [loadingEdit, setLoadingEdit] = useState(false);
-  const formLocked = isSaving || loadingEdit || Boolean(lastCompletedOrder);
+  // Sales > Orders → "Convert to Invoice" (or "Bill this order"): the saved Order is shown strictly
+  // read-only and its balance is collected in the Payment & Delivery pop-up, which bills it as a tax
+  // invoice and marks it delivered. { orderNumber, advance } while active; cleared by resetSaleForm.
+  const [settleOrder, setSettleOrder] = useState(null);
+  const [settleOpen, setSettleOpen] = useState(false);
+  const formLocked = isSaving || loadingEdit || Boolean(lastCompletedOrder) || Boolean(settleOrder);
 
   // Deferred eye test fees ("Pay during frame / lens purchase" on the Eye Test payment screen):
   // picking a patient adds each of their pending fees to the bill as an Eye Test Fee service
@@ -1923,6 +1934,8 @@ export default function NewSaleWizard({
     setLastCompletedOrder(null);
     setEditingDoc(null);
     setEditCustomerOption(null);
+    setSettleOrder(null);
+    setSettleOpen(false);
   };
 
   const handleStartNewSale = () => {
@@ -2167,7 +2180,16 @@ export default function NewSaleWizard({
       if (editConvertTo && savedType !== editConvertTo) {
         setDocType(editConvertTo);
         setBillNo(generateDocNumber(editConvertTo));
-        notify(`${doc.backend?.invoice_number || 'The order'} opened as a ${docTypeLabel(editConvertTo)} — check the payment and press Complete to bill it.`);
+        if (editConvertTo === 'Invoice' && savedType === 'Order' && doc.backend) {
+          // Order → Invoice: nothing on the bill changes; only the balance is collected.
+          setSettleOrder({
+            orderNumber: doc.backend.invoice_number || '',
+            advance: round2(parseFloat(doc.backend.paid_amount) || 0),
+          });
+          setSettleOpen(true);
+        } else {
+          notify(`${doc.backend?.invoice_number || 'The order'} opened as a ${docTypeLabel(editConvertTo)} — check the payment and press Complete to bill it.`);
+        }
       }
     });
     return () => { cancelled = true; setLoadingEdit(false); };
@@ -2488,14 +2510,23 @@ export default function NewSaleWizard({
 
   // Entry point for every "Complete …" button. Refuses to run twice for one bill (a double-click,
   // or a click while the saved sale is locked) and keeps the form frozen while the save runs.
-  const handleCompleteBilling = async () => {
+  // `settle` (from the Order settlement pop-up): { receipts, collected, change } — the balance
+  // collected at delivery. The bill itself is read-only then, so nothing here may open an editor.
+  const handleCompleteBilling = async (settle = null) => {
     if (savingRef.current || lastCompletedOrder) return;
+    // A button's click event is not a settlement; only the pop-up may complete a locked order.
+    if (!settle?.receipts) settle = null;
+    if (settleOrder && !settle) return;
     if (itemsList.length === 0) {
       notify('Please add at least one item to the billing grid before completing.');
       return;
     }
     // Every Order / Invoice / Quotation must say who it's for (the backend refuses it otherwise).
     if (!realCustomerName(customerInput.name)) {
+      if (settle) {
+        notify('This order has no customer name. Cancel, open it with ✏️ Edit to add one, then convert it.', 'error');
+        return;
+      }
       setCustomerNameError(true);
       notify("Customer name is required — select the patient or type the customer's name before saving.");
       customerNameRef.current?.focus();
@@ -2506,6 +2537,10 @@ export default function NewSaleWizard({
     // the prescription is known: invalid values still block it, an incomplete one asks first.
     const badLens = itemsList.map(r => ({ r, errors: lensErrorsFor(r) })).find(x => x.errors.length);
     if (badLens) {
+      if (settle) {
+        notify(`${badLens.r.item}: ${badLens.errors[0]} Open the order with ✏️ Edit to fix it before billing.`, 'error');
+        return;
+      }
       notify(`${badLens.r.item}: ${badLens.errors[0]}`);
       setEditDialogId(badLens.r.id);
       return;
@@ -2570,14 +2605,14 @@ export default function NewSaleWizard({
         const { approvedBy, ...fields } = approved; // eslint-disable-line no-unused-vars
         priceExtra = fields;
       }
-      await saveCompletedSale(priceExtra);
+      await saveCompletedSale(priceExtra, settle);
     } finally {
       savingRef.current = false;
       setIsSaving(false);
     }
   };
 
-  const saveCompletedSale = async (priceExtra = {}) => {
+  const saveCompletedSale = async (priceExtra = {}, settle = null) => {
 
     // Resolve-or-create the real backend Customer this sale belongs to — same pattern as
     // handleSavePatient/Appointments.jsx, so a walk-in typed directly here still lands in the
@@ -2611,6 +2646,7 @@ export default function NewSaleWizard({
 
     let backendInvoiceId = null;
     let backendInvoiceNumber = billNo;
+    let serverPaid = NaN;
     // All three document types now persist to the backend Invoice/InvoiceItem tables (one
     // table backs Quotation/Order/Invoice so a quote can later be converted in place from the
     // Orders section). Only a completed INVOICE actually commits stock + the accounting
@@ -2658,8 +2694,32 @@ export default function NewSaleWizard({
             [m.apiKey, paySettlement.recorded[m.key] > 0 ? (payBanks[m.apiKey] || null) : null])),
           payment_references: Object.fromEntries(PAY_MODES.filter(m => needsBank(m.label)).map(m =>
             [m.apiKey, paySettlement.recorded[m.key] > 0 ? String(payRefs[m.apiKey] || '').trim() : ''])),
+        };
+        if (settle) {
+          // Order settlement: the advance receipts stay exactly as booked (no split / paid figure
+          // is re-sent, so receipts recorded since are never folded in twice); the balance
+          // collected now becomes today's receipts in the same transaction, and the order is
+          // handed over.
+          delete payload.paid_amount;
+          delete payload.payment_splits;
+          delete payload.payment_banks;
+          delete payload.payment_references;
+          const used = new Set([
+            ...String(paymentMethodLabel || '').split(' + ').filter(l => l && l !== 'Credit'),
+            ...PAY_MODES.filter(m => settle.receipts[m.apiKey]).map(m => m.label),
+          ]);
+          payload.payment_method = PAY_MODES.filter(m => used.has(m.label)).map(m => m.label).join(' + ') || paymentMethodLabel;
+          payload.balance_receipts = settle.receipts;
+          payload.fulfillment_status = 'Delivered';
+          payload.delivered_at = localDateISO();
+        }
+        Object.assign(payload, {
           items: itemsList.map(i => ({
             product: i.productId || null,
+            // Codes the server re-links the line by if `product` turns out not to be one of this
+            // store's products (an out-of-date picker copy) — instead of dropping its stock move.
+            barcode: i.productId ? (i.barcode || '') : '',
+            sku: i.productId ? (i.modelNo || '') : '',
             service: i.serviceId || null,
             item_type: i.itemType || (i.category === 'SERVICE' ? 'SERVICE' : 'PRODUCT'),
             service_details: i.serviceDetails || null,
@@ -2680,7 +2740,7 @@ export default function NewSaleWizard({
             // Lens lines: selling unit (Pair / Piece), eye, lens count and the per-eye prescription.
             ...lensToPayload(i.lens, i.qty)
           }))
-        };
+        });
         // Editing updates the same record in place (the backend swaps its items and moves stock
         // by the difference). A local-only document has no database row to update.
         const send = (extra = {}) => (editingDoc
@@ -2700,7 +2760,7 @@ export default function NewSaleWizard({
               // the lines were added): a manager approves it, or the bill goes back for a new price.
               const lines = (err.response.data.violations || []).map(v => ({
                 name: v.name,
-                text: violationText({ netUnit: v.net_unit, floorUnit: v.floor_unit, costUnit: v.cost_unit,
+                text: violationText({ netUnit: v.net_unit, floorUnit: v.floor_unit, costUnit: v.cost_unit ?? null,
                   offer: v.offer, marginApplied: v.margin_applied }),
               }));
               const approved = await requestPriceApproval(lines);
@@ -2726,8 +2786,11 @@ export default function NewSaleWizard({
           }
         }
         if (res) {
+          serverPaid = parseFloat(res.data.paid_amount);
           backendInvoiceId = res.data.id;
           backendInvoiceNumber = res.data.invoice_number || billNo;
+          // The server moved stock in the same transaction: open stock screens re-read it now.
+          window.dispatchEvent(new Event('optical_stock_updated'));
         }
       } catch (e) {
         // Never fall back to a browser-only "saved offline" copy: it never reached the database, so
@@ -2736,11 +2799,30 @@ export default function NewSaleWizard({
         // fix / retry.
         console.warn('Invoice did not save to the database:', e);
         if (String(e?.response?.data?.code || '').startsWith('offer_')) liveOffers.refresh();
+        // A line pointed at a product this store doesn't have (out-of-date picker copy): reload
+        // the product list so it can be re-picked.
+        if (e?.response?.data?.code === 'unknown_product') window.dispatchEvent(new Event('optical_stock_updated'));
         notify(editingDoc
           ? `Could not update ${editingDoc.invoiceNumber} — the changes were NOT saved. ${apiErrorMessage(e)}`
           : `The ${docType.toLowerCase()} was NOT saved. ${apiErrorMessage(e)}`);
         return;
       }
+    }
+
+    // A settled order's bill shows the advance plus the balance just collected (the server's
+    // Total Paid when it sent one back).
+    let paidOut = { paid: recordedPaidAmount, balance: balanceDue, status: paymentStatusLabel,
+      method: paymentMethodLabel, multiPay: paySettlement.recorded, tendered: totalPaidAmount, change: changeDue };
+    if (settle) {
+      const paid = round2(Number.isFinite(serverPaid) ? serverPaid : recordedPaidAmount + settle.collected);
+      const multi = { ...paySettlement.recorded };
+      PAY_MODES.forEach(m => { multi[m.key] = round2((multi[m.key] || 0) + (settle.receipts[m.apiKey]?.amount || 0)); });
+      const owed = round2(Math.max(0, netTotal - paid));
+      paidOut = {
+        paid, balance: owed, status: owed <= 0.009 ? 'PAID' : (paid > 0 ? 'PARTIALLY PAID' : 'UNPAID'),
+        method: paySplitLabel(multi) || paymentMethodLabel, multiPay: multi,
+        tendered: round2(paid + settle.change), change: settle.change,
+      };
     }
 
     const completedOrder = {
@@ -2759,23 +2841,24 @@ export default function NewSaleWizard({
       diagnosis: rxData.notes || '',
       icdCode,
       docType,
-      fulfillmentStatus: docType === 'Order' && editingDoc?.docType !== 'Order' ? newOrderStage : undefined,
+      fulfillmentStatus: settle ? 'Delivered'
+        : (docType === 'Order' && editingDoc?.docType !== 'Order' ? newOrderStage : undefined),
       items: itemsList,
       totalQty,
       grossTotal,
       itemDiscounts,
       totalTax,
       netTotal,
-      advancePaid: recordedPaidAmount,
-      balanceDue,
-      paidAmount: recordedPaidAmount,
-      totalPaidAmount: recordedPaidAmount,
-      amountTendered: totalPaidAmount,
-      changeReturned: changeDue,
-      paymentStatusLabel,
-      paymentMode: paymentMethodLabel,
-      paymentMethod: paymentMethodLabel,
-      multiPay: paySettlement.recorded,
+      advancePaid: paidOut.paid,
+      balanceDue: paidOut.balance,
+      paidAmount: paidOut.paid,
+      totalPaidAmount: paidOut.paid,
+      amountTendered: paidOut.tendered,
+      changeReturned: paidOut.change,
+      paymentStatusLabel: paidOut.status,
+      paymentMode: paidOut.method,
+      paymentMethod: paidOut.method,
+      multiPay: paidOut.multiPay,
       salesman,
       testNo,
       rxData
@@ -2831,8 +2914,16 @@ export default function NewSaleWizard({
       } catch (e) {}
     }
 
+    // Settled order: straight to the invoice print / share dialog.
+    if (settle) {
+      setSettleOpen(false);
+      setShowBillOpen(true);
+    }
+
     const docLabel = docTypeLabel(docType);
-    const savedMsg = editingDoc
+    const savedMsg = settle
+      ? `✔ ${settleOrder?.orderNumber || 'Order'} billed as Tax Invoice ${backendInvoiceNumber} and marked delivered — collected ₹${settle.collected.toFixed(2)}, balance due ₹${paidOut.balance.toFixed(2)}.`
+      : editingDoc
       ? `✔ ${docLabel} ${backendInvoiceNumber} updated${editingDoc.isBackend ? ' in the database' : ' (offline copy)'} — Net Total: ₹${netTotal.toFixed(2)}.`
       : backendInvoiceId
         ? `✔ ${docLabel} ${backendInvoiceNumber} saved to database successfully! Net Total: ₹${netTotal.toFixed(2)}.`
@@ -2917,8 +3008,40 @@ export default function NewSaleWizard({
         </Box>
       </Card>
 
+      {/* Order settlement banner — the bill below is read-only; payment happens in the pop-up. */}
+      {settleOrder && !lastCompletedOrder && (
+        <Alert
+          severity="info"
+          icon={<LockIcon />}
+          sx={{ mb: 2, borderRadius: 2.5, alignItems: 'center', border: '1px solid', borderColor: 'info.light' }}
+          action={
+            <Stack direction="row" spacing={1}>
+              <Button
+                color="success" size="small" variant="contained"
+                onClick={() => setSettleOpen(true)} disabled={isSaving}
+                sx={{ fontWeight: 800, textTransform: 'none' }}
+              >
+                Collect Payment
+              </Button>
+              <Button
+                color="inherit" size="small" variant="outlined"
+                onClick={handleCancelEdit} disabled={isSaving}
+                sx={{ fontWeight: 800, textTransform: 'none' }}
+              >
+                Back to Orders
+              </Button>
+            </Stack>
+          }
+        >
+          <Typography variant="body2" fontWeight={700}>
+            Billing Order <b>{settleOrder.orderNumber}</b> as a Tax Invoice — the order is locked (read-only).
+            Collect the balance in the Payment &amp; Delivery pop-up to generate the invoice.
+          </Typography>
+        </Alert>
+      )}
+
       {/* Edit-mode banner — outside the lock container so "Cancel Edit" works while loading. */}
-      {(editingDoc || loadingEdit) && !lastCompletedOrder && (
+      {(editingDoc || loadingEdit) && !lastCompletedOrder && !settleOrder && (
         <Alert
           severity="warning"
           icon={<EditIcon />}
@@ -2983,7 +3106,11 @@ export default function NewSaleWizard({
           outside the inert box (so it stays usable) and is the only way back into the form. */}
       <Box
         inert={formLocked}
-        sx={formLocked ? { opacity: 0.5, filter: 'grayscale(0.35)', userSelect: 'none', transition: 'opacity 0.2s' } : undefined}
+        aria-readonly={settleOrder && !lastCompletedOrder ? true : undefined}
+        sx={settleOrder && !lastCompletedOrder && !isSaving
+          // Read-only order under settlement: stays legible (it's what is being billed), just inert.
+          ? { opacity: 0.85, userSelect: 'none', cursor: 'not-allowed', transition: 'opacity 0.2s' }
+          : formLocked ? { opacity: 0.5, filter: 'grayscale(0.35)', userSelect: 'none', transition: 'opacity 0.2s' } : undefined}
       >
 
       {/* ========================================================================= */}
@@ -4714,6 +4841,18 @@ export default function NewSaleWizard({
             </Typography>
           </Paper>
       )}
+
+      {/* Orders → Convert to Invoice: collect the balance and bill the locked order. */}
+      <OrderSettlementDialog
+        open={Boolean(settleOrder) && settleOpen && !lastCompletedOrder}
+        saving={isSaving}
+        orderNumber={settleOrder?.orderNumber || ''}
+        customerName={realCustomerName(customerInput.name) || ''}
+        total={netTotal}
+        advance={settleOrder?.advance || 0}
+        onConfirm={(settle) => handleCompleteBilling(settle)}
+        onClose={() => setSettleOpen(false)}
+      />
 
       {/* Read-only invoice preview of the current billing grid (no save / no stock move) */}
       <PrintInvoiceModal

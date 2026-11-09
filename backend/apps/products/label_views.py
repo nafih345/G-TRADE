@@ -31,7 +31,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .label_fields import (
-    LayoutError, can_design, can_see_restricted, field_catalog, layout_uses_restricted,
+    LayoutError, can_design, can_see_cost, can_see_restricted, field_catalog, layout_uses_restricted,
     resolve_product_fields, resolve_store_fields, validate_template,
 )
 from .label_presets import PRESETS, preset_spec
@@ -428,6 +428,7 @@ class LabelDataView(APIView):
         ids = [str(i) for i in (request.data.get('product_ids') or []) if UUID_RE.match(str(i))]
         ids = list(dict.fromkeys(ids))[:MAX_LABEL_DATA_PRODUCTS]
         include_restricted = can_see_restricted(request.user)
+        include_cost = include_restricted and can_see_cost(request.user)
         products = (Product.objects.filter(pk__in=ids)
                     .select_related('brand', 'category', 'variant_group').prefetch_related('extra_barcodes'))
         out = {}
@@ -437,7 +438,7 @@ class LabelDataView(APIView):
                 'variant_group': str(p.variant_group_id) if p.variant_group_id else None,
                 'variant_attributes': p.variant_attributes or {},
                 'stock': p.stock,
-                'fields': resolve_product_fields(p, include_restricted),
+                'fields': resolve_product_fields(p, include_restricted, include_cost),
             }
         missing = [i for i in ids if i not in out]
         return Response({

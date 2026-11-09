@@ -59,6 +59,7 @@ from apps.products.models import (
 from apps.purchasing.models import PurchaseInvoice, PurchaseInvoiceItem, PurchaseOrder, Supplier
 
 from .models import StockAdjustment, StockAdjustmentSequence, StockLedger
+from .stock_lifecycle import attach_lifecycle
 from .stock_utils import adjust_branch_stock
 
 # ---------------------------------------------------------------------------------------------
@@ -66,9 +67,8 @@ from .stock_utils import adjust_branch_stock
 # ---------------------------------------------------------------------------------------------
 ALL_ROLES = {'SUPER_ADMIN', 'ADMINISTRATOR', 'MANAGER', 'ACCOUNTANT', 'INVENTORY_MANAGER',
              'SALES_EXECUTIVE', 'PURCHASE_EXECUTIVE', 'CASHIER'}
-# Same set label_fields uses for purchase cost on labels: cost and purchase value are hidden
-# from everyone else.
-COST_VIEW_ROLES = {'SUPER_ADMIN', 'ADMINISTRATOR', 'MANAGER', 'ACCOUNTANT'}
+# Cost / purchase value visibility is not a role rule: Settings → Pricing Rules → Show Cost Price
+# (apps/company/cost_visibility.py) decides it per user.
 PRICE_EDIT_ROLES = {'SUPER_ADMIN', 'ADMINISTRATOR', 'MANAGER'}
 LOCATION_EDIT_ROLES = {'SUPER_ADMIN', 'ADMINISTRATOR', 'MANAGER', 'INVENTORY_MANAGER', 'PURCHASE_EXECUTIVE'}
 STOCK_ADJUST_ROLES = {'SUPER_ADMIN', 'ADMINISTRATOR', 'MANAGER', 'INVENTORY_MANAGER'}
@@ -103,11 +103,13 @@ def user_role(user):
 
 
 def capabilities(user):
+    from apps.company.cost_visibility import can_view_cost
     role = user_role(user)
     return {
         'role': role,
         'view': role in ALL_ROLES,
-        'view_cost': role in COST_VIEW_ROLES,
+        # Settings → Pricing Rules → Show Cost Price (Main Admin + picked users), not the role.
+        'view_cost': role in ALL_ROLES and can_view_cost(user),
         'edit_prices': role in PRICE_EDIT_ROLES,
         'edit_location': role in LOCATION_EDIT_ROLES,
         'edit_details': role in DETAIL_EDIT_ROLES,
@@ -331,7 +333,7 @@ def serialize_row(p, caps, offers=None):
     model_no = str(_extra(p, 'model_no', 'model', 'model_number') or '')
     variant_bits = [b for b in (model_no, p.frame_type, color, size) if b]
     unit = p.unit
-    return {
+    row = {
         'id': str(p.pk),
         'sku': p.sku,
         'barcode': p.barcode or '',
@@ -352,7 +354,7 @@ def serialize_row(p, caps, offers=None):
         'minimum_stock': int(p.minimum_stock or 0),
         'unit': str(unit.pk) if unit else None,
         'uom': (unit.code if unit else None) or str(_extra(p, 'uom', 'unit') or ''),
-        'cost_price': _money(p.cost_price) if caps['view_cost'] else None,
+        'cost_price': _money(p.cost_price),
         'retail_price': _money(p.retail_price),
         'mrp': product_mrp(p),
         # The product's own vendor (editable here); the last purchase's supplier stands in when unset.
@@ -364,6 +366,9 @@ def serialize_row(p, caps, offers=None):
         'stock_source': p.stock_source or '',
         'updated_at': p.updated_at.isoformat() if p.updated_at else None,
     }
+    if not caps['view_cost']:
+        del row['cost_price']   # omitted, not null: the value never reaches the browser
+    return row
 
 
 # ---------------------------------------------------------------------------------------------
@@ -614,7 +619,9 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
         return product
 
     def _row(self, pk):
-        return serialize_row(base_queryset().get(pk=pk), self._caps(), offer_resolver())
+        product, caps = base_queryset().get(pk=pk), self._caps()
+        return attach_lifecycle([serialize_row(product, caps, offer_resolver())], [product],
+                                view_cost=caps['view_cost'])[0]
 
     # -- list / summary / facets ---------------------------------------------------------------
     def list(self, request):
@@ -622,7 +629,8 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
         caps = self._caps()
         page = self.paginate_queryset(qs)
         offers = offer_resolver()
-        return self.get_paginated_response([serialize_row(p, caps, offers) for p in page])
+        rows = attach_lifecycle([serialize_row(p, caps, offers) for p in page], page, view_cost=caps['view_cost'])
+        return self.get_paginated_response(rows)
 
     @action(detail=False, methods=['get'])
     def summary(self, request):
@@ -644,16 +652,19 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
                .aggregate(ALL=Count('id'), **{k: Count('id', filter=SOURCE_FILTERS[k])
                                               for k in ('OPENING_STOCK', 'EXCEL_IMPORT', 'PURCHASE')}))
         caps = self._caps()
-        return Response({
+        body = {
             'source_counts': src,
             'total_products': agg['total_products'],
             'total_quantity': int(agg['total_quantity'] or 0),
             'low_stock': agg['low_stock'],
             'out_of_stock': agg['out_of_stock'],
-            'purchase_value': _money(agg['purchase_value']) if caps['view_cost'] else None,
+            'purchase_value': _money(agg['purchase_value']),
             'selling_value': _money(agg['selling_value']),
             'generated_at': timezone.now().isoformat(),
-        })
+        }
+        if not caps['view_cost']:
+            del body['purchase_value']
+        return Response(body)
 
     @action(detail=False, methods=['get'])
     def facets(self, request):
@@ -688,7 +699,8 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
             return Response({'found': False, 'results': []})
         caps = self._caps()
         offers = offer_resolver()
-        rows = [serialize_row(p, caps, offers) for p in base_queryset().filter(_code_q(code)).order_by('name')[:5]]
+        found = list(base_queryset().filter(_code_q(code)).order_by('name')[:5])
+        rows = attach_lifecycle([serialize_row(p, caps, offers) for p in found], found, view_cost=caps['view_cost'])
         return Response({'found': bool(rows), 'results': rows})
 
     # -- export ---------------------------------------------------------------------------------
@@ -696,8 +708,11 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
         ('sku', 'Item Code / SKU'), ('barcode', 'Barcode 1'), ('secondary_barcode', 'Barcode 2'),
         ('name', 'Product Name'), ('brand', 'Brand'), ('category', 'Category'), ('variant', 'Model / Variant'),
         ('color', 'Colour'), ('size', 'Size'), ('rack_location', 'Rack'), ('bin_location', 'Shelf / Bin'),
-        ('stock', 'Current Stock'), ('minimum_stock', 'Minimum Stock'), ('uom', 'UOM'),
-        ('status_label', 'Stock Status'), ('cost_price', 'Purchase Cost'), ('retail_price', 'Selling Price'),
+        ('stock', 'On Hand (Physical)'), ('purchased', 'Purchased Stock'), ('ordered', 'Ordered Stock (Reserved)'),
+        ('sold', 'Sold Stock'), ('available', 'Current Stock (Available)'), ('other_movements', 'Opening / Adjustments'),
+        ('minimum_stock', 'Minimum Stock'), ('uom', 'UOM'),
+        ('status_label', 'Stock Status'), ('cost_price', 'Purchase Cost'),
+        ('avg_purchase_cost', 'Avg Purchase Cost'), ('purchase_value', 'Total Purchase Cost'), ('retail_price', 'Selling Price'),
         ('mrp', 'MRP'), ('supplier_name', 'Supplier'), ('last_purchase_date', 'Last Purchase Date'),
         ('source_label', 'Stock Source'), ('offer_price', 'Offer Price'), ('offer_status', 'Offer Qty / Status'),
         ('stock_value', 'Stock Value'),
@@ -710,15 +725,31 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
         self._require('export', 'Your role cannot export stock data.')
         fmt = (request.query_params.get('export_format') or 'xlsx').lower()
         caps = self._caps()
-        columns = [c for c in self.EXPORT_COLUMNS if c[0] != 'cost_price' or caps['view_cost']]
+        cost_cols = {'cost_price', 'avg_purchase_cost', 'purchase_value'}
+        columns = [c for c in self.EXPORT_COLUMNS if c[0] not in cost_cols or caps['view_cost']]
         qs = apply_ordering(apply_filters(self.get_queryset(), request.query_params), request.query_params)
         stamp = timezone.localtime().strftime('%Y%m%d-%H%M')
 
         offers = offer_resolver()
 
-        def rows():
+        def serialized():
+            chunk = []
             for p in qs[:EXPORT_ROW_LIMIT].iterator(chunk_size=2000):
-                r = serialize_row(p, caps, offers)
+                chunk.append(p)
+                if len(chunk) >= 1000:
+                    yield from attach_lifecycle([serialize_row(x, caps, offers) for x in chunk], chunk,
+                                                view_cost=caps['view_cost'])
+                    chunk = []
+            if chunk:
+                yield from attach_lifecycle([serialize_row(x, caps, offers) for x in chunk], chunk,
+                                            view_cost=caps['view_cost'])
+
+        def rows():
+            for r in serialized():
+                life = r.get('lifecycle') or {}
+                for key in ('purchased', 'ordered', 'sold', 'available', 'avg_purchase_cost', 'purchase_value'):
+                    r[key] = life.get(key)
+                r['other_movements'] = life.get('other')
                 o = r['offer']
                 r['offer_price'] = o['offer_price'] if o else None
                 r['offer_status'] = offer_status_text(o)
@@ -742,11 +773,13 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
         wb = Workbook(write_only=True)
         ws = wb.create_sheet('Stock Overview')
         ws.append([label for _, label in columns])
-        numeric = {'stock', 'minimum_stock', 'cost_price', 'retail_price', 'mrp', 'offer_price', 'stock_value'}
+        money_cols = ('cost_price', 'retail_price', 'mrp', 'stock_value', 'avg_purchase_cost', 'purchase_value')
+        numeric = {'stock', 'minimum_stock', 'offer_price', 'purchased', 'ordered', 'sold', 'available',
+                   'other_movements', *money_cols}
         keys = [k for k, _ in columns]
         for row in rows():
             ws.append([
-                (float(v) if k in ('cost_price', 'retail_price', 'mrp', 'stock_value') else v) if (k in numeric and v not in (None, ''))
+                (float(v) if k in money_cols else v) if (k in numeric and v not in (None, ''))
                 else ('' if v is None else v)
                 for k, v in zip(keys, row)
             ])
@@ -1023,8 +1056,13 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
         qs = qs.order_by('-created_at', '-pk')
         paginator = HistoryPagination()
         page = paginator.paginate_queryset(qs, request, view=self)
-        resp = paginator.get_paginated_response(describe_ledger_rows(page, product))
-        resp.data['product'] = serialize_row(base_queryset().get(pk=product.pk), self._caps(), offer_resolver())
+        caps = self._caps()
+        entries = describe_ledger_rows(page, product)
+        if not caps['view_cost']:
+            for e in entries:
+                e.pop('unit_cost', None)
+        resp = paginator.get_paginated_response(entries)
+        resp.data['product'] = serialize_row(base_queryset().get(pk=product.pk), caps, offer_resolver())
         return resp
 
 

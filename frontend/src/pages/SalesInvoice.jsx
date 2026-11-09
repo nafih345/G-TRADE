@@ -9,6 +9,7 @@ import { ensureEditAccess } from '../utils/editPermissions';
 import { describeApiError } from '../utils/apiWriteGuard';
 import PaymentModeDetails from '../components/common/PaymentModeDetails';
 import { needsBank } from '../utils/paymentModes';
+import { reconcileLocalInventory } from '../utils/inventoryCache';
 import { 
   Box, Grid, Card, CardContent, Typography, TextField, 
   Button, MenuItem, Table, TableBody, TableCell, 
@@ -118,26 +119,14 @@ const formatApiProduct = (p) => ({
   image: (p.category_name || p.category || p.type || '').toLowerCase().includes('lens') ? '🔍' : '👓'
 });
 
-// The database is the source of truth for stock: API rows replace any same-id copy (including
-// the localStorage first-paint copy), and the browser cache's stock is corrected to match so the
-// next first paint doesn't flash the stale opening figure again.
-const mergeApiProducts = (prev, prodList) => {
+// The database is the source of truth for the product list and its stock: once the API has
+// answered, the pickers show exactly its rows. The localStorage copy only paints the screen
+// first; cached products the server doesn't have are dropped (from the picker and the cache) —
+// selling one used to save the bill without moving any stock.
+const mergeApiProducts = (_prev, prodList) => {
   const apiFormatted = prodList.map(formatApiProduct);
-  const map = new Map();
-  [...prev, ...apiFormatted].forEach(item => map.set(item.id || item.name, item));
-  try {
-    const stockById = new Map(apiFormatted.map(p => [p.id, p.stock]));
-    const local = JSON.parse(localStorage.getItem('optical_inventory_items') || '[]');
-    let changed = false;
-    const synced = local.map(it => {
-      const s = stockById.get(String(it.id));
-      if (s === undefined || parseInt(it.stock, 10) === s) return it;
-      changed = true;
-      return { ...it, stock: s };
-    });
-    if (changed) localStorage.setItem('optical_inventory_items', JSON.stringify(synced));
-  } catch (e) {}
-  return Array.from(map.values());
+  reconcileLocalInventory(apiFormatted);
+  return apiFormatted;
 };
 
 // --- MASTER DATABASE ARRAYS (Starts blank until entered/fetched from DB) ---
@@ -269,7 +258,9 @@ export default function SalesInvoice() {
           })));
         }
 
-        if (Array.isArray(prodList) && prodList.length > 0) {
+        // A successful answer replaces the list even when empty (a store with no products yet
+        // must not keep showing cached ones); a failed request (prodRes null) keeps what's shown.
+        if (prodRes && Array.isArray(prodList)) {
           setProducts(prev => mergeApiProducts(prev, prodList));
         }
 
@@ -452,7 +443,7 @@ export default function SalesInvoice() {
     try {
       const res = await axios.get('/api/products/products/');
       const prodList = (res && res.data && res.data.results) || (res && res.data) || [];
-      if (Array.isArray(prodList) && prodList.length > 0) {
+      if (Array.isArray(prodList)) {
         setProducts(prev => mergeApiProducts(prev, prodList));
       }
     } catch (e) {}
@@ -1080,6 +1071,7 @@ export default function SalesInvoice() {
           orders={orders}
           onNavigateToNewSale={() => { setActiveTab('new-sale'); navigate('/sales/new'); }}
           onEditInNewSale={(ord) => openSavedDocForEdit(ord)}
+          onSettleOrder={(ord) => openSavedDocForEdit(ord, 'Invoice')}
           // Orders > Lenses: the supplier purchase / receiving / stock entry happen in Purchase,
           // billing back in New Sale (the Order opens as its tax invoice).
           onCreateLensPurchase={(row) => navigate('/purchase/lens-orders', { state: { lensForSalesOrder: row.id } })}

@@ -316,8 +316,20 @@ function renderItems(model, cfg, thermal, currency) {
     <thead>${head}</thead><tbody>${body}</tbody></table>`;
 }
 
+function purchaseSummaryRows(model, currency) {
+  const ps = model.totals?.purchaseSummary;
+  if (!ps) return null;
+  const qty = (q) => String(Math.round((Number(q) || 0) * 100) / 100);
+  return [
+    ...(ps.sections || []).map((g) => ({ key: 'section', label: `${g.label} (Qty ${qty(g.qty)})`, value: money(g.amount, currency) || money(0, currency) })),
+    { key: 'totalQty', label: 'Total Quantity', value: qty(ps.totalQty) },
+    { key: 'grandTotal', label: 'Final Total Amount', strong: true, value: money(model.totals.grandTotal, currency) || '—' },
+  ];
+}
+
 function renderTotals(model, cfg, thermal, currency) {
-  const rows = buildTotalsRows(model, cfg, currency);
+  // Purchase bill: Lens / Other sub-totals, then only Total Quantity and the Final Total.
+  const rows = purchaseSummaryRows(model, currency) || buildTotalsRows(model, cfg, currency);
   if (!rows.length) return '';
   const body = rows.map((r) => {
     const style = [

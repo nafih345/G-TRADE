@@ -32,6 +32,8 @@ import ProductMasterDialog from '../components/inventory/ProductMasterDialog';
 import { ensureEditAccess } from '../utils/editPermissions';
 import ProductVariantMaster from '../components/inventory/variants/ProductVariantMaster';
 import VariantImportDialog from '../components/inventory/variants/VariantImportDialog';
+import { reconcileLocalInventory } from '../utils/inventoryCache';
+import { useCanViewCost } from '../utils/costVisibility';
 
 const isBackendId = (v) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(v || ''));
 
@@ -49,6 +51,7 @@ const opticalBrands = [
 ];
 
 export default function Products() {
+  const viewCost = useCanViewCost();
   const [products, setProducts] = useState(initialProducts);
   const [currentTab, setCurrentTab] = useState(0);
   const location = useLocation();
@@ -152,7 +155,10 @@ export default function Products() {
 
       try {
         const res = await axios.get('/api/products/items/');
-        if (res.data && Array.isArray(res.data) && res.data.length > 0) {
+        if (res.data && Array.isArray(res.data)) {
+          // The server answered: its list is the truth. Cached rows it doesn't have go (from the
+          // table and the cache), and cached stock takes the server's figure.
+          itemsList = reconcileLocalInventory(res.data) || [];
           const formatted = res.data.map(p => ({
             id: String(p.id),
             code: p.sku || p.code || `PROD-${p.id}`,
@@ -606,7 +612,7 @@ export default function Products() {
                                 <Typography variant="caption" color="text.secondary" display="block">{product.size} | {product.gender}</Typography>
                               </TableCell>
                               <TableCell>
-                                <Typography variant="body2">Buy: ₹{(parseFloat(product.purchasePrice) || 0).toFixed(2)}</Typography>
+                                {viewCost && <Typography variant="body2">Buy: ₹{(parseFloat(product.purchasePrice) || 0).toFixed(2)}</Typography>}
                                 <Typography variant="body2" fontWeight={600}>Sell: ₹{(parseFloat(product.sellingPrice) || 0).toFixed(2)} <span style={{fontSize: '0.75rem', color: 'gray'}}>({product.gst || '18%'} GST)</span></Typography>
                               </TableCell>
                               <TableCell>

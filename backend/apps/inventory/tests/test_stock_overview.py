@@ -180,8 +180,9 @@ class StockOverviewTests(APITestCase):
     def test_permissions(self):
         self.client.force_authenticate(self.cashier)
         rows = self.client.get(URL).data['results']
-        self.assertTrue(all(r['cost_price'] is None for r in rows))
-        self.assertIsNone(self.client.get(URL + 'summary/').data['purchase_value'])
+        # Cost keys are left out entirely (Show Cost Price), not sent as null.
+        self.assertTrue(all('cost_price' not in r for r in rows))
+        self.assertNotIn('purchase_value', self.client.get(URL + 'summary/').data)
         self.assertEqual(self.adjust(self.frame, new_quantity=1, reason='x').status_code, 403)
         self.assertEqual(self.patch(self.frame, {'retail_price': '1'}).status_code, 403)
         self.assertEqual(self.client.get(URL + 'export/').status_code, 403)
@@ -208,6 +209,57 @@ class StockOverviewTests(APITestCase):
         self.assertEqual((h[0]['type_label'], h[0]['reference_number'], h[0]['party'], h[0]['quantity_in'],
                           h[0]['previous_stock'], h[0]['new_stock'], h[0]['unit_cost']),
                          ('Purchase Entry', number, 'Hoya', 4, 2, 6, '300.00'))
+
+    # -- lifecycle: purchased → ordered (reserved) → sold ------------------------------------------
+    def test_lifecycle_purchase_order_invoice(self):
+        """Spec example: buy 10, a customer orders 5 (reserved, not yet sold), the order is billed."""
+        item = product('Lifecycle Frame', stock=0, cost_price=Decimal('250'), retail_price=Decimal('600'))
+        sup = Supplier.objects.create(name='Titan', supplier_code='S9')
+        body = {'invoice_number': 'PE-88', 'supplier': str(sup.pk), 'purchase_date': TODAY.isoformat(), 'purchase_type': 'CASH',
+                'payment_method': 'CASH', 'status': 'CONFIRMED', 'grand_total': 2500,
+                'items': [{'product': str(item.pk), 'quantity': 10, 'purchase_rate': 250, 'selling_price': 600,
+                           'line_total': 2500}]}
+        with self.captureOnCommitCallbacks(execute=True):
+            self.assertEqual(self.client.post('/api/purchase/invoices/', body, format='json').status_code, 201)
+
+        def life():
+            return self.client.get(URL, {'code': 'SKU-Lifecycle Frame'}).data['results'][0]['lifecycle']
+
+        l1 = life()
+        self.assertEqual((l1['purchased'], l1['on_hand'], l1['available'], l1['ordered'], l1['sold']), (10, 10, 10, 0, 0))
+        self.assertEqual((l1['avg_purchase_cost'], l1['purchase_value'], l1['other']), ('250.00', '2500.00', 0))
+
+        order = {'document_type': 'ORDER', 'invoice_date': TODAY.isoformat(), 'status': 'UNPAID',
+                 'total_amount': 3000, 'net_amount': 3000, 'paid_amount': 0, 'customer_name': 'Anjali',
+                 'items': [{'product': str(item.pk), 'quantity': 5, 'unit_price': 600, 'total': 3000}]}
+        with self.captureOnCommitCallbacks(execute=True):
+            res = self.client.post('/api/sales/invoices/', order, format='json')
+        self.assertEqual(res.status_code, 201, res.content)
+        l2 = life()
+        self.assertEqual((l2['purchased'], l2['on_hand'], l2['available'], l2['ordered'], l2['sold']), (10, 10, 5, 5, 0))
+
+        with self.captureOnCommitCallbacks(execute=True):
+            conv = self.client.post(f"/api/sales/invoices/{res.data['id']}/convert/", {'document_type': 'INVOICE'},
+                                    format='json')
+        self.assertEqual(conv.status_code, 200, conv.content)
+        l3 = life()
+        self.assertEqual((l3['purchased'], l3['on_hand'], l3['available'], l3['ordered'], l3['sold']), (10, 5, 5, 0, 5))
+        # purchased + other = available + ordered + sold
+        self.assertEqual(l3['purchased'] + l3['other'], l3['available'] + l3['ordered'] + l3['sold'])
+
+        # A delivered (closed) order no longer reserves stock; cost is hidden from other roles.
+        from apps.sales.models import Invoice
+        with self.captureOnCommitCallbacks(execute=True):
+            again = self.client.post('/api/sales/invoices/', order, format='json')
+        self.assertEqual(life()['ordered'], 5)
+        Invoice.objects.filter(pk=again.data['id']).update(fulfillment_status='Delivered')
+        self.assertEqual(life()['ordered'], 0)
+        self.client.force_authenticate(self.cashier)
+        self.assertNotIn('purchase_value', life())
+
+        self.client.force_authenticate(self.admin)
+        text = self.client.get(URL + 'export/', {'export_format': 'csv', 'q': 'Lifecycle'}).content.decode('utf-8-sig')
+        self.assertIn('Ordered Stock (Reserved)', text)
 
     def test_export(self):
         res = self.client.get(URL + 'export/', {'export_format': 'csv', 'brand': 'RayBan'})

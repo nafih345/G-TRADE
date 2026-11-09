@@ -26,8 +26,7 @@ export const PURCHASE_ENTRY_SHORTCUTS = [
   { id: 'save', keys: ['Ctrl+S'], group: 'Purchase Entry', label: 'Save purchase' },
   { id: 'print', keys: ['Ctrl+P'], group: 'Purchase Entry', label: 'Save & print' },
   { id: 'new', keys: ['Ctrl+N', 'Esc'], group: 'Purchase Entry', label: 'Clear the form' },
-  { id: 'lensMenu', keys: ['Alt+L'], group: 'Lens Purchase Order', label: 'Open the Lens Purchase Order menu (then N, or ↑↓ + Enter)' },
-  { id: 'lensMenuN', keys: ['N'], group: 'Lens Purchase Order', global: false, label: 'Menu: Lens Purchase Order (pick the customer order, map suppliers)' },
+  { id: 'orderSearch', keys: ['Alt+L'], group: 'Customer Orders', label: "Open the Search Order Number window — add a customer order's waiting lenses (↑↓ + Enter to pick)" },
   { id: 'help', keys: ['Ctrl+/'], group: 'Help', label: 'This list' },
   ...FIELD_KEYS,
 ];

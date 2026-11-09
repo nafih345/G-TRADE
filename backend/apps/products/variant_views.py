@@ -33,6 +33,7 @@ from .variant_service import (
     CONTEXT_INVENTORY, CONTEXT_PURCHASE, MAX_ROWS_PER_REQUEST, VariantValidationError, save_variants,
     serialize_group, serialize_variant,
 )
+from apps.company.cost_visibility import CostHidingMixin, request_can_view_cost
 
 IMPORT_MAX_BYTES = 15 * 1024 * 1024
 
@@ -115,7 +116,7 @@ def _changed_by(request):
     return (getattr(request, 'data', None) or {}).get('changed_by') or 'Administrator'
 
 
-class ProductVariantGroupViewSet(viewsets.ReadOnlyModelViewSet):
+class ProductVariantGroupViewSet(CostHidingMixin, viewsets.ReadOnlyModelViewSet):
     queryset = ProductVariantGroup.objects.all()
     authentication_classes = []
     permission_classes = [permissions.AllowAny]
@@ -190,7 +191,8 @@ class ProductVariantGroupViewSet(viewsets.ReadOnlyModelViewSet):
         except Exception:
             branch = None
         try:
-            result = save_variants(request.data, user=request.user, branch=branch, changed_by=_changed_by(request))
+            result = save_variants(request.data, user=request.user, branch=branch, changed_by=_changed_by(request),
+                                   can_set_cost=request_can_view_cost(request))
         except VariantValidationError as exc:
             return _error_response(exc)
         code = status.HTTP_200_OK if result.get('dry_run') or result.get('replayed') or not result.get('created') else status.HTTP_201_CREATED
@@ -348,6 +350,7 @@ class ProductVariantGroupViewSet(viewsets.ReadOnlyModelViewSet):
         group_id = request.query_params.get('group')
         qs = qs.filter(variant_group_id=group_id) if group_id else qs.filter(variant_group__isnull=False)
 
+        show_cost = request_can_view_cost(request)
         wb = Workbook()
         ws = wb.active
         ws.title = 'Variants'
@@ -364,7 +367,7 @@ class ProductVariantGroupViewSet(viewsets.ReadOnlyModelViewSet):
                 'group': v['group'], 'brand': v['brand'], 'model_number': v['model_number'],
                 'color': attrs.get('color', ''), 'size': attrs.get('size', ''), 'power': attrs.get('power', ''),
                 'hsn_code': v['hsn_code'], 'unit': g.unit.name if g and g.unit_id else '',
-                'cost_price': v['cost_price'], 'mrp': v['mrp'], 'sales_price': v['sales_price'],
+                'cost_price': v['cost_price'] if show_cost else '', 'mrp': v['mrp'], 'sales_price': v['sales_price'],
                 'tax_percent': v['tax_percent'], 'opening_stock': '',
             }
             ws.append([row[f] for f, _h, _a in IMPORT_COLUMNS] + [v['stock'], 'Yes' if v['is_active'] else 'No'])

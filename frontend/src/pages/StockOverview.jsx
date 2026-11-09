@@ -41,6 +41,7 @@ import { useDebounce } from '../hooks/useDebounce';
 import { apiErrorMessage } from '../utils/apiError';
 import { notify } from '../utils/notify';
 import { stockValue, activeOfferPrice } from '../utils/stockValue';
+import { useCanViewCost } from '../utils/costVisibility';
 
 const BLANK_FILTERS = { brand: '', category: '', rack: '', supplier: '', variant_group: '', status: '', import_batch: '', source: '', offer: '' };
 const SOURCE_VALUES = STOCK_SOURCES.map((s) => s.value);
@@ -88,7 +89,14 @@ const COLUMNS = [
   { key: 'variant', label: 'Variant', w: 54, edit: 'variant' },
   { key: 'rack_location', label: 'Rack', sort: 'rack', w: 36, edit: 'text', list: 'racks' },
   { key: 'bin_location', label: 'Shelf', sort: 'bin', w: 38, edit: 'text' },
-  { key: 'stock', label: 'Current Stock', sort: 'stock', align: 'right', always: true, w: 50, edit: 'int' },
+  // Lifecycle (row.lifecycle, apps/inventory/stock_lifecycle.py): Purchased → Ordered (reserved
+  // for open customer Orders) → Sold, with On Hand the physical count and Available = On Hand −
+  // Ordered. Only On Hand is editable (a ledgered adjustment); the rest are derived.
+  { key: 'purchased', label: 'Purchased Stock', align: 'right', w: 44 },
+  { key: 'stock', label: 'On Hand', sort: 'stock', align: 'right', always: true, w: 44, edit: 'int' },
+  { key: 'ordered', label: 'Ordered (Reserved)', align: 'right', w: 46 },
+  { key: 'sold', label: 'Sold Stock', align: 'right', w: 40 },
+  { key: 'available', label: 'Current Stock (Available)', align: 'right', always: true, w: 52 },
   { key: 'status', label: 'Status', w: 46 },
   { key: 'minimum_stock', label: 'Low Stock Alert', sort: 'minimum_stock', align: 'right', w: 40, edit: 'int' },
   { key: 'uom', label: 'UOM', w: 40, edit: 'unit' },
@@ -260,7 +268,13 @@ export default function StockOverview() {
 
   const [facets, setFacets] = useState(null);
   const [facetsError, setFacetsError] = useState('');
-  const caps = facets?.permissions || {};
+  // Cost columns follow Settings → Pricing Rules → Show Cost Price. The profile answers before the
+  // first request (no column flash); the server's own answer wins once the facets arrive.
+  const profileViewCost = useCanViewCost();
+  const caps = useMemo(() => {
+    const perms = facets?.permissions || {};
+    return { ...perms, view_cost: facets ? Boolean(perms.view_cost) : profileViewCost };
+  }, [facets, profileViewCost]);
 
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebounce(search, 300);
@@ -354,6 +368,22 @@ export default function StockOverview() {
     window.addEventListener('optical_stock_updated', onChange);
     return () => window.removeEventListener('optical_stock_updated', onChange);
   }, [refresh, loadFacets]);
+
+  // Sales / purchases posted in another tab or by another user: re-read when this tab comes back,
+  // unless a row is being edited (a reload would drop the typed values).
+  const editingRef = useRef(null);
+  editingRef.current = editing;
+  useEffect(() => {
+    const onBack = () => {
+      if (document.visibilityState === 'visible' && !editingRef.current) refresh();
+    };
+    window.addEventListener('focus', onBack);
+    document.addEventListener('visibilitychange', onBack);
+    return () => {
+      window.removeEventListener('focus', onBack);
+      document.removeEventListener('visibilitychange', onBack);
+    };
+  }, [refresh]);
 
   const replaceRow = useCallback((row) => {
     setData((d) => ({ ...d, results: d.results.map((r) => (r.id === row.id ? row : r)) }));
@@ -563,7 +593,7 @@ export default function StockOverview() {
 
   const setSort = (key) => setOrdering((o) => (o === key ? `-${key}` : key));
 
-  const visibleColumns = COLUMNS.filter((c) => !hidden.has(c.key) && (!c.costOnly || caps.view_cost !== false));
+  const visibleColumns = COLUMNS.filter((c) => !hidden.has(c.key) && (!c.costOnly || caps.view_cost));
   const totalW = CHECK_W + ACTIONS_W + visibleColumns.reduce((sum, c) => sum + c.w, 0);
   const toggleColumn = (key) => setHidden((h) => {
     const next = new Set(h);
@@ -664,7 +694,59 @@ export default function StockOverview() {
       if (fields.length === 1) return renderInput(col, fields[0], row);
       return <Stack spacing={0.4}>{fields.map((f) => renderInput(col, f, row))}</Stack>;
     }
+    const life = row.lifecycle;
     switch (col.key) {
+      case 'purchased': {
+        if (!life) return muted();
+        const cost = caps.view_cost && life.purchase_value != null;
+        return (
+          <Box component="span" data-life-purchased={row.id}
+            title={cost ? `Received on purchase entries: ${formatQty(life.purchased)}\nTotal purchase cost ${formatMoney(life.purchase_value)}${life.avg_purchase_cost != null ? `\nAverage unit cost ${formatMoney(life.avg_purchase_cost)}` : ''}` : `Received on purchase entries: ${formatQty(life.purchased)}`}>
+            <Box component="span" sx={{ fontWeight: 700 }}>{formatQty(life.purchased)}</Box>
+            {cost && life.purchased > 0 && (
+              <Box sx={{ fontSize: 9.5, color: 'text.secondary', whiteSpace: 'nowrap' }}>₹{amount(life.purchase_value)}</Box>
+            )}
+          </Box>
+        );
+      }
+      case 'ordered': {
+        if (!life) return muted();
+        if (!life.ordered) return muted('0');
+        return (
+          <Box component="span" data-life-ordered={row.id}
+            title={`${formatQty(life.ordered)} held for open customer orders (not yet billed)${life.shortfall ? `\n${formatQty(life.shortfall)} not on the shelf yet` : ''}`}>
+            <Box component="span" sx={{ fontWeight: 800, color: '#b45309' }}>{formatQty(life.ordered)}</Box>
+            {life.shortfall > 0 && (
+              <Box sx={{ fontSize: 9.5, fontWeight: 700, color: 'error.main', whiteSpace: 'nowrap' }}>short {formatQty(life.shortfall)}</Box>
+            )}
+          </Box>
+        );
+      }
+      case 'sold': {
+        if (!life) return muted();
+        return (
+          <Box component="span" data-life-sold={row.id}
+            title={`Retail invoices ${formatQty(life.sold_retail)} · Wholesale ${formatQty(life.sold_wholesale)}`}>
+            {formatQty(life.sold)}
+          </Box>
+        );
+      }
+      case 'available': {
+        if (!life) return muted();
+        // While the row is being edited, follow the typed On Hand figure.
+        const typed = isEditing && editing.values.stock !== '' && Number.isFinite(Number(editing.values.stock))
+          ? Number(editing.values.stock) : life.on_hand;
+        const avail = Math.max(typed - (life.ordered || 0), 0);
+        const other = life.other
+          ? `\nOpening stock / adjustments: ${life.other > 0 ? '+' : ''}${formatQty(life.other)}` : '';
+        return (
+          <Box component="span" data-life-available={row.id}
+            title={`On hand ${formatQty(typed)} − ordered ${formatQty(life.ordered)} = ${formatQty(avail)} free to sell\n\nPurchased ${formatQty(life.purchased)}${other}\n= Available ${formatQty(life.available)} + Ordered ${formatQty(life.ordered)} + Sold ${formatQty(life.sold)}${life.shortfall ? ` − Short ${formatQty(life.shortfall)}` : ''}`}
+            sx={{ fontWeight: 800, color: avail <= 0 ? 'error.main' : avail <= (Number(row.minimum_stock) || 0) ? '#b45309' : 'success.main' }}>
+            {formatQty(avail)}
+          </Box>
+        );
+      }
       case 'stock': {
         const meta = STATUS_META[row.status];
         return <Box component="span" sx={{ fontWeight: 800, color: meta?.color }}>{formatQty(row.stock)}</Box>;
@@ -816,8 +898,10 @@ export default function StockOverview() {
         <SummaryCard icon={<LowIcon />} label="Low Stock Items" tone="#d97706" loading={summaryLoading && !s} value={s ? formatQty(s.low_stock) : '—'}
           hint="In stock but at or below the product's minimum alert level" />
         <SummaryCard icon={<OutIcon />} label="Out of Stock Items" tone="#dc2626" loading={summaryLoading && !s} value={s ? formatQty(s.out_of_stock) : '—'} />
-        <SummaryCard icon={<PurchaseValueIcon />} label="Total Purchase Value" tone="#059669" loading={summaryLoading && !s}
-          value={s ? (s.purchase_value === null ? 'Restricted' : formatMoney(s.purchase_value)) : '—'} hint="On-hand quantity × purchase cost" />
+        {caps.view_cost && (
+          <SummaryCard icon={<PurchaseValueIcon />} label="Total Purchase Value" tone="#059669" loading={summaryLoading && !s}
+            value={s ? (s.purchase_value == null ? '—' : formatMoney(s.purchase_value)) : '—'} hint="On-hand quantity × purchase cost" />
+        )}
         <SummaryCard icon={<SellValueIcon />} label="Total Selling Value" tone="#7c3aed" loading={summaryLoading && !s}
           value={s ? formatMoney(s.selling_value) : '—'} hint="On-hand quantity × regular selling price (before offers — see the Stock Value column per row)" />
       </Box>

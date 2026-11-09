@@ -10,7 +10,8 @@ StockLedger audit row stay consistent.
 """
 
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import F, OuterRef, Subquery, Sum, Value
+from django.db.models.functions import Coalesce
 
 
 def _default_branch():
@@ -83,6 +84,10 @@ def adjust_branch_stock(product, branch, delta, *, ledger=None, enforce_stock=Fa
     revived = bool(getattr(row, 'is_deleted', False))
     if revived:
         row.is_deleted = False
+    # Re-read Product.stock now that the row is locked: the caller loaded `product` before the
+    # lock, and a concurrent sale may have committed since. Reconciling against that stale copy
+    # used to overwrite the other sale's deduction (a lost update — stock "didn't go down").
+    _refresh_stock(product)
     # When this branch holds the product's ONLY stock row (the normal single-branch shop, and
     # every product added by the Excel importer or the Product Master screen — neither touches
     # BranchStock), the scalar Product.stock is the authoritative on-hand figure. Reconcile the
@@ -139,6 +144,12 @@ def adjust_branch_stock_many(deltas, branch, *, ledger=None, enforce_stock=False
     )
     rows = list(BranchStock.all_objects.select_for_update()
                 .filter(branch=branch, product_id__in=products))
+    # Fresh Product.stock under the lock (see adjust_branch_stock): one query for the batch.
+    fresh = dict(type(next(iter(products.values()))).all_objects
+                 .filter(pk__in=products).values_list('pk', 'stock'))
+    for pk, product in products.items():
+        if pk in fresh:
+            product.stock = fresh[pk]
     with_other_rows = set(BranchStock.objects.filter(product_id__in=products)
                           .exclude(pk__in=[r.pk for r in rows])
                           .values_list('product_id', flat=True))
@@ -159,15 +170,12 @@ def adjust_branch_stock_many(deltas, branch, *, ledger=None, enforce_stock=False
 
     totals = dict(BranchStock.objects.filter(product_id__in=products)
                   .values_list('product_id').annotate(t=Sum('quantity')))
-    changed = []
-    for pk, product in products.items():
-        total = totals.get(pk) or 0
-        if product.stock != total:
-            product.stock = total
-            product.updated_at = now
-            changed.append(product)
+    changed = [pk for pk, product in products.items() if product.stock != (totals.get(pk) or 0)]
+    for pk in changed:
+        products[pk].stock = totals.get(pk) or 0
+        products[pk].updated_at = now
     if changed:
-        type(changed[0]).objects.bulk_update(changed, ['stock', 'updated_at'])
+        _write_stock_totals(type(products[changed[0]]), changed, now)
 
     if ledger is None:
         return
@@ -190,9 +198,30 @@ def adjust_branch_stock_many(deltas, branch, *, ledger=None, enforce_stock=False
     ])
 
 
+def _refresh_stock(product):
+    stock = type(product).all_objects.filter(pk=product.pk).values_list('stock', flat=True).first()
+    if stock is not None:
+        product.stock = stock
+
+
+def _write_stock_totals(model, pks, now):
+    """Product.stock = SUM(BranchStock.quantity), computed inside the UPDATE itself (one query,
+    tenant-scoped by the ORM). Writing a total summed in Python could overwrite a movement another
+    branch committed in between."""
+    from apps.company.models import BranchStock
+    total = (BranchStock.objects.filter(product_id=OuterRef('pk')).order_by()
+             .values('product_id').annotate(t=Sum('quantity')).values('t'))
+    model.all_objects.filter(pk__in=pks).update(
+        stock=Coalesce(Subquery(total), Value(0)), updated_at=now)
+
+
 def _apply_scalar_stock(product, delta):
-    product.stock = (product.stock or 0) + delta
-    product.save(update_fields=['stock', 'updated_at'])
+    """No branch at all: move Product.stock with an in-database F() increment, so two tills
+    selling the same product at once can't overwrite each other."""
+    from django.utils import timezone
+    type(product).all_objects.filter(pk=product.pk).update(stock=F('stock') + delta,
+                                                            updated_at=timezone.now())
+    _refresh_stock(product)
 
 
 def _write_ledger(branch, product, delta, ledger):
@@ -242,11 +271,12 @@ def _audit_fields(product, ledger):
 
 
 def _sync_product_total(product):
+    from django.utils import timezone
     from apps.company.models import BranchStock
     total = BranchStock.objects.filter(product=product).aggregate(t=Sum('quantity'))['t'] or 0
     if product.stock != total:
         product.stock = total
-        product.save(update_fields=['stock', 'updated_at'])
+        _write_stock_totals(type(product), [product.pk], timezone.now())
 
 
 def get_branch_quantity(product, branch):

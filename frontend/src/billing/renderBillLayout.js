@@ -251,7 +251,16 @@ const RENDER = {
   totals(el, ctx) {
     const fmt = fmtWithCurrency(ctx.fmt, ctx.model);
     const rows = [];
-    (el.rows || []).forEach((r) => {
+    const ps = ctx.model.totals?.purchaseSummary;
+    if (ps) {
+      // Purchase bill: Lens / Other sub-totals, then only Total Quantity and the Final Total.
+      const qty = (q) => formatNumber(q, { decimals: q % 1 ? 2 : 0, thousands: 'none' });
+      (ps.sections || []).forEach((g) => rows.push({ label: `${g.label} (Qty ${qty(g.qty)})`, value: formatMoney(g.amount, fmt), key: 'section' }));
+      rows.push({ label: 'Total Quantity', value: qty(ps.totalQty), key: 'totalQty' });
+      const g = rawField(ctx.model, 'totals.grandTotal');
+      rows.push({ label: 'Final Total Amount', value: g === null ? '—' : formatMoney(g, fmt), grand: true });
+    }
+    if (!ps) (el.rows || []).forEach((r) => {
       const meta = TOTALS_ROW_BY_KEY[r.key];
       if (!meta) return;
       const v = rawField(ctx.model, `totals.${r.key}`);

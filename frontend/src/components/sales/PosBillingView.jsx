@@ -903,6 +903,9 @@ export default function PosBillingView({
                     },
                     items: cart.map(i => ({
                       product: i.product.id,
+                      // Re-link codes if the id is from an out-of-date picker copy (server side).
+                      barcode: i.product.barcode || '',
+                      sku: i.product.sku || '',
                       description: i.product.name,
                       quantity: i.qty,
                       unit_price: i.product.price,
@@ -925,6 +928,8 @@ export default function PosBillingView({
                   // for a sale that would only exist in this browser.
                   console.warn('POS sale did not save to the database:', e);
                   notify(`Sale NOT saved — ${apiErrorMessage(e)}`);
+                  // Out-of-date product in the cart: reload the list so it can be re-picked.
+                  if (e?.response?.data?.code === 'unknown_product') window.dispatchEvent(new Event('optical_stock_updated'));
                   return;
                 }
 

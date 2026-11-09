@@ -377,7 +377,11 @@ export default function Purchases() {
         // Product Master stores MRP in wholesale_price (+ extra_data.mrp)
         mrp: parseFloat(p.mrp || p.extra_data?.mrp || p.wholesale_price || 0) || 0,
         stock: parseInt(p.stock) || 0,
-        taxRate: parseFloat(p.taxRate || p.tax_rate) || 18
+        taxRate: parseFloat(p.taxRate || p.tax_rate) || 18,
+        // Lets Purchase Entry tell prescription lenses from frames / accessories (Lens vs Other totals).
+        category_name: p.category_name || (typeof p.category === 'string' && !/^[0-9a-f-]{36}$/i.test(p.category) ? p.category : ''),
+        type: p.type || '',
+        extra_data: p.extra_data || {}
       });
 
       if (localProds.length > 0) {

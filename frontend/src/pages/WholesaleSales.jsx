@@ -75,7 +75,7 @@ import { useAuth } from '../context/AuthContext';
 import { describeApiError } from '../utils/apiWriteGuard';
 import {
   LS_KEYS, PRICE_LIST_OPTIONS, PRICE_TIER_LABEL, DELIVERY_TYPES, ORDER_STATUSES, ORDER_STATUS_COLORS,
-  DEFAULT_SCHEMES, DEMO_SALES_REPS, INITIAL_DEMO_PRODUCTS, INITIAL_DEMO_CUSTOMERS,
+  DEFAULT_SCHEMES, DEMO_SALES_REPS, INITIAL_DEMO_CUSTOMERS,
   ADDITIONAL_CHARGE_TYPES, NOTE_TEMPLATES, SPLIT_PAYMENT_MODES, WHOLESALE_API,
   uid, readLS, writeLS, resolvePriceForDealer, computeLineTotals, buildDealerLedger,
   fmtINR, canOverridePrice, isUuid, fetchAllPages, mapDealerFromApi, mapDealerToApi,
@@ -89,6 +89,8 @@ import {
   parseTaxPercent, productPriceTiers, shownPrice, setLinePrice, setLineTax, setLineTaxMode, pricedLine,
   zeroTaxLabel, lineMargin, priceChoices, taxBreakup, round2,
 } from '../utils/wholesalePricing';
+import { reconcileLocalInventory } from '../utils/inventoryCache';
+import { useCanViewCost } from '../utils/costVisibility';
 
 // One "label: value" row used in the credit panel.
 function SummaryLine({ label, value, valueColor, dense }) {
@@ -197,6 +199,7 @@ const isNearExpiry = (dateStr) => {
 };
 
 export default function WholesaleSales() {
+  const viewCost = useCanViewCost();
   const location = useLocation();
   const navigate = useNavigate();
   const { user } = useAuth();
@@ -447,37 +450,35 @@ export default function WholesaleSales() {
       };
     };
 
-    const keyOf = (p) => String(p.barcode || p.code || p.sku || p.id || p.name || '').toLowerCase();
-
     const readLocalProducts = () => readLS(LS_KEYS.inventory, []);
 
     const syncInventory = async () => {
-      let local = readLocalProducts();
+      const local = readLocalProducts();
 
       let backend = [];
+      let answered = false;
       try {
         // Every page — the first page alone (20) left most products with stale stock here.
         const raw = await fetchAllPages(axios, '/api/products/products/');
-        if (Array.isArray(raw)) backend = raw.map(mapBackendProduct);
+        if (Array.isArray(raw)) {
+          backend = raw.map(mapBackendProduct);
+          answered = true;
+          reconcileLocalInventory(raw);
+        }
       } catch (e) {}
 
       if (cancelled) return;
 
-      if (backend.length === 0) {
-        if (local.length === 0) {
-          setProducts(INITIAL_DEMO_PRODUCTS);
-          writeLS(LS_KEYS.inventory, INITIAL_DEMO_PRODUCTS);
-        } else {
-          setProducts(local);
-        }
+      // The server answered: sell only its products. Cached / demo rows it doesn't have carried
+      // ids the server can't move stock for — those sales saved without touching inventory.
+      if (answered) {
+        setProducts(backend);
         return;
       }
 
-      const backendKeys = new Set(backend.map(keyOf));
-      const backendIds = new Set(backend.map(p => String(p.id)));
-      const localOnly = local.filter(p => !backendKeys.has(keyOf(p)) && !backendIds.has(String(p.id)));
-
-      setProducts([...backend, ...localOnly]);
+      // Server unreachable: show the last cached copy. Never seed demo products — they were
+      // written into the shared product cache and then offered by every picker.
+      setProducts(local);
     };
 
     const loadWarehouses = async () => {
@@ -2204,7 +2205,7 @@ export default function WholesaleSales() {
               <Typography variant="caption" fontWeight={800} color="text.secondary" display="block">
                 {line.name}
               </Typography>
-              {(line.costPrice > 0) && (
+              {viewCost && (line.costPrice > 0) && (
                 <Typography variant="caption" color="text.secondary" display="block">
                   Cost {fmtINR(line.costPrice)}
                 </Typography>
@@ -2217,7 +2218,7 @@ export default function WholesaleSales() {
                 <MenuItem key={c.key} selected={selected} data-price-choice={c.key} onClick={() => { applyPriceChoice(priceMenu.idx, c); close(); }}>
                   <Box sx={{ flex: 1, pr: 3 }}>
                     <Typography variant="body2" fontWeight={700}>{c.label}</Typography>
-                    {line.costPrice > 0 && (
+                    {viewCost && line.costPrice > 0 && (
                       <Typography variant="caption" color={c.price < line.costPrice ? 'error' : 'text.secondary'}>
                         {c.price < line.costPrice ? 'Below cost' : `Margin ${(((c.inclusive ? c.price / (1 + (parseFloat(line.gst) || 0) / 100) : c.price) - line.costPrice) / line.costPrice * 100).toFixed(1)}%`}
                       </Typography>

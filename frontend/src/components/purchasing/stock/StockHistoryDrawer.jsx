@@ -9,6 +9,7 @@ import {
 import { Close as CloseIcon } from '@mui/icons-material';
 import { fetchStockHistory, formatDateTime, formatMoney, formatQty, STATUS_META } from './stockApi';
 import { apiErrorMessage } from '../../../utils/apiError';
+import { useCanViewCost } from '../../../utils/costVisibility';
 
 const TYPES = [
   { value: '', label: 'All movements' },
@@ -23,6 +24,7 @@ const BLANK = { date_from: '', date_to: '', type: '', reference: '' };
 const cell = { py: 0.6, px: 1, fontSize: 12.5, whiteSpace: 'nowrap' };
 
 export default function StockHistoryDrawer({ open, row, refreshKey, onClose }) {
+  const viewCost = useCanViewCost();
   const [draft, setDraft] = useState(BLANK);
   const [filters, setFilters] = useState(BLANK);
   const [page, setPage] = useState(0);
@@ -97,7 +99,7 @@ export default function StockHistoryDrawer({ open, row, refreshKey, onClose }) {
         <Table size="small" stickyHeader aria-label="Stock movements">
           <TableHead>
             <TableRow>
-              {['Date & time', 'Type', 'Reference', 'Supplier / Customer', 'In', 'Out', 'Previous', 'New', 'Unit cost', 'User', 'Remarks'].map((h) => (
+              {['Date & time', 'Type', 'Reference', 'Supplier / Customer', 'In', 'Out', 'Previous', 'New', ...(viewCost ? ['Unit cost'] : []), 'User', 'Remarks'].map((h) => (
                 <TableCell key={h} sx={{ ...cell, fontWeight: 800, bgcolor: 'background.paper' }}
                   align={['In', 'Out', 'Previous', 'New', 'Unit cost'].includes(h) ? 'right' : 'left'}>{h}</TableCell>
               ))}
@@ -114,7 +116,7 @@ export default function StockHistoryDrawer({ open, row, refreshKey, onClose }) {
                 <TableCell sx={{ ...cell, color: 'error.main', fontWeight: 700 }} align="right">{m.quantity_out ? `−${formatQty(m.quantity_out)}` : ''}</TableCell>
                 <TableCell sx={cell} align="right">{formatQty(m.previous_stock)}</TableCell>
                 <TableCell sx={{ ...cell, fontWeight: 700 }} align="right">{formatQty(m.new_stock)}</TableCell>
-                <TableCell sx={cell} align="right">{m.unit_cost ? formatMoney(m.unit_cost) : '—'}</TableCell>
+                {viewCost && <TableCell sx={cell} align="right">{m.unit_cost ? formatMoney(m.unit_cost) : '—'}</TableCell>}
                 <TableCell sx={cell}>{m.performed_by || '—'}</TableCell>
                 <TableCell sx={{ ...cell, whiteSpace: 'normal', minWidth: 220 }}>
                   <Tooltip title={m.branch ? `Branch: ${m.branch}` : ''}><span>{m.remarks || '—'}</span></Tooltip>

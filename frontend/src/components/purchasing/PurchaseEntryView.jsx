@@ -23,14 +23,16 @@ import {
   LibraryAdd as MultiItemsIcon,
   QrCode2 as LabelIcon,
   Visibility as LensIcon,
-  ArrowDropDown as DropDownIcon,
-  ReceiptLong as LensBillIcon
+  ExpandMore as ExpandMoreIcon,
+  ExpandLess as ExpandLessIcon
 } from '@mui/icons-material';
 import { LensPOEditor, useLensProducts, UUID_RE } from './LensPurchaseOrderView';
 import { lensItemsFromRequirements } from '../../utils/lensPurchaseOrders';
 import { printLensPO } from '../../utils/printLensPO';
 import { poQtyLabel } from '../../utils/lensPurchaseOrders';
 import { notify } from '../../utils/notify';
+import { isPairSellable } from '../../utils/lensUnits';
+import { purchaseGroupTotals } from '../../utils/purchaseGroups';
 import { useBranch } from '../../context/BranchContext';
 import { PURCHASE_ENTRY_SHORTCUTS } from './lensPoShortcuts';
 import { navScopeProps, navDialogProps, enterOpensSelectProps, focusNextAfterRender } from '../../pages/wholesale/keyboardNav';
@@ -50,6 +52,9 @@ import { useStoreProfile } from '../../utils/storeProfile';
 import { confirmPosting, peekDocumentNumber } from '../../utils/businessPrefs';
 
 const todayStr = () => new Date().toISOString().split('T')[0];
+const dmy = (iso) => (iso ? String(iso).slice(0, 10).split('-').reverse().join('-') : '');
+// Sales > Orders > Lenses queue states that still have lenses to bring in.
+const OPEN_LENS_ORDER_STATES = 'PENDING_PURCHASE,PURCHASE_PLACED,PARTIALLY_RECEIVED,RECEIVED_NOT_STOCKED';
 const genInvoiceNumber = () => `PINV-${Date.now().toString().slice(-8)}`;
 
 // Backend product PKs are UUIDs. Products that only ever lived in the browser's
@@ -105,7 +110,12 @@ const blankRow = (product, overrides = {}, defaultGstPercent = 0, defaultCessPer
     mrp,
     sellingPrice,
     marginPercent: rate > 0 ? +(((sellingPrice - rate) / rate) * 100).toFixed(2) : 0,
-    lineTotal: 0
+    lineTotal: 0,
+    // Bill section: 'LENS' (prescription lenses) or '' (frames, accessories, everything else).
+    lineGroup: overrides.lineGroup ?? (isPairSellable(product) ? 'LENS' : ''),
+    // Set on lines pulled in by Search Order Number: the customer order they belong to.
+    lensOrderId: overrides.lensOrderId || '',
+    lensNote: overrides.lensNote || ''
   };
 };
 
@@ -205,7 +215,8 @@ const rowFromInvoiceItem = (it) => {
     mrp: num(it.mrp),
     sellingPrice: num(it.selling_price),
     marginPercent: num(it.margin_percent),
-    lineTotal: num(it.line_total)
+    lineTotal: num(it.line_total),
+    lineGroup: it.item_group || ''
   };
 };
 
@@ -287,14 +298,29 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
   const [pendingFocusRow, setPendingFocusRow] = useState(null);
   const [addProductOpen, setAddProductOpen] = useState(false);
   const [multiItemsOpen, setMultiItemsOpen] = useState(false);
-  // Lens Purchase Order from inside the entry: menu anchor, open editor, the PO just
-  // saved (offered for printing as an order form) and received-but-unbilled POs to pull in.
-  const [lensMenuAnchor, setLensMenuAnchor] = useState(null);
+  // Lens PO editor (opened from Sales > Orders > Lenses) and the PO it just saved.
   const [lensEditor, setLensEditor] = useState(null);
   const [savedLensPO, setSavedLensPO] = useState(null);
-  const [unbilledLensPOs, setUnbilledLensPOs] = useState([]);
   const { lensProducts, productsLoading: lensProductsLoading } = useLensProducts();
-  const lensBtnRef = useRef(null);
+  // Search Order Number: customer orders whose waiting lenses are on this entry. Saving the entry
+  // receives those lenses on lensReceivedDate (the actual arrival date) and bills their Lens POs.
+  const [linkedOrders, setLinkedOrders] = useState([]);
+  const [lensReceivedDate, setLensReceivedDate] = useState(todayStr());
+  const [orderSearch, setOrderSearch] = useState('');
+  const debouncedOrderSearch = useDebounce(orderSearch, 250);
+  const [orderOptions, setOrderOptions] = useState([]);
+  const [orderLoading, setOrderLoading] = useState(false);
+  const [showSummaryDetails, setShowSummaryDetails] = useState(() => {
+    try { return localStorage.getItem('purchaseEntry_summaryDetails') === '1'; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('purchaseEntry_summaryDetails', showSummaryDetails ? '1' : '0'); } catch {}
+  }, [showSummaryDetails]);
+  const orderSearchRef = useRef(null);
+  const orderBtnRef = useRef(null);
+  // Search Order Number popup: open flag + keyboard-highlighted row.
+  const [orderDialogOpen, setOrderDialogOpen] = useState(false);
+  const [orderActive, setOrderActive] = useState(0);
   const saveBtnRef = useRef(null);
   const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
 
@@ -463,6 +489,7 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
         const product = products.find(p => String(p.id) === String(l.product)) || { id: l.product, name: l.product_name, stock: 0 };
         return recalcRow(blankRow(product, {
           quantity: l.quantity, purchaseRate: parseFloat(l.purchase_rate) || 0, gstPercent: parseFloat(l.gst_percent) || 0,
+          lineGroup: 'LENS',
         }), 'quantity', gstType, isInterstate);
       });
       setRows(prev => (append ? [...prev, ...lensRows] : lensRows));
@@ -497,36 +524,106 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialLensSalesOrder?.at, lensProductsLoading]);
 
-  const openLensMenu = () => {
-    if (editingId || !lensBtnRef.current) return;
-    setLensMenuAnchor(lensBtnRef.current);
-    axios.get('/api/purchase/lens-orders/', { params: { status: 'PARTIALLY_RECEIVED,RECEIVED' } })
-      .then(res => setUnbilledLensPOs((res.data?.results || res.data || []).filter(po => !po.purchase_invoice)))
-      .catch(() => setUnbilledLensPOs([]));
+  // --- Search Order Number ---
+  useEffect(() => {
+    if (!orderDialogOpen) return undefined;
+    // Empty search lists every open order still waiting for lenses (newest first).
+    const q = debouncedOrderSearch.trim();
+    let alive = true;
+    setOrderLoading(true);
+    axios.get('/api/purchase/lens-orders/sales-queue/', { params: { ...(q ? { search: q } : {}), status: OPEN_LENS_ORDER_STATES } })
+      .then(res => { if (alive) { setOrderOptions(Array.isArray(res.data) ? res.data : []); setOrderActive(0); } })
+      .catch(() => { if (alive) setOrderOptions([]); })
+      .finally(() => { if (alive) setOrderLoading(false); });
+    return () => { alive = false; };
+  }, [debouncedOrderSearch, orderDialogOpen]);
+  const openOrderDialog = () => {
+    if (editingId) return;
+    setOrderSearch('');
+    setOrderActive(0);
+    setOrderDialogOpen(true);
   };
-  const startLensOrder = () => {
-    setLensMenuAnchor(null);
-    if (linkedLensPO) { alert(`This entry already bills Lens PO ${linkedLensPO.po_number}. Save it first, then start the next lens order.`); return; }
-    setLensEditor({});
+  const closeOrderDialog = () => {
+    setOrderDialogOpen(false);
+    setTimeout(() => orderBtnRef.current?.focus(), 60);
   };
-  const billLensPO = (po) => {
-    setLensMenuAnchor(null);
-    if (linkedLensPO) { alert(`This entry already bills Lens PO ${linkedLensPO.po_number}. Save it first.`); return; }
-    if (selectedSupplierId && String(po.supplier) !== String(selectedSupplierId)) {
-      alert(`${po.po_number} is from ${po.supplier_name}, not this entry's supplier.`);
+  const pickOrder = (o) => {
+    if (!o) return;
+    setOrderDialogOpen(false);
+    addOrderToEntry(o);
+  };
+  const onOrderSearchKeys = (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); setOrderActive(i => Math.min(i + 1, Math.max(0, orderOptions.length - 1))); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setOrderActive(i => Math.max(0, i - 1)); }
+    else if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); pickOrder(orderOptions[orderActive]); }
+  };
+  useEffect(() => {
+    if (!orderDialogOpen) return;
+    document.querySelector(`[data-order-row="${orderActive}"]`)?.scrollIntoView({ block: 'nearest' });
+  }, [orderActive, orderDialogOpen]);
+
+  // The order's waiting lenses (not ordered yet, or placed with this supplier) join the grid as
+  // Lens lines; frames / accessories are added next to them as usual.
+  const addOrderToEntry = async (order) => {
+    if (!order || editingId) return;
+    setOrderSearch('');
+    if (linkedOrders.some(o => o.id === String(order.id))) {
+      notify(`Order ${order.invoice_number} is already on this entry.`, 'info');
       return;
     }
-    applyLensPO(po.id, { append: true }).then(focusSaveButton);
+    const supplier = UUID_RE.test(String(selectedSupplierId)) ? String(selectedSupplierId) : '';
+    try {
+      const { data: d } = await axios.get('/api/purchase/lens-orders/order-draft/', {
+        params: { sales_order: order.id, ...(supplier ? { supplier } : {}) },
+      });
+      const skipped = d.skipped || [];
+      if (!d.lines?.length) {
+        alert(`No lenses of order ${d.sales_order_number} are waiting to be purchased${supplier ? ' from this supplier' : ''}.`
+          + (skipped.length ? `\n\n${skipped.join('\n')}` : ''));
+        return;
+      }
+      if (!supplier && d.supplier) setSelectedSupplierId(d.supplier);
+      const who = [d.customer_name, d.patient_code && `(${d.patient_code})`].filter(Boolean).join(' ');
+      const lensRows = d.lines.map(l => {
+        const product = products.find(p => String(p.id) === String(l.product)) || { id: l.product, name: l.product_name, stock: 0 };
+        const base = blankRow(product, {
+          quantity: l.quantity,
+          purchaseRate: parseFloat(l.purchase_rate) || 0,
+          ...(l.gst_percent !== null && l.gst_percent !== undefined ? { gstPercent: parseFloat(l.gst_percent) || 0 } : {}),
+          lineGroup: 'LENS',
+          lensOrderId: String(d.sales_order),
+          lensNote: `${d.sales_order_number}${who ? ` · ${who}` : ''} · ${l.note}`,
+        }, defaultGstPercent, defaultCessPercent, defaultVatPercent);
+        return recalcRow({ ...base, discountPercent: parseFloat(l.discount_percent) || 0 }, 'quantity', gstType, isInterstate);
+      });
+      setRows(prev => [...prev, ...lensRows]);
+      setLinkedOrders(prev => [...prev, {
+        id: String(d.sales_order), number: d.sales_order_number, customer: who,
+        expected: d.expected_delivery_date || '', poNumbers: (d.purchase_orders || []).map(x => x.po_number),
+      }]);
+      if (!poRef) setPoRef(d.sales_order_number);
+      if (skipped.length) notify(`Order ${d.sales_order_number}: some lenses were left out — ${skipped.join(' ')}`, 'warning');
+      else notify(`${d.sales_order_number}: ${lensRows.length} lens line${lensRows.length === 1 ? '' : 's'} added. Add frames or accessories below as usual.`, 'success');
+      setTimeout(() => productSearchRef.current?.focus(), 60);
+    } catch (err) {
+      alert(err.response?.data?.detail || 'Could not load the lenses of that order.');
+    }
   };
+  const removeLinkedOrder = (id) => {
+    setLinkedOrders(prev => prev.filter(o => o.id !== id));
+    setRows(prev => prev.filter(r => r.lensOrderId !== id));
+  };
+  // An order whose lens lines were all deleted from the grid is no longer on the entry.
+  useEffect(() => {
+    setLinkedOrders(prev => {
+      const next = prev.filter(o => rows.some(r => r.lensOrderId === o.id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [rows]);
+  const latestExpected = linkedOrders.map(o => o.expected).filter(Boolean).sort().pop() || '';
+
   // After lenses join the entry the next step is saving it: Enter on the focused button saves.
   const focusSaveButton = () => setTimeout(() => saveBtnRef.current?.focus(), 60);
-  // Menu letter N starts a lens order (↑/↓ + Enter work too).
-  const onLensMenuKeys = (e) => {
-    if (e.ctrlKey || e.altKey || e.metaKey || e.key.toLowerCase() !== 'n') return;
-    e.preventDefault();
-    e.stopPropagation();
-    startLensOrder();
-  };
   const onLensPOSaved = async (po, { receivedNow, all } = {}) => {
     setLensEditor(null);
     if (receivedNow) await applyLensPO(po.id, { append: true });
@@ -611,7 +708,8 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
     const preRound = gross - discount + tax + cess + vat + (parseFloat(otherCharges) || 0);
     const grandTotal = Math.round(preRound);
     const roundOff = +(grandTotal - preRound).toFixed(2);
-    return { totalItems, totalQty, gross, discount, tax, cgst, sgst, igst, cess, vat, roundOff, grandTotal };
+    const groups = purchaseGroupTotals(rows.map(r => ({ group: r.lineGroup, qty: r.quantity, total: r.lineTotal })));
+    return { totalItems, totalQty, gross, discount, tax, cgst, sgst, igst, cess, vat, roundOff, grandTotal, groups };
   }, [rows, otherCharges]);
 
   const balanceAmount = Math.max(0, +(totals.grandTotal - (parseFloat(paidAmount) || 0)).toFixed(2));
@@ -784,6 +882,9 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
     setCashStatus(CASH_PAID);
     setLinkedPO(null);
     setLinkedLensPO(null);
+    setLinkedOrders([]);
+    setLensReceivedDate(todayStr());
+    setOrderSearch('');
     cellRefs.current = {};
   };
 
@@ -926,7 +1027,8 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
       mrp: r.mrp,
       selling_price: r.sellingPrice,
       margin_percent: r.marginPercent,
-      line_total: r.lineTotal
+      line_total: r.lineTotal,
+      item_group: r.lineGroup || ''
     }))
   });
 
@@ -968,6 +1070,14 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
     // blocking the save here made it impossible to update ANY field (Purchase Type included)
     // on that invoice ever again.
     if (!editingId && saveStatus !== 'DRAFT' && rows.length === 0) { alert('Please add at least one product line.'); productSearchRef.current?.focus(); return; }
+    if (linkedOrders.length && saveStatus === 'DRAFT') {
+      alert('Lenses pulled in by Order Number are received when the entry is saved — save it as Confirmed, not as a draft.');
+      return;
+    }
+    if (linkedOrders.length && (!lensReceivedDate || lensReceivedDate > todayStr())) {
+      alert('Enter the date the lenses were actually received (today or earlier).');
+      return;
+    }
     // Settings → "Require Confirmation Before Posting": a confirmed entry moves stock and payables.
     if (saveStatus !== 'DRAFT' && !confirmPosting(`${editingId ? 'the changes to ' : ''}this purchase entry`)) return;
 
@@ -984,6 +1094,10 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
       }
       const payload = buildPayload(saveStatus, itemRows);
       if (linkedLensPO && !editingId) payload.lens_purchase_order = linkedLensPO.id;
+      if (linkedOrders.length && !editingId) {
+        payload.lens_sales_orders = linkedOrders.map(o => o.id);
+        payload.lens_received_date = lensReceivedDate;
+      }
       const res = editingId
         ? await axios.put(`/api/purchase/invoices/${editingId}/`, payload)
         : await axios.post('/api/purchase/invoices/', payload);
@@ -1009,9 +1123,10 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
       const printable = {
         ...saved,
         lensPoNumber: !editingId && linkedLensPO ? linkedLensPO.po_number : '',
+        lensOrderNumbers: !editingId ? linkedOrders.map(o => o.number) : [],
         wasEdit: Boolean(editingId),
         supplierName: selectedSupplier?.name || selectedSupplier?.company_name,
-        items: rows.map(r => ({ ...r, productName: r.productName }))
+        items: rows.map(r => ({ ...r, productName: r.productName, item_group: r.lineGroup || '' }))
       };
 
       if (print) printPurchaseReceipt(printable);
@@ -1048,11 +1163,11 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
     const handleShortcut = (e) => {
       // The Add Multiple Items dialog and the Lens Purchase Order dialogs / menu have their own
       // keys; nothing here may act behind them (Esc in a lens dialog must not clear this entry).
-      if (multiItemsOpen || lensEditor || savedLensPO || lensMenuAnchor || shortcutHelpOpen) return;
+      if (multiItemsOpen || lensEditor || savedLensPO || shortcutHelpOpen || orderDialogOpen) return;
       // Esc pressed inside any dialog / menu closes that, never this form. Decided from where the
       // key was pressed: the closing dialog has already cleared its state by the time this runs.
       if (e.key === 'Escape' && (e.target?.closest?.('.MuiModal-root') || document.querySelector('.MuiModal-root:not(.MuiModal-hidden)'))) return;
-      if (e.altKey && !e.ctrlKey && (e.key === 'l' || e.key === 'L')) { e.preventDefault(); openLensMenu(); return; }
+      if (e.altKey && !e.ctrlKey && (e.key === 'l' || e.key === 'L')) { e.preventDefault(); openOrderDialog(); return; }
       if (e.ctrlKey && e.key === '/') { e.preventDefault(); setShortcutHelpOpen(true); return; }
       if (e.key === 'F2') { e.preventDefault(); dateInputRef.current?.focus(); }
       else if (e.key === 'F3') { e.preventDefault(); supplierInputRef.current?.focus(); }
@@ -1373,40 +1488,111 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
             Add Multiple Items
           </Button>
         </Tooltip>
-        <Tooltip title={editingId ? 'Lens orders are added to new entries only' : 'Alt+L — order prescription lenses from a supplier (pair or single lens), or bill lenses already received'}>
+        <Tooltip title={editingId ? 'Customer orders are added to new entries only' : 'Alt+L — find a customer order by Order Number (or patient / Lens PO no.) and add its pending or placed lenses to this purchase'}>
           <span>
             <Button
-              ref={lensBtnRef}
+              ref={orderBtnRef}
               variant="outlined"
               color="secondary"
               size="small"
-              startIcon={<LensIcon />}
-              endIcon={<DropDownIcon />}
+              startIcon={<SearchIcon />}
               disabled={Boolean(editingId)}
-              onClick={openLensMenu}
+              onClick={openOrderDialog}
+              data-testid="pe-order-search-btn"
               sx={{ flexShrink: 0, fontWeight: 800, borderRadius: '24px', px: 2, whiteSpace: 'nowrap' }}
             >
-              Lens Purchase Order (Alt+L)
+              Search Order Number (Alt+L)
             </Button>
           </span>
         </Tooltip>
-        <Menu anchorEl={lensMenuAnchor} open={Boolean(lensMenuAnchor)} onClose={() => setLensMenuAnchor(null)}
-          MenuListProps={{ onKeyDown: onLensMenuKeys }}>
-          <MenuItem onClick={() => startLensOrder()}>
-            <AddIcon fontSize="small" sx={{ mr: 1 }} />Lens Purchase Order
-            <Typography component="span" variant="caption" sx={{ ml: 'auto', pl: 3, fontWeight: 800, color: 'text.secondary' }}>N</Typography>
-          </MenuItem>
-          <Divider />
-          <MenuItem disabled sx={{ fontSize: 12, fontWeight: 700 }}>Bill a received lens order</MenuItem>
-          {unbilledLensPOs.length === 0 && <MenuItem disabled sx={{ fontSize: 13 }}>No received lens orders waiting to be billed</MenuItem>}
-          {unbilledLensPOs.map(po => (
-            <MenuItem key={po.id} onClick={() => billLensPO(po)}>
-              <LensBillIcon fontSize="small" sx={{ mr: 1 }} />
-              {po.po_number} · {po.supplier_name} · {po.summary?.received}/{po.summary?.pieces} lenses
-            </MenuItem>
-          ))}
-        </Menu>
       </Paper>
+      <Dialog open={orderDialogOpen} onClose={closeOrderDialog} maxWidth="md" fullWidth data-testid="pe-order-dialog">
+        <DialogTitle sx={{ fontWeight: 800, pb: 1 }}>
+          Search Order Number
+          <Typography variant="caption" display="block" color="text.secondary">
+            Customer orders with lenses still to purchase. Pick one to add its lenses to this entry — ↑↓ to move, Enter to add, Esc to close.
+          </Typography>
+        </DialogTitle>
+        <DialogContent dividers sx={{ pt: 1.5 }}>
+          <TextField
+            autoFocus
+            fullWidth
+            size="small"
+            inputRef={orderSearchRef}
+            value={orderSearch}
+            onChange={(e) => setOrderSearch(e.target.value)}
+            onKeyDown={onOrderSearchKeys}
+            placeholder="Order number (ORD-…), patient name / code / phone, or Lens PO no. (LPO-…)"
+            InputProps={{ startAdornment: <SearchIcon fontSize="small" sx={{ mr: 1, color: 'text.secondary' }} /> }}
+            sx={{ mb: 1.5 }}
+          />
+          <TableContainer component={Paper} variant="outlined" sx={{ maxHeight: 420 }}>
+            <Table size="small" stickyHeader>
+              <TableHead>
+                <TableRow sx={{ '& th': { fontWeight: 800 } }}>
+                  <TableCell>Order No</TableCell>
+                  <TableCell>Date</TableCell>
+                  <TableCell>Customer</TableCell>
+                  <TableCell>Status</TableCell>
+                  <TableCell align="center">Lenses waiting</TableCell>
+                  <TableCell>Lens PO</TableCell>
+                  <TableCell align="right" />
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {orderLoading && orderOptions.length === 0 && [0, 1, 2].map(i => (
+                  <TableRow key={`sk-${i}`}><TableCell colSpan={7}><Skeleton height={24} /></TableCell></TableRow>
+                ))}
+                {!orderLoading && orderOptions.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={7} align="center" sx={{ py: 4, color: 'text.secondary' }}>
+                      {orderSearch.trim() ? 'No customer order with lenses waiting matches this search.' : 'No customer orders are waiting for lenses.'}
+                    </TableCell>
+                  </TableRow>
+                )}
+                {orderOptions.map((o, i) => {
+                  const waiting = Math.max(0, (o.totals?.required || 0) - (o.totals?.stocked || 0));
+                  const added = linkedOrders.some(x => x.id === String(o.id));
+                  return (
+                    <TableRow
+                      key={o.id}
+                      hover
+                      selected={i === orderActive}
+                      data-order-row={i}
+                      onMouseEnter={() => setOrderActive(i)}
+                      onClick={() => pickOrder(o)}
+                      sx={{ cursor: 'pointer', opacity: added ? 0.55 : 1 }}
+                    >
+                      <TableCell sx={{ fontWeight: 800, whiteSpace: 'nowrap' }}>{o.invoice_number}</TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>{dmy(o.invoice_date)}</TableCell>
+                      <TableCell>
+                        <Typography variant="body2" fontWeight={700}>{o.customer_name || '—'}</Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {[o.patient_code, o.customer_phone].filter(Boolean).join(' · ')}
+                        </Typography>
+                      </TableCell>
+                      <TableCell><Chip size="small" variant="outlined" color="secondary" label={o.queue_status_label} /></TableCell>
+                      <TableCell align="center" sx={{ fontWeight: 800 }}>{waiting}</TableCell>
+                      <TableCell sx={{ fontSize: '0.75rem' }}>{(o.purchase_orders || []).map(x => x.po_number).join(', ') || 'Not ordered yet'}</TableCell>
+                      <TableCell align="right">
+                        {added
+                          ? <Chip size="small" label="Added" />
+                          : <Button size="small" variant={i === orderActive ? 'contained' : 'outlined'} color="secondary" onClick={(e) => { e.stopPropagation(); pickOrder(o); }}>Add</Button>}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        </DialogContent>
+        <DialogActions>
+          <Typography variant="caption" color="text.secondary" sx={{ mr: 'auto', pl: 1 }}>
+            {orderLoading ? 'Searching…' : `${orderOptions.length} order${orderOptions.length === 1 ? '' : 's'}`}
+          </Typography>
+          <Button onClick={closeOrderDialog}>Close (Esc)</Button>
+        </DialogActions>
+      </Dialog>
       {lensEditor && (
         <LensPOEditor
           open
@@ -1420,7 +1606,7 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
           suppliers={suppliers.filter(sp => UUID_RE.test(String(sp.id)))}
           lensProducts={lensProducts}
           productsLoading={lensProductsLoading}
-          onClose={() => { setLensEditor(null); setTimeout(() => lensBtnRef.current?.focus(), 60); }}
+          onClose={() => { setLensEditor(null); setTimeout(() => orderBtnRef.current?.focus(), 60); }}
           onSaved={onLensPOSaved}
         />
       )}
@@ -1438,7 +1624,7 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
           <Typography variant="body2" sx={{ mt: 1 }} color="text.secondary">
             {savedLensPO?.receivedNow
               ? 'All lenses were received and added to this Purchase Entry. Saving the entry brings them into stock and links it to the lens order.'
-              : 'Ordered from the lab — no stock or invoice yet. When the lenses arrive, receive them under Purchase → Lens Purchase Order, then bill them here via Lens Purchase Order → Bill a received lens order.'}
+              : 'Ordered from the lab — no stock or invoice yet. When the lenses arrive, find the customer order here with Search Order Number and save the entry with the actual received date.'}
           </Typography>
         </DialogContent>
         <DialogActions sx={{ flexWrap: 'wrap', gap: 1 }}>
@@ -1449,6 +1635,46 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
         </DialogActions>
       </Dialog>
       <ShortcutHelpDialog open={shortcutHelpOpen} onClose={() => setShortcutHelpOpen(false)} shortcuts={PURCHASE_ENTRY_SHORTCUTS} title="Purchase Entry" />
+
+      {linkedOrders.length > 0 && (
+        <Card variant="outlined" sx={{ borderRadius: 3, p: 2, mb: 2, borderColor: 'secondary.light' }} data-testid="pe-linked-orders">
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
+            <Box sx={{ flex: '1 1 320px', minWidth: 0 }}>
+              <Typography variant="subtitle2" fontWeight={800} sx={{ mb: 0.75 }}>Lenses from customer orders</Typography>
+              <Box sx={{ display: 'flex', gap: 0.75, flexWrap: 'wrap' }}>
+                {linkedOrders.map(o => (
+                  <Chip
+                    key={o.id}
+                    icon={<LensIcon />}
+                    color="secondary"
+                    variant="outlined"
+                    label={`${o.number}${o.customer ? ` · ${o.customer}` : ''}${o.poNumbers.length ? ` · ${o.poNumbers.join(', ')}` : ' · not ordered yet'}`}
+                    onDelete={() => removeLinkedOrder(o.id)}
+                  />
+                ))}
+              </Box>
+            </Box>
+            <Box sx={{ width: 230 }}>
+              <TextField
+                type="date"
+                size="small"
+                fullWidth
+                label="Actual Received Date"
+                value={lensReceivedDate}
+                onChange={(e) => setLensReceivedDate(e.target.value)}
+                inputProps={{ max: todayStr(), 'data-testid': 'pe-lens-received-date' }}
+                InputLabelProps={{ shrink: true }}
+                helperText={latestExpected
+                  ? (lensReceivedDate && lensReceivedDate !== latestExpected
+                    ? `Expected ${dmy(latestExpected)} — arrived ${lensReceivedDate > latestExpected ? 'late' : 'early'}`
+                    : `Expected ${dmy(latestExpected)}`)
+                  : 'The day the lenses arrived'}
+                FormHelperTextProps={{ sx: { color: latestExpected && lensReceivedDate > latestExpected ? 'warning.main' : undefined } }}
+              />
+            </Box>
+          </Box>
+        </Card>
+      )}
 
       {/* 3. Item Grid trigger — the grid itself lives in a popup (see Dialog below) */}
       <Card
@@ -1591,7 +1817,14 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
                       <TableCell sx={{ fontSize: '0.75rem', whiteSpace: 'nowrap' }}>{row.barcode || '-'}</TableCell>
                     )}
                     <TableCell sx={{ minWidth: 150 }}>
-                      <Typography variant="body2" fontWeight={700} noWrap>{row.productName}</Typography>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0 }}>
+                        <Typography variant="body2" fontWeight={700} noWrap>{row.productName}</Typography>
+                        <Chip size="small" label={row.lineGroup === 'LENS' ? 'Lens' : 'Other'} color={row.lineGroup === 'LENS' ? 'secondary' : 'default'}
+                          variant="outlined" sx={{ height: 18, fontSize: '0.65rem', fontWeight: 700 }} />
+                      </Box>
+                      {row.lensNote && (
+                        <Typography variant="caption" color="secondary.main" noWrap sx={{ display: 'block' }} title={row.lensNote}>{row.lensNote}</Typography>
+                      )}
                       <Typography variant="caption" color="text.secondary" noWrap sx={{ display: 'block' }}>
                         Stock: {row.currentStock} → {row.currentStock + (parseFloat(row.quantity) || 0) + (parseFloat(row.freeQuantity) || 0)}
                         {row.lastRate != null && ` | Last Rate: ₹${row.lastRate}`}
@@ -1657,72 +1890,98 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
         <Grid container spacing={3}>
           {/* Amount breakdown */}
           <Grid item xs={12} md={8}>
-            <Typography variant="subtitle1" fontWeight={800} sx={{ mb: 1.5 }}>Purchase Summary</Typography>
-            <Grid container spacing={2}>
-              <Grid item xs={6} sm={4} md={3}>
-                <Typography variant="caption" color="text.secondary" display="block">Total Items</Typography>
-                <Typography variant="body2" fontWeight={700}>{totals.totalItems}</Typography>
-              </Grid>
-              <Grid item xs={6} sm={4} md={3}>
-                <Typography variant="caption" color="text.secondary" display="block">Total Qty</Typography>
-                <Typography variant="body2" fontWeight={700}>{totals.totalQty}</Typography>
-              </Grid>
-              <Grid item xs={6} sm={4} md={3}>
-                <Typography variant="caption" color="text.secondary" display="block">Gross Amount</Typography>
-                <Typography variant="body2" fontWeight={700}>₹{totals.gross.toFixed(2)}</Typography>
-              </Grid>
-              <Grid item xs={6} sm={4} md={3}>
-                <Typography variant="caption" color="text.secondary" display="block">Discount</Typography>
-                <Typography variant="body2" fontWeight={700} color="error.main">-₹{totals.discount.toFixed(2)}</Typography>
-              </Grid>
-              <Grid item xs={6} sm={4} md={3}>
-                <Typography variant="caption" color="text.secondary" display="block">Tax (GST)</Typography>
-                <Typography variant="body2" fontWeight={700}>₹{totals.tax.toFixed(2)}</Typography>
-              </Grid>
-              {gstType !== 'NO_GST' && (isInterstate ? (
-                <Grid item xs={6} sm={4} md={3}>
-                  <Typography variant="caption" color="text.secondary" display="block">↳ IGST</Typography>
-                  <Typography variant="body2" fontWeight={700}>₹{totals.igst.toFixed(2)}</Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', mb: 1.5 }}>
+              <Typography variant="subtitle1" fontWeight={800}>Purchase Summary</Typography>
+              <Button size="small" sx={{ ml: 'auto' }} onClick={() => setShowSummaryDetails(v => !v)}
+                endIcon={showSummaryDetails ? <ExpandLessIcon /> : <ExpandMoreIcon />}>
+                {showSummaryDetails ? 'Hide tax & charges' : 'Tax & charges'}
+              </Button>
+            </Box>
+            <Grid container spacing={2} sx={{ mb: showSummaryDetails ? 2 : 0 }} data-testid="pe-summary-groups">
+              {totals.groups.sections.map(g => (
+                <Grid item xs={6} sm={4} key={g.key}>
+                  <Typography variant="caption" color="text.secondary" display="block">{g.label}</Typography>
+                  <Typography variant="body1" fontWeight={800}>₹{g.amount.toFixed(2)}</Typography>
+                  <Typography variant="caption" color="text.secondary">Qty {g.qty}</Typography>
                 </Grid>
-              ) : (
-                <>
-                  <Grid item xs={6} sm={4} md={3}>
-                    <Typography variant="caption" color="text.secondary" display="block">↳ CGST</Typography>
-                    <Typography variant="body2" fontWeight={700}>₹{totals.cgst.toFixed(2)}</Typography>
-                  </Grid>
-                  <Grid item xs={6} sm={4} md={3}>
-                    <Typography variant="caption" color="text.secondary" display="block">↳ SGST</Typography>
-                    <Typography variant="body2" fontWeight={700}>₹{totals.sgst.toFixed(2)}</Typography>
-                  </Grid>
-                </>
               ))}
-              {totals.cess > 0 && (
-                <Grid item xs={6} sm={4} md={3}>
-                  <Typography variant="caption" color="text.secondary" display="block">Cess</Typography>
-                  <Typography variant="body2" fontWeight={700}>₹{totals.cess.toFixed(2)}</Typography>
-                </Grid>
-              )}
-              {totals.vat > 0 && (
-                <Grid item xs={6} sm={4} md={3}>
-                  <Typography variant="caption" color="text.secondary" display="block">VAT</Typography>
-                  <Typography variant="body2" fontWeight={700}>₹{totals.vat.toFixed(2)}</Typography>
-                </Grid>
-              )}
-              <Grid item xs={6} sm={4} md={3}>
-                <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.4 }}>Other Charges</Typography>
-                <TextField size="small" type="number" value={otherCharges} onChange={(e) => setOtherCharges(e.target.value)} sx={{ width: '100%', maxWidth: 120, '& input': { py: 0.4 } }} />
-              </Grid>
-              <Grid item xs={6} sm={4} md={3}>
-                <Typography variant="caption" color="text.secondary" display="block">Round Off</Typography>
-                <Typography variant="body2" fontWeight={700}>₹{totals.roundOff.toFixed(2)}</Typography>
+              <Grid item xs={6} sm={4}>
+                <Typography variant="caption" color="text.secondary" display="block">Total Quantity</Typography>
+                <Typography variant="body1" fontWeight={800}>{totals.totalQty}</Typography>
+                {!showSummaryDetails && (Math.abs(parseFloat(otherCharges) || 0) > 0 || Math.abs(totals.roundOff) > 0) && (
+                  <Typography variant="caption" color="text.secondary">
+                    {[(parseFloat(otherCharges) || 0) ? `Other charges ₹${(parseFloat(otherCharges) || 0).toFixed(2)}` : '', totals.roundOff ? `Round off ₹${totals.roundOff.toFixed(2)}` : ''].filter(Boolean).join(' · ')}
+                  </Typography>
+                )}
               </Grid>
             </Grid>
+            {showSummaryDetails && (
+              <Grid container spacing={2}>
+                <Grid item xs={6} sm={4} md={3}>
+                  <Typography variant="caption" color="text.secondary" display="block">Total Items</Typography>
+                  <Typography variant="body2" fontWeight={700}>{totals.totalItems}</Typography>
+                </Grid>
+                <Grid item xs={6} sm={4} md={3}>
+                  <Typography variant="caption" color="text.secondary" display="block">Total Qty</Typography>
+                  <Typography variant="body2" fontWeight={700}>{totals.totalQty}</Typography>
+                </Grid>
+                <Grid item xs={6} sm={4} md={3}>
+                  <Typography variant="caption" color="text.secondary" display="block">Gross Amount</Typography>
+                  <Typography variant="body2" fontWeight={700}>₹{totals.gross.toFixed(2)}</Typography>
+                </Grid>
+                <Grid item xs={6} sm={4} md={3}>
+                  <Typography variant="caption" color="text.secondary" display="block">Discount</Typography>
+                  <Typography variant="body2" fontWeight={700} color="error.main">-₹{totals.discount.toFixed(2)}</Typography>
+                </Grid>
+                <Grid item xs={6} sm={4} md={3}>
+                  <Typography variant="caption" color="text.secondary" display="block">Tax (GST)</Typography>
+                  <Typography variant="body2" fontWeight={700}>₹{totals.tax.toFixed(2)}</Typography>
+                </Grid>
+                {gstType !== 'NO_GST' && (isInterstate ? (
+                  <Grid item xs={6} sm={4} md={3}>
+                    <Typography variant="caption" color="text.secondary" display="block">↳ IGST</Typography>
+                    <Typography variant="body2" fontWeight={700}>₹{totals.igst.toFixed(2)}</Typography>
+                  </Grid>
+                ) : (
+                  <>
+                    <Grid item xs={6} sm={4} md={3}>
+                      <Typography variant="caption" color="text.secondary" display="block">↳ CGST</Typography>
+                      <Typography variant="body2" fontWeight={700}>₹{totals.cgst.toFixed(2)}</Typography>
+                    </Grid>
+                    <Grid item xs={6} sm={4} md={3}>
+                      <Typography variant="caption" color="text.secondary" display="block">↳ SGST</Typography>
+                      <Typography variant="body2" fontWeight={700}>₹{totals.sgst.toFixed(2)}</Typography>
+                    </Grid>
+                  </>
+                ))}
+                {totals.cess > 0 && (
+                  <Grid item xs={6} sm={4} md={3}>
+                    <Typography variant="caption" color="text.secondary" display="block">Cess</Typography>
+                    <Typography variant="body2" fontWeight={700}>₹{totals.cess.toFixed(2)}</Typography>
+                  </Grid>
+                )}
+                {totals.vat > 0 && (
+                  <Grid item xs={6} sm={4} md={3}>
+                    <Typography variant="caption" color="text.secondary" display="block">VAT</Typography>
+                    <Typography variant="body2" fontWeight={700}>₹{totals.vat.toFixed(2)}</Typography>
+                  </Grid>
+                )}
+                <Grid item xs={6} sm={4} md={3}>
+                  <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.4 }}>Other Charges</Typography>
+                  <TextField size="small" type="number" value={otherCharges} onChange={(e) => setOtherCharges(e.target.value)} sx={{ width: '100%', maxWidth: 120, '& input': { py: 0.4 } }} />
+                </Grid>
+                <Grid item xs={6} sm={4} md={3}>
+                  <Typography variant="caption" color="text.secondary" display="block">Round Off</Typography>
+                  <Typography variant="body2" fontWeight={700}>₹{totals.roundOff.toFixed(2)}</Typography>
+                </Grid>
+              </Grid>
+            )}
           </Grid>
 
           {/* Grand Total + Payment */}
           <Grid item xs={12} md={4} sx={{ borderLeft: { xs: 'none', md: '1px solid' }, borderTop: { xs: '1px solid', md: 'none' }, borderColor: 'divider', pl: { md: 3 }, pt: { xs: 2, md: 0 } }}>
             <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', mb: 2 }}>
-              <Typography variant="subtitle1" fontWeight={800}>Grand Total</Typography>
+              <Typography variant="subtitle1" fontWeight={800}>Final Total Amount</Typography>
               <Typography variant="h4" fontWeight={900} color="primary.main">₹{totals.grandTotal.toFixed(2)}</Typography>
             </Box>
 

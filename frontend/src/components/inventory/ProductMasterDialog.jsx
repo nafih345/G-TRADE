@@ -33,6 +33,7 @@ import {
   MODE_LISTS, readModeLists, DEFAULT_CATEGORY_FOR_MODE, inferCategoryMode, inferBrandMode, inMode
 } from './productAttributeOptions';
 import { isSpectacleLensCategory } from '../../utils/lensUnits';
+import { useCanViewCost } from '../../utils/costVisibility';
 
 const blankProduct = (overrides = {}) => ({
   name: '', code: '', modelNo: '', hsnCode: '',
@@ -493,6 +494,9 @@ export default function ProductMasterDialog({
     }));
   }, [open, isLens]);
 
+  // Settings → Pricing Rules → Show Cost Price: no cost field for users it hides cost from (the
+  // server neither sends their cost nor takes one from them on an edit).
+  const viewCost = useCanViewCost();
   const purchaseNum = parseFloat(p.purchasePrice) || 0;
   const mrpNum = parseFloat(p.mrp) || 0;
   const saleNum = parseFloat(p.salePrice) || 0;
@@ -819,6 +823,7 @@ export default function ProductMasterDialog({
             {/* ── Pricing (MRP & Sale price as their own part) ── */}
             <Section title="Pricing — Cost, MRP, Sale & Wholesale Price" icon={<PriceIcon fontSize="small" />}>
               <Grid container spacing={2}>
+                {viewCost && (
                 <Grid item xs={12} sm={6} md={2.4}>
                   <TextField
                     label="Purchase Cost Price (₹)" fullWidth size="small" type="number"
@@ -826,6 +831,7 @@ export default function ProductMasterDialog({
                     inputProps={{ style: { fontWeight: 800 } }}
                   />
                 </Grid>
+                )}
                 <Grid item xs={12} sm={6} md={2.4}>
                   <TextField
                     label="MRP Price (₹)" fullWidth size="small" type="number"
@@ -942,7 +948,10 @@ export default function ProductMasterDialog({
             <Section title="Stock & Location" icon={<StockIcon fontSize="small" />}>
               <Grid container spacing={2}>
                 <Grid item xs={12} sm={6} md={3}>
-                  <TextField label="Initial Stock Qty" fullWidth size="small" type="number" value={p.stock} onChange={(e) => set({ stock: e.target.value })} inputProps={{ style: { fontWeight: 800 } }} />
+                  <TextField label={isEdit ? 'Current Stock Qty' : 'Initial Stock Qty'} fullWidth size="small" type="number" value={p.stock}
+                    onChange={(e) => set({ stock: e.target.value })} disabled={isEdit}
+                    helperText={isEdit ? 'Changes only through sales, purchases or Stock Overview → Adjust stock' : undefined}
+                    inputProps={{ style: { fontWeight: 800 } }} />
                 </Grid>
                 <Grid item xs={12} sm={6} md={3}>
                   <TextField label="Rack Location" fullWidth size="small" placeholder="e.g. Rack A1 / Lens Drawer 2" value={p.rack} onChange={(e) => set({ rack: e.target.value })} />

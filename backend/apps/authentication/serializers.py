@@ -17,7 +17,7 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = ('id', 'username', 'email', 'first_name', 'last_name', 'role', 'role_display', 'phone', 'is_active',
                   'tenant', 'is_platform_admin', 'workspace', 'module_access',
-                  'settings_features', 'edit_permissions')
+                  'settings_features', 'edit_permissions', 'can_view_cost')
         read_only_fields = ('id', 'is_active', 'tenant')
 
     # {module: 'full'|'view'|'none'} from the tenant's subscription and this role's levels
@@ -52,6 +52,17 @@ class UserSerializer(serializers.ModelSerializer):
     def get_edit_permissions(self, obj):
         from .edit_permissions import user_edit_permissions
         return user_edit_permissions(obj)
+
+    # Settings → Pricing Rules → Show Cost Price (apps/company/cost_visibility.py). Shipped with the
+    # profile so grids pick their columns before their first request.
+    can_view_cost = serializers.SerializerMethodField()
+
+    def get_can_view_cost(self, obj):
+        from apps.company.cost_visibility import can_view_cost
+        try:
+            return can_view_cost(obj)
+        except Exception:   # no tenant settings row reachable (e.g. mid-onboarding): hide
+            return False
 
     def get_settings_features(self, obj):
         from apps.common.module_access import settings_features_for

@@ -859,11 +859,17 @@ class InvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewsets.Model
         instance._prefetched_objects_cache = {}
 
         data = serializer.validated_data
+        # Order → Invoice settlement (New Sale's payment pop-up): the balance collected at delivery,
+        # recorded below as today's receipts in the same transaction as the conversion.
+        balance = self._balance_receipts(serializer, splits)
+        balance_total = sum((amount for amount, _, _ in balance.values()), Decimal('0'))
         extra = {}
         if splits is not None:
             # Total Paid = what was taken at billing (the split) + anything collected against the
             # bill later from the Payments tab, which an edit must not wipe out.
             extra['paid_amount'] = sum(splits.values(), Decimal('0')) + _collected_later_total(instance.pk)
+        if balance_total:
+            extra['paid_amount'] = extra.get('paid_amount', Decimal(str(instance.paid_amount or 0))) + balance_total
         paid = extra.get('paid_amount', data.get('paid_amount', instance.paid_amount))
         extra['status'] = settle_payment_status(
             data.get('status', instance.status), data.get('net_amount', instance.net_amount), paid
@@ -879,6 +885,8 @@ class InvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewsets.Model
         invoice = serializer.save(**extra)
         if splits is not None:
             self._sync_billing_receipts(invoice, splits, banks, refs)
+        if balance:
+            self._record_balance_receipts(invoice, balance)
         # Item list is optional on update (e.g. a status-only PATCH from the Orders tab won't
         # include it) — only replace items when the client actually sent a new list.
         if 'items' in self.request.data:
@@ -1027,6 +1035,85 @@ class InvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewsets.Model
                 raise serializers.ValidationError({'payment_banks': exc.detail})
         return banks, refs
 
+    def _balance_receipts(self, serializer, splits):
+        """{mode: (amount, bank ledger, reference)} from the request's `balance_receipts` — the
+        balance collected when an Order is billed (New Sale's settlement pop-up). Empty when not
+        sent. Shape: {"cash": 100, "upi": {"amount": 50, "bank_account": id, "reference": "UTR"}}.
+
+        These are real receipts dated today, kept apart from the BILLING split so the advance
+        taken at booking keeps its own date and bank. Card / UPI / Bank need a bank, and the
+        advance + earlier receipts + this balance may not exceed the net payable."""
+        from apps.financial.models import ChartOfAccount
+        raw = self.request.data.get('balance_receipts')
+        if not raw:
+            return {}
+        if not isinstance(raw, dict):
+            raise serializers.ValidationError({'balance_receipts': 'Expected {cash, card, upi, bank} amounts.'})
+        labels = {key: label for key, label, _ in BILLING_PAY_MODES}
+        out = {}
+        for key, label, _ in BILLING_PAY_MODES:
+            entry = raw.get(key)
+            if entry in (None, '', 0):
+                continue
+            if not isinstance(entry, dict):
+                entry = {'amount': entry}
+            try:
+                amount = Decimal(str(entry.get('amount') or 0)).quantize(_CENT)
+            except (InvalidOperation, TypeError, ValueError):
+                raise serializers.ValidationError({'balance_receipts': f'{label} amount is not a number.'})
+            if amount < 0:
+                raise serializers.ValidationError({'balance_receipts': f'{label} amount cannot be negative.'})
+            if amount == 0:
+                continue
+            bank = None
+            ref = ''
+            if key in BANK_PAY_MODES:
+                value = entry.get('bank_account')
+                acc = ChartOfAccount.objects.filter(pk=value).first() if _is_uuid(value) else None
+                if acc is None:
+                    raise serializers.ValidationError({
+                        'balance_receipts': f'Select the bank account the {labels[key]} payment was deposited into.'
+                    })
+                try:
+                    bank = validate_bank_account(acc)
+                except serializers.ValidationError as exc:
+                    raise serializers.ValidationError({'balance_receipts': exc.detail})
+                ref = str(entry.get('reference') or '').strip()
+                if len(ref) > 80:
+                    raise serializers.ValidationError({'balance_receipts': f'{label} reference is longer than 80 characters.'})
+            out[key] = (amount, bank, ref)
+        if not out:
+            return {}
+
+        instance = serializer.instance
+        net = serializer.validated_data.get('net_amount', instance.net_amount)
+        net = Decimal(str(net or 0))
+        already = (sum(splits.values(), Decimal('0')) + _collected_later_total(instance.pk)
+                   if splits is not None else Decimal(str(instance.paid_amount or 0)))
+        total = sum((a for a, _, _ in out.values()), Decimal('0'))
+        if already + total > net + _CENT:
+            raise serializers.ValidationError({
+                'balance_receipts': f'Collecting ₹{total} would take Total Paid to ₹{(already + total).quantize(_CENT)}, '
+                                    f'more than the net payable ₹{net.quantize(_CENT)}.'
+            })
+        return out
+
+    def _record_balance_receipts(self, invoice, balance):
+        """One receipt per mode for the balance collected at delivery. Blank source = "collected
+        later", so it counts in Total Paid on top of the BILLING split (already added to
+        paid_amount by perform_update) and a later New Sale edit leaves it alone."""
+        customer = invoice.customer
+        customer_name = invoice.customer_name or (customer.name if customer else '') or 'Walk-in Customer'
+        labels = {key: (label, code) for key, label, code in BILLING_PAY_MODES}
+        for key, (amount, bank, ref) in balance.items():
+            label, code = labels[key]
+            Payment.objects.create(
+                invoice=invoice, customer=customer, customer_name=customer_name,
+                amount=amount, method=label, bank_account=bank, reference_no=ref,
+                receipt_no=self._billing_receipt_no(invoice, f'{code}-BAL'),
+                payment_date=timezone.localdate(), status='Completed', branch=invoice.branch,
+            )
+
     _SEQUENCE_TYPE = {'INVOICE': 'SALES_INVOICE', 'ORDER': 'SALES_ORDER', 'QUOTATION': 'QUOTATION'}
 
     def _sequence_number(self, doc_type):
@@ -1115,12 +1202,13 @@ class InvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewsets.Model
         raw_items = self.request.data.get('items') or []
         # The product pickers can still surface legacy localStorage-only items whose id is not a
         # real Product UUID (see the "local vs backend product ids" gotcha). Passing one straight
-        # to product_id raises and 500s the whole sale, so drop the link and keep the line as a
-        # plain description instead of losing the invoice. One query checks every line's product
-        # (each lookup is a network round trip on the hosted database).
+        # to product_id raises and 500s the whole sale. One query checks every line's product
+        # (each lookup is a network round trip on the hosted database); an unknown one is re-linked
+        # by its code or the save is refused — never kept as a stock-less description line.
         wanted = {str(raw.get('product')) for raw in raw_items if _is_uuid(raw.get('product'))}
         known = {str(pk): extra for pk, extra in Product.objects.filter(pk__in=wanted).values_list('pk', 'extra_data')} \
             if wanted else {}
+        raw_items = _relink_unknown_products(raw_items, known)
         # Pricing offer each line was sold under (offer barcode scanned / offer price applied).
         # Only real offers are linked; _enforce_offers then checks they fit the line's product.
         from apps.company.models import PricingOffer
@@ -1254,6 +1342,59 @@ class InvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewsets.Model
                     'reference_number': invoice.invoice_number,
                 },
             )
+
+def _relink_unknown_products(raw_items, known):
+    """Lines whose `product` is not one of this client's products (`known` = {id: extra_data},
+    updated in place).
+
+    The pickers used to merge a browser-cached product list into the server's, so a line could
+    carry an id from a stale cache: a product deleted since, a copy left by another account signed
+    in on the same browser, or a browser-only import. Such a line used to be saved as a plain
+    description — the bill went through and stock silently never moved. Re-link it by its barcode
+    / item code when exactly one of this client's products matches (the ORM scopes the lookup to
+    the tenant); otherwise refuse the save (400 `unknown_product`) so the user refreshes and
+    re-picks it."""
+    from apps.products.models import Product
+
+    def ref(raw):
+        value = raw.get('product')
+        return '' if value in (None, '') else str(value).strip()
+
+    code_keys = ('barcode', 'sku', 'product_code')
+    stale = [i for i, raw in enumerate(raw_items)
+             if ref(raw) and ref(raw) not in known
+             and str(raw.get('item_type') or raw.get('itemType') or 'PRODUCT').upper() != 'SERVICE']
+    if not stale:
+        return raw_items
+    codes = {str(raw_items[i].get(k) or '').strip() for i in stale for k in code_keys} - {''}
+    matches = {}
+    if codes:
+        for pk, sku, barcode, second, extra in Product.objects.filter(
+                Q(sku__in=codes) | Q(barcode__in=codes) | Q(secondary_barcode__in=codes)
+        ).values_list('pk', 'sku', 'barcode', 'secondary_barcode', 'extra_data'):
+            for code in {sku, barcode, second} & codes:
+                matches.setdefault(code, {})[str(pk)] = extra
+    out, unresolved = list(raw_items), []
+    for i in stale:
+        raw, found = raw_items[i], {}
+        for k in code_keys:
+            found.update(matches.get(str(raw.get(k) or '').strip(), {}))
+        if len(found) == 1:
+            (pk, extra), = found.items()
+            known[pk] = extra
+            out[i] = {**raw, 'product': pk}
+        else:
+            unresolved.append(str(raw.get('description') or raw.get('name') or ref(raw)))
+    if unresolved:
+        raise serializers.ValidationError({
+            'detail': "These items are not in this store's product list (the screen showed an "
+                      'out-of-date copy), so their stock could not be updated: '
+                      + ', '.join(unresolved) + '. Refresh the page and add them again.',
+            'code': 'unknown_product',
+            'items': unresolved,
+        })
+    return out
+
 
 class PaymentViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
     queryset = Payment.objects.all()

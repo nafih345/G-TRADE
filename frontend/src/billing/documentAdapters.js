@@ -26,6 +26,7 @@
 //   footer   {notes, terms}  (legacy renderer)
 import { canonicalDocType } from './billFields.js';
 import { qtyLabel, unitWord } from '../utils/lensUnits.js';
+import { purchaseGroupTotals } from '../utils/purchaseGroups.js';
 
 const num = (v) => {
   const n = parseFloat(v);
@@ -327,10 +328,17 @@ function adaptPurchase(doc, documentType) {
       taxAmount: numOrNull(it.gst_amount, it.tax_amount),
       total: numOrNull(it.line_total, it.total, it.amount, it.creditAmount),
       itemType: 'PRODUCT',
+      group: str(it.item_group, it.lineGroup).toUpperCase() === 'LENS' ? 'LENS' : '',
       grossWeight: 0, netWeight: 0, stoneWeight: 0, makingCharge: 0, stoneCharge: 0, otherCharges: 0,
     };
   });
   const isReturn = canonicalDocType(documentType) === 'PURCHASE_RETURN';
+  // Purchase bill summary: Lens / Frames & Other sub-totals (when the bill has both), then only
+  // Total Quantity and the Final Total Amount — no tax / paid / balance clutter.
+  const groups = !isReturn && items.length
+    ? purchaseGroupTotals(items.map((it) => ({ group: it.group, qty: it.qty, total: it.total ?? 0 })))
+    : null;
+  const lensOrders = Array.isArray(doc.lensOrderNumbers) ? doc.lensOrderNumbers.filter(Boolean) : [];
   const grandTotal = numOrNull(doc.grand_total, doc.grandTotal, isReturn ? first(doc.creditAmount, doc.credit_amount, doc.amount) : undefined);
   const paid = numOrNull(doc.paid_amount, doc.paidAmount);
   const balance = numOrNull(doc.balance_amount, doc.balanceAmount);
@@ -348,7 +356,7 @@ function adaptPurchase(doc, documentType) {
       type: documentType,
       title: autoTitle(documentType),
       number: str(doc.invoice_number, doc.invoiceNumber, doc.returnNo, doc.id),
-      orderNumber: str(doc.purchase_order_ref),
+      orderNumber: str(lensOrders.join(', '), doc.purchase_order_ref),
       reference: str(doc.supplier_invoice_number, doc.supplierInvoiceNumber),
       date: str(doc.purchase_date, doc.date) || new Date().toISOString().split('T')[0],
       dueDate: str(doc.due_date, doc.dueDate),
@@ -383,6 +391,11 @@ function adaptPurchase(doc, documentType) {
       paid,
       balance,
       refund: isReturn ? numOrNull(doc.creditAmount, doc.credit_amount) : null,
+      // Read by both totals renderers: replaces the usual rows with the compact purchase summary.
+      purchaseSummary: groups ? {
+        sections: groups.mixed ? groups.sections.map((g) => ({ label: g.label, qty: g.qty, amount: g.amount })) : [],
+        totalQty: Math.round(items.reduce((a, it) => a + (Number(it.qty) || 0), 0) * 1000) / 1000,
+      } : null,
     },
     payment: {
       method: str(doc.payment_method, doc.paymentMethod),

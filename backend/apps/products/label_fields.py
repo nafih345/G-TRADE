@@ -66,9 +66,17 @@ def can_design(user):
     return user_role(user) in DESIGNER_ROLES
 
 
+def can_see_cost(user):
+    """Purchase cost also follows Settings → Pricing Rules → Show Cost Price."""
+    from apps.company.cost_visibility import can_view_cost
+    return can_see_restricted(user) and can_view_cost(user)
+
+
 def field_catalog(user):
     allowed = can_see_restricted(user)
-    return [dict(f, allowed=(allowed or not f.get('restricted'))) for f in LABEL_FIELDS]
+    cost = allowed and can_see_cost(user)
+    return [dict(f, allowed=(cost if f['id'] == 'cost_price' else (allowed or not f.get('restricted'))))
+            for f in LABEL_FIELDS]
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +111,7 @@ def _money(v):
     return f"{d:.2f}" if d > 0 else ''
 
 
-def resolve_product_fields(product, include_restricted=False):
+def resolve_product_fields(product, include_restricted=False, include_cost=None):
     """Every product-sourced field id -> display string ('' when genuinely missing)."""
     group = product.variant_group if product.variant_group_id else None
     attrs = product.variant_attributes if isinstance(product.variant_attributes, dict) else {}
@@ -136,7 +144,8 @@ def resolve_product_fields(product, include_restricted=False):
         # wholesale_price column value.
         values['wholesale_price'] = _money(
             product.wholesale_sale_price if product.wholesale_sale_price is not None else product.wholesale_price)
-        values['cost_price'] = _money(product.cost_price)
+        if include_cost is None or include_cost:
+            values['cost_price'] = _money(product.cost_price)
     return values
 
 

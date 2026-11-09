@@ -54,9 +54,10 @@ export function findPriceViolations(rows, floors, billDiscount = 0) {
       out[row.id] = {
         netUnit: round2(lineNet / qty),
         floorUnit: round2(lineFloor / qty),
-        costUnit: round2((num(info.cost) * units) / qty),
+        costUnit: info.cost == null ? null : round2((num(info.cost) * units) / qty),
         offer: offer || null,
-        marginApplied: info.base_floor != null && num(info.base_floor) > num(info.cost),
+        marginApplied: info.cost != null && info.base_floor != null && num(info.base_floor) > num(info.cost),
+        costHidden: info.cost == null,
       };
     }
   });
@@ -68,6 +69,7 @@ export function violationText(v, symbol = '₹') {
   const floor = `${symbol}${v.floorUnit.toFixed(2)}`;
   let reason = `the cost price (${floor})`;
   if (v.offer) reason = `the ${v.offer.tag} offer price (${floor})`;
+  else if (v.costHidden || v.costUnit == null) reason = `the minimum selling price (${floor})`;
   else if (v.marginApplied) reason = `the minimum selling price (${floor}; cost ${symbol}${v.costUnit.toFixed(2)} + margin)`;
   return `${symbol}${v.netUnit.toFixed(2)} is below ${reason}`;
 }

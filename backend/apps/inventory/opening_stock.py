@@ -259,7 +259,7 @@ def batch_json(batch, caps):
         'id': str(batch.pk), 'batch_number': batch.batch_number, 'method': batch.method,
         'method_label': batch.get_method_display(), 'file_name': batch.file_name,
         'product_count': batch.product_count, 'total_quantity': batch.total_quantity,
-        'total_value': _money(batch.total_value) if caps['view_cost'] else None,
+        **({'total_value': _money(batch.total_value)} if caps['view_cost'] else {}),
         'performed_by': batch.performed_by, 'created_at': batch.created_at.isoformat(),
     }
 

@@ -230,6 +230,10 @@ class PurchaseInvoiceItem(BaseUUIDModel):
     # Position in the entry. The lines are bulk-created together (same created_at, random UUIDs),
     # so without it their order is whatever the database returns. Legacy rows are all 0.
     line_no = models.PositiveIntegerField(default=0)
+    # Bill section: 'LENS' for prescription lenses (pulled in from a customer order or a lens
+    # product), '' for frames / accessories / everything else. Drives the Lens vs Other
+    # sub-totals on the entry and its printed bill; never stock or accounting.
+    item_group = models.CharField(max_length=10, blank=True, default='')
 
     class Meta:
         ordering = ['line_no', 'id']
@@ -306,8 +310,11 @@ class LensPurchaseOrder(BaseUUIDModel):
     remarks = models.TextField(blank=True, default='')
     # Who raised it (request actor — same identity the stock ledger records).
     created_by_name = models.CharField(max_length=150, blank=True, default='')
-    purchase_invoice = models.OneToOneField(
-        PurchaseInvoice, on_delete=models.SET_NULL, null=True, blank=True, related_name='lens_purchase_order')
+    # The Purchase Entry that brought these lenses into stock. A PO is billed once (the
+    # conversion locks it and refuses a second), but one entry may bill several POs: a
+    # Purchase Entry that pulls in customer orders by Order Number receives each of them.
+    purchase_invoice = models.ForeignKey(
+        PurchaseInvoice, on_delete=models.SET_NULL, null=True, blank=True, related_name='lens_purchase_orders')
     # Append-only audit trail: [{at, by, action, detail}] — creation, submission, vendor /
     # assignment / prescription changes, receipts, discrepancies, conversion, cancellation and
     # every sales-order status this PO moved (with the status it moved from).

@@ -394,7 +394,7 @@ def _extra_data(existing, r):
     return data
 
 
-def _apply_row(product, r, context, masters, group_obj, is_new):
+def _apply_row(product, r, context, masters, group_obj, is_new, can_set_cost=True):
     from .views import infer_category_name
 
     product.name = r['name']
@@ -419,7 +419,9 @@ def _apply_row(product, r, context, masters, group_obj, is_new):
         product.tax = cache[r['tax_percent']]
     # Supplier-specific purchase cost belongs to the purchase line, not the product master:
     # from Purchase Entry the posted purchase sets cost_price (existing posting rule).
-    if context == CONTEXT_INVENTORY and r['cost_price'] is not None:
+    # A user the Show Cost Price setting hides cost from never received it, so what their form
+    # sends back is not a real figure: it only seeds a brand-new product.
+    if context == CONTEXT_INVENTORY and r['cost_price'] is not None and (is_new or can_set_cost):
         product.cost_price = r['cost_price']
     if r['sales_price'] is not None:
         product.retail_price = r['sales_price']
@@ -432,7 +434,7 @@ def _apply_row(product, r, context, masters, group_obj, is_new):
     product.variant_key = r['key'] if group_obj else None
 
 
-def save_variants(payload, *, user=None, branch=None, changed_by='Administrator'):
+def save_variants(payload, *, user=None, branch=None, changed_by='Administrator', can_set_cost=True):
     """Validate and (unless dry_run) write the whole payload atomically.
 
     Returns a dict: {group, variants, created, updated, deactivated, dry_run}.
@@ -530,7 +532,7 @@ def save_variants(payload, *, user=None, branch=None, changed_by='Administrator'
                 is_new = not r['id']
                 product = Product() if is_new else Product.objects.select_for_update().get(pk=r['id'])
                 old_barcode = None if is_new else product.barcode
-                _apply_row(product, r, context, masters, group_obj if grouped else None, is_new)
+                _apply_row(product, r, context, masters, group_obj if grouped else None, is_new, can_set_cost)
                 if is_new:
                     product.stock = 0
                     product.opening_stock = r['opening_stock'] if context == CONTEXT_INVENTORY else 0

@@ -280,3 +280,41 @@ test('bills print in English, Arabic, or English + Arabic', async () => {
     setMode('en', 'EN');
   }
 });
+
+// ---------------------------------------------------------------------------
+// Purchase bill summary: Lens / Frames & Other sub-totals, Total Quantity, Final Total Amount
+// ---------------------------------------------------------------------------
+
+test('purchase bill prints lens / other sub-totals and only total qty + final total', async () => {
+  const { renderBillHtml } = await import('../renderBillHtml.js');
+  const doc = {
+    invoice_number: 'PE-9', supplier_name: 'Essilor', grand_total: '2750', paid_amount: '0', balance_amount: '2750',
+    tax_amount: '0', lensOrderNumbers: ['ORD-12'], purchase_order_ref: 'ORD-12',
+    items: [
+      { product_name: 'HMC 1.56', quantity: '1', purchase_rate: '950', line_total: '950', item_group: 'LENS' },
+      { product_name: 'Ray Frame', quantity: '2', purchase_rate: '900', line_total: '1800', item_group: '' },
+    ],
+  };
+  const m = toBillModel(doc, 'PURCHASE_BILL');
+  assert.deepEqual(m.items.map((it) => it.group), ['LENS', '']);
+  assert.deepEqual(m.totals.purchaseSummary, {
+    sections: [{ label: 'Lens', qty: 1, amount: 950 }, { label: 'Frames & Other Products', qty: 2, amount: 1800 }],
+    totalQty: 3,
+  });
+  assert.equal(m.document.orderNumber, 'ORD-12');
+
+  const legacy = renderBillHtml(PRESET_TEMPLATES[0], m);
+  assert.ok(legacy.includes('Lens (Qty 1)'));
+  assert.ok(/Frames (&amp;|&) Other Products \(Qty 2\)/.test(legacy));
+  assert.ok(legacy.includes('Total Quantity') && legacy.includes('Final Total Amount'));
+  assert.ok(!legacy.includes('Balance Amount'), 'no paid / balance clutter in the summary');
+
+  const visual = renderVisualBillHtml(A4(convertLegacyTemplate(PRESET_TEMPLATES[0], 190)), m, opts).html;
+  assert.ok(visual.includes('Lens (Qty 1)') && visual.includes('Final Total Amount'));
+
+  // Lens-only (or frames-only) bill: no section rows, still the compact summary.
+  const only = toBillModel({ ...doc, items: [doc.items[1]] }, 'PURCHASE_BILL');
+  assert.deepEqual(only.totals.purchaseSummary, { sections: [], totalQty: 2 });
+  // Returns keep their own totals.
+  assert.equal(toBillModel({ ...doc, creditAmount: 100 }, 'PURCHASE_RETURN').totals.purchaseSummary, null);
+});

@@ -56,7 +56,12 @@ DEFAULTS = {
     'min_margin_percent': 0,      # floor = cost + this % ...
     'min_profit_amount': 0,       # ... or cost + this amount per unit, whichever is higher
     'offers_enabled': False,
+    # Cost price visibility (apps/company/cost_visibility.py): on = the Main Admin plus the
+    # picked cost_viewers; off = nobody.
+    'show_cost_price': True,
+    'cost_viewers': [],
 }
+COST_VISIBILITY_KEYS = ('show_cost_price', 'cost_viewers')
 PREF_KEY = 'pricing_rules'        # inside BusinessSettings.preferences
 CACHE_KEY = 'company:pricing_rules'
 TOKEN_SALT = 'pricing-floor-override'
@@ -94,7 +99,12 @@ def get_settings():
 
 def validate_settings(data):
     clean, errors = {}, {}
-    for key in ('cost_lock_enabled', 'offers_enabled'):
+    if 'cost_viewers' in data:
+        from .cost_visibility import clean_cost_viewers
+        viewers = clean_cost_viewers(data['cost_viewers'], errors)
+        if viewers is not None:
+            clean['cost_viewers'] = viewers
+    for key in ('cost_lock_enabled', 'offers_enabled', 'show_cost_price'):
         if key in data:
             if isinstance(data[key], bool):
                 clean[key] = data[key]
@@ -128,7 +138,18 @@ class PricingRulesView(APIView):
     permission_classes = [PricingAdminWrite]
 
     def get(self, request):
-        return Response({'settings': get_settings(), 'can_edit': is_pricing_admin(request.user)})
+        from .cost_visibility import can_view_cost, is_main_admin, tenant_users
+        settings = get_settings()
+        main_admin = is_main_admin(request.user)
+        body = {'settings': settings, 'can_edit': is_pricing_admin(request.user),
+                'can_edit_cost_visibility': main_admin,
+                'can_view_cost': can_view_cost(request.user, settings)}
+        if main_admin:
+            body['cost_users'] = tenant_users()
+        else:
+            # Staff don't need (or get) the list of who else may see cost.
+            body['settings'] = {k: v for k, v in settings.items() if k != 'cost_viewers'}
+        return Response(body)
 
     def put(self, request):
         data = request.data if isinstance(request.data, dict) else {}
@@ -138,6 +159,11 @@ class PricingRulesView(APIView):
             return Response({'detail': 'Please fix the highlighted fields.', 'errors': errors},
                             status=status.HTTP_400_BAD_REQUEST)
         current = get_settings()
+        from .cost_visibility import is_main_admin
+        touched = [k for k in COST_VISIBILITY_KEYS if k in clean and clean[k] != current.get(k)]
+        if touched and not is_main_admin(request.user):
+            return Response({'detail': 'Only the Main Admin can change who sees the cost price.'},
+                            status=status.HTTP_403_FORBIDDEN)
         changes = {k: [current.get(k), v] for k, v in clean.items() if current.get(k) != v}
         with transaction.atomic():
             obj = BusinessSettings.objects.select_for_update().get(pk=BusinessSettings.load().pk)
@@ -148,7 +174,7 @@ class PricingRulesView(APIView):
             if changes:
                 audit(request, 'PRICING', 'UPDATE', f"Updated {', '.join(sorted(changes))}", changes)
         hot_cache.clear()
-        return Response({'settings': get_settings(), 'can_edit': True})
+        return self.get(request)
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +347,16 @@ def _offers_json(qs, today=None):
     return [_offer_json(o, today, sold.get(o.pk, 0)) for o in offers]
 
 
+def _for_viewer(request, rows):
+    """Offer rows as this user may see them: no product cost unless Show Cost Price allows it."""
+    from .cost_visibility import request_can_view_cost, strip_cost
+    if not request_can_view_cost(request):
+        single = isinstance(rows, dict)
+        for row in ([rows] if single else rows):
+            strip_cost(row)
+    return rows
+
+
 def _parse_date(value, label, errors):
     if value in (None, ''):
         return None
@@ -409,7 +445,7 @@ class PricingOfferListView(APIView):
         qs = PricingOffer.objects.select_related('product', 'category')
         if request.query_params.get('active') in ('1', 'true'):
             qs = qs.filter(running_offers_q())
-        return Response(_offers_json(qs, _today()))
+        return Response(_for_viewer(request, _offers_json(qs, _today())))
 
     def post(self, request):
         """One offer per product id in `products` (and/or category id in `categories`), all with
@@ -461,7 +497,7 @@ class PricingOfferListView(APIView):
                   f"Offer '{fields['tag']}' set on {len(saved)} item(s)",
                   {'offers': [str(o.pk) for o in saved], 'offer_price': str(fields.get('offer_price'))})
         rows = PricingOffer.objects.select_related('product', 'category').filter(pk__in=[o.pk for o in saved])
-        return Response(_offers_json(rows, _today()), status=status.HTTP_201_CREATED)
+        return Response(_for_viewer(request, _offers_json(rows, _today())), status=status.HTTP_201_CREATED)
 
 
 class PricingOfferDetailView(APIView):
@@ -493,7 +529,7 @@ class PricingOfferDetailView(APIView):
         if changes:
             audit(request, 'PRICING', 'UPDATE', f"Offer '{offer.tag}' updated", changes)
         assign_offer_barcode(offer)
-        return Response(_offers_json([offer])[0])
+        return Response(_for_viewer(request, _offers_json([offer])[0]))
 
     def delete(self, request, pk):
         offer = self._get(pk)
@@ -523,7 +559,7 @@ class PricingOfferBarcodeView(APIView):
             if not had:
                 audit(request, 'PRICING', 'UPDATE', f"Offer barcode {code} generated for {offer.product.name}",
                       {'offer': str(offer.pk), 'offer_barcode': code})
-        return Response(_offers_json([offer])[0])
+        return Response(_for_viewer(request, _offers_json([offer])[0]))
 
 
 def _running_offer_maps(products, today=None):
@@ -637,7 +673,13 @@ class PricingFloorsView(APIView):
         settings = get_settings()
         wanted = settings['cost_lock_enabled'] or settings['offers_enabled']
         products = Product.objects.filter(pk__in=ids) if ids and wanted else []
-        return Response({'settings': settings, 'floors': floors_for(products, settings),
+        floors = floors_for(products, settings)
+        from .cost_visibility import request_can_view_cost
+        if not request_can_view_cost(request, settings):
+            for info in floors.values():
+                info.pop('cost', None)
+        public = {k: v for k, v in settings.items() if k != 'cost_viewers'}
+        return Response({'settings': public, 'floors': floors,
                          'can_override': is_pricing_admin(request.user)})
 
 
@@ -783,10 +825,13 @@ def price_violations(raw_items, net_amount, tax_amount, settings=None):
     return out
 
 
-def violation_message(v, symbol='₹'):
+def violation_message(v, symbol='₹', show_cost=True):
     floor = f"{symbol}{v['floor_unit']:.2f}"
     if v['offer']:
         reason = f"the {v['offer']['tag']} offer price ({floor})"
+    elif not show_cost:
+        # Never name the cost to someone the Show Cost Price setting hides it from.
+        reason = f"the minimum selling price ({floor})"
     elif v['margin_applied']:
         reason = f"the minimum selling price ({floor}; cost {symbol}{v['cost_unit']:.2f} + margin)"
     else:
@@ -810,8 +855,12 @@ def enforce_line_prices(request, raw_items, net_amount, tax_amount, document_lab
     from .store_profile import get_company
     company = get_company()
     symbol = (company.currency if company else '') or '₹'
-    messages = [violation_message(v, symbol) for v in violations]
+    from .cost_visibility import request_can_view_cost
+    show_cost = request_can_view_cost(request)
+    messages = [violation_message(v, symbol, show_cost) for v in violations]
     if approver is None:
+        if not show_cost:
+            violations = [{k: val for k, val in v.items() if k != 'cost_unit'} for v in violations]
         raise ValidationError({
             'detail': 'Selling price cannot be less than the cost price — '
                       + '; '.join(messages) + '. A manager must approve it.',

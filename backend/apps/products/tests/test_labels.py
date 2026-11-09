@@ -108,7 +108,11 @@ class FieldResolutionTests(APITestCase):
         self.assertNotIn('cost_price', fields)
         self.assertFalse(res.data['restricted_included'])
 
+        # Purchase cost also follows Show Cost Price: an Accountant gets it only once picked.
         self.client.force_authenticate(user('ACCOUNTANT'))
+        res = self.client.post('/api/products/label-data/', {'product_ids': [str(p.id)]}, format='json')
+        self.assertNotIn('cost_price', res.data['products'][str(p.id)]['fields'])
+        self.client.force_authenticate(user('SUPER_ADMIN'))
         res = self.client.post('/api/products/label-data/', {'product_ids': [str(p.id)]}, format='json')
         self.assertEqual(res.data['products'][str(p.id)]['fields']['cost_price'], '400.00')
 

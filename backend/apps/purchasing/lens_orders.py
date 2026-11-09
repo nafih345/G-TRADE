@@ -11,6 +11,7 @@ with every physical lens mapped to the customer order it was made for.
     /api/purchase/lens-orders/pending-requirements/     sales-order lenses still to be ordered
     /api/purchase/lens-orders/sales-queue/              Sales > Orders > Lenses: one row per customer order
     /api/purchase/lens-orders/reserved-stock/           stocked lenses held for not-yet-billed orders
+    /api/purchase/lens-orders/order-draft/              Purchase Entry lines for one customer order (by Order Number)
 
 A "lens requirement" is one eye of one lens line on a sales Order / Invoice: a PAIR line needs
 RE + LE, a PIECE line its own eye, times the line quantity. New Sale edits recreate an order's
@@ -22,9 +23,17 @@ Nothing here moves stock or posts accounting. Goods come in when the PO is conve
 ordinary Purchase Entry: PurchaseInvoiceViewSet.perform_create calls link_purchase_invoice, in
 the same transaction that applies the entry's stock and payables, and the one-to-one
 LensPurchaseOrder.purchase_invoice makes a second conversion impossible.
+
+Purchase Entry can also pull lenses in by customer Order Number (order-draft): the order's lenses
+still waiting - not yet ordered, or placed on a Lens PO with this supplier - become entry lines,
+and saving the entry (receive_orders_into_invoice) receives them on the actual received date:
+pending lenses get a Lens PO created as received, placed ones are received on their PO (moved to
+a PO of their own first when that PO also carries other customers' lenses), and every such PO is
+linked to the entry. One entry may therefore bill several POs; each PO is still billed only once.
 """
 import math
 from collections import Counter
+from datetime import date, datetime, time
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.db import transaction
@@ -537,6 +546,269 @@ def _rx_change_text(items):
                      for it in items for p in it['pieces'] if p.get('rx_change_reason'))
 
 
+def next_po_number(given=None):
+    """The next Lens PO number: Settings numbering sequence, else the typed one, else LPO-YYYY-NNNN."""
+    from .views import _sequence_number
+    number = _sequence_number('LENS_PO', LensPurchaseOrder, 'po_number', given)
+    if number:
+        return number
+    given = (given or '').strip()
+    if given and not LensPurchaseOrder.all_objects.filter(po_number=given).exists():
+        return given
+    year = timezone.localdate().year
+    n = LensPurchaseOrder.all_objects.filter(po_number__startswith=f'LPO-{year}-').count() + 1
+    while LensPurchaseOrder.all_objects.filter(po_number=f'LPO-{year}-{n:04d}').exists():
+        n += 1
+    return f'LPO-{year}-{n:04d}'
+
+
+def received_at_for(value):
+    """The moment lenses count as received for an "actual received date" typed by staff: now when
+    it is today (or not given), else midday of that date. A date in the future is refused."""
+    if value in (None, ''):
+        return timezone.now()
+    try:
+        day = date.fromisoformat(str(value)[:10])
+    except ValueError:
+        raise serializers.ValidationError({'lens_received_date': ['Enter the received date as YYYY-MM-DD.']})
+    today = timezone.localdate()
+    if day > today:
+        raise serializers.ValidationError({'lens_received_date': ['The lenses cannot be received on a future date.']})
+    if day == today:
+        return timezone.now()
+    return timezone.make_aware(datetime.combine(day, time(12, 0)))
+
+
+# ---------------------------------------------------------------------------
+# Purchase Entry by customer Order Number
+# ---------------------------------------------------------------------------
+
+def _po_live_invoice(po):
+    inv = po.purchase_invoice
+    return inv if inv is not None and not inv.is_deleted and inv.status != 'CANCELLED' else None
+
+
+def _piece_stock(product):
+    return str(((product.extra_data if product else None) or {}).get('lens_stock_unit') or '').upper() == PIECE
+
+
+def order_plan(order, supplier_id=None):
+    """What a Purchase Entry would receive for one customer order's lenses.
+
+    {'placed': {po_id: {'po', 'pieces', 'items'}}, 'pending': [(req, eye, n)], 'skipped': [text],
+     'supplier': id|None, 'by_product': {product_id: {...}}}
+
+    Placed = pieces on a live, not yet billed PO of `supplier_id` (when given; else of the one
+    supplier those POs share) - DAMAGED / MISSING / INCORRECT pieces too, as the lab's replacement
+    arrives against them. Pending = lenses the order needs that no live PO holds yet."""
+    reqs = order_requirements(order)
+    pieces = list(live_pieces().filter(sales_order=order).select_related(
+        'item__product', 'item__order__supplier', 'item__order__purchase_invoice'))
+    skipped, placed, supplier = [], {}, str(supplier_id) if supplier_id else None
+    # Pieces on a PO already billed are in stock (or on an entry being finished elsewhere).
+    open_pieces = [p for p in pieces if _po_live_invoice(p.item.order) is None]
+    if supplier is None:
+        sups = {str(p.item.order.supplier_id) for p in open_pieces}
+        supplier = sups.pop() if len(sups) == 1 else None
+    item_ids = {p.item_id for p in open_pieces}
+    shared_items = set(LensPurchaseOrderPiece.objects.filter(item_id__in=item_ids, is_deleted=False)
+                       .exclude(sales_order=order).values_list('item_id', flat=True))
+    for p in open_pieces:
+        po = p.item.order
+        where = f"{EYE_LABEL.get(p.eye, p.eye)} {p.item.product.name if p.item.product_id else 'lens'} ({po.po_number})"
+        if supplier and str(po.supplier_id) != supplier:
+            skipped.append(f"{where} is ordered from {po.supplier.name if po.supplier_id else 'another supplier'} - "
+                           "bill it on that supplier's purchase entry.")
+            continue
+        if p.item_id in shared_items:
+            skipped.append(f"{where} is one pair shared with another customer order - bill it from "
+                           "Purchase -> Lens Purchase Order.")
+            continue
+        g = placed.setdefault(po.pk, {'po': po, 'pieces': [], 'items': set()})
+        g['pieces'].append(p)
+        g['items'].add(p.item_id)
+
+    # Requirements nobody has ordered yet (every live piece holds one, billed or not).
+    held = Counter((p.item.product_id, p.eye) for p in pieces)
+    held_eye = Counter(p.eye for p in pieces)
+    pending = []
+    for (pid, eye), req in reqs.items():
+        taken = held[(pid, eye)] if pid is not None else held_eye[eye]
+        left = req['count'] - taken
+        if left <= 0:
+            continue
+        if pid is None:
+            skipped.append(f"{EYE_LABEL[eye]} lens '{req['item'].description or 'custom lens'}' has no lens product - "
+                           "pick the lens model on the order (or order it from Purchase -> Lens Purchase Order).")
+            continue
+        pending.append((req, eye, left))
+
+    def bucket(product, tax):
+        return by_product.setdefault(product.pk, {'product': product, 'pieces': 0, 'cost': Decimal('0'),
+                                                  'discount': Decimal('0'), 'tax': tax, 'eyes': [], 'rx': [],
+                                                  'pos': set(), 'pending': 0})
+
+    by_product = {}
+    for g in placed.values():
+        for p in g['pieces']:
+            item = p.item
+            row = bucket(item.product, item.tax_percent)
+            row['pieces'] += 1
+            row['cost'] += _money(item.unit_price) / PIECES_PER_UNIT.get(item.pricing_unit, 2)
+            row['discount'] += _money(item.discount_amount) / max(1, item.physical_quantity)
+            row['eyes'].append(p.eye)
+            row['rx'].append(f"{p.eye} {rx_summary(p.rx)}".strip())
+            row['pos'].add(g['po'].po_number)
+    for req, eye, n in pending:
+        product = req['item'].product
+        row = bucket(product, None)
+        per_unit = _money(product.cost_price)
+        row['pieces'] += n
+        row['pending'] += n
+        row['cost'] += (per_unit if _piece_stock(product) else per_unit / 2) * n
+        row['eyes'] += [eye] * n
+        row['rx'].append(f"{eye} {rx_summary(req['rx'])}".strip())
+    return {'placed': placed, 'pending': pending, 'skipped': skipped, 'supplier': supplier, 'by_product': by_product}
+
+
+def order_draft_lines(plan):
+    """Purchase Entry lines for an order plan, one per lens product in its stock unit (one order's
+    pair-stocked lenses round up to whole pairs - the same rule its sale deducts by)."""
+    lines = []
+    for row in plan['by_product'].values():
+        product = row['product']
+        qty = stock_units(product, row['pieces'])
+        rate = _money(row['cost'] / qty) if qty else Decimal('0')
+        gross = rate * qty
+        eyes = Counter(row['eyes'])
+        eye_text = ' + '.join(eye if eyes[eye] == 1 else f'{eye} x{eyes[eye]}' for eye in EYES if eyes[eye])
+        pos = ', '.join(sorted(row['pos']))
+        if row['pending'] == row['pieces']:
+            state = 'not ordered yet'
+        elif not row['pending']:
+            state = f'on {pos}'
+        else:
+            state = f"{row['pieces'] - row['pending']} on {pos}, {row['pending']} not ordered yet"
+        lines.append({
+            'product': str(product.pk), 'product_name': product.name, 'quantity': qty,
+            'stock_unit': PIECE if _piece_stock(product) else PAIR,
+            'pieces': row['pieces'], 'eyes': eye_text, 'rx_summary': ' | '.join(r for r in row['rx'] if r),
+            'purchase_rate': str(rate),
+            # A lens nobody ordered yet has no PO tax: the entry falls back to the product's own.
+            'gst_percent': None if row['tax'] is None else str(row['tax']),
+            'discount_percent': str(_money(row['discount'] / gross * 100) if gross else Decimal('0')),
+            'source': 'PENDING' if row['pending'] == row['pieces'] else 'PLACED' if not row['pending'] else 'MIXED',
+            'note': f"{row['pieces']} lens(es) {eye_text} - {state}",
+        })
+    return lines
+
+
+def _detach_items(po, item_ids, order):
+    """Move one customer order's items off a PO that also carries other orders' lenses onto a PO
+    of their own (same supplier, dates and status), so billing them doesn't bill the others."""
+    new_po = LensPurchaseOrder.objects.create(
+        po_number=next_po_number(), supplier_id=po.supplier_id, branch_id=po.branch_id, order_date=po.order_date,
+        expected_delivery_date=po.expected_delivery_date, status=po.status,
+        remarks=f'Split from {po.po_number} for customer order {order.invoice_number}',
+        created_by_name=get_actor() or '',
+    )
+    LensPurchaseOrderItem.objects.filter(pk__in=item_ids).update(order=new_po, updated_at=timezone.now())
+    _log(po, 'SPLIT', f'Lenses of {order.invoice_number} moved to {new_po.po_number}')
+    po.save(update_fields=['history', 'updated_at'])
+    _log(new_po, 'SPLIT', f'Split from {po.po_number} for {order.invoice_number}')
+    new_po.save(update_fields=['history'])
+    return new_po
+
+
+def _received_po_for_pending(order, invoice, pending, received_at):
+    """A Lens PO for lenses bought without one (they arrived with the bill): created already
+    received, so the order's lab trail is the same as for an ordered lens."""
+    actor = get_actor() or ''
+    po = LensPurchaseOrder.objects.create(
+        po_number=next_po_number(), supplier_id=invoice.supplier_id, branch_id=invoice.branch_id,
+        order_date=timezone.localtime(received_at).date(), status='ORDERED',
+        remarks=f'Received with Purchase Entry {invoice.invoice_number} for customer order {order.invoice_number}',
+        created_by_name=actor,
+    )
+    customer = order.customer
+    name = order.customer_name or (customer.name if customer else '')
+    for req, eye, n in pending:
+        item = req['item']
+        product = item.product
+        cost = _money(product.cost_price)
+        unit_price = cost if _piece_stock(product) else _money(cost / 2)
+        for _ in range(n):
+            po_item = LensPurchaseOrderItem.objects.create(
+                order=po, product=product, lens_model=product.name, lens_type=(req.get('lens_type') or '')[:100],
+                lens_index=(req.get('lens_index') or '')[:30], lens_coating=(req.get('lens_coating') or '')[:100],
+                order_type=LensPurchaseOrderItem.SINGLE_PIECE, commercial_quantity=1, commercial_unit=PIECE,
+                physical_quantity=1, unit_price=unit_price, pricing_unit=PIECE, line_total=unit_price,
+            )
+            LensPurchaseOrderPiece.objects.create(
+                item=po_item, piece_number=1, customer=customer, customer_name=name, sales_order=order,
+                sales_order_item=item, eye=eye, rx=req['rx'], original_rx=req['rx'], receiving_status='RECEIVED',
+                received_at=received_at, received_by=actor,
+            )
+    _log(po, 'RECEIVED', f'{sum(n for _r, _e, n in pending)} lens(es) arrived with Purchase Entry {invoice.invoice_number}')
+    refresh_statuses(po)
+    po.save()
+    return po
+
+
+def receive_orders_into_invoice(invoice, order_ids, received_on=None):
+    """Purchase Entry save with customer orders pulled in by Order Number: receive each order's
+    waiting lenses (at `received_on`, the actual received date) and link their Lens POs to this
+    entry, inside the entry's own transaction. Returns the POs billed."""
+    if invoice.status in ('DRAFT', 'CANCELLED'):
+        raise serializers.ValidationError({'lens_sales_orders': [
+            'Lenses pulled in by Order Number are received when the entry is saved as Confirmed - not as a draft.']})
+    received_at = received_at_for(received_on)
+    received_day = timezone.localtime(received_at).date()
+    actor = get_actor() or ''
+    billed = []
+    for order_id in dict.fromkeys(str(o) for o in order_ids if o):
+        order = Invoice.all_objects.select_for_update().filter(pk=order_id).first()
+        if order is None:
+            raise serializers.ValidationError({'lens_sales_orders': ['A customer order on this entry no longer exists.']})
+        blocker = _order_blocker(order)
+        if blocker:
+            raise serializers.ValidationError({'lens_sales_orders': [f'Order {order.invoice_number} {blocker}.']})
+        order = Invoice.all_objects.select_related('customer').prefetch_related('items__product').get(pk=order.pk)
+        plan = order_plan(order, invoice.supplier_id)
+        if not plan['placed'] and not plan['pending']:
+            raise serializers.ValidationError({'lens_sales_orders': [
+                f'Order {order.invoice_number} has no lenses waiting for this supplier - remove it from the entry.']})
+        for po_id, g in plan['placed'].items():
+            po = LensPurchaseOrder.objects.select_for_update().get(pk=po_id)
+            if _po_live_invoice(po) is not None:
+                raise serializers.ValidationError({'lens_sales_orders': [
+                    f'Lens PO {po.po_number} was billed meanwhile on {po.purchase_invoice.invoice_number}.']})
+            if LensPurchaseOrderItem.objects.filter(order=po).exclude(pk__in=g['items']).exists():
+                po = _detach_items(po, g['items'], order)
+            if po.status in ('DRAFT', 'PENDING'):
+                po.status = 'ORDERED'
+            touched = []
+            for p in LensPurchaseOrderPiece.objects.select_for_update().filter(item__order=po):
+                if p.receiving_status == 'RECEIVED':
+                    continue
+                p.receiving_status, p.received_at, p.received_by, p.discrepancy_notes = 'RECEIVED', received_at, actor, ''
+                touched.append(p)
+            if touched:
+                LensPurchaseOrderPiece.objects.bulk_update(
+                    touched, ['receiving_status', 'received_at', 'received_by', 'discrepancy_notes'])
+                expected = po.expected_delivery_date
+                late = f' (expected {expected:%d-%m-%Y})' if expected and expected != received_day else ''
+                _log(po, 'RECEIVED', f'{len(touched)} lens(es) received on {received_day:%d-%m-%Y}{late} '
+                                     f'with Purchase Entry {invoice.invoice_number}')
+            refresh_statuses(po)
+            po.save()
+            billed.append(po)
+        if plan['pending']:
+            billed.append(_received_po_for_pending(order, invoice, plan['pending'], received_at))
+    for po in billed:
+        link_purchase_invoice(po, invoice)
+    return billed
+
 # ---------------------------------------------------------------------------
 # Status roll-up and sales-order sync
 # ---------------------------------------------------------------------------
@@ -831,18 +1103,7 @@ class LensPurchaseOrderViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
         return qs.distinct()
 
     def _po_number(self, serializer):
-        from .views import _sequence_number
-        number = _sequence_number('LENS_PO', LensPurchaseOrder, 'po_number', serializer.validated_data.get('po_number'))
-        if number:
-            return number
-        given = (serializer.validated_data.get('po_number') or '').strip()
-        if given and not LensPurchaseOrder.all_objects.filter(po_number=given).exists():
-            return given
-        year = timezone.localdate().year
-        n = LensPurchaseOrder.all_objects.filter(po_number__startswith=f'LPO-{year}-').count() + 1
-        while LensPurchaseOrder.all_objects.filter(po_number=f'LPO-{year}-{n:04d}').exists():
-            n += 1
-        return f'LPO-{year}-{n:04d}'
+        return next_po_number(serializer.validated_data.get('po_number'))
 
     @transaction.atomic
     def perform_create(self, serializer):
@@ -941,7 +1202,9 @@ class LensPurchaseOrderViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
             return Response({'detail': 'Select at least one lens to receive.'}, status=status.HTTP_400_BAD_REQUEST)
         pieces = {str(p.pk): p for p in LensPurchaseOrderPiece.objects.select_for_update()
                   .filter(item__order=po).select_related('sales_order', 'item')}
-        errors, touched, touched_orders, now, actor = [], [], set(), timezone.now(), get_actor() or ''
+        # The actual date the lenses arrived (may differ from the PO's expected delivery date).
+        now = received_at_for(request.data.get('received_date'))
+        errors, touched, touched_orders, actor = [], [], set(), get_actor() or ''
         for row in rows:
             piece = pieces.get(str(row.get('id')))
             state = str(row.get('status') or '').upper()
@@ -1022,7 +1285,9 @@ class LensPurchaseOrderViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
             s = p['search'].strip()
             orders = orders.filter(Q(invoice_number__icontains=s) | Q(customer_name__icontains=s)
                                    | Q(customer__name__icontains=s) | Q(customer__patient_code__icontains=s)
-                                   | Q(customer__phone__icontains=s))
+                                   | Q(customer__phone__icontains=s)
+                                   | Q(pk__in=live_pieces().filter(item__order__po_number__icontains=s)
+                                       .values('sales_order_id')))
         orders = list(orders.distinct().select_related('customer').prefetch_related('items__product')
                       .order_by('-invoice_date', '-created_at')[:300])
         by_order = {}
@@ -1039,6 +1304,37 @@ class LensPurchaseOrderViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
     def reserved_stock_view(self, request):
         """?exclude_order= leaves out the order being billed (its own lenses aren't held from it)."""
         return Response(reserved_stock(exclude_order=request.query_params.get('exclude_order') or None))
+
+    @action(detail=False, methods=['get'], url_path='order-draft')
+    def order_draft(self, request):
+        """Purchase Entry -> Search Order Number: ?sales_order=<id> [&supplier=<id>] -> the order's
+        lenses still waiting (not ordered yet, or on an unbilled Lens PO of that supplier) as entry
+        lines, plus why any lens was left out and the expected delivery date of the placed POs."""
+        p = request.query_params
+        order = Invoice.objects.select_related('customer').prefetch_related('items__product') \
+            .filter(pk=p.get('sales_order')).first() if p.get('sales_order') else None
+        if order is None:
+            return Response({'detail': 'Customer order not found.'}, status=status.HTTP_404_NOT_FOUND)
+        blocker = _order_blocker(order)
+        if blocker:
+            return Response({'detail': f'Order {order.invoice_number} {blocker}.'}, status=status.HTTP_400_BAD_REQUEST)
+        plan = order_plan(order, p.get('supplier') or None)
+        lines = order_draft_lines(plan)
+        customer = order.customer
+        expected = sorted(g['po'].expected_delivery_date for g in plan['placed'].values() if g['po'].expected_delivery_date)
+        supplier = Supplier.all_objects.filter(pk=plan['supplier']).first() if plan['supplier'] else None
+        return Response({
+            'sales_order': str(order.pk), 'sales_order_number': order.invoice_number,
+            'document_type': order.document_type, 'order_date': order.invoice_date,
+            'customer_name': order.customer_name or (customer.name if customer else ''),
+            'patient_code': customer.patient_code if customer else '',
+            'supplier': plan['supplier'], 'supplier_name': supplier.name if supplier else '',
+            'lines': lines, 'skipped': plan['skipped'],
+            'purchase_orders': [{'id': str(g['po'].pk), 'po_number': g['po'].po_number, 'status': g['po'].status,
+                                 'order_date': g['po'].order_date, 'expected_delivery_date': g['po'].expected_delivery_date}
+                                for g in plan['placed'].values()],
+            'expected_delivery_date': expected[-1] if expected else None,
+        })
 
     @action(detail=False, methods=['get'], url_path='pending-requirements')
     def pending_requirements(self, request):

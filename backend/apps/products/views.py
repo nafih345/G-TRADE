@@ -199,6 +199,20 @@ class ProductSerializer(ModelSerializer):
     def get_rack(self, obj):
         return obj.rack_location or 'A1'
 
+    def _can_view_cost(self):
+        from apps.company.cost_visibility import request_can_view_cost
+        request = self.context.get('request')
+        # No request = server-side use (services, tests): nothing is sent to a browser.
+        return True if request is None else request_can_view_cost(request)
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # Settings → Pricing Rules → Show Cost Price: the key is left out (not nulled) for users
+        # who may not see cost, so it never reaches the browser.
+        if not self._can_view_cost():
+            data.pop('cost_price', None)
+        return data
+
     def validate_barcode(self, value):
         # Normalize blank barcode to None so two blank products don't collide
         # under the unique constraint (NULLs are distinct; empty strings aren't).
@@ -260,6 +274,9 @@ class ProductSerializer(ModelSerializer):
     def update(self, instance, validated_data):
         request = self.context.get('request')
         input_data = request.data if request else {}
+        if not self._can_view_cost():
+            # A form that never received the cost would send it back blank / 0: keep the saved one.
+            validated_data.pop('cost_price', None)
         cat_val = input_data.get('category') or input_data.get('category_name') or validated_data.get('category_name') or instance.category_name
         name_val = input_data.get('name') or validated_data.get('name') or instance.name
         validated_data['category_name'] = infer_category_name(cat_val, name_val)
@@ -268,7 +285,17 @@ class ProductSerializer(ModelSerializer):
         if brand_val:
             validated_data['brand_name'] = str(brand_val)
         self._apply_variant_attrs(validated_data, input_data)
-        return super().update(instance, validated_data)
+        # Quantity never changes through a product edit: stock moves only by ledgered, atomic
+        # movements (sales, purchases, Stock Overview adjustments — inventory.stock_utils). The
+        # form's stock figure was read when it opened, so saving it would undo every sale or
+        # purchase posted since. Lock the row and write back the live quantity instead.
+        validated_data.pop('stock', None)
+        with transaction.atomic():
+            live = (type(instance).all_objects.select_for_update()
+                    .filter(pk=instance.pk).values_list('stock', flat=True).first())
+            if live is not None:
+                instance.stock = live
+            return super().update(instance, validated_data)
 
 
 class ProductViewSet(EditApprovalMixin, viewsets.ModelViewSet):

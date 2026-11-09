@@ -581,6 +581,10 @@ function ReceiveDialog({ po, onClose, onDone }) {
     .map((p) => ({ ...p, lens_model: it.lens_model || it.product_name }))), [po]);
   const [rows, setRows] = useState({});
   const [saving, setSaving] = useState(false);
+  // The day the lenses actually arrived — often not the PO's expected delivery date.
+  const today = new Date().toISOString().slice(0, 10);
+  const [receivedDate, setReceivedDate] = useState(today);
+  const expected = po?.expected_delivery_date ? String(po.expected_delivery_date).slice(0, 10) : '';
   useEffect(() => {
     const init = {};
     pending.forEach((p) => { init[p.id] = { selected: true, status: 'RECEIVED', piece_reference: p.piece_reference || '', notes: '', modelOk: true, rxOk: true }; });
@@ -596,9 +600,10 @@ function ReceiveDialog({ po, onClose, onDone }) {
       return { id: p.id, status, piece_reference: r.piece_reference, notes: r.notes || auto };
     });
     if (!chosen.length) { notify('Select at least one lens.', 'warning'); return; }
+    if (!receivedDate || receivedDate > today) { notify('Enter the date the lenses were actually received (today or earlier).', 'warning'); return; }
     setSaving(true);
     try {
-      const res = await axios.post(`${API}${po.id}/receive/`, { pieces: chosen });
+      const res = await axios.post(`${API}${po.id}/receive/`, { pieces: chosen, received_date: receivedDate });
       const got = chosen.filter((c) => c.status === 'RECEIVED').length;
       notify(`${got} lens(es) received${chosen.length > got ? `, ${chosen.length - got} discrepancy(ies) recorded` : ''}. Linked sales orders updated.`, 'success');
       onDone(res.data);
@@ -658,6 +663,12 @@ function ReceiveDialog({ po, onClose, onDone }) {
         )}
       </DialogContent>
       <DialogActions sx={{ px: 3, py: 1.5 }}>
+        {pending.length > 0 && (
+          <TextField type="date" size="small" label="Actual Received Date" value={receivedDate}
+            onChange={(e) => setReceivedDate(e.target.value)} InputLabelProps={{ shrink: true }}
+            inputProps={{ max: today }} sx={{ mr: 'auto', width: 230 }}
+            helperText={expected ? `Expected ${expected.split('-').reverse().join('-')}${receivedDate && receivedDate !== expected ? (receivedDate > expected ? ' — arrived late' : ' — arrived early') : ''}` : ' '} />
+        )}
         <Button onClick={onClose} disabled={saving}>Cancel</Button>
         {pending.length > 0 && <Button variant="contained" color="success" onClick={submit} disabled={saving} startIcon={<ReceiveIcon />} sx={{ fontWeight: 800 }}>Confirm Receipt (Ctrl+Enter)</Button>}
       </DialogActions>
