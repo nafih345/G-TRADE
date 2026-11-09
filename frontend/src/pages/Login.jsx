@@ -80,6 +80,9 @@ export default function Login({ variant = 'staff' }) {
   const [capsLock, setCapsLock] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  // The hosted backend sleeps when idle and takes up to a minute to wake; say so instead of
+  // leaving "Signing in…" looking frozen.
+  const [slow, setSlow] = useState(false);
   // Second sign-in step ({ challenge, setup }) when the account uses two-factor authentication.
   const [twoFactor, setTwoFactor] = useState(null);
   // Why the previous session ended (idle timeout, restore…), left by utils/sessionGuard.
@@ -102,6 +105,8 @@ export default function Login({ variant = 'staff' }) {
     }
     setError('');
     setLoading(true);
+    setSlow(false);
+    const slowTimer = setTimeout(() => setSlow(true), 5000);
     try {
       const result = await login(username.trim(), password, { portal });
       if (result.success) {
@@ -119,6 +124,8 @@ export default function Login({ variant = 'staff' }) {
     } catch (err) {
       setError('An error occurred. Please try again.');
     } finally {
+      clearTimeout(slowTimer);
+      setSlow(false);
       setLoading(false);
     }
   };
@@ -371,10 +378,15 @@ export default function Login({ variant = 'staff' }) {
                   {loading
                     ? <Stack direction="row" spacing={1.5} alignItems="center">
                         <CircularProgress size={18} sx={{ color: '#fff' }} />
-                        <span>Signing in…</span>
+                        <span>{slow ? 'Waking the server…' : 'Signing in…'}</span>
                       </Stack>
                     : 'Sign in'}
                 </Button>
+                {loading && slow && (
+                  <Typography variant="caption" color="text.secondary" role="status" sx={{ textAlign: 'center' }}>
+                    The server was idle and is starting up — this can take up to a minute. Please keep this page open.
+                  </Typography>
+                )}
               </Stack>
             </form>
             )}
