@@ -57,8 +57,12 @@ class SingleTenantInstall(permissions.BasePermission):
     def has_permission(self, request, view):
         if self.writes_only and request.method in permissions.SAFE_METHODS:
             return True
-        from apps.common.models import Tenant
-        return Tenant.objects.count() <= 1
+        return single_tenant_install()
+
+
+def single_tenant_install():
+    from apps.common.models import Tenant
+    return Tenant.objects.count() <= 1
 
 
 class SingleTenantWrites(SingleTenantInstall):
@@ -89,6 +93,7 @@ SETTING_FIELDS = ('inactivity_timeout_minutes', 'sensitive_action_reauth', 'logi
 
 def _settings_payload(obj, user):
     tf = UserTwoFactor.objects.filter(user_id=user.pk).first()
+    server_wide = single_tenant_install()
     return {
         **{f: getattr(obj, f) for f in SETTING_FIELDS},
         'version': obj.version,
@@ -104,7 +109,11 @@ def _settings_payload(obj, user):
             'confirmed_at': _iso(tf.confirmed_at) if tf else None,
             'enrolled_users': UserTwoFactor.objects.filter(confirmed_at__isnull=False).count(),
         },
-        'can_edit': user_role(user) in OWNER_ROLES,
+        'can_edit': server_wide and user_role(user) in OWNER_ROLES,
+        # False while several businesses share this server: backups / restores / schedule / audit
+        # log and policy edits are refused (SingleTenantInstall), so the page shows a notice instead.
+        'server_wide_available': server_wide,
+        'server_wide_locked_reason': '' if server_wide else SingleTenantInstall.message,
         'reauth_window_seconds': int(policy.REAUTH_WINDOW.total_seconds()),
     }
 

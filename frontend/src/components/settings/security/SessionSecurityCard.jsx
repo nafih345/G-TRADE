@@ -52,7 +52,11 @@ export default function SessionSecurityCard({ form, saved, server, errors, dirty
       subtitle="Control how long sessions last and how sign-ins are protected"
     >
       {!canEdit && (
-        <Alert severity="info" sx={{ mb: 1, borderRadius: '12px' }}>Only a Super Admin can change the security policy.</Alert>
+        <Alert severity="info" sx={{ mb: 1, borderRadius: '12px' }}>
+          {server?.server_wide_available === false
+            ? 'The security policy is server-wide, so it cannot be changed while this server hosts more than one business.'
+            : 'Only a Super Admin can change the security policy.'}
+        </Alert>
       )}
 
       <SettingRow

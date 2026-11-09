@@ -1,7 +1,9 @@
 import React, {
   forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useState,
 } from 'react';
-import { Alert, Button, Grid, Stack } from '@mui/material';
+import { Alert, Button, Grid, Stack, Typography } from '@mui/material';
+import { HealthAndSafetyOutlined as HealthIcon } from '@mui/icons-material';
+import { PanelCard } from './securityUi';
 import SessionSecurityCard from './SessionSecurityCard';
 import BackupHealthCard from './BackupHealthCard';
 import BackupScheduleCard from './BackupScheduleCard';
@@ -108,17 +110,24 @@ const SystemSecuritySettings = forwardRef(function SystemSecuritySettings({ onSt
     return () => { window.removeEventListener('beforeunload', onBeforeUnload); release(); };
   }, [anyDirty]);
 
+  // Backups, restores, the schedule and the audit log are refused by the server (403) while it hosts
+  // more than one business — known from the settings payload, so those panels are not even requested
+  // (no failing calls, no pointless Retry). Older servers without the flag count as available.
+  const serverWide = server ? server.server_wide_available !== false : null;
+
   // ---- backup health ---------------------------------------------------------------------------
   const loadHealth = useCallback(() => {
+    if (!serverWide) return;
     backupApi.health().then((h) => { setHealth(h); setHealthError(''); })
       .catch((e) => setHealthError(`Could not load backup status. ${apiErrorMessage(e)}`));
-  }, []);
+  }, [serverWide]);
   useEffect(() => { loadHealth(); }, [loadHealth, refreshKey]);
   const running = !!(health?.running_backup || health?.running_restore);
   useEffect(() => {
+    if (!serverWide) return undefined;
     const id = setInterval(loadHealth, running ? 5000 : 60000);
     return () => clearInterval(id);
-  }, [loadHealth, running]);
+  }, [loadHealth, running, serverWide]);
 
   const startBackup = async (autoDownload) => {
     if (starting) return;
@@ -166,10 +175,25 @@ const SystemSecuritySettings = forwardRef(function SystemSecuritySettings({ onSt
           />
         </Grid>
         <Grid item xs={12} lg={5}>
-          <BackupHealthCard health={health} error={healthError} timezone={timezone} creating={starting}
-            onCreate={() => startBackup(false)} onRetry={loadHealth} />
+          {serverWide === false ? (
+            <PanelCard icon={<HealthIcon />} title="Backup Health">
+              <Alert severity="info" sx={{ borderRadius: '12px' }}>
+                {server.server_wide_locked_reason || 'Backups, restores and server-wide security settings are disabled while this server hosts more than one business.'}
+              </Alert>
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+                A whole-server backup or restore would include — or overwrite — the other businesses&apos; data, so
+                these tools are switched off here. Per-client data exports are available to the platform
+                administrator in Client Management (open the client → Backups tab). The session security settings are shown read-only here.
+              </Typography>
+            </PanelCard>
+          ) : (
+            <BackupHealthCard health={serverWide ? health : null} error={healthError} timezone={timezone} creating={starting}
+              onCreate={() => startBackup(false)} onRetry={loadHealth} />
+          )}
         </Grid>
       </Grid>
+
+      {serverWide && (<>
 
       <BackupScheduleCard onSaved={() => setRefreshKey((k) => k + 1)} onDirtyChange={setScheduleDirty} />
 
@@ -184,6 +208,7 @@ const SystemSecuritySettings = forwardRef(function SystemSecuritySettings({ onSt
         onRestore={(row) => setRestoreTarget({ backup: row })} onChanged={() => setRefreshKey((k) => k + 1)} />
 
       <SecurityAuditPanel refreshKey={refreshKey} timezone={timezone} />
+      </>)}
 
       <RestoreConfirmationDialog
         backup={restoreTarget?.backup}
