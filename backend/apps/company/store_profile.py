@@ -8,7 +8,13 @@ Storage (nothing is kept twice):
   * company.Company (oldest row)      identity, contact, address, clinic details, currency
   * billing.BillingSettings           logo_data_url + business_info.tagline / .website — the same
                                       values the Bill Designer's Branding panel edits
+  * billing.BillingSettings           show_logo_on_print + logo_align — invoice print branding
   * company.Branch (default branch)   the Clinic / Branch Code
+  * company.Branch.logo_data_url      optional per-branch logo; GET reports the caller's active
+                                      branch's one as branch_logo_data_url (blank = store logo)
+
+    GET   /api/company/store-profile/branch-logo/<branch_id>/   one branch's logo
+    PUT   /api/company/store-profile/branch-logo/<branch_id>/   {logo_data_url} ('' clears it)
 
 Reads are open (every screen prints, and an expired token must not break a reprint); writes need
 a store-settings role, mirroring the billing designer endpoints.
@@ -40,6 +46,7 @@ LOGO_RE = re.compile(r'^data:image/(png|jpeg|svg\+xml);base64,[A-Za-z0-9+/=\s]+$
 GSTIN_RE = re.compile(r'^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$')
 TIME_RE = re.compile(r'^([01][0-9]|2[0-3]):[0-5][0-9]$')
 CODE_RE = re.compile(r'^[A-Za-z0-9_-]{1,20}$')
+LOGO_ALIGNS = ('left', 'center', 'right')
 
 # Text fields copied as-is (after trimming) between the payload and the Company row.
 TEXT_FIELDS = {
@@ -131,6 +138,8 @@ def _profile_payload(company, branding, branch):
         'website': info.get('website', '') or '',
         'tagline': info.get('tagline', '') or '',
         'logo_data_url': (branding.logo_data_url or '') if branding else '',
+        'show_logo_on_print': branding.show_logo_on_print if branding else True,
+        'logo_align': (branding.logo_align or '') if branding else '',
         'address': (c.address or '') if c else '',
         'city': c.city if c else '',
         'state': c.state if c else '',
@@ -254,12 +263,18 @@ def validate_profile(data, current, partial):
             clean['extra_addresses'] = addrs
 
     if touched('logo_data_url'):
-        logo = str(merged.get('logo_data_url') or '').strip()
-        if logo and not LOGO_RE.match(logo):
-            err('logo_data_url', 'Logo must be a PNG, JPG or SVG image.')
-        elif len(logo) > MAX_LOGO_CHARS:
-            err('logo_data_url', 'Logo is too large — use an image under 1 MB.')
+        logo, msg = clean_logo(merged.get('logo_data_url'))
+        if msg:
+            err('logo_data_url', msg)
         clean['logo_data_url'] = logo
+
+    if touched('show_logo_on_print'):
+        clean['show_logo_on_print'] = merged.get('show_logo_on_print') is not False
+    if touched('logo_align'):
+        align = str(merged.get('logo_align') or '').strip().lower()
+        if align and align not in LOGO_ALIGNS:
+            err('logo_align', 'Choose left, center or right.')
+        clean['logo_align'] = align
 
     for field in ('opening_time', 'closing_time'):
         if touched(field):
@@ -331,6 +346,16 @@ def validate_profile(data, current, partial):
     return clean, errors
 
 
+def clean_logo(value):
+    """(logo, error) for an uploaded logo data URL; '' is a valid 'no logo'."""
+    logo = str(value or '').strip()
+    if logo and not LOGO_RE.match(logo):
+        return logo, 'Logo must be a PNG, JPG or SVG image.'
+    if len(logo) > MAX_LOGO_CHARS:
+        return logo, 'Logo is too large — use an image under 1 MB.'
+    return logo, ''
+
+
 def compute_completeness(profile):
     """Per-category checklist from saved data only (never the unsaved form)."""
     from apps.billing.models import BillingSettings, BillTemplate, DocumentTemplateAssignment
@@ -385,9 +410,25 @@ def _default_branch():
         return Branch.get_default()
 
 
-def build_profile(include_completeness=False):
+def _active_branch_logo(request, default_branch):
+    """(branch, logo) for the branch this caller prints as. The middleware's branch object can come
+    from a process cache, so the logo is re-read from the row."""
+    branch = getattr(request, 'active_branch', None) if request is not None else None
+    branch = branch or default_branch
+    if branch is None:
+        return None, ''
+    logo = Branch.objects.filter(pk=branch.pk).values_list('logo_data_url', flat=True).first() or ''
+    return branch, logo
+
+
+def build_profile(include_completeness=False, request=None):
     company = get_company()
-    payload = _profile_payload(company, _branding(), _default_branch())
+    default_branch = _default_branch()
+    payload = _profile_payload(company, _branding(), default_branch)
+    branch, logo = _active_branch_logo(request, default_branch)
+    payload['active_branch_id'] = str(branch.pk) if branch else None
+    payload['active_branch_name'] = branch.name if branch else ''
+    payload['branch_logo_data_url'] = logo
     if include_completeness:
         payload['completeness'] = compute_completeness(payload)
     return payload
@@ -403,7 +444,7 @@ class StoreProfileView(APIView):
 
     def get(self, request):
         include = request.query_params.get('include') == 'completeness'
-        return Response(build_profile(include_completeness=include))
+        return Response(build_profile(include_completeness=include, request=request))
 
     def put(self, request):
         return self._save(request, partial=False)
@@ -449,16 +490,18 @@ class StoreProfileView(APIView):
             company.updated_by = user
             company.save()
 
-            if any(k in clean for k in ('logo_data_url', 'website', 'tagline')):
+            branding_keys = ('logo_data_url', 'show_logo_on_print', 'logo_align')
+            if any(k in clean for k in ('website', 'tagline') + branding_keys):
                 branding = _branding()
                 info = dict(branding.business_info or {})
                 for k in ('website', 'tagline'):
                     if k in clean:
                         info[k] = clean[k]
                 branding.business_info = info
-                if 'logo_data_url' in clean:
-                    branding.logo_data_url = clean['logo_data_url']
-                branding.save(update_fields=['business_info', 'logo_data_url', 'updated_at'])
+                for k in branding_keys:
+                    if k in clean:
+                        setattr(branding, k, clean[k])
+                branding.save(update_fields=['business_info', *branding_keys, 'updated_at'])
 
             if code and (branch is None or branch.code != code):
                 if branch is None:
@@ -468,4 +511,36 @@ class StoreProfileView(APIView):
                     branch.code = code
                     branch.save(update_fields=['code', 'updated_at'])
 
-        return Response(build_profile(include_completeness=True))
+        return Response(build_profile(include_completeness=True, request=request))
+
+
+class BranchLogoView(APIView):
+    """One branch's own logo. Blank means the branch prints the store logo."""
+    permission_classes = [StoreSettingsPermission]
+
+    def perform_authentication(self, request):
+        if request.method not in permissions.SAFE_METHODS:
+            request.user  # noqa: B018 — forces authentication
+
+    def _payload(self, branch):
+        return {'branch_id': str(branch.pk), 'branch_name': branch.name,
+                'logo_data_url': branch.logo_data_url or ''}
+
+    def get(self, request, branch_id):
+        branch = Branch.objects.filter(pk=branch_id).first()
+        if branch is None:
+            return Response({'detail': 'Branch not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(self._payload(branch))
+
+    def put(self, request, branch_id):
+        branch = Branch.objects.filter(pk=branch_id).first()
+        if branch is None:
+            return Response({'detail': 'Branch not found.'}, status=status.HTTP_404_NOT_FOUND)
+        data = request.data if isinstance(request.data, dict) else {}
+        logo, msg = clean_logo(data.get('logo_data_url'))
+        if msg:
+            return Response({'detail': msg, 'errors': {'logo_data_url': msg}},
+                            status=status.HTTP_400_BAD_REQUEST)
+        branch.logo_data_url = logo
+        branch.save(update_fields=['logo_data_url', 'updated_at'])
+        return Response(self._payload(branch))

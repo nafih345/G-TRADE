@@ -132,6 +132,12 @@ class BillingSettings(BaseUUIDModel):
     # is ephemeral (see the multi-branch prod notes) and the print popup / PDF needs the
     # image inline anyway. Automatically available to every template.
     logo_data_url = models.TextField(blank=True, default='')
+    # Invoice print branding (Settings → Store & Clinic Profile). show_logo_on_print=False prints
+    # the text header only. logo_align '' keeps each template's own alignment; left/center/right
+    # overrides it on every template.
+    show_logo_on_print = models.BooleanField(default=True)
+    LOGO_ALIGNS = ('left', 'center', 'right')
+    logo_align = models.CharField(max_length=10, blank=True, default='')
     primary_color = models.CharField(max_length=20, blank=True, default='#2563eb')
     accent_color = models.CharField(max_length=20, blank=True, default='#0f172a')
     # Extra header lines not on the Company model: tagline, website, PAN, bank details, UPI id.

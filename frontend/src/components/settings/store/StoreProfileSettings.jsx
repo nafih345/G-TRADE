@@ -21,8 +21,9 @@ import { notify } from '../../../utils/notify';
 import { setNavigationGuard, confirmLeave } from '../../../utils/navigationGuard';
 import {
   ADDRESS_KINDS, COUNTRIES, INDIAN_STATES, STORE_TYPES, WEEKDAYS, fetchStoreProfile, formatPhone,
-  isIndia, profileToForm, saveStoreProfile, stateForGstin, validateProfile,
+  isIndia, LOGO_ALIGNS, profileToForm, saveStoreProfile, stateForGstin, validateProfile,
 } from '../../../utils/storeProfile';
+import BranchLogoManager from './BranchLogoManager';
 import BrandPreviewCard from './BrandPreviewCard';
 import ProfileCompletenessCard from './ProfileCompletenessCard';
 import InvoicePreviewDialog from './InvoicePreviewDialog';
@@ -343,6 +344,57 @@ const StoreProfileSettings = forwardRef(function StoreProfileSettings({ onStateC
                   {logoMsg.warning && <Typography variant="caption" color="warning.main" sx={{ display: 'block', mt: 1 }}>{logoMsg.warning}</Typography>}
                 </Box>
               </Box>
+
+              {/* Invoice print branding: applies to every bill layout (A4, A5, thermal). */}
+              <Box
+                id="sp-print-branding"
+                sx={{ display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap', mb: 3, p: 1.5, borderRadius: 2, bgcolor: 'background.default' }}
+              >
+                <FormControlLabel
+                  sx={{ mr: 'auto' }}
+                  control={(
+                    <Switch
+                      checked={form.show_logo_on_print}
+                      onChange={(e) => set('show_logo_on_print', e.target.checked)}
+                      inputProps={{ 'aria-describedby': 'sp-print-logo-help' }}
+                    />
+                  )}
+                  label={(
+                    <Box>
+                      <Typography variant="body2" fontWeight={700}>Show Logo on Invoice Print</Typography>
+                      <Typography id="sp-print-logo-help" variant="caption" color="text.secondary">
+                        {form.show_logo_on_print
+                          ? (form.logo_data_url ? 'Printed on A4, A5 and thermal bills.' : 'No logo uploaded — bills print the store name instead.')
+                          : 'Bills print a text header with the store name and contact details.'}
+                      </Typography>
+                    </Box>
+                  )}
+                />
+                <Box>
+                  <Typography variant="caption" color="text.secondary" fontWeight={700} sx={{ display: 'block', mb: 0.5 }}>Logo Alignment</Typography>
+                  <ToggleButtonGroup
+                    size="small"
+                    exclusive
+                    value={form.logo_align}
+                    onChange={(_, v) => { if (v !== null) set('logo_align', v); }}
+                    aria-label="Logo alignment on invoices"
+                    disabled={!form.show_logo_on_print}
+                  >
+                    {LOGO_ALIGNS.map((a) => (
+                      <ToggleButton
+                        key={a.value || 'template'}
+                        value={a.value}
+                        title={a.value ? `${a.label} on every bill layout` : 'Keep each bill template’s own alignment'}
+                        sx={{ px: 1.5, fontWeight: 700, textTransform: 'none' }}
+                      >
+                        {a.label}
+                      </ToggleButton>
+                    ))}
+                  </ToggleButtonGroup>
+                </Box>
+              </Box>
+
+              {multiBranchEnabled && <BranchLogoManager storeLogo={form.logo_data_url} />}
 
               <Grid container columnSpacing={2} rowSpacing={1.25}>
                 <Grid item xs={12} sm={6}>{field('name', 'Store / Clinic Name', { required: true, inputProps: { maxLength: 150 } })}</Grid>

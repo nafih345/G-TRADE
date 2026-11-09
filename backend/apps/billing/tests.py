@@ -240,8 +240,11 @@ class ApiTests(APITestCase):
         self.assertTrue(self.client.get('/api/billing/meta/').data['can_design'])
 
     def test_settings_validation(self):
-        res = self.client.patch('/api/billing/settings/', {'logo_data_url': 'data:image/svg+xml;base64,AA'}, format='json')
+        res = self.client.patch('/api/billing/settings/', {'logo_data_url': 'data:image/gif;base64,AA'}, format='json')
         self.assertEqual(res.status_code, 400)
+        res = self.client.patch('/api/billing/settings/', {'logo_data_url': 'data:image/svg+xml;base64,AA', 'logo_align': 'center'}, format='json')
+        self.assertEqual(res.status_code, 200)  # SVG logos are allowed (rendered via <img>, never inline)
+        self.assertEqual(self.client.patch('/api/billing/settings/', {'logo_align': 'top'}, format='json').status_code, 400)
         res = self.client.patch('/api/billing/settings/', {'themes': [{'name': 'Mine', 'primary': '#112233', 'accent': 'javascript:x'}], 'business_info': {'upiId': 'shop@upi'}}, format='json')
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.data['themes'], [{'name': 'Mine', 'primary': '#112233'}])

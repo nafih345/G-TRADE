@@ -66,6 +66,10 @@ class Branch(BaseUUIDModel):
     # back to when Multi-Branch Mode is OFF, and the seed target for data migrations. Enforced
     # in save() below and by BranchViewSet.set_default.
     is_default = models.BooleanField(default=False)
+    # Optional branch logo (base64 data URL, same reasoning as BillingSettings.logo_data_url).
+    # Blank = the branch prints the store logo. Edited via /api/company/store-profile/branch-logo/
+    # and deliberately left out of the branch list payloads (it can be ~1 MB).
+    logo_data_url = models.TextField(blank=True, default='')
 
     class Meta:
         ordering = ['-is_default', 'name']

@@ -237,10 +237,22 @@ const RENDER = {
   },
 
   logo(el, ctx) {
-    const src = ctx.model.company?.logoDataUrl;
-    const pos = { left: 'left center', center: 'center', right: 'right center' }[el.style?.align || 'left'];
-    if (!src) return ctx.editor ? '<div class="bd-ph-box">LOGO<br/><small>Logo &amp; Branding</small></div>' : '';
-    return `<img src="${esc(src)}" alt="" style="width:100%;height:100%;object-fit:${el.fit === 'cover' ? 'cover' : 'contain'};object-position:${pos}"/>`;
+    const c = ctx.model.company || {};
+    const src = c.logoDataUrl;
+    // Store-level alignment (Store & Clinic Profile) overrides the element's own.
+    const align = c.logoAlign || el.style?.align || 'left';
+    const justify = { left: 'flex-start', center: 'center', right: 'flex-end' }[align] || 'flex-start';
+    if (!src) {
+      if (ctx.editor) return '<div class="bd-ph-box">LOGO<br/><small>Logo &amp; Branding</small></div>';
+      // No logo (none uploaded, or printing it is switched off): print the store name in its
+      // place unless the template already prints it, so the header keeps its identity and shape.
+      if (!c.name || ctx.nameElsewhere) return '';
+      const size = Math.max(7, Math.min(16, num(el.h, 10) * 1.3));
+      return `<div class="bd-logo-box" style="justify-content:${justify}"><div class="bd-logo-text" style="text-align:${align};font-size:${r2(size)}pt;color:${ctx.theme.primary}">${esc(c.name)}</div></div>`;
+    }
+    const pos = { left: 'left center', center: 'center', right: 'right center' }[align] || 'left center';
+    const fit = el.fit === 'cover' ? 'cover' : 'contain';
+    return `<div class="bd-logo-box" style="justify-content:${justify}"><img class="bd-logo-img" src="${esc(src)}" alt="" style="object-fit:${fit};object-position:${pos}"/></div>`;
   },
 
   image(el, ctx) {
@@ -552,6 +564,10 @@ ${BILL_I18N_CSS}
 .bd-root .bd-nowrap>.bd-in{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bd-root .bd-line>.bd-in,.bd-root .bd-box>.bd-in{position:absolute;inset:0}
 .bd-root .bd-logo>.bd-in,.bd-root .bd-image>.bd-in,.bd-root .bd-signature>.bd-in{height:100%}
+.bd-root img{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.bd-root .bd-logo-box{display:flex;align-items:center;width:100%;height:100%;overflow:hidden}
+.bd-root .bd-logo-img{display:block;flex:none;width:min(100%,160px);height:min(100%,70px);max-width:160px;max-height:70px;object-fit:contain;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.bd-root .bd-logo-text{width:100%;font-weight:800;line-height:1.15;overflow:hidden;overflow-wrap:anywhere}
 .bd-root .bd-muted{color:${t.muted}}
 .bd-root .bd-title{font-weight:700;color:${t.primary};margin-bottom:0.6mm;font-size:1.02em}
 .bd-root .bd-kv{display:flex;align-items:baseline}
@@ -744,6 +760,15 @@ export function paginate({ contentH, thermal, hH, hS, hF, items, mt, mb, thead, 
   return { pages };
 }
 
+/** Whether some element other than the logo already prints the store name. */
+function printsCompanyName(cfg) {
+  return Object.values(cfg.bands || {}).some((band) => (band?.elements || []).some((el) => {
+    if (el.type === 'companyBlock') return el.show?.name !== false;
+    if (el.type === 'logo') return false;
+    return el.field === 'company.name' || (el.type === 'text' && JSON.stringify(el).includes('company.name'));
+  }));
+}
+
 /**
  * Lay the document out. `opts.designRows` caps the item rows (designer canvas), `opts.measurer`
  * overrides measurement (tests).
@@ -755,7 +780,7 @@ export function layoutBill(template, model, opts = {}) {
   const fmt = cfg.format;
   const warnings = [];
   const warn = (w) => { if (!warnings.some((x) => x.message === w.message && x.elementId === w.elementId)) warnings.push(w); };
-  const ctx = { model, fmt, theme, editor: !!opts.editor, warn, scale: 1 };
+  const ctx = { model, fmt, theme, editor: !!opts.editor, warn, scale: 1, nameElsewhere: printsCompanyName(cfg) };
   const css = billCss(cfg, theme);
   const bands = cfg.bands;
   const table = bands.items.table;
@@ -832,7 +857,7 @@ export function renderBillPages(template, model, layout, opts = {}) {
   // re-measuring); sizes, page breaks and font scales from the measured layout.
   const { theme, geometry: g, pages, scales, items, itemsOn } = layout;
   const cfg = normalizeConfig(template.config);
-  const ctxBase = { model, fmt: cfg.format, theme, editor: !!opts.editor, warn: opts.warn || null, scale: 1 };
+  const ctxBase = { model, fmt: cfg.format, theme, editor: !!opts.editor, warn: opts.warn || null, scale: 1, nameElsewhere: printsCompanyName(cfg) };
   const bands = cfg.bands;
   const bandHtml = (name, top, pageNo) => {
     const band = bands[name];

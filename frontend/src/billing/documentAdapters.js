@@ -8,8 +8,8 @@
 // exactly how such a line is defined.
 //
 // BillModel:
-//   company  {name, tagline, address, phone, email, website, gstin, pan, logoDataUrl, currency,
-//             bankDetails, upiId}
+//   company  {name, tagline, address, phone, email, website, gstin, pan, logoDataUrl, logoAlign,
+//             currency, bankDetails, upiId}
 //   document {type, title, number, orderNumber, reference, date, dueDate, deliveryDate, status,
 //             paymentStatus, fulfillmentStatus, salesperson, branch, preparedBy, printedAt,
 //             notes, terms}
@@ -88,6 +88,7 @@ const FALLBACK_COMPANY = {
   gstin: '',
   pan: '',
   logoDataUrl: '',
+  logoAlign: '',
   currency: '₹',
   bankDetails: '',
   upiId: '',
@@ -99,7 +100,11 @@ export function resolveCompany(ctx = {}) {
   const out = { ...FALLBACK_COMPANY };
   ['name', 'tagline', 'address', 'phone', 'email', 'website', 'gstin', 'pan', 'currency']
     .forEach((k) => { if (first(c[k])) out[k] = c[k]; });
-  if (first(b.logo_data_url, c.logoDataUrl)) out.logoDataUrl = b.logo_data_url || c.logoDataUrl;
+  // Logo: the active branch's own logo, else the store logo; none at all when
+  // "Show Logo on Invoice Print" is off (the header then prints as text only).
+  const logo = first(c.branchLogoDataUrl, b.logo_data_url, c.logoDataUrl);
+  if (logo && b.show_logo_on_print !== false) out.logoDataUrl = logo;
+  if (['left', 'center', 'right'].includes(b.logo_align)) out.logoAlign = b.logo_align;
   const info = b.business_info || {};
   ['tagline', 'website', 'pan', 'bankDetails', 'upiId'].forEach((k) => { if (first(info[k])) out[k] = info[k]; });
   return out;

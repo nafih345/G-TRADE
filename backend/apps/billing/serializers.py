@@ -1,3 +1,4 @@
+import re
 from rest_framework import serializers
 
 from .bill_fields import (
@@ -132,7 +133,7 @@ class DocumentTemplateAssignmentSerializer(serializers.ModelSerializer):
         return data
 
 
-MAX_LOGO_CHARS = 800_000
+MAX_LOGO_CHARS = 1_500_000  # same cap as the Store Profile upload
 
 
 class BillingSettingsSerializer(serializers.ModelSerializer):
@@ -140,7 +141,7 @@ class BillingSettingsSerializer(serializers.ModelSerializer):
         model = BillingSettings
         fields = (
             'id', 'use_single_template', 'single_template',
-            'logo_data_url', 'primary_color', 'accent_color', 'business_info', 'themes',
+            'logo_data_url', 'show_logo_on_print', 'logo_align', 'primary_color', 'accent_color', 'business_info', 'themes',
             'updated_at',
         )
         read_only_fields = ('id', 'updated_at')
@@ -149,10 +150,16 @@ class BillingSettingsSerializer(serializers.ModelSerializer):
         value = value or ''
         if value and not value.startswith('data:image/'):
             raise serializers.ValidationError('The logo must be an uploaded image.')
-        if value.startswith('data:image/svg'):
-            raise serializers.ValidationError('SVG logos are not supported — upload a PNG or JPEG.')
+        if value and not re.match(r'^data:image/(png|jpeg|svg\+xml);base64,', value):
+            raise serializers.ValidationError('Upload the logo as a PNG, JPG or SVG image.')
         if len(value) > MAX_LOGO_CHARS:
-            raise serializers.ValidationError('The logo is too large — upload an image under 500 KB.')
+            raise serializers.ValidationError('The logo is too large — upload an image under 1 MB.')
+        return value
+
+    def validate_logo_align(self, value):
+        value = (value or '').strip().lower()
+        if value and value not in BillingSettings.LOGO_ALIGNS:
+            raise serializers.ValidationError('Choose left, center or right.')
         return value
 
     def validate_business_info(self, value):

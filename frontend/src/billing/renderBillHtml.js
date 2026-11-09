@@ -204,31 +204,38 @@ function renderCompany(model, cfg, thermal) {
   if (cfg.showPan && c.pan) reg.push(`PAN: ${esc(c.pan)}`);
   if (reg.length) lines.push(reg.join(' &nbsp;|&nbsp; '));
 
+  // Store-level alignment (Store & Clinic Profile) overrides the template's own.
+  const override = c.logoAlign || '';
+  const logoAlign = override || cfg.logoAlign;
   const logo = cfg.showLogo && c.logoDataUrl
-    ? `<img src="${c.logoDataUrl}" alt="logo" style="height:${cfg.logoHeightPx || 48}px;max-width:60%;object-fit:contain;display:block;margin:${cfg.logoAlign === 'center' ? '0 auto 6px' : cfg.logoAlign === 'right' ? '0 0 6px auto' : '0 0 6px 0'};" />`
+    ? `<img class="co-logo" src="${esc(c.logoDataUrl)}" alt="logo" style="height:${Math.min(cfg.logoHeightPx || 48, 70)}px;margin:${logoAlign === 'center' ? '0 auto 6px' : logoAlign === 'right' ? '0 0 6px auto' : '0 0 6px 0'};" />`
     : '';
-  const nameHtml = cfg.showName
+  // Fallback: with no logo printed (none uploaded, or printing it is switched off) the store
+  // name always prints, so the header never collapses to an anonymous block.
+  const nameHtml = (cfg.showName || (!logo && c.name))
     ? `<div class="co-name" style="font-size:${cfg.nameSizePx || 24}px;">${esc(c.name)}</div>` : '';
   const taglineHtml = cfg.showTagline && c.tagline
     ? `<div class="co-tag">${esc(c.tagline)}</div>` : '';
 
-  if (thermal || cfg.layout === 'stacked') {
-    return `<div class="sec company center">
+  if (thermal || cfg.layout === 'stacked' || override === 'center') {
+    const alignAttr = override ? `" style="text-align:${override};` : ' center';
+    return `<div class="sec company${alignAttr}">
       ${logo}${nameHtml}${taglineHtml}
       ${lines.map((l) => `<div class="co-line">${l}</div>`).join('')}
     </div>`;
   }
-  // split layout: identity left, address block right
-  return `<table class="sec company split"><tr>
-    <td style="vertical-align:top;">${logo}${nameHtml}${taglineHtml}
+  // split layout: identity block on the logo's side, address block opposite
+  const identity = `<td style="vertical-align:top;text-align:${override === 'right' ? 'right' : 'left'};">${logo}${nameHtml}${taglineHtml}
       ${cfg.showGstin && c.gstin ? `<div class="co-line">GSTIN: ${esc(c.gstin)}${cfg.showPan && c.pan ? ` | PAN: ${esc(c.pan)}` : ''}</div>` : ''}
-    </td>
-    <td style="vertical-align:top;text-align:right;">
+    </td>`;
+  const contactTd = `<td style="vertical-align:top;text-align:${override === 'right' ? 'left' : 'right'};">
       ${cfg.showAddress && c.address ? `<div class="co-line">${esc(c.address)}</div>` : ''}
       ${cfg.showPhone && c.phone ? `<div class="co-line">${L('Phone')}: ${esc(c.phone)}</div>` : ''}
       ${cfg.showEmail && c.email ? `<div class="co-line">${esc(c.email)}</div>` : ''}
       ${cfg.showWebsite && c.website ? `<div class="co-line">${esc(c.website)}</div>` : ''}
-    </td>
+    </td>`;
+  return `<table class="sec company split"><tr>
+    ${override === 'right' ? contactTd + identity : identity + contactTd}
   </tr></table>`;
 }
 
@@ -419,7 +426,10 @@ function buildStyles(template, thermal, styles) {
 
   const common = `
     * { box-sizing: border-box; }
-    html, body { margin: 0; padding: 0; }
+    html, body { margin: 0; padding: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    img { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    /* Logo bounds: a high-resolution logo must never push the items table onto another page. */
+    .co-logo { display: block; width: auto; max-height: 70px; max-width: min(160px, 100%); object-fit: contain; }
     body {
       font-family: ${styles.fontFamily || "'Segoe UI', Arial, sans-serif"};
       color: ${styles.textColor || '#0f172a'};

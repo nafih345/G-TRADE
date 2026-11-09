@@ -5,7 +5,7 @@ from .views import (
     BusinessSettingsView, UserBranchAccessViewSet, BranchStockViewSet,
     StockTransferViewSet, branch_context,
 )
-from .store_profile import StoreProfileView
+from .store_profile import BranchLogoView, StoreProfileView
 from .localization import LocalizationSettingsView, LocalizationCatalogView, SettingsAuditView
 from .numbering import DocumentSequenceListView, DocumentSequenceDetailView, DocumentSequencePeekView
 from .tax_config import TaxConfigListView, TaxConfigDetailView
@@ -27,6 +27,7 @@ router.register('stock-transfers', StockTransferViewSet, basename='stock-transfe
 
 urlpatterns = [
     path('store-profile/', StoreProfileView.as_view(), name='store-profile'),
+    path('store-profile/branch-logo/<uuid:branch_id>/', BranchLogoView.as_view(), name='store-profile-branch-logo'),
     path('localization/', LocalizationSettingsView.as_view(), name='localization'),
     path('localization/catalog/', LocalizationCatalogView.as_view(), name='localization-catalog'),
     path('settings-audit/', SettingsAuditView.as_view(), name='settings-audit'),

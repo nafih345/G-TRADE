@@ -6,7 +6,7 @@ from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework.serializers import ModelSerializer, PrimaryKeyRelatedField
+from rest_framework.serializers import ModelSerializer, PrimaryKeyRelatedField, SerializerMethodField
 from .models import (
     Company, Branch, Warehouse, Notification,
     BusinessSettings, UserBranchAccess, BranchStock, StockTransfer, StockTransferItem,
@@ -21,11 +21,18 @@ class CompanySerializer(ModelSerializer):
 
 
 class BranchSerializer(ModelSerializer):
+    # The logo is read/written only through store-profile/branch-logo/ (it can be ~1 MB, and every
+    # branch list would otherwise carry it); lists just say whether one is set.
+    has_logo = SerializerMethodField()
+
     class Meta:
         model = Branch
-        fields = '__all__'
+        exclude = ('logo_data_url',)
         # company is auto-filled server-side when omitted (single-company install).
         extra_kwargs = {'company': {'required': False}}
+
+    def get_has_logo(self, obj):
+        return bool(obj.logo_data_url)
 
 
 class WarehouseSerializer(ModelSerializer):

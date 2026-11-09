@@ -116,3 +116,56 @@ class StoreProfileTests(APITestCase):
         self.client.force_authenticate(user('CASHIER'))
         self.assertEqual(self.client.put(URL, body(), format='json').status_code, 403)
         self.assertIn(self.client.post('/api/company/profile/', {'name': 'x'}, format='json').status_code, (401, 403))
+
+
+SVG = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4='
+
+
+class PrintBrandingTests(APITestCase):
+    def setUp(self):
+        self.client.force_authenticate(user('SUPER_ADMIN'))
+        self.client.put(URL, body(), format='json')
+
+    def test_toggle_and_alignment_round_trip(self):
+        self.assertTrue(self.client.get(URL).data['show_logo_on_print'])
+        self.assertEqual(self.client.get(URL).data['logo_align'], '')
+        res = self.client.patch(URL, {'show_logo_on_print': False, 'logo_align': 'Center'}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        b = BillingSettings.load()
+        self.assertFalse(b.show_logo_on_print)
+        self.assertEqual(b.logo_align, 'center')
+        self.assertEqual(b.logo_data_url, PNG)  # untouched by a partial save
+        bad = self.client.patch(URL, {'logo_align': 'top'}, format='json')
+        self.assertIn('logo_align', bad.data['errors'])
+
+    def test_svg_logo_accepted(self):
+        res = self.client.patch(URL, {'logo_data_url': SVG}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(BillingSettings.load().logo_data_url, SVG)
+
+    def test_branch_logo_override(self):
+        branch = Branch.get_default()
+        logo_url = f'{URL}branch-logo/{branch.pk}/'
+        self.assertEqual(self.client.get(URL).data['branch_logo_data_url'], '')
+        res = self.client.put(logo_url, {'logo_data_url': SVG}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(self.client.get(logo_url).data['logo_data_url'], SVG)
+        prof = self.client.get(URL).data
+        self.assertEqual(prof['branch_logo_data_url'], SVG)
+        self.assertEqual(prof['logo_data_url'], PNG)  # store logo kept separately
+        # list payloads stay small: only a has_logo flag
+        listed = self.client.get('/api/company/branches/').data
+        listed = listed.get('results', listed) if isinstance(listed, dict) else listed
+        row = next(b for b in listed if str(b['id']) == str(branch.pk))
+        self.assertTrue(row['has_logo'])
+        self.assertNotIn('logo_data_url', row)
+        self.assertEqual(self.client.put(logo_url, {'logo_data_url': 'data:text/html;base64,PHA+'},
+                                         format='json').status_code, 400)
+        self.assertEqual(self.client.put(logo_url, {'logo_data_url': ''}, format='json').status_code, 200)
+        self.assertEqual(self.client.get(URL).data['branch_logo_data_url'], '')
+
+    def test_branch_logo_write_needs_admin(self):
+        branch = Branch.get_default()
+        self.client.force_authenticate(user('CASHIER'))
+        res = self.client.put(f'{URL}branch-logo/{branch.pk}/', {'logo_data_url': SVG}, format='json')
+        self.assertEqual(res.status_code, 403)

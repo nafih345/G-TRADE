@@ -11,7 +11,7 @@ import {
 import {
   paginate, layoutBill, renderVisualBillHtml, pageGeometry, createEstimateMeasurer,
 } from '../renderBillLayout.js';
-import { toBillModel } from '../documentAdapters.js';
+import { toBillModel, resolveCompany } from '../documentAdapters.js';
 import { sampleBillModel } from '../sampleModels.js';
 import { PRESET_TEMPLATES } from '../templatePresets.js';
 
@@ -318,3 +318,62 @@ test('purchase bill prints lens / other sub-totals and only total qty + final to
   // Returns keep their own totals.
   assert.equal(toBillModel({ ...doc, creditAmount: 100 }, 'PURCHASE_RETURN').totals.purchaseSummary, null);
 });
+
+// ---------------------------------------------------------------------------
+// Store logo print branding (Store & Clinic Profile toggles)
+// ---------------------------------------------------------------------------
+
+const STORE_LOGO = 'data:image/png;base64,STORE';
+const BRANCH_LOGO = 'data:image/svg+xml;base64,BRANCH';
+
+test('logo: branch logo beats store logo; switched off prints none; store alignment carried', () => {
+  const company = { name: 'Vision Care', branchLogoDataUrl: BRANCH_LOGO };
+  assert.equal(resolveCompany({ company, branding: { logo_data_url: STORE_LOGO } }).logoDataUrl, BRANCH_LOGO);
+  assert.equal(resolveCompany({ company: { name: 'x' }, branding: { logo_data_url: STORE_LOGO } }).logoDataUrl, STORE_LOGO);
+  const off = resolveCompany({ company, branding: { logo_data_url: STORE_LOGO, show_logo_on_print: false } });
+  assert.equal(off.logoDataUrl, '');
+  assert.equal(resolveCompany({ company, branding: { logo_align: 'right' } }).logoAlign, 'right');
+  assert.equal(resolveCompany({ company, branding: { logo_align: 'bogus' } }).logoAlign, '');
+});
+
+test('visual logo: capped, print-colour exact, aligned by the store setting', () => {
+  const cfg = blankConfig();
+  cfg.bands.header.elements = [{ ...createElement('logo'), id: 'lg', x: 0, y: 0, w: 120, h: 40 }];
+  const model = sampleBillModel('SALES_INVOICE');
+  model.company = { ...model.company, logoDataUrl: STORE_LOGO, logoAlign: 'right' };
+  const { html } = renderVisualBillHtml(A4(cfg), model, opts);
+  assert.ok(html.includes(`src="${STORE_LOGO}"`));
+  assert.match(html, /\.bd-logo-img\{[^}]*max-width:160px;max-height:70px/);
+  assert.match(html, /print-color-adjust:exact/);
+  assert.ok(html.includes('justify-content:flex-end'), 'store alignment overrides the element');
+});
+
+test('visual logo: with no logo the store name prints in its place, unless printed elsewhere', () => {
+  const cfg = blankConfig();
+  cfg.bands.header.elements = [{ ...createElement('logo'), id: 'lg', x: 0, y: 0, w: 40, h: 15 }];
+  const model = sampleBillModel('SALES_INVOICE');
+  model.company = { ...model.company, name: 'Vision Care Opticals', logoDataUrl: '' };
+  assert.ok(renderVisualBillHtml(A4(cfg), model, opts).html.includes('class="bd-logo-text"'));
+  cfg.bands.header.elements.push({ ...createElement('companyBlock'), id: 'co', x: 50, y: 0, w: 80, h: 20 });
+  assert.ok(!renderVisualBillHtml(A4(cfg), model, opts).html.includes('class="bd-logo-text"'));
+});
+
+test('legacy header: logo capped, text fallback when no logo, store alignment applied', async () => {
+  const { renderBillHtml } = await import('../renderBillHtml.js');
+  const tpl = structuredClone(PRESET_TEMPLATES.find((t) => t.template_type === 'STANDARD') || PRESET_TEMPLATES[0]);
+  const company = tpl.config.sections.find((s) => s.id === 'company');
+  company.config = { ...company.config, showLogo: true, showName: false, logoHeightPx: 120 };
+  const model = sampleBillModel('SALES_INVOICE');
+  model.company = { ...model.company, name: 'Vision Care Opticals', logoDataUrl: STORE_LOGO, logoAlign: 'right' };
+  let html = renderBillHtml(tpl, model);
+  assert.match(html, /class="co-logo"[^>]*height:70px/);
+  assert.match(html, /\.co-logo \{[^}]*max-height: 70px; max-width: min\(160px, 100%\)/);
+  assert.match(html, /print-color-adjust: exact/);
+  assert.ok(!html.includes('Vision Care Opticals</div>'), 'name hidden by the template while a logo prints');
+  model.company.logoDataUrl = '';
+  html = renderBillHtml(tpl, model);
+  assert.ok(html.includes('Vision Care Opticals</div>'), 'no logo -> the store name prints');
+  model.company.logoAlign = 'center';
+  assert.ok(renderBillHtml(tpl, model).includes('style="text-align:center;"'));
+});
+

@@ -68,6 +68,8 @@ export function profileToForm(p = {}) {
     website: p.website || '',
     tagline: p.tagline || '',
     logo_data_url: p.logo_data_url || '',
+    show_logo_on_print: p.show_logo_on_print !== false,
+    logo_align: p.logo_align || '',
     address: p.address || '',
     city: p.city || '',
     state: p.state || '',
@@ -112,14 +114,25 @@ export function companyFromProfile(p = {}) {
     gstin: p.gstin || '',
     tagline: p.tagline || '',
     currency: p.currency || '',
+    // The active branch's own logo (blank = print the store logo).
+    branchLogoDataUrl: p.branch_logo_data_url || '',
   };
 }
+
+export const LOGO_ALIGNS = [
+  { value: '', label: 'As designed' },
+  { value: 'left', label: 'Left' },
+  { value: 'center', label: 'Center' },
+  { value: 'right', label: 'Right' },
+];
 
 /** Billing-settings overlay so unsaved logo / tagline / website edits show in previews. */
 export function brandingFromProfile(p = {}, branding = {}) {
   return {
     ...branding,
     logo_data_url: p.logo_data_url || '',
+    show_logo_on_print: p.show_logo_on_print !== false,
+    logo_align: p.logo_align || '',
     business_info: { ...(branding.business_info || {}), tagline: p.tagline || '', website: p.website || '' },
   };
 }
