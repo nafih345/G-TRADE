@@ -28,6 +28,7 @@ export const WHOLESALE_SHORTCUTS = [
   // Product entry
   { id: 'tabProduct', keys: ['F4'], group: 'Product entry', label: 'Select Product tab' },
   { id: 'productSearch', keys: ['F7'], group: 'Product entry', label: 'Focus barcode / product search (results list in the billing grid)' },
+  { id: 'searchOrders', keys: ['F8'], group: 'Product entry', label: 'Search Orders — load a pending Wholesale Order / Quotation into this bill' },
   { id: 'grid', keys: ['F9'], group: 'Product entry', label: 'Edit bill lines — jump to the Qty cell of the selected (or last) line' },
   { id: 'bulkAdd', keys: ['Ctrl+B'], group: 'Product entry', label: 'Open Bulk Add' },
   { id: 'excelImport', keys: ['Ctrl+I'], group: 'Product entry', label: 'Open Excel Import' },

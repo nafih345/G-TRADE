@@ -55,6 +55,7 @@ import {
   Receipt as BillIcon,
   ImageOutlined as NoImageIcon,
   Edit as EditIcon,
+  AssignmentTurnedIn as OrdersSearchIcon,
 } from '@mui/icons-material';
 import axios from 'axios';
 import QuickDatePickerField from '../components/common/QuickDatePickerField';
@@ -80,6 +81,7 @@ import {
   uid, readLS, writeLS, resolvePriceForDealer, computeLineTotals, buildDealerLedger,
   fmtINR, canOverridePrice, isUuid, fetchAllPages, mapDealerFromApi, mapDealerToApi,
   saveInvoiceToBackend, cacheInvoice, syncWholesaleInvoices, newInvoiceNo, invoiceFromApi,
+  mapWholesaleProduct, NEW_DEALER_DEFAULTS,
 } from './wholesale/wholesaleConstants';
 import {
   NewDealerDialog, LedgerDialog, RecordPaymentDialog, DealerProfileDialog, PreviousOrdersDialog, BulkAddDialog,
@@ -90,6 +92,10 @@ import {
   zeroTaxLabel, lineMargin, priceChoices, taxBreakup, round2,
 } from '../utils/wholesalePricing';
 import { reconcileLocalInventory } from '../utils/inventoryCache';
+import SearchOrdersDialog from './wholesale/SearchOrdersDialog';
+import {
+  DOC_KINDS, STATUS_META, docFromApi, isOpenDoc, orderLineToCartLine, combineReservations,
+} from './wholesale/wholesaleOrders';
 import { useCanViewCost } from '../utils/costVisibility';
 
 // One "label: value" row used in the credit panel.
@@ -184,11 +190,6 @@ const editStateOf = (inv) => {
   };
 };
 
-const NEW_DEALER_DEFAULTS = {
-  code: '', name: '', contactPerson: '', phone: '', email: '', gstin: '', billingAddress: '', shippingAddress: '',
-  priceList: 'WHOLESALE', dealerDiscountPercent: 0, creditLimit: 100000, creditDays: 30, salesExec: 'Default Exec',
-};
-
 // FEFO-style expiry check: block adding/selling an already-expired line unless the user
 // is authorized to override (mirrors the price-override role gate).
 const isExpired = (dateStr) => Boolean(dateStr) && new Date(dateStr) < new Date(new Date().toDateString());
@@ -232,7 +233,17 @@ export default function WholesaleSales() {
   const [loadingEdit, setLoadingEdit] = useState(false);
   // Confirmed (non-draft) bills keep the payments already recorded against them.
   const paymentLocked = Boolean(editing && !editing.isDraft);
-  const heldFor = (id) => (editing?.heldUnits?.[id] || 0);
+  // The Wholesale Order / Quotation this bill is made from ({ kind, id, number }). Saved in the
+  // invoice details (linkedOrder / linkedQuotation) so the server closes it once billed
+  // (apps/sales/wholesale_orders.py) and re-opens it if the bill is cancelled.
+  const [linkedDoc, setLinkedDoc] = useState(null);
+  const [ordersSearchOpen, setOrdersSearchOpen] = useState(false);
+  const [loadingOrder, setLoadingOrder] = useState(false);
+  // Units held by OTHER open orders (wholesale + retail) — not free to sell from this bill.
+  const [reservedElsewhere, setReservedElsewhere] = useState({});
+  const [productsLoaded, setProductsLoaded] = useState(false);
+  // Live on-hand + what an edited invoice already holds − what other open orders reserve.
+  const heldFor = (id) => (editing?.heldUnits?.[id] || 0) - (reservedElsewhere[id] || 0);
 
   // Product entry row (Product / Lens / Services tabs) — search, pick, adjust, Add Item.
   const rootRef = useRef(null);
@@ -408,48 +419,6 @@ export default function WholesaleSales() {
   useEffect(() => {
     let cancelled = false;
 
-    const mapBackendProduct = (p) => {
-      const stock = parseInt(p.stock ?? p.quantity ?? 0) || 0;
-      // tax_rate is the numeric resolver output; 0 is a real (zero-tax) rate, only an
-      // unknown rate falls back to the 18% default slab.
-      const gstNum = parseTaxPercent(p.tax_rate, p.gst);
-      const tiers = productPriceTiers(p);
-      const extra = p.extra_data && typeof p.extra_data === 'object' ? p.extra_data : {};
-      return {
-        id: String(p.id),
-        code: p.product_code || p.sku || p.code || '',
-        sku: p.sku || p.product_code || '',
-        name: p.name || 'Unnamed',
-        brand: p.brand || 'Generic',
-        category: p.category || 'General',
-        modelNo: p.model_no || extra.model_no || extra.model || '—',
-        color: p.colour || p.color || extra.color || '—',
-        size: p.size || extra.size || '—',
-        power: p.power || extra.power || '—',
-        lensType: extra.lens_type || extra.lensType || '—',
-        cylinder: extra.cylinder || extra.cyl || '—',
-        axis: extra.axis || '—',
-        batch: extra.batch || extra.batch_number || '—',
-        availableStock: stock,
-        stock,
-        minStock: parseInt(p.minimum_stock ?? 5) || 5,
-        retailPrice: tiers.retailPrice,
-        // Base for the dealer-tier resolver: wholesale tier → MRP → retail sale price.
-        wholesalePrice: tiers.wholesaleBase,
-        wholesaleRate: tiers.wholesaleRate,
-        mrp: tiers.mrp,
-        costPrice: tiers.costPrice,
-        price: parseFloat(p.price || p.retail_price || 0) || 0,
-        gst: gstNum ?? 18,
-        taxInclusive: p.tax_treatment === 'INCLUSIVE',
-        taxCategory: p.tax_category || '',
-        unit: p.unit || 'Pcs',
-        barcode: p.barcode || '',
-        hsn: p.hsn_code || extra.hsn_code || '',
-        image: p.image || extra.image || '',
-      };
-    };
-
     const readLocalProducts = () => readLS(LS_KEYS.inventory, []);
 
     const syncInventory = async () => {
@@ -461,7 +430,7 @@ export default function WholesaleSales() {
         // Every page — the first page alone (20) left most products with stale stock here.
         const raw = await fetchAllPages(axios, '/api/products/products/');
         if (Array.isArray(raw)) {
-          backend = raw.map(mapBackendProduct);
+          backend = raw.map(mapWholesaleProduct);
           answered = true;
           reconcileLocalInventory(raw);
         }
@@ -473,12 +442,14 @@ export default function WholesaleSales() {
       // ids the server can't move stock for — those sales saved without touching inventory.
       if (answered) {
         setProducts(backend);
+        setProductsLoaded(true);
         return;
       }
 
       // Server unreachable: show the last cached copy. Never seed demo products — they were
       // written into the shared product cache and then offered by every picker.
       setProducts(local);
+      setProductsLoaded(true);
     };
 
     const loadWarehouses = async () => {
@@ -1129,6 +1100,7 @@ export default function WholesaleSales() {
     setSplitPayments([{ mode: 'Cash', amount: '' }]);
     setOrderStatus('Confirmed');
     setEditing(null);
+    setLinkedDoc(null);
   };
 
   const handleClearCart = () => {
@@ -1155,6 +1127,7 @@ export default function WholesaleSales() {
       salesRep,
       referenceNo,
       poNumber,
+      linkedDoc,
       heldAt: new Date().toLocaleTimeString(),
       totalAmount: summary.grandTotal,
     };
@@ -1174,6 +1147,7 @@ export default function WholesaleSales() {
     if (heldItem.salesRep) setSalesRep(heldItem.salesRep);
     setReferenceNo(heldItem.referenceNo || '');
     setPoNumber(heldItem.poNumber || '');
+    setLinkedDoc(heldItem.linkedDoc || null);
 
     const updatedHeld = heldInvoices.filter(h => h.id !== heldItem.id);
     setHeldInvoices(updatedHeld);
@@ -1417,11 +1391,96 @@ export default function WholesaleSales() {
     setSplitPayments(inv.splitPayments?.length ? inv.splitPayments : [{ mode: 'Cash', amount: '' }]);
     setAmountReceived(ed.isDraft ? '' : String(ed.originalPaid || ''));
     setEditing(ed);
+    setLinkedDoc(inv.linkedOrder?.id ? { kind: 'order', id: inv.linkedOrder.id, number: inv.linkedOrder.orderNumber }
+      : inv.linkedQuotation?.id ? { kind: 'quotation', id: inv.linkedQuotation.id, number: inv.linkedQuotation.quotationNumber } : null);
     setPrevOrdersOpen(false);
     setPrintModalOpen(false);
     showToast(ed.isDraft ? `Draft ${inv.invoiceNo} opened — complete it to bill it.` : `Editing ${inv.invoiceNo} — change lines, quantities or prices, then save with Ctrl+Enter.`, 'info');
     setTimeout(() => focusGrid(), 120);
   }
+
+  // Units reserved by open orders other than the one being billed (Stock Overview "Ordered").
+  const linkedOrderId = linkedDoc?.kind === 'order' ? linkedDoc.id : '';
+  useEffect(() => {
+    if (!productsLoaded) return undefined;
+    let cancelled = false;
+    axios.get(`${WHOLESALE_API}/orders/availability/`, { params: linkedOrderId ? { exclude: linkedOrderId } : {}, __silentError: true })
+      .then(({ data }) => { if (!cancelled) setReservedElsewhere(combineReservations(data)); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [linkedOrderId, invoicesVersion, productsLoaded]);
+
+  // Wholesale Orders → "Order to Sale" (?order=<id>), Quotations → "To Sale" (?quotation=<id>),
+  // or the POS "Search Orders" (F8) pick: read the document fresh, then fill the dealer and grid
+  // with its agreed lines. Billing it closes the order on the server.
+  async function loadDocIntoPos(ref, kind = 'order') {
+    const id = typeof ref === 'string' ? ref : ref?.id;
+    const meta = DOC_KINDS[kind];
+    if (!id || loadingOrder) return;
+    if (paymentLocked) { showToast(`Finish or cancel the edit of ${editing.invoiceNo} before loading an order.`, 'warning'); return; }
+    if (linkedDoc?.id === id) { setOrdersSearchOpen(false); showToast(`${linkedDoc.number} is already loaded in this bill.`, 'info'); return; }
+    const label = (typeof ref === 'object' && ref?.number) || `the selected ${meta.noun.toLowerCase()}`;
+    if (cartItems.length && !window.confirm(`Replace the current bill with ${label}?`)) return;
+    setLoadingOrder(true);
+    try {
+      let doc;
+      let reserved = {};
+      try {
+        const [docRes, availRes] = await Promise.all([
+          axios.get(`${WHOLESALE_API}/${meta.endpoint}/${id}/`, { __silentError: true }),
+          axios.get(`${WHOLESALE_API}/orders/availability/`, { params: kind === 'order' ? { exclude: id } : {}, __silentError: true }).catch(() => null),
+        ]);
+        doc = docFromApi(kind, docRes.data);
+        reserved = combineReservations(availRes?.data);
+      } catch (e) {
+        showToast(`Could not load the ${meta.noun.toLowerCase()} from the server — ${describeApiError(e, 'try again')}`, 'error');
+        return;
+      }
+      if (!isOpenDoc(doc)) {
+        const st = (STATUS_META[doc.status]?.label || doc.status || '').toLowerCase();
+        showToast(`${doc.number} is ${st}${doc.invoiceNumber ? ` (${doc.invoiceNumber})` : ''} — it can't be billed again.`, 'warning');
+        return;
+      }
+      if (!doc.items.length) { showToast(`${doc.number} has no items.`, 'warning'); return; }
+      let dealer = customers.find(c => String(c.id) === String(doc.dealerId));
+      if (!dealer) {
+        try {
+          const { data } = await axios.get(`${WHOLESALE_API}/dealers/${doc.dealerId}/`, { __silentError: true });
+          dealer = mapDealerFromApi(data);
+          setCustomers(prev => [dealer, ...prev.filter(c => String(c.id) !== String(dealer.id))]);
+        } catch (e) { dealer = null; }
+      }
+      if (!dealer) { showToast(`The dealer on ${doc.number} could not be loaded.`, 'error'); return; }
+      const missing = [];
+      const lines = doc.items.map((line) => {
+        if (isServiceLine(line)) return { ...line };
+        const live = products.find(p => p.id === String(line.id));
+        if (!live) missing.push(line.name);
+        const available = live ? Math.max(0, (parseFloat(live.availableStock ?? live.stock ?? 0) || 0) - (reserved[live.id] || 0)) : 0;
+        return orderLineToCartLine(line, live ? buildCartLine(live, parseFloat(line.qty) || 1) : null, available);
+      });
+      resetSaleForm();
+      handleSelectCustomer(dealer);
+      setReservedElsewhere(reserved);
+      setCartItems(lines);
+      setNotesState({ customer: doc.notes || '', internal: `From ${meta.noun} ${doc.number}` });
+      setLinkedDoc({ kind, id: doc.id, number: doc.number });
+      setOrdersSearchOpen(false);
+      showToast(missing.length
+        ? `${doc.number} loaded — ${missing.join(', ')} is no longer in the product list; check those lines.`
+        : `${meta.noun} ${doc.number} loaded for ${dealer.name} — review and complete the sale (Ctrl+Enter).`, missing.length ? 'warning' : 'success');
+      setTimeout(() => focusGrid(), 120);
+    } finally {
+      setLoadingOrder(false);
+    }
+  }
+
+  const unlinkDoc = () => {
+    if (!linkedDoc) return;
+    const n = linkedDoc.number;
+    setLinkedDoc(null);
+    showToast(`This bill is no longer linked to ${n} — it stays open in Wholesale ${linkedDoc.kind === 'order' ? 'Orders' : 'Quotations'}.`, 'info');
+  };
 
   const cancelEdit = () => {
     if (!editing) return;
@@ -1432,8 +1491,9 @@ export default function WholesaleSales() {
   };
 
   // While editing, keep each line's "available" figure = live stock + what this invoice holds.
+  // (Also outside edit mode: open orders' reservations change what this bill may take.)
   useEffect(() => {
-    if (!editing || !products.length) return;
+    if (!products.length) return;
     setCartItems(prev => {
       let changed = false;
       const next = prev.map(line => {
@@ -1448,7 +1508,7 @@ export default function WholesaleSales() {
       return changed ? next : prev;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [products, editing]);
+  }, [products, editing, reservedElsewhere]);
 
   // Deep links: ?edit=<invoice no> (Wholesale Reports → Edit Bill) and ?dealer=<id> (Dealers
   // master → New Sale). Read once the dealer list is in, then dropped from the URL.
@@ -1458,16 +1518,21 @@ export default function WholesaleSales() {
     const params = new URLSearchParams(location.search);
     const editNo = params.get('edit');
     const dealerId = params.get('dealer');
-    if (!editNo && !dealerId) return;
+    const orderId = params.get('order');
+    const quoteId = params.get('quotation');
+    if (!editNo && !dealerId && !orderId && !quoteId) return;
+    if ((orderId || quoteId) && !productsLoaded) return; // its lines need the live catalogue
     const key = location.search;
     if (deepLinkDoneRef.current === key) return;
     deepLinkDoneRef.current = key;
     navigate(location.pathname, { replace: true });
     if (editNo) { startEditInvoice(editNo, { preChecked: params.get('checked') === '1' }); return; }
+    if (orderId) { loadDocIntoPos(orderId, 'order'); return; }
+    if (quoteId) { loadDocIntoPos(quoteId, 'quotation'); return; }
     const d = customers.find(c => String(c.id) === dealerId);
     if (d && !editing) { handleSelectCustomer(d); setTimeout(() => focusSearch(), 60); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location.search, dealersLoading]);
+  }, [location.search, dealersLoading, productsLoaded]);
 
   // Ctrl+Enter / "Complete Wholesale Invoice": validate everything, then ask to confirm (the
   // confirm dialog also carries the credit-limit override). Never runs twice at once.
@@ -1548,6 +1613,9 @@ export default function WholesaleSales() {
       invoiceDiscount,
       // The typed charge rows, so an edit reopens them as entered (summary only has the totals).
       chargesList: chargesList.filter(c => parseFloat(c.amount) > 0),
+      // Server closes the order / quotation this bill was made from (sales.wholesale_orders).
+      ...(linkedDoc?.kind === 'order' ? { linkedOrder: { id: linkedDoc.id, orderNumber: linkedDoc.number } } : {}),
+      ...(linkedDoc?.kind === 'quotation' ? { linkedQuotation: { id: linkedDoc.id, quotationNumber: linkedDoc.number } } : {}),
     };
   }
 
@@ -1772,7 +1840,8 @@ export default function WholesaleSales() {
       });
     }
     resetSaleForm();
-    if (synced) showToast(`Wholesale Sale Completed! Invoice #${invoiceNo} posted.`, 'success');
+    const fromDoc = completedInvoice.linkedOrder?.orderNumber || completedInvoice.linkedQuotation?.quotationNumber;
+    if (synced) showToast(`Wholesale Sale Completed! Invoice #${invoiceNo} posted.${fromDoc ? ` ${fromDoc} is now billed.` : ''}`, 'success');
     else showToast(`Invoice #${invoiceNo} completed but saved on this device only — the server could not be reached; it will upload automatically.`, 'warning');
   }
 
@@ -2029,6 +2098,7 @@ export default function WholesaleSales() {
     },
     tabProduct: () => switchItemMode('product'),
     productSearch: () => focusSearch(),
+    searchOrders: () => setOrdersSearchOpen(true),
     grid: () => focusGrid(),
     bulkAdd: () => setBulkAddOpen(true),
     excelImport: () => setExcelImportOpen(true),
@@ -2129,7 +2199,7 @@ export default function WholesaleSales() {
   const detailLive = detailItem && !detailIsService
     ? (products.find(p => p.id === detailItem.id || (cellText(detailItem.code) && p.code === detailItem.code)) || detailItem)
     : null;
-  const detailStock = detailLive ? parseFloat(detailLive.availableStock ?? detailLive.stock ?? 0) : null;
+  const detailStock = detailLive ? (parseFloat(detailLive.availableStock ?? detailLive.stock ?? 0) || 0) + heldFor(detailLive.id) : null;
   const detailInBill = detailItem && !detailFromSearch ? (parseFloat(detailItem.qty) || 0) : (detailItem ? (cartItems.find(it => !it.isFreeGift && !isServiceLine(it) && it.id === detailItem.id)?.qty || 0) : 0);
 
   return (
@@ -2160,6 +2230,16 @@ export default function WholesaleSales() {
                 label={`${paymentLocked ? 'Editing' : 'Draft'} ${editing.invoiceNo}`} sx={{ fontWeight: 900, borderRadius: 1 }}
               />
             )}
+            {linkedDoc && (
+              <Tooltip title={paymentLocked ? 'Billed from this document' : 'Completing this bill marks it billed. Click × to bill without it (it stays open).'}>
+                <Chip
+                  icon={<OrdersSearchIcon sx={{ fontSize: 15 }} />} color="success" variant="outlined"
+                  label={`From ${linkedDoc.kind === 'order' ? 'Order' : 'Quotation'} ${linkedDoc.number}`}
+                  onDelete={paymentLocked ? undefined : unlinkDoc} sx={{ fontWeight: 900, borderRadius: 1 }}
+                />
+              </Tooltip>
+            )}
+            {(loadingOrder) && <CircularProgress size={18} />}
             {editing && (
               <Button variant="outlined" size="small" color="inherit" onClick={cancelEdit} sx={{ fontWeight: 800, textTransform: 'none', borderColor: '#cbd5e1' }}>
                 {paymentLocked ? 'Cancel Edit' : 'Close Draft'}
@@ -2480,6 +2560,13 @@ export default function WholesaleSales() {
           >
             New {itemMode === 'service' ? 'Service' : itemMode === 'lens' ? 'Lens' : 'Item'}
           </Button>
+          <Button
+            variant="outlined" startIcon={<OrdersSearchIcon />} id="ws-search-orders"
+            onClick={() => setOrdersSearchOpen(true)} disabled={paymentLocked}
+            sx={{ fontWeight: 900, py: 1.2, px: 2, borderRadius: 2, textTransform: 'none', fontSize: '0.8rem', whiteSpace: 'nowrap', flexShrink: 0, borderColor: NAVY, color: NAVY }}
+          >
+            Search Orders&nbsp;<Kbd>F8</Kbd>
+          </Button>
         </Box>
 
         {/* Selected item details */}
@@ -2578,7 +2665,7 @@ export default function WholesaleSales() {
               {showSearchResults && searchMatches.map((p, i) => {
                 const active = i === matchIndex;
                 const svc = itemMode === 'service';
-                const stock = svc ? null : parseFloat(p.availableStock ?? p.stock ?? 0);
+                const stock = svc ? null : (parseFloat(p.availableStock ?? p.stock ?? 0) || 0) + heldFor(p.id);
                 const price = svc ? (parseFloat(p.price) || 0) : priceForProduct(p).rate;
                 const tax = parseTaxPercent(p.gst) ?? 0;
                 const previewLine = pricedLine({ qty: 1, discount: 0, gst: tax }, price, Boolean(p.taxInclusive));
@@ -3322,6 +3409,11 @@ export default function WholesaleSales() {
         onNewSale={() => { setCompletionOpen(false); setSelectedCustomer(null); setTimeout(() => focusById('ws-dealer-search'), 120); }}
       />
       <ShortcutHelpDialog open={helpOpen} onClose={() => setHelpOpen(false)} />
+      <SearchOrdersDialog
+        open={ordersSearchOpen} dealer={selectedCustomer}
+        onClose={() => { setOrdersSearchOpen(false); setTimeout(() => focusSearch(), 60); }}
+        onPick={(doc) => loadDocIntoPos(doc, doc.kind)}
+      />
 
       {/* "New Item" — the Inventory product master (Lens mode on the Lens tab); the saved product
           lands in the live catalogue and is added to the bill automatically. */}

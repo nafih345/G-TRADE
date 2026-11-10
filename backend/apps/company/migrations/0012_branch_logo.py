@@ -3,6 +3,28 @@
 from django.db import migrations, models
 
 
+class AddFieldIfMissing(migrations.AddField):
+    """AddField that skips the DDL when the column already exists.
+
+    Some local databases already carry this column from an earlier,
+    since-renamed draft of this migration (0012_branch_logo_print_branding),
+    so a plain AddField fails with DuplicateColumn there.
+    """
+
+    def database_forwards(self, app_label, schema_editor, from_state, to_state):
+        model = to_state.apps.get_model(app_label, self.model_name)
+        table = model._meta.db_table
+        column = model._meta.get_field(self.name).column
+        with schema_editor.connection.cursor() as cursor:
+            existing = {
+                col.name
+                for col in schema_editor.connection.introspection.get_table_description(cursor, table)
+            }
+        if column in existing:
+            return
+        super().database_forwards(app_label, schema_editor, from_state, to_state)
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -10,7 +32,7 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
+        AddFieldIfMissing(
             model_name='branch',
             name='logo_data_url',
             field=models.TextField(blank=True, default=''),

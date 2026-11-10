@@ -33,6 +33,8 @@ DOC_TYPES = {
     'PURCHASE_BILL': ('Purchase bill', 'PINV-{YYYY}-', 4, 'Purchase → Purchase Entry'),
     'PURCHASE_ORDER': ('Purchase order', 'PO-{YYYY}-', 4, 'Purchase → Purchase Orders'),
     'LENS_PO': ('Lens purchase order', 'LPO-{YYYY}-', 4, 'Purchase → Lens Purchase Order'),
+    'WHOLESALE_ORDER': ('Wholesale order', 'WO-{YYYY}-', 4, 'Wholesale → Wholesale Orders'),
+    'WHOLESALE_QUOTATION': ('Wholesale quotation', 'WQ-{YYYY}-', 4, 'Wholesale → Quotations'),
     'SALES_BILL': ('Wholesale sales bill', 'WINV-', 5, None),
     'CREDIT_NOTE': ('Credit note', 'CN-', 4, None),
     'DEBIT_NOTE': ('Debit note', 'DN-', 4, None),

@@ -9,7 +9,8 @@
 // the database is the source of truth; optical_wholesale_invoices is a cache that also keeps
 // invoices saved while the server was unreachable (pendingSync) until they upload.
 
-import { fetchAllPages as fetchAllPagesShared } from '../../utils/fetchAllPages';
+import { fetchAllPages as fetchAllPagesShared } from '../../utils/fetchAllPages.js';
+import { parseTaxPercent, productPriceTiers } from '../../utils/wholesalePricing.js';
 
 export const WHOLESALE_API = '/api/sales/wholesale';
 
@@ -324,7 +325,8 @@ export function invoiceToApi(inv) {
   return {
     invoice_number: inv.invoiceNo,
     dealer: inv.customer?.id,
-    order_ref: inv.referenceNo || '',
+    // A bill made from a Wholesale Order carries its number (the server sets it too).
+    order_ref: inv.linkedOrder?.orderNumber || inv.referenceNo || '',
     invoice_date: inv.date,
     due_date: inv.dueDate || inv.date,
     grand_total: Number(inv.summary?.grandTotal || 0).toFixed(2),
@@ -431,4 +433,53 @@ export async function syncWholesaleInvoices(axios, dealers = []) {
     ? { ...x, attachments: localByNo[x.invoiceNo].attachments } : x));
   writeLS(LS_KEYS.invoices, withFiles);
   return withFiles;
+}
+
+export const NEW_DEALER_DEFAULTS = {
+  code: '', name: '', contactPerson: '', phone: '', email: '', gstin: '', billingAddress: '', shippingAddress: '',
+  priceList: 'WHOLESALE', dealerDiscountPercent: 0, creditLimit: 100000, creditDays: 30, salesExec: 'Default Exec',
+};
+
+// Backend Product row -> the catalogue item shape the Wholesale POS / Orders / Quotations use.
+// `availableStock` is the on-hand count; screens subtract open-order reservations themselves.
+export function mapWholesaleProduct(p) {
+  const stock = parseInt(p.stock ?? p.quantity ?? 0) || 0;
+  // tax_rate is the numeric resolver output; 0 is a real (zero-tax) rate, only an
+  // unknown rate falls back to the 18% default slab.
+  const gstNum = parseTaxPercent(p.tax_rate, p.gst);
+  const tiers = productPriceTiers(p);
+  const extra = p.extra_data && typeof p.extra_data === 'object' ? p.extra_data : {};
+  return {
+    id: String(p.id),
+    code: p.product_code || p.sku || p.code || '',
+    sku: p.sku || p.product_code || '',
+    name: p.name || 'Unnamed',
+    brand: p.brand || 'Generic',
+    category: p.category || 'General',
+    modelNo: p.model_no || extra.model_no || extra.model || '—',
+    color: p.colour || p.color || extra.color || '—',
+    size: p.size || extra.size || '—',
+    power: p.power || extra.power || '—',
+    lensType: extra.lens_type || extra.lensType || '—',
+    cylinder: extra.cylinder || extra.cyl || '—',
+    axis: extra.axis || '—',
+    batch: extra.batch || extra.batch_number || '—',
+    availableStock: stock,
+    stock,
+    minStock: parseInt(p.minimum_stock ?? 5) || 5,
+    retailPrice: tiers.retailPrice,
+    // Base for the dealer-tier resolver: wholesale tier → MRP → retail sale price.
+    wholesalePrice: tiers.wholesaleBase,
+    wholesaleRate: tiers.wholesaleRate,
+    mrp: tiers.mrp,
+    costPrice: tiers.costPrice,
+    price: parseFloat(p.price || p.retail_price || 0) || 0,
+    gst: gstNum ?? 18,
+    taxInclusive: p.tax_treatment === 'INCLUSIVE',
+    taxCategory: p.tax_category || '',
+    unit: p.unit || 'Pcs',
+    barcode: p.barcode || '',
+    hsn: p.hsn_code || extra.hsn_code || '',
+    image: p.image || extra.image || '',
+  };
 }

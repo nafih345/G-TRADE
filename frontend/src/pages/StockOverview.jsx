@@ -714,7 +714,7 @@ export default function StockOverview() {
         if (!life.ordered) return muted('0');
         return (
           <Box component="span" data-life-ordered={row.id}
-            title={`${formatQty(life.ordered)} held for open customer orders (not yet billed)${life.shortfall ? `\n${formatQty(life.shortfall)} not on the shelf yet` : ''}`}>
+            title={`${formatQty(life.ordered)} held for open orders (not yet billed)${life.ordered_wholesale ? `\n${formatQty(life.ordered_wholesale)} on Wholesale Orders · ${formatQty(life.ordered - life.ordered_wholesale)} on retail Orders` : ''}${life.shortfall ? `\n${formatQty(life.shortfall)} not on the shelf yet` : ''}`}>
             <Box component="span" sx={{ fontWeight: 800, color: '#b45309' }}>{formatQty(life.ordered)}</Box>
             {life.shortfall > 0 && (
               <Box sx={{ fontSize: 9.5, fontWeight: 700, color: 'error.main', whiteSpace: 'nowrap' }}>short {formatQty(life.shortfall)}</Box>

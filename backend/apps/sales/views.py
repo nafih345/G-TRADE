@@ -1586,15 +1586,43 @@ class WholesalePriceListSerializer(ModelSerializer):
         model = WholesalePriceList
         fields = '__all__'
 
-class WholesaleQuotationSerializer(ModelSerializer):
+class _WholesaleDocSerializer(ModelSerializer):
+    """Shared by Wholesale Orders / Quotations: line items live in `details.items` (the same
+    line shape as a Wholesale POS invoice), validated against the product master."""
+    dealer_name = serializers.CharField(source='dealer.business_name', read_only=True, default='')
+    dealer_code = serializers.CharField(source='dealer.dealer_code', read_only=True, default='')
+
+    def validate_details(self, value):
+        from .wholesale_orders import validate_items
+        if not isinstance(value, dict):
+            raise serializers.ValidationError('Must be an object.')
+        return {**value, 'items': validate_items(value.get('items') or [])}
+
+    def validate_dealer(self, value):
+        if value is not None and str(value.status or '').lower() in ('inactive', 'blocked'):
+            raise serializers.ValidationError(f'{value.business_name} is {value.status} - pick an active dealer.')
+        return value
+
+
+class WholesaleQuotationSerializer(_WholesaleDocSerializer):
+    quotation_number = serializers.CharField(read_only=True)
+    expiry_date = serializers.DateField(required=False)
+    date = serializers.DateField(required=False)
+
     class Meta:
         model = WholesaleQuotation
         fields = '__all__'
+        read_only_fields = ('status', 'converted_order_number', 'converted_invoice_number')
 
-class WholesaleOrderSerializer(ModelSerializer):
+class WholesaleOrderSerializer(_WholesaleDocSerializer):
+    order_number = serializers.CharField(read_only=True)
+    order_date = serializers.DateField(required=False)
+    invoice_number = serializers.CharField(source='invoice.invoice_number', read_only=True, default=None)
+
     class Meta:
         model = WholesaleOrder
         fields = '__all__'
+        read_only_fields = ('status', 'reserved_items', 'invoice', 'billed_at')
 
 class WholesaleDeliveryChallanSerializer(ModelSerializer):
     class Meta:
@@ -1682,15 +1710,127 @@ class WholesalePriceListViewSet(viewsets.ModelViewSet):
     serializer_class = WholesalePriceListSerializer
     permission_classes = [permissions.AllowAny]
 
+def _wholesale_doc_filters(qs, params, number_field, date_field):
+    status_q = (params.get('status') or '').strip().upper()
+    if status_q:
+        qs = qs.filter(status__in=[s for s in status_q.split(',') if s])
+    if params.get('dealer'):
+        qs = qs.filter(dealer_id=params['dealer'])
+    q = (params.get('search') or params.get('q') or '').strip()
+    if q:
+        qs = qs.filter(Q(**{f'{number_field}__icontains': q}) | Q(dealer__business_name__icontains=q)
+                       | Q(dealer__dealer_code__icontains=q) | Q(dealer__phone__icontains=q))
+    if params.get('date_from'):
+        qs = qs.filter(**{f'{date_field}__gte': params['date_from']})
+    if params.get('date_to'):
+        qs = qs.filter(**{f'{date_field}__lte': params['date_to']})
+    return qs
+
+
 class WholesaleQuotationViewSet(viewsets.ModelViewSet):
-    queryset = WholesaleQuotation.objects.all()
+    """Wholesale -> Quotations. Estimates only: they never reserve or move stock."""
+    queryset = WholesaleQuotation.objects.select_related('dealer').order_by('-date', '-created_at')
     serializer_class = WholesaleQuotationSerializer
     permission_classes = [permissions.AllowAny]
 
+    def get_queryset(self):
+        return _wholesale_doc_filters(super().get_queryset(), self.request.query_params, 'quotation_number', 'date')
+
+    def perform_create(self, serializer):
+        from datetime import timedelta
+        from .wholesale_orders import QUOTE_OPEN, issue_document_number
+        with transaction.atomic():
+            day = serializer.validated_data.get('date') or timezone.localdate()
+            serializer.save(
+                quotation_number=issue_document_number(WholesaleQuotation, 'quotation_number', 'WHOLESALE_QUOTATION', 'WQ-'),
+                date=day, expiry_date=serializer.validated_data.get('expiry_date') or day + timedelta(days=15),
+                status=QUOTE_OPEN)
+
+    def perform_update(self, serializer):
+        from .wholesale_orders import QUOTE_OPEN
+        if serializer.instance.status != QUOTE_OPEN:
+            raise serializers.ValidationError({'detail': (
+                f"Quotation {serializer.instance.quotation_number} was already converted or cancelled, so it can't be edited.")})
+        serializer.save()
+
+    @action(detail=True, methods=['post'], url_path='convert-to-order')
+    def convert_to_order(self, request, pk=None):
+        from .wholesale_orders import convert_quotation_to_order
+        order, created = convert_quotation_to_order(self.get_object())
+        return Response({'order': WholesaleOrderSerializer(order).data, 'created': created})
+
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        from .wholesale_orders import QUOTE_CANCELLED, QUOTE_OPEN
+        quote = self.get_object()
+        if quote.status != QUOTE_OPEN:
+            raise serializers.ValidationError({'detail': 'Only an open quotation can be cancelled.'})
+        quote.status = QUOTE_CANCELLED
+        quote.save(update_fields=['status', 'updated_at'])
+        return Response(self.get_serializer(quote).data)
+
+
 class WholesaleOrderViewSet(viewsets.ModelViewSet):
-    queryset = WholesaleOrder.objects.all()
+    """Wholesale -> Wholesale Orders. A CONFIRMED order reserves its units (Stock Overview
+    "Ordered"); the Wholesale POS invoice that bills it deducts them and marks it BILLED
+    (sales.wholesale_orders)."""
+    queryset = WholesaleOrder.objects.select_related('dealer', 'invoice').order_by('-order_date', '-created_at')
     serializer_class = WholesaleOrderSerializer
     permission_classes = [permissions.AllowAny]
+
+    def get_queryset(self):
+        return _wholesale_doc_filters(super().get_queryset(), self.request.query_params, 'order_number', 'order_date')
+
+    def perform_create(self, serializer):
+        from .wholesale_orders import ORDER_CONFIRMED, issue_document_number, sync_reservation
+        with transaction.atomic():
+            order = serializer.save(
+                order_number=issue_document_number(WholesaleOrder, 'order_number', 'WHOLESALE_ORDER', 'WO-'),
+                order_date=serializer.validated_data.get('order_date') or timezone.localdate(),
+                status=ORDER_CONFIRMED)
+            sync_reservation(order)
+
+    def perform_update(self, serializer):
+        from .wholesale_orders import ORDER_CONFIRMED, sync_reservation
+        with transaction.atomic():
+            locked = WholesaleOrder.objects.select_for_update().get(pk=serializer.instance.pk)
+            if locked.status != ORDER_CONFIRMED:
+                raise serializers.ValidationError({'detail': (
+                    f'Order {locked.order_number} is {locked.status.lower()} - only a confirmed order can be edited.')})
+            sync_reservation(serializer.save())
+
+    def _cancel(self, order):
+        from .wholesale_orders import ORDER_BILLED, ORDER_CANCELLED, sync_reservation
+        if order.status == ORDER_BILLED:
+            billed_on = order.invoice.invoice_number if order.invoice else 'an invoice'
+            raise serializers.ValidationError({'detail': (
+                f'Order {order.order_number} is billed on {billed_on} - cancel that invoice in the Wholesale POS instead.')})
+        order.status = ORDER_CANCELLED
+        order.save(update_fields=['status', 'updated_at'])
+        sync_reservation(order)
+        return order
+
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        with transaction.atomic():
+            order = self._cancel(WholesaleOrder.objects.select_for_update().get(pk=self.get_object().pk))
+        return Response(self.get_serializer(order).data)
+
+    def perform_destroy(self, instance):
+        with transaction.atomic():
+            order = self._cancel(WholesaleOrder.objects.select_for_update().get(pk=instance.pk))
+            order.delete()
+
+    @action(detail=False, methods=['get'])
+    def availability(self, request):
+        """Units reserved by open orders, per product: {'wholesale': {...}, 'retail': {...}}
+        (CONFIRMED wholesale orders / open retail sales Orders), for the "Available" figure on the
+        order and POS screens. ?exclude=<order id> leaves out the order being edited or billed."""
+        from apps.inventory.stock_lifecycle import open_reservations
+        from .wholesale_stock import is_uuid
+        exclude = request.query_params.get('exclude') or None
+        wholesale, retail = open_reservations(exclude_wholesale_order=exclude if is_uuid(exclude) else None)
+        return Response({'wholesale': wholesale, 'retail': retail})
 
 class WholesaleDeliveryChallanViewSet(viewsets.ModelViewSet):
     queryset = WholesaleDeliveryChallan.objects.all()
@@ -1714,9 +1854,13 @@ class WholesaleInvoiceViewSet(EditApprovalMixin, viewsets.ModelViewSet):
     # Every save deducts / restores stock to match the invoice (sales.wholesale_stock), in the
     # same transaction — a refused shortfall leaves neither the invoice nor the stock changed.
     def _sync_stock(self, invoice):
+        from .wholesale_orders import link_invoice_orders
         from .wholesale_stock import sync_wholesale_invoice_stock
         invoice = WholesaleInvoice.all_objects.select_for_update().get(pk=invoice.pk)
         sync_wholesale_invoice_stock(invoice, self.request, enforce_stock=self._enforce_stock())
+        # A bill made from a Wholesale Order closes it (and re-opens it if the bill is
+        # cancelled / drafted / deleted) in this same transaction.
+        link_invoice_orders(invoice)
 
     def _enforce_stock(self):
         from apps.billing.views import user_role
@@ -1739,6 +1883,8 @@ class WholesaleInvoiceViewSet(EditApprovalMixin, viewsets.ModelViewSet):
             invoice.is_deleted = True   # nothing held any more: restore it all
             from .wholesale_stock import sync_wholesale_invoice_stock
             sync_wholesale_invoice_stock(invoice, self.request, enforce_stock=False)
+            from .wholesale_orders import link_invoice_orders
+            link_invoice_orders(invoice)   # its order (if any) goes back to CONFIRMED
             invoice.delete()
 
     def get_queryset(self):

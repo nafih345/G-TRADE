@@ -609,6 +609,12 @@ class WholesaleQuotation(BaseUUIDModel):
     grand_total = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     status = models.CharField(max_length=20, default='Draft')
     terms = models.TextField(blank=True, null=True)
+    # The estimate as entered on Wholesale → Quotations: {'items': [...], 'summary': {...},
+    # 'dealer': {...snapshot}, 'notes': ''}. Quotations never reserve or move stock.
+    details = models.JSONField(default=dict, blank=True)
+    # Set when the quotation is turned into an order / billed (sales.wholesale_orders).
+    converted_order_number = models.CharField(max_length=50, blank=True, default='')
+    converted_invoice_number = models.CharField(max_length=50, blank=True, default='')
 
     class Meta:
         constraints = [
@@ -629,6 +635,16 @@ class WholesaleOrder(BaseUUIDModel):
     paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     status = models.CharField(max_length=30, default='Draft')
     payment_terms = models.CharField(max_length=50, default='Credit Net 30')
+    # Line items / dealer snapshot / summary as entered on Wholesale → Orders.
+    details = models.JSONField(default=dict, blank=True)
+    # {product_id: units} this order holds as "Ordered (Reserved)" stock — kept by
+    # sales.wholesale_orders on every save: the order's lines while CONFIRMED, {} once billed or
+    # cancelled. An order never moves Product.stock; the invoice that bills it does.
+    reserved_items = models.JSONField(default=dict, blank=True, editable=False)
+    # The Wholesale POS invoice that billed this order (status BILLED).
+    invoice = models.ForeignKey('WholesaleInvoice', on_delete=models.SET_NULL, null=True, blank=True,
+                                related_name='source_orders')
+    billed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         constraints = [

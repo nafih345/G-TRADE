@@ -4,7 +4,8 @@ For a set of products, where their units have gone over their whole life:
 
   purchased  units received on confirmed Purchase Entries (quantity + free quantity)
   ordered    units held by open customer Orders (sales Invoice rows with document_type ORDER that
-             are not drafts, cancelled or already delivered) — reserved, not yet sold
+             are not drafts, cancelled or already delivered) and by CONFIRMED Wholesale Orders
+             (WholesaleOrder.reserved_items, see sales.wholesale_orders) — reserved, not yet sold
   sold       units on completed sales: retail Invoices (document_type INVOICE, not draft or
              cancelled) + Wholesale invoices (what each one holds out of stock, stock_applied)
   on_hand    Product.stock — the physical count (an Order never moves it; only an Invoice does)
@@ -33,7 +34,7 @@ INACTIVE_DOC_STATUSES = ('DRAFT', 'CANCELLED')
 
 def _blank():
     return {'purchased': 0, 'purchase_value': Decimal('0'), 'ordered': 0, 'sold': 0,
-            'sold_retail': 0, 'sold_wholesale': 0}
+            'sold_retail': 0, 'sold_wholesale': 0, 'ordered_wholesale': 0}
 
 
 def _purchases(ids, out):
@@ -95,6 +96,33 @@ def _wholesale(ids, out):
                     continue
 
 
+def _wholesale_orders(ids, out):
+    """CONFIRMED Wholesale Orders: reserved, not yet billed (billing moves them to sold)."""
+    from apps.sales.wholesale_orders import reserved_by_product
+    by_str = {str(pk): pk for pk in ids}
+    for pid, units in reserved_by_product(list(by_str)).items():
+        out[by_str[pid]]['ordered'] += units
+        out[by_str[pid]]['ordered_wholesale'] += units
+
+
+def open_reservations(exclude_wholesale_order=None):
+    """({product_id: units} held by CONFIRMED wholesale orders, {product_id: units} held by open
+    retail Orders) — products with no open order are left out."""
+    from apps.sales.models import InvoiceItem
+    from apps.sales.wholesale_orders import reserved_by_product
+    wholesale = reserved_by_product(exclude_order=exclude_wholesale_order)
+    ids = list(InvoiceItem.objects
+               .filter(invoice__is_deleted=False, invoice__document_type='ORDER', product_id__isnull=False)
+               .exclude(invoice__status__in=INACTIVE_DOC_STATUSES)
+               .values_list('product_id', flat=True).distinct())
+    retail = {}
+    if ids:
+        out = defaultdict(_blank)
+        _sales_docs(ids, out)
+        retail = {str(pid): o['ordered'] for pid, o in out.items() if o['ordered']}
+    return wholesale, retail
+
+
 def lifecycle_for(products, *, view_cost=True):
     """{product pk: lifecycle dict} for an iterable of Product rows (one page of the grid)."""
     products = list(products)
@@ -105,6 +133,7 @@ def lifecycle_for(products, *, view_cost=True):
     _purchases(ids, out)
     _sales_docs(ids, out)
     _wholesale(ids, out)
+    _wholesale_orders(ids, out)
 
     result = {}
     for p in products:
@@ -118,6 +147,7 @@ def lifecycle_for(products, *, view_cost=True):
         result[p.pk] = {
             'purchased': purchased,
             'ordered': ordered,
+            'ordered_wholesale': o['ordered_wholesale'],
             'sold': sold,
             'sold_retail': o['sold_retail'],
             'sold_wholesale': o['sold_wholesale'],

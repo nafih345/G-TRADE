@@ -25,6 +25,7 @@ const SalesInvoice = lazy(() => import('./pages/SalesInvoice'));
 const WholesaleSales = lazy(() => import('./pages/WholesaleSales'));
 const WholesaleReports = lazy(() => import('./pages/WholesaleReports'));
 const WholesaleDealers = lazy(() => import('./pages/WholesaleDealers'));
+const WholesaleOrders = lazy(() => import('./pages/WholesaleOrders'));
 const AccountsCOA = lazy(() => import('./pages/AccountsCOA'));
 const AccountsVouchers = lazy(() => import('./pages/AccountsVouchers'));
 const AccountsProfitLoss = lazy(() => import('./pages/AccountsProfitLoss'));
@@ -250,8 +251,8 @@ function MainLayout() {
                 <Route path="/wholesale/dealers" element={<WholesaleDealers />} />
                 <Route path="/wholesale/customers" element={<WholesaleDealers />} />
                 <Route path="/wholesale/price-lists" element={<WholesaleSales />} />
-                <Route path="/wholesale/quotations" element={<WholesaleSales />} />
-                <Route path="/wholesale/orders" element={<WholesaleSales />} />
+                <Route path="/wholesale/quotations" element={<WholesaleOrders key="quotation" kind="quotation" />} />
+                <Route path="/wholesale/orders" element={<WholesaleOrders key="order" kind="order" />} />
                 <Route path="/wholesale/challans" element={<WholesaleSales />} />
                 <Route path="/wholesale/dispatch" element={<WholesaleSales />} />
                 <Route path="/wholesale/invoices" element={<WholesaleSales />} />
