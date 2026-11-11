@@ -1,3 +1,4 @@
+import { formatCurrency, formatNumber, getCurrencySymbol } from '../utils/localeFormat.js';
 // Barcode label designer — dynamic field catalog + value formatting.
 //
 // Mirrors backend/apps/products/label_fields.py (the API validates against that one;
@@ -75,7 +76,7 @@ const extraOf = (product, ...keys) => {
 // Positive amount as "1234.50"; '' when missing or zero (₹0.00 on a shelf tag would mislead).
 export const money = (v) => {
   if (v === undefined || v === null || v === '') return '';
-  const n = parseFloat(String(v).replace(/[₹,\s]/g, ''));
+  const n = parseFloat(String(v).replace(/[^0-9.\-]/g, ''));
   return Number.isFinite(n) && n > 0 ? n.toFixed(2) : '';
 };
 
@@ -125,9 +126,8 @@ export function todayIso(now = new Date()) {
 export function formatPrice(value, format = 'currency') {
   const n = parseFloat(value);
   if (!Number.isFinite(n)) return '';
-  if (format === 'currency0') return `₹${Math.round(n).toLocaleString('en-IN')}`;
-  const fixed = n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return format === 'number' ? fixed : `₹${fixed}`;
+  if (format === 'currency0') return formatCurrency(Math.round(n), { decimals: 0 });
+  return format === 'number' ? formatNumber(n, 2) : formatCurrency(n);
 }
 
 // Raw value of one field for one label. `data` = { fields, store, job }.
@@ -156,7 +156,10 @@ export function formatFieldValue(fieldId, raw, priceFormat = 'currency') {
 // Returns { text, hidden, missing } — `missing` = no real value (even if a fallback filled it).
 export function resolveFieldElement(el, data) {
   const raw = rawFieldValue(el.field, data);
-  const withAffixes = (v) => `${el.prefix || ''}${v}${el.suffix || ''}`;
+  // A '₹' in a prefix / suffix (the shipped presets print "₹ 1,200") stands for the store's
+  // currency, so labels follow Settings → Business & Localization.
+  const cur = (t) => String(t || '').replace(/₹/g, getCurrencySymbol());
+  const withAffixes = (v) => `${cur(el.prefix)}${v}${cur(el.suffix)}`;
   if (raw) {
     return { text: withAffixes(formatFieldValue(el.field, raw, el.priceFormat)), hidden: false, missing: false };
   }

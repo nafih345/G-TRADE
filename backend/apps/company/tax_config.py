@@ -16,7 +16,7 @@ from rest_framework import status
 from rest_framework.response import Response
 
 from apps.masters.models import Tax
-from .localization import OpenReadsSettingsView, audit
+from .localization import OpenReadsSettingsView, audit, get_preference, tax_terms
 
 TAX_TYPES = {k for k, _ in Tax.TAX_TYPES}
 TREATMENTS = {k for k, _ in Tax.TREATMENTS}
@@ -102,6 +102,15 @@ def _bad(errors):
                     status=status.HTTP_400_BAD_REQUEST)
 
 
+def _tax_disabled_response():
+    """409 while the Tax Configuration master switch is off — no rates can be added or edited."""
+    if get_preference('tax_enabled'):
+        return None
+    label = tax_terms(get_preference('country'))['label']
+    return Response({'detail': f'{label} is turned off. Switch on "Enable {label}" in Tax Configuration first.'},
+                    status=status.HTTP_409_CONFLICT)
+
+
 def _clear_other_defaults(tax):
     if tax.is_default:
         Tax.objects.filter(is_default=True).exclude(pk=tax.pk).update(is_default=False)
@@ -112,6 +121,9 @@ class TaxConfigListView(OpenReadsSettingsView):
         return Response([serialize(t) for t in _queryset().order_by('-is_active', 'rate', 'name')])
 
     def post(self, request):
+        blocked = _tax_disabled_response()
+        if blocked:
+            return blocked
         data = request.data if isinstance(request.data, dict) else {}
         clean, errors = validate(data)
         if errors:
@@ -129,6 +141,9 @@ class TaxConfigDetailView(OpenReadsSettingsView):
         return _queryset().filter(pk=pk).first()
 
     def put(self, request, pk):
+        blocked = _tax_disabled_response()
+        if blocked:
+            return blocked
         tax = self._get(pk)
         if tax is None:
             return Response({'detail': 'Tax not found.'}, status=status.HTTP_404_NOT_FOUND)
@@ -148,6 +163,9 @@ class TaxConfigDetailView(OpenReadsSettingsView):
         return Response(serialize(self._get(tax.pk)))
 
     def delete(self, request, pk):
+        blocked = _tax_disabled_response()
+        if blocked:
+            return blocked
         tax = self._get(pk)
         if tax is None:
             return Response({'detail': 'Tax not found.'}, status=status.HTTP_404_NOT_FOUND)

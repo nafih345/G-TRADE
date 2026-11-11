@@ -25,6 +25,7 @@
 //   return   {reason, originalInvoice, action}
 //   footer   {notes, terms}  (legacy renderer)
 import { canonicalDocType } from './billFields.js';
+import { getCurrencySymbol } from '../utils/localeFormat.js';
 import { qtyLabel, unitWord } from '../utils/lensUnits.js';
 import { purchaseGroupTotals } from '../utils/purchaseGroups.js';
 
@@ -89,7 +90,7 @@ const FALLBACK_COMPANY = {
   pan: '',
   logoDataUrl: '',
   logoAlign: '',
-  currency: '₹',
+  currency: '',
   bankDetails: '',
   upiId: '',
 };
@@ -604,7 +605,11 @@ export function toBillModel(rawDoc, documentType = 'SALES_INVOICE', ctx = {}) {
   const adapter = ADAPTERS[type] || adaptSalesLike;
   const model = adapter(rawDoc || {}, type);
   model.company = resolveCompany(ctx);
-  model.company.currency = model.company.currency || '₹';
+  // The store's symbol; a rupee left on the profile after the base currency moved off INR is
+  // stale, so the live Business & Localization symbol wins then.
+  const live = getCurrencySymbol();
+  const stored = model.company.currency;
+  model.company.currency = !stored || (stored === '₹' && live !== '₹') ? live : stored;
   model.payment.bankDetails = model.company.bankDetails || '';
   model.payment.upiId = model.company.upiId || '';
   if (ctx.user && !model.document.preparedBy) model.document.preparedBy = ctx.user;

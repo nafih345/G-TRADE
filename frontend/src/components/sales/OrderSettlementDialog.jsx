@@ -6,6 +6,8 @@ import {
 import { Payments as PaymentsIcon } from '@mui/icons-material';
 import PaymentModeDetails from '../common/PaymentModeDetails';
 import { needsBank } from '../../utils/paymentModes';
+import { formatCurrency } from '../../utils/localeFormat.js';
+import CurrencySymbol from '../common/CurrencySymbol.jsx';
 
 // Pay modes offered at delivery: `apiKey` is the balance_receipts key the server expects
 // (InvoiceViewSet._balance_receipts), `label` the receipt's method.
@@ -18,7 +20,7 @@ export const SETTLE_MODES = [
 
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const amt = (v) => Math.max(0, r2(parseFloat(v) || 0));
-const money = (n) => `₹${r2(n).toFixed(2)}`;
+const money = (n) => `${formatCurrency(r2(n))}`;
 const cleanAmount = (raw) => {
   const s = String(raw ?? '').replace(/[^\d.]/g, '');
   const dot = s.indexOf('.');
@@ -147,7 +149,7 @@ export default function OrderSettlementDialog({
                       onChange={(e) => setAmounts(a => ({ ...a, [m.apiKey]: cleanAmount(e.target.value) }))}
                       onFocus={(e) => e.target.select()}
                       InputProps={{
-                        startAdornment: <InputAdornment position="start">₹</InputAdornment>,
+                        startAdornment: <InputAdornment position="start"><CurrencySymbol /></InputAdornment>,
                         endAdornment: (
                           <InputAdornment position="end">
                             <Button

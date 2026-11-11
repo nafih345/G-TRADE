@@ -345,9 +345,16 @@ function installKeepAwake() {
   // The ping only has to reach the web process, so it uses the database-free liveness route.
   // It used to run the full /api/health/ (~10 queries), which also stopped Neon from ever
   // suspending while a tab was open. A full health check still runs whenever traffic fails.
+  // Signed-in users keep it awake even from a background tab: switching to another window for
+  // 15+ minutes used to let Render sleep, so the next click waited ~45 s for a cold start.
+  // (Browsers still run a 1-minute timer in hidden tabs.) Signed-out hidden tabs don't ping.
+  const signedIn = () => {
+    try { return Boolean(localStorage.getItem('access_token') || localStorage.getItem('token') || localStorage.getItem('user_profile')); } catch { return false; }
+  };
   let lastPingAt = Date.now();
   const pingIfDue = () => {
-    if (document.visibilityState !== 'visible' || isOffline()) return;
+    if (isOffline()) return;
+    if (document.visibilityState !== 'visible' && !signedIn()) return;
     if (Date.now() - Math.max(lastPingAt, lastProbeAt, lastTrafficAt) < KEEP_AWAKE_INTERVAL_MS) return;
     lastPingAt = Date.now();
     axios.get('/api/health/live/', { baseURL: primaryBaseUrl || undefined, timeout: 90000, __noFallback: true, __silentError: true })

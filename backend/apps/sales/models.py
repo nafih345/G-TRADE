@@ -740,3 +740,42 @@ class WholesaleReturn(BaseUUIDModel):
         return f"Return {self.return_number} - {self.dealer.business_name}"
 
 
+
+
+# ---------------------------------------------------------------------------------------------
+# Sales Return (Sales → Sales Return). Retail customer returns: goods come back into stock, the
+# value is refunded (Cash / GPay / Bank) or left on the customer's account (Credit), and the
+# accounting engine books it (posting_rules.build_sales_return). See apps/inventory/returns.py.
+# ---------------------------------------------------------------------------------------------
+from apps.inventory.return_models import ReturnDocumentBase, ReturnLineBase  # noqa: E402
+
+
+class SalesReturn(ReturnDocumentBase):
+    # Null for a manual return (products picked without the original bill).
+    original_invoice = models.ForeignKey(Invoice, on_delete=models.SET_NULL, null=True, blank=True,
+                                         related_name='sales_returns')
+    original_invoice_number = models.CharField(max_length=50, blank=True, default='')
+    customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True,
+                                 related_name='sales_returns')
+    customer_name = models.CharField(max_length=150, blank=True, default='')
+    customer_phone = models.CharField(max_length=20, blank=True, default='')
+
+    class Meta(ReturnDocumentBase.Meta):
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'return_number'], name='sales_salesreturn_number_tenant'),
+        ]
+
+    def __str__(self):
+        return f"Sales Return {self.return_number}"
+
+
+class SalesReturnItem(ReturnLineBase):
+    sales_return = models.ForeignKey(SalesReturn, on_delete=models.CASCADE, related_name='items')
+    original_item = models.ForeignKey(InvoiceItem, on_delete=models.SET_NULL, null=True, blank=True,
+                                      related_name='return_lines')
+
+    class Meta(ReturnLineBase.Meta):
+        pass
+
+    def __str__(self):
+        return f"{self.description} × {self.return_qty}"

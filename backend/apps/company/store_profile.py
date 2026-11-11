@@ -204,10 +204,13 @@ def validate_profile(data, current, partial):
         clean['store_type'] = st
 
     if touched('gstin'):
-        g = re.sub(r'\s', '', str(merged.get('gstin') or '')).upper()
-        if g and not GSTIN_RE.match(g):
-            err('gstin', 'GSTIN must be 15 characters, e.g. 32ABCDE1234F1Z5.')
-        clean['gstin'] = g
+        # The tax registration number (GSTIN / TRN / VAT No …) — format rules follow the country
+        # set in Business & Localization, not just India's GSTIN.
+        from .localization import clean_tax_registration, get_preference
+        try:
+            clean['gstin'] = clean_tax_registration(merged.get('gstin'), get_preference('country'))
+        except ValueError as exc:
+            err('gstin', str(exc))
 
     for field, required in (('phone', True), ('whatsapp', False)):
         if touched(field) or (field == 'phone' and touched('country')):

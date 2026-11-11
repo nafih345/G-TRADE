@@ -38,6 +38,8 @@ REGISTRY = {
     'sales.wholesale_invoice': ('sales.WholesaleInvoice', rules.build_wholesale_invoice, 'invoice_date', 'invoice_number'),
     'sales.wholesale_collection': ('sales.WholesalePaymentCollection', rules.build_wholesale_collection, 'payment_date', 'receipt_number'),
     'sales.wholesale_return': ('sales.WholesaleReturn', rules.build_wholesale_return, 'return_date', 'return_number'),
+    'sales.sales_return': ('sales.SalesReturn', rules.build_sales_return, 'return_date', 'return_number'),
+    'purchasing.purchase_return': ('purchasing.PurchaseReturn', rules.build_purchase_return, 'return_date', 'return_number'),
     'purchasing.purchase_invoice': ('purchasing.PurchaseInvoice', rules.build_purchase_invoice, 'purchase_date', 'invoice_number'),
     'purchasing.purchase_payment': ('purchasing.PurchaseInvoice', rules.build_purchase_payment, 'purchase_date', 'invoice_number'),
     'purchasing.purchase_order': ('purchasing.PurchaseOrder', rules.build_purchase_order, 'order_date', 'order_number'),

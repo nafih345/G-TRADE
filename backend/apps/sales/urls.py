@@ -15,6 +15,9 @@ router.register('appointments', AppointmentViewSet)
 router.register('invoices', InvoiceViewSet)
 router.register('payments', PaymentViewSet)
 router.register('services', ServiceViewSet)
+# Sales → Sales Return (apps/inventory/returns.py)
+from apps.inventory.returns import SalesReturnViewSet  # noqa: E402
+router.register('returns', SalesReturnViewSet, basename='sales-return')
 
 # Wholesale endpoints
 router.register('wholesale/customers', DealerViewSet, basename='wholesale-customer')

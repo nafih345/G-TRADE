@@ -21,8 +21,9 @@ purchases and sales use — so BranchStock, Product.stock and the StockLedger st
 
 List filters: q (words; each must match some identifying field), code (exact scan), brand,
 category, rack, supplier (Supplier id), variant_group, status (in|low|out), import_batch,
-source (alias source_type: ALL|OPENING_STOCK|EXCEL_IMPORT|PURCHASE — Product.stock_source; PURCHASE
-means regular stock, i.e. neither of the other two), ordering.
+source (alias source_type: ALL|OPENING_STOCK|EXCEL_IMPORT|PURCHASE|RETURN — Product.stock_source; PURCHASE
+means regular stock, i.e. neither of the other two; RETURN = products with live Sales / Purchase
+Return lines, each row carrying returns {sales, purchase} units), ordering.
 
 An Excel import never writes over an existing product's stock (see apps.products.import_engine).
 The sheet's quantity waits on its ImportPreviewRow; the import review applies it as an ordinary
@@ -158,6 +159,25 @@ SOURCE_FILTERS = {
 SOURCE_FILTERS['REGULAR'] = SOURCE_FILTERS['PURCHASE']
 
 
+def return_stock_q():
+    """Products with stock that came back through a live Sales Return or went out on a live
+    Purchase Return (the "Return Stock" switch). Built per call: the return models live in the
+    sales / purchasing apps, which import this app."""
+    from apps.purchasing.models import PurchaseReturnItem
+    from apps.sales.models import SalesReturnItem
+    sales = (SalesReturnItem.objects.filter(product=OuterRef('pk'), sales_return__is_deleted=False)
+             .exclude(sales_return__status='CANCELLED'))
+    purchase = (PurchaseReturnItem.objects.filter(product=OuterRef('pk'), purchase_return__is_deleted=False)
+                .exclude(purchase_return__status='CANCELLED'))
+    return Q(Exists(sales)) | Q(Exists(purchase))
+
+
+def source_q(source):
+    if source == 'RETURN':
+        return return_stock_q()
+    return SOURCE_FILTERS.get(source)
+
+
 def _last_purchase_items():
     return (PurchaseInvoiceItem.objects
             .filter(product=OuterRef('pk'), purchase_invoice__is_deleted=False)
@@ -239,9 +259,9 @@ def apply_filters(qs, params, *, skip_source=False):
                     | Q(category_id__in=[o['category'] for o in live if o['scope'] == 'CATEGORY']))
         qs = qs.filter(on_offer) if offer in ('1', 'true', 'on') else qs.exclude(on_offer)
     if not skip_source:
-        source = source_param(params)
-        if source in SOURCE_FILTERS:
-            qs = qs.filter(SOURCE_FILTERS[source])
+        q = source_q(source_param(params))
+        if q is not None:
+            qs = qs.filter(q)
     return qs
 
 
@@ -486,9 +506,19 @@ HISTORY_TYPE_FILTERS = {
     'SALE': lambda: Q(Exists(_sales_invoice_model().all_objects.filter(pk=OuterRef('reference_id')))),
     'ADJUSTMENT': lambda: Q(transaction_type__in=['ADJ_ADD', 'ADJ_SUB']),
     'TRANSFER': lambda: Q(transaction_type='TRANSFER'),
+    'RETURN': lambda: Q(source_type__in=['SALES_RETURN', 'PURCHASE_RETURN']),
     'IN': lambda: Q(quantity__gt=0),
     'OUT': lambda: Q(quantity__lt=0),
 }
+
+
+def _return_docs(refs):
+    if not refs:
+        return {}, {}
+    from apps.purchasing.models import PurchaseReturn
+    from apps.sales.models import SalesReturn
+    return ({x.pk: x for x in SalesReturn.all_objects.filter(pk__in=refs)},
+            {x.pk: x for x in PurchaseReturn.all_objects.filter(pk__in=refs).select_related('supplier')})
 
 
 def _sales_invoice_model():
@@ -502,6 +532,7 @@ def describe_ledger_rows(rows, product):
     orders = {o.pk: o for o in PurchaseOrder.all_objects.filter(pk__in=refs).select_related('supplier')} if refs else {}
     sales = {i.pk: i for i in _sales_invoice_model().all_objects.filter(pk__in=refs)} if refs else {}
     adjustments = {a.pk: a for a in StockAdjustment.all_objects.filter(pk__in=refs)} if refs else {}
+    sales_returns, purchase_returns = _return_docs(refs)
     costs = {}
     if purchases:
         for inv_id, rate in (PurchaseInvoiceItem.all_objects
@@ -515,7 +546,17 @@ def describe_ledger_rows(rows, product):
         kind, party, ref_no, remarks, cost = 'Movement', '', r.reference_number or '', r.notes or '', r.unit_cost
         before = (r.balance_after - qty) if r.balance_after is not None else None
         after = r.balance_after
-        if r.reference_id in purchases:
+        if r.reference_id in sales_returns:
+            sr = sales_returns[r.reference_id]
+            kind, party, ref_no = 'Sales Return', sr.customer_name or '', ref_no or sr.return_number
+            remarks = sr.general_remarks or remarks
+        elif r.reference_id in purchase_returns:
+            pr = purchase_returns[r.reference_id]
+            kind, party, ref_no = 'Purchase Return', pr.supplier.name if pr.supplier_id else '', ref_no or pr.return_number
+            remarks = pr.general_remarks or remarks
+        elif r.source_type in ('SALES_RETURN', 'PURCHASE_RETURN'):
+            kind = ('Sales Return' if r.source_type == 'SALES_RETURN' else 'Purchase Return') + ' Cancelled'
+        elif r.reference_id in purchases:
             p = purchases[r.reference_id]
             kind, party, ref_no = 'Purchase Entry', p.supplier.name if p.supplier_id else '', ref_no or p.invoice_number
             cost = cost if cost is not None else costs.get(p.pk)
@@ -649,11 +690,20 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
         )
         # Per-source counts under every other filter, for the source switch's badges.
         src = (apply_filters(Product.objects.filter(is_active=True), request.query_params, skip_source=True)
-               .aggregate(ALL=Count('id'), **{k: Count('id', filter=SOURCE_FILTERS[k])
-                                              for k in ('OPENING_STOCK', 'EXCEL_IMPORT', 'PURCHASE')}))
+               .aggregate(ALL=Count('id'), **{k: Count('id', filter=source_q(k))
+                                              for k in ('OPENING_STOCK', 'EXCEL_IMPORT', 'PURCHASE', 'RETURN')}))
         caps = self._caps()
+        # Return Stock totals for the badge: every product when unfiltered, else the filtered set.
+        filtered_ids = None
+        if any(request.query_params.get(k) for k in request.query_params):
+            filtered_ids = list(apply_filters(Product.objects.filter(is_active=True), request.query_params)
+                                .values_list('pk', flat=True)[:20000])
+        from .returns import return_stock_by_product
+        ret = return_stock_by_product(filtered_ids)
         body = {
             'source_counts': src,
+            'return_stock': {'sales': sum(v['sales'] for v in ret.values()),
+                             'purchase': sum(v['purchase'] for v in ret.values())},
             'total_products': agg['total_products'],
             'total_quantity': int(agg['total_quantity'] or 0),
             'low_stock': agg['low_stock'],
@@ -715,7 +765,8 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
         ('avg_purchase_cost', 'Avg Purchase Cost'), ('purchase_value', 'Total Purchase Cost'), ('retail_price', 'Selling Price'),
         ('mrp', 'MRP'), ('supplier_name', 'Supplier'), ('last_purchase_date', 'Last Purchase Date'),
         ('source_label', 'Stock Source'), ('offer_price', 'Offer Price'), ('offer_status', 'Offer Qty / Status'),
-        ('stock_value', 'Stock Value'),
+        ('stock_value', 'Stock Value'), ('sales_return_qty', 'Sales Return Stock (In)'),
+        ('purchase_return_qty', 'Purchase Return Stock (Out)'),
     ]
     SOURCE_LABELS = {'OPENING_STOCK': 'Opening Stock', 'EXCEL_IMPORT': 'Excel Import'}
     STATUS_LABELS = {'in': 'In Stock', 'low': 'Low Stock', 'out': 'Out of Stock'}
@@ -750,6 +801,9 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
                 for key in ('purchased', 'ordered', 'sold', 'available', 'avg_purchase_cost', 'purchase_value'):
                     r[key] = life.get(key)
                 r['other_movements'] = life.get('other')
+                ret = r.get('returns') or {}
+                r['sales_return_qty'] = ret.get('sales', 0)
+                r['purchase_return_qty'] = ret.get('purchase', 0)
                 o = r['offer']
                 r['offer_price'] = o['offer_price'] if o else None
                 r['offer_status'] = offer_status_text(o)

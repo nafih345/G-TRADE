@@ -15,6 +15,7 @@ import { newClientToken, saveOpeningStock, validateOpeningRows } from '../../pur
 import { apiErrorMessage } from '../../../utils/apiError';
 import { notify } from '../../../utils/notify';
 import { OPENING_FIELDS, ROW_STATUS, lineValue, money, resultMessages, totals } from './openingStockFields';
+import { getCurrencySymbol } from '../../../utils/localeFormat.js';
 
 const DRAFT_KEY = 'opening_stock_manual_draft';
 let seq = 0;
@@ -164,7 +165,7 @@ export default function OpeningStockManualGrid({ facets, canSave, onSaved }) {
                   {f.label}{f.required && <Box component="span" sx={{ color: 'error.main' }}> *</Box>}
                 </TableCell>
               ))}
-              <TableCell sx={{ ...cellSx, fontWeight: 800, width: 110 }} align="right">Value ₹</TableCell>
+              <TableCell sx={{ ...cellSx, fontWeight: 800, width: 110 }} align="right">Value {getCurrencySymbol()}</TableCell>
               <TableCell sx={{ ...cellSx, width: 80, fontWeight: 800 }}>Check</TableCell>
               <TableCell sx={{ width: 40 }} />
             </TableRow>

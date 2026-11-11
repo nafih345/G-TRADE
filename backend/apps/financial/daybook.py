@@ -53,6 +53,7 @@ KIND_LABELS = OrderedDict([
     ('EYE_TEST_FEE', 'Eye Test Fee'),
     ('WHOLESALE_COLLECTION', 'Wholesale Collection'),
     ('SALES_RETURN', 'Sales Return'),
+    ('PURCHASE_RETURN', 'Purchase Return'),
     ('PURCHASE', 'Purchase'),
     ('PURCHASE_PAYMENT', 'Purchase Payment'),
     ('STOCK', 'Stock Adjustment'),
@@ -178,7 +179,8 @@ def _kind(primary, entries, money_in, money_out, look):
             return 'ADVANCE' if p and p['invoice_id'] else 'RECEIPT'
         return 'RECEIPT'
     simple = {'sales.eye_test_fee': 'EYE_TEST_FEE', 'sales.wholesale_collection': 'WHOLESALE_COLLECTION',
-              'sales.wholesale_return': 'SALES_RETURN', 'purchasing.purchase_payment': 'PURCHASE_PAYMENT',
+              'sales.wholesale_return': 'SALES_RETURN', 'sales.sales_return': 'SALES_RETURN',
+              'purchasing.purchase_return': 'PURCHASE_RETURN', 'purchasing.purchase_payment': 'PURCHASE_PAYMENT',
               'inventory.stock_adjustment': 'STOCK'}
     if key in simple:
         return simple[key]

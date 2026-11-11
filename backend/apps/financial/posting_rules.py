@@ -251,6 +251,105 @@ def build_wholesale_return(ret, previous=None):
 
 
 # ---------------------------------------------------------------------------
+# Sales Return / Purchase Return (sales.SalesReturn / purchasing.PurchaseReturn)
+# ---------------------------------------------------------------------------
+
+_RETURN_MODE_MEMOS = {'CASH': 'Cash', 'GPAY': 'GPay (UPI)', 'BANK': 'Bank Transfer'}
+_RETURN_MODE_ROLES = {'CASH': 'CASH', 'GPAY': 'PAYMENT_UPI', 'BANK': 'BANK'}
+
+
+def _return_is_live(ret):
+    return not ret.is_deleted and ret.status != 'CANCELLED'
+
+
+def _return_settlement_lines(ret, *, money_debit, credit_kwargs, credit_memo):
+    """One line per settlement row: money rows hit Cash or the picked bank's ledger (so they show
+    in the Cash Book / that Bank Book), Credit rows hit the party's receivable / payable.
+    money_debit: True when money comes IN (purchase return), False when it goes out (sales return)."""
+    from .models import ChartOfAccount
+    lines = []
+    for s in ret.settlements or []:
+        amount = money(s.get('amount'))
+        if amount <= 0:
+            continue
+        mode = str(s.get('mode') or '').upper()
+        if mode == 'CREDIT':
+            kwargs, memo = credit_kwargs, credit_memo
+        else:
+            bank = ChartOfAccount.all_objects.filter(pk=s['bank_account']).first() if s.get('bank_account') else None
+            kwargs = bank_line_kwargs(_RETURN_MODE_ROLES.get(mode, 'CASH'), bank)
+            memo = _RETURN_MODE_MEMOS.get(mode, mode.title() or 'Cash')
+            if s.get('reference'):
+                memo = f"{memo} {s['reference']}"
+        if money_debit:
+            lines.append(_line(debit=amount, memo=memo, **kwargs))
+        else:
+            lines.append(_line(credit=amount, memo=memo, **kwargs))
+    return lines
+
+
+def _return_reason_memo(ret, default):
+    from apps.inventory.returns_catalog import REASON_LABELS
+    reasons = sorted({REASON_LABELS.get(i.return_reason_category, i.return_reason_category) for i in ret.items.all()})
+    return f"{default}: {', '.join(reasons)}"[:255] if reasons else default
+
+
+def build_sales_return(ret, previous=None):
+    """Customer return: the sale's revenue and output tax are reversed (Dr Sales returns + GST
+    output), the money goes back out of Cash / the selected bank — or stays on the customer's
+    account as a credit (Cr Customer receivable). The restocked goods come back into Inventory at
+    the cost recorded on the return (Dr Inventory / Cr COGS)."""
+    total = money(ret.total_amount)
+    if not _return_is_live(ret) or total <= 0:
+        return None
+    tax = min(money(ret.tax_amount), total)
+    who = ret.customer_name or 'customer'
+    lines = [_line('SALES_RETURNS', debit=total - tax, memo=_return_reason_memo(ret, 'Sales return'))]
+    if tax > 0:
+        lines.append(_line('GST_OUTPUT', debit=tax, memo='Output GST reversed'))
+    lines += _return_settlement_lines(ret, money_debit=False, credit_kwargs={'role': 'RETAIL_RECEIVABLE'},
+                                      credit_memo=f"Credit note to {who}")
+    cost = ZERO
+    for it in ret.items.all():
+        if it.product_id and it.stock_qty:
+            cost += money(money(it.unit_cost) * it.stock_qty)
+    if cost > 0:
+        lines.append(_line('INVENTORY', debit=cost, memo='Returned goods back in stock'))
+        lines.append(_line('COGS', credit=cost, memo='Cost of goods returned'))
+    against = f" against {ret.original_invoice_number}" if ret.original_invoice_number else ''
+    return {
+        'date': _date(ret.return_date), 'branch': ret.branch, 'voucher_type_code': 'CN',
+        'source_number': ret.return_number, 'reference_type': 'SALES_RETURN',
+        'narration': f"Sales Return {ret.return_number}{against} — {who}",
+        'lines': lines,
+    }
+
+
+def build_purchase_return(ret, previous=None):
+    """Goods sent back to a supplier: the value comes back into Cash / the selected bank, or is set
+    off against what we owe them (Dr Supplier payable); the goods leave stock at the return value
+    (Cr Purchase returns — Inventory by default) and the input tax claimed on them is reversed."""
+    total = money(ret.total_amount)
+    if not _return_is_live(ret) or total <= 0:
+        return None
+    tax = min(money(ret.tax_amount), total)
+    supplier = ret.supplier if ret.supplier_id else None
+    name = getattr(supplier, 'name', '') or 'supplier'
+    lines = _return_settlement_lines(ret, money_debit=True, credit_kwargs=_payable(supplier),
+                                     credit_memo=f"Debit note to {name}")
+    lines.append(_line('PURCHASE_RETURNS', credit=total - tax, memo=_return_reason_memo(ret, 'Purchase return')))
+    if tax > 0:
+        lines.append(_line('GST_INPUT', credit=tax, memo='Input tax credit reversed'))
+    against = f" against {ret.original_bill_number}" if ret.original_bill_number else ''
+    return {
+        'date': _date(ret.return_date), 'branch': ret.branch, 'voucher_type_code': 'DN',
+        'source_number': ret.return_number, 'reference_type': 'PURCHASE_RETURN',
+        'narration': f"Purchase Return {ret.return_number}{against} — {name}",
+        'lines': lines,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Purchasing (purchasing.PurchaseInvoice / PurchaseOrder)
 # ---------------------------------------------------------------------------
 

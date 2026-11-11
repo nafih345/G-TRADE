@@ -5,6 +5,7 @@ import {
   MenuItem, Button, Stack, Typography, FormControlLabel, Switch, Chip
 } from '@mui/material';
 import { Build as ServiceIcon } from '@mui/icons-material';
+import { getCurrencySymbol } from '../../utils/localeFormat.js';
 
 const TAX_OPTIONS = ['0', '5', '12', '18', '28'];
 
@@ -126,7 +127,7 @@ export default function ServiceMasterDialog({ open, onClose, service = null, onS
           </Grid>
           <Grid item xs={12} sm={4}>
             <TextField
-              fullWidth size="small" label="Default Price (₹)" type="number"
+              fullWidth size="small" label={`Default Price (${getCurrencySymbol()})`} type="number"
               value={s.default_price}
               onChange={(e) => set({ default_price: e.target.value })}
               placeholder="0.00"

@@ -59,6 +59,7 @@ const menuItems = [
       { text: 'Orders', path: '/sales/orders' },
       { text: 'Customers', path: '/sales/customers' },
       { text: 'Payments', path: '/sales/payments' },
+      { text: 'Sales Return', path: '/sales/returns' },
       { text: 'Reports', path: '/sales/reports' }
     ]
   },

@@ -9,6 +9,7 @@ import {
 } from '@mui/icons-material';
 import { ELEMENT_LIBRARY, elementTitle, BAND_LABELS } from '../../../../billing/billLayout';
 import { FIELD_GROUPS, fieldsForDocTypes, DOC_TYPE_LABELS } from '../../../../billing/billFields';
+import { getCurrencySymbol } from '../../../../utils/localeFormat.js';
 
 const DRAG_TYPE = 'application/x-bill-element';
 
@@ -107,7 +108,7 @@ export default function BillPalette({
                     >
                       <Typography variant="body2" sx={{ fontSize: 12.5, fontWeight: 600 }}>{f.label}</Typography>
                       <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace', fontSize: 10.5 }}>
-                        {f.id}{f.kind === 'money' ? ' · ₹' : f.kind === 'date' ? ' · date' : ''}{f.scope ? ' · limited' : ''}
+                        {f.id}{f.kind === 'money' ? ` · ${getCurrencySymbol()}` : f.kind === 'date' ? ' · date' : ''}{f.scope ? ' · limited' : ''}
                       </Typography>
                     </Box>
                   ))}

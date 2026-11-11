@@ -34,6 +34,8 @@ import ProductVariantMaster from '../components/inventory/variants/ProductVarian
 import VariantImportDialog from '../components/inventory/variants/VariantImportDialog';
 import { reconcileLocalInventory } from '../utils/inventoryCache';
 import { useCanViewCost } from '../utils/costVisibility';
+import { formatCurrency } from '../utils/localeFormat.js';
+import { useTaxSettings } from '../context/SettingsContext';
 
 const isBackendId = (v) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(v || ''));
 
@@ -51,6 +53,7 @@ const opticalBrands = [
 ];
 
 export default function Products() {
+  const { isTaxEnabled, taxLabel } = useTaxSettings();
   const viewCost = useCanViewCost();
   const [products, setProducts] = useState(initialProducts);
   const [currentTab, setCurrentTab] = useState(0);
@@ -612,8 +615,8 @@ export default function Products() {
                                 <Typography variant="caption" color="text.secondary" display="block">{product.size} | {product.gender}</Typography>
                               </TableCell>
                               <TableCell>
-                                {viewCost && <Typography variant="body2">Buy: ₹{(parseFloat(product.purchasePrice) || 0).toFixed(2)}</Typography>}
-                                <Typography variant="body2" fontWeight={600}>Sell: ₹{(parseFloat(product.sellingPrice) || 0).toFixed(2)} <span style={{fontSize: '0.75rem', color: 'gray'}}>({product.gst || '18%'} GST)</span></Typography>
+                                {viewCost && <Typography variant="body2">Buy: {formatCurrency(parseFloat(product.purchasePrice) || 0)}</Typography>}
+                                <Typography variant="body2" fontWeight={600}>Sell: {formatCurrency(parseFloat(product.sellingPrice) || 0)} {isTaxEnabled && <span style={{fontSize: '0.75rem', color: 'gray'}}>({product.gst || '18%'} {taxLabel})</span>}</Typography>
                               </TableCell>
                               <TableCell>
                                 <Typography variant="body2" fontWeight={700} color={isLowStock ? 'error.main' : 'success.main'}>

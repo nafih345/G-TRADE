@@ -6,6 +6,7 @@ import {
   CHEQUE_STATUSES, blankCheque, chequeDaysLeft, chequeDueDate, chequeFromRow, daysLeftLabel, daysLeftTone, validateCheque,
 } from '../../utils/cheques';
 import { formatDate } from '../../utils/localeFormat';
+import CurrencySymbol from '../common/CurrencySymbol.jsx';
 
 const TONE_COLOR = { overdue: 'error', today: 'warning', soon: 'info', later: 'success' };
 
@@ -87,7 +88,7 @@ export default function ChequeDetailsDialog({ open, direction = 'RECEIVED', valu
                 disabled={locked} error={tried && !(parseFloat(amt) > 0)}
                 helperText={locked ? 'Posted on the voucher — reverse the voucher to change it.' : 'Same as this payment line’s amount.'}
                 inputProps={{ min: 0, step: '0.01', style: { textAlign: 'right', fontWeight: 700 } }}
-                InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }} />
+                InputProps={{ startAdornment: <InputAdornment position="start"><CurrencySymbol /></InputAdornment> }} />
             </Grid>
             <Grid item xs={12} sm={6}>
               <TextField fullWidth size="small" type="date" label="Deposited Date" value={draft.depositedDate} onChange={set('depositedDate')}

@@ -2,6 +2,7 @@
 // The server (backend/apps/purchasing/lens_orders.py) is the authority on every rule here; these
 // only give the screen instant feedback and consistent labels.
 import { formatDioptre } from './lensUnits.js';
+import { getTaxLabel } from './localeFormat.js';
 
 export const SINGLE_PAIR = 'SINGLE_PAIR';
 export const SPLIT_PAIR = 'SPLIT_PAIR';
@@ -237,7 +238,7 @@ export function buildOrderSheetHtml(po, { variant = 'vendor', store = {}, showCu
         ${internal ? `<td class="c">${esc(RECEIVING_STATUSES[p.receiving_status]?.label || p.receiving_status || '')}${p.piece_reference ? `<div class="sub">${esc(p.piece_reference)}</div>` : ''}</td>` : ''}
         ${first ? `<td rowspan="${span}" class="c nowrap">${esc(lpoQtyLabel(it.order_type, it.commercial_quantity || 1))}</td>` : ''}
         ${showPrices && first ? `<td rowspan="${span}" class="r nowrap">${money(it.unit_price)}<div class="sub">per ${it.pricing_unit === 'PIECE' ? 'piece' : 'pair'}</div></td>
-        <td rowspan="${span}" class="r nowrap">${money(amountOf(it))}${Number(it.tax_percent) ? `<div class="sub">incl. GST ${esc(it.tax_percent)}%</div>` : ''}</td>` : ''}
+        <td rowspan="${span}" class="r nowrap">${money(amountOf(it))}${Number(it.tax_percent) ? `<div class="sub">incl. ${esc(getTaxLabel())} ${esc(it.tax_percent)}%</div>` : ''}</td>` : ''}
       </tr>`;
     }).join('');
   }).join('');
@@ -252,7 +253,7 @@ export function buildOrderSheetHtml(po, { variant = 'vendor', store = {}, showCu
     <tbody>${rows}</tbody>
     <tfoot>
       <tr><td colspan="${colCount - (showPrices ? 2 : 0)}" class="r"><b>Total: ${esc(poQtyLabel(items))}</b></td>${showPrices ? `<td class="r">Sub total</td><td class="r">${money(subtotal)}</td>` : ''}</tr>
-      ${showPrices && grand - subtotal > 0.004 ? `<tr><td colspan="${colCount - 2}"></td><td class="r">GST</td><td class="r">${money(grand - subtotal)}</td></tr>` : ''}
+      ${showPrices && grand - subtotal > 0.004 ? `<tr><td colspan="${colCount - 2}"></td><td class="r">${esc(getTaxLabel())}</td><td class="r">${money(grand - subtotal)}</td></tr>` : ''}
       ${showPrices ? `<tr class="grand"><td colspan="${colCount - 2}"></td><td class="r">Grand Total</td><td class="r">${money(grand)}</td></tr>` : ''}
     </tfoot>
   </table>` : '';

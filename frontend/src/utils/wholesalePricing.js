@@ -15,7 +15,7 @@
 
 const num = (v) => {
   if (v === undefined || v === null || v === '') return null;
-  const n = typeof v === 'number' ? v : parseFloat(String(v).replace(/[,%₹\s]/g, ''));
+  const n = typeof v === 'number' ? v : parseFloat(String(v).replace(/[^0-9.\-]/g, ''));
   return Number.isFinite(n) ? n : null;
 };
 

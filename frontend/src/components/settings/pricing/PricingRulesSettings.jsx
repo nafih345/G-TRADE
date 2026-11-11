@@ -17,12 +17,14 @@ import { GREEN, greenButtonSx } from '../store/storeUi';
 import { notify } from '../../../utils/notify';
 import { apiErrorMessage } from '../../../utils/apiError';
 import { OFFER_TAGS, PRICING_RULES_API } from '../../../utils/pricingRules';
+import { formatCurrency } from '../../../utils/localeFormat.js';
+import CurrencySymbol from '../../common/CurrencySymbol.jsx';
 
 // Settings → Pricing Rules & Offers. The selling-below-cost lock (+ minimum margin) and the
 // clearance / special-offer items allowed under it. Rules live server-side
 // (apps/company/pricing_rules.py); New Sale checks lines against them and the server refuses the save.
 const OFFERS_API = `${PRICING_RULES_API}offers/`;
-const money = (n) => (n == null ? '—' : `₹${Number(n).toFixed(2)}`);
+const money = (n) => (n == null ? '—' : `${formatCurrency(Number(n))}`);
 const listOf = (data) => (Array.isArray(data) ? data : data?.results || []);
 
 const STATE_CHIP = {
@@ -146,7 +148,7 @@ export default function PricingRulesSettings() {
     const cost = 100;
     const floor = Math.max(cost * (1 + (Number(settings.min_margin_percent) || 0) / 100),
       cost + (Number(settings.min_profit_amount) || 0));
-    return `Example: cost ₹${cost.toFixed(2)} → lowest selling price ₹${floor.toFixed(2)}`;
+    return `Example: cost ${formatCurrency(cost)} → lowest selling price ${formatCurrency(floor)}`;
   }, [settings]);
 
   const viewers = useMemo(() => new Set((settings?.cost_viewers || []).map(String)), [settings]);
@@ -332,7 +334,7 @@ export default function PricingRulesSettings() {
                   onChange={(e) => set('min_profit_amount', e.target.value)}
                   disabled={!canEdit || !settings.cost_lock_enabled}
                   error={!!errors.min_profit_amount} helperText={errors.min_profit_amount || 'The higher of the two floors applies'}
-                  InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment>, inputProps: { min: 0, step: 1 } }}
+                  InputProps={{ startAdornment: <InputAdornment position="start"><CurrencySymbol /></InputAdornment>, inputProps: { min: 0, step: 1 } }}
                 />
               </Grid>
               <Grid item xs={12} md={4} sx={{ display: 'flex', alignItems: 'center' }}>
@@ -691,7 +693,7 @@ function OfferDialog({ state, onClose, onSaved, onPrint }) {
                 value={form.offer_price} onChange={(e) => set('offer_price', e.target.value)}
                 error={!!errors.offer_price}
                 helperText={errors.offer_price || 'Billing may not go below this price for the item.'}
-                InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment>, inputProps: { min: 0 } }}
+                InputProps={{ startAdornment: <InputAdornment position="start"><CurrencySymbol /></InputAdornment>, inputProps: { min: 0 } }}
               />
             )}
             {below.length > 0 && (

@@ -3,6 +3,7 @@
 // actually refuses the save; this only lets New Sale flag the line as it is typed.
 // Pure (no React / axios) so it runs under `node --test`.
 import { PAIR, PIECE, physicalQty } from './lensUnits.js';
+import { formatCurrency, getCurrencySymbol } from './localeFormat.js';
 
 export const PRICING_RULES_API = '/api/company/pricing-rules/';
 export const PRICING_FLOORS_API = '/api/company/pricing-rules/floors/';
@@ -65,13 +66,13 @@ export function findPriceViolations(rows, floors, billDiscount = 0) {
 }
 
 /** "₹80.00 is below the cost price (₹100.00)" — same wording as the server's refusal. */
-export function violationText(v, symbol = '₹') {
-  const floor = `${symbol}${v.floorUnit.toFixed(2)}`;
+export function violationText(v, symbol = getCurrencySymbol()) {
+  const floor = formatCurrency(v.floorUnit, { symbol });
   let reason = `the cost price (${floor})`;
   if (v.offer) reason = `the ${v.offer.tag} offer price (${floor})`;
   else if (v.costHidden || v.costUnit == null) reason = `the minimum selling price (${floor})`;
-  else if (v.marginApplied) reason = `the minimum selling price (${floor}; cost ${symbol}${v.costUnit.toFixed(2)} + margin)`;
-  return `${symbol}${v.netUnit.toFixed(2)} is below ${reason}`;
+  else if (v.marginApplied) reason = `the minimum selling price (${floor}; cost ${formatCurrency(v.costUnit, { symbol })} + margin)`;
+  return `${formatCurrency(v.netUnit, { symbol })} is below ${reason}`;
 }
 
 /** Offer price per selling unit for a row (lens singles of pair stock pay half), or null. */
@@ -137,7 +138,7 @@ export function offerUnitsLeft(offer, rows, exceptRowId = null) {
 /** "On Offer: ₹120.00 · 3 left" — the badge on search results and bill lines. */
 export function offerBadgeText(offer, { left } = {}) {
   if (!offer) return '';
-  const price = offer.offer_price != null ? `₹${Number(offer.offer_price).toFixed(2)}` : 'any price';
+  const price = offer.offer_price != null ? `${formatCurrency(Number(offer.offer_price))}` : 'any price';
   const units = offer.apply_to_all === false ? ` · ${left ?? offer.remaining ?? 0} left` : '';
   return `On Offer: ${price}${units}`;
 }

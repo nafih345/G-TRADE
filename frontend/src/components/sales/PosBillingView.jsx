@@ -40,6 +40,9 @@ import {
   CameraAlt as CameraIcon,
   Inbox as EmptyIcon
 } from '@mui/icons-material';
+import { formatCurrency, currencyPrefix, getCurrencySymbol } from '../../utils/localeFormat.js';
+import { useTaxSettings } from '../../context/SettingsContext';
+import { taxRateList } from '../../utils/taxRates';
 
 export default function PosBillingView({
   products = [],
@@ -134,7 +137,10 @@ export default function PosBillingView({
   // Selectable per standard Indian GST slabs — applied to the whole cart's subtotal rather than
   // trusting each product's own (often missing/inconsistent) taxRate, so what's shown always
   // matches what's actually charged.
-  const [taxRatePercent, setTaxRatePercent] = useState(18);
+  const { isTaxEnabled, taxLabel, taxSlabs } = useTaxSettings();
+  const [chosenTaxRate, setTaxRatePercent] = useState(18);
+  // Tax switched off in Tax Configuration → nothing is charged, whatever was picked.
+  const taxRatePercent = isTaxEnabled ? chosenTaxRate : 0;
   // Split payment — how much of the total is actually being paid via each mode, mirroring the
   // same "Multi Paymode" pattern used on the New Sale billing screen.
   const [multiPay, setMultiPay] = useState({ cash: '', upi: '', card: '', credit: '' });
@@ -172,10 +178,10 @@ export default function PosBillingView({
     const onOffer = addToCart(product, offer);
     const live = !offer && liveOffers.enabled ? offerForProduct(liveOffers.index, product) : null;
     setLastScannedNotice(onOffer
-      ? `✅ Scanned offer tag "${rawCode}" — "${product.name}" added at the ${offer.tag} price ₹${Number(offer.offer_price ?? product.price).toFixed(2)}!`
+      ? `✅ Scanned offer tag "${rawCode}" — "${product.name}" added at the ${offer.tag} price ${formatCurrency(Number(offer.offer_price ?? product.price))}!`
       : live
-        ? `✅ Scanned "${product.name}" (₹${product.price}) -> Added to Bill! It is ${offerBadgeText(live, { left: offerLeft(live) === Infinity ? undefined : offerLeft(live) })} — use the "Offer price" button to sell it on the offer.`
-        : `✅ Scanned "${product.name}" (₹${product.price}) -> Added to Bill!`);
+        ? `✅ Scanned "${product.name}" (${currencyPrefix()}${product.price}) -> Added to Bill! It is ${offerBadgeText(live, { left: offerLeft(live) === Infinity ? undefined : offerLeft(live) })} — use the "Offer price" button to sell it on the offer.`
+        : `✅ Scanned "${product.name}" (${currencyPrefix()}${product.price}) -> Added to Bill!`);
     setScanHistory(prev => [{ code: rawCode, item: product.name, time: new Date().toLocaleTimeString() }, ...prev]);
     setTimeout(() => setLastScannedNotice(null), 4000);
   };
@@ -615,7 +621,7 @@ export default function PosBillingView({
 
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 1.5 }}>
                       <Typography variant="subtitle1" fontWeight={900} color="primary.main">
-                        ₹{parseFloat(item.price || 0).toLocaleString()}
+                        {formatCurrency(parseFloat(item.price || 0))}
                       </Typography>
                       <IconButton size="small" color="primary" sx={{ bgcolor: 'rgba(37, 99, 235, 0.08)' }}>
                         <AddCartIcon fontSize="small" />
@@ -669,7 +675,7 @@ export default function PosBillingView({
                           sx={{ height: 18, fontSize: '0.6rem', fontWeight: 900, mb: 0.3 }} />
                       )}
                       <Typography variant="caption" color="text.secondary" display="block">
-                        ₹{parseFloat(item.product.price || 0)} x {item.qty} = <strong>₹{parseFloat(item.product.price || 0) * item.qty}</strong>
+                        {currencyPrefix()}{parseFloat(item.product.price || 0)} x {item.qty} = <strong>{currencyPrefix()}{parseFloat(item.product.price || 0) * item.qty}</strong>
                       </Typography>
                     </Box>
 
@@ -704,7 +710,7 @@ export default function PosBillingView({
                   }
                   label={
                     <Typography variant="caption" fontWeight={700}>
-                      Redeem Rewards: {selectedCust.points} Points (₹{Math.min(selectedCust.points, 200)} Off)
+                      Redeem Rewards: {selectedCust.points} Points ({currencyPrefix()}{Math.min(selectedCust.points, 200)} Off)
                     </Typography>
                   }
                 />
@@ -715,11 +721,12 @@ export default function PosBillingView({
             <Box sx={{ p: 2, bgcolor: '#f8fafc', borderRadius: 2.5, border: '1px solid', borderColor: 'divider', mb: 2 }}>
               <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
                 <Typography variant="body2" color="text.secondary">Subtotal:</Typography>
-                <Typography variant="body2" fontWeight={700}>₹{subtotal.toLocaleString()}</Typography>
+                <Typography variant="body2" fontWeight={700}>{formatCurrency(subtotal)}</Typography>
               </Box>
 
+              {isTaxEnabled && (
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
-                <Typography variant="body2" color="text.secondary">GST / Tax:</Typography>
+                <Typography variant="body2" color="text.secondary">{taxLabel}:</Typography>
                 <Stack direction="row" spacing={1} alignItems="center">
                   <TextField
                     select
@@ -728,18 +735,17 @@ export default function PosBillingView({
                     onChange={(e) => setTaxRatePercent(parseFloat(e.target.value))}
                     sx={{ width: 90, '& .MuiSelect-select': { py: 0.5, fontSize: '0.85rem', fontWeight: 700 } }}
                   >
-                    <MenuItem value={0}>0%</MenuItem>
-                    <MenuItem value={5}>5%</MenuItem>
-                    <MenuItem value={12}>12%</MenuItem>
-                    <MenuItem value={18}>18%</MenuItem>
-                    <MenuItem value={28}>28%</MenuItem>
+                    {[...new Set([...taxRateList(taxSlabs), chosenTaxRate])].sort((a, b) => a - b).map((r) => (
+                      <MenuItem key={r} value={r}>{r}%</MenuItem>
+                    ))}
                   </TextField>
-                  <Typography variant="body2" fontWeight={700}>₹{taxAmount.toLocaleString()}</Typography>
+                  <Typography variant="body2" fontWeight={700}>{formatCurrency(taxAmount)}</Typography>
                 </Stack>
               </Box>
+              )}
 
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
-                <Typography variant="body2" color="text.secondary">Discount (₹):</Typography>
+                <Typography variant="body2" color="text.secondary">Discount ({getCurrencySymbol()}):</Typography>
                 <TextField
                   size="small"
                   type="number"
@@ -754,7 +760,7 @@ export default function PosBillingView({
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
                 <Typography variant="subtitle1" fontWeight={800}>Total Payable:</Typography>
                 <Typography variant="h4" fontWeight={900} color="primary.main">
-                  ₹{grandTotal.toLocaleString()}
+                  {formatCurrency(grandTotal)}
                 </Typography>
               </Box>
             </Box>
@@ -768,14 +774,14 @@ export default function PosBillingView({
               <Grid container spacing={1}>
                 <Grid item xs={6}>
                   <TextField
-                    fullWidth size="small" label="Cash (₹)" type="number" disabled={cashUnpaid}
+                    fullWidth size="small" label={`Cash (${getCurrencySymbol()})`} type="number" disabled={cashUnpaid}
                     value={cashUnpaid ? '' : multiPay.cash} onChange={(e) => setMultiPay({ ...multiPay, cash: e.target.value })}
                   />
                   <PaymentModeDetails compact method="Cash" cashStatus={cashStatus} onCashStatusChange={setCashStatus} sx={{ mt: 0.5 }} />
                 </Grid>
                 <Grid item xs={6}>
                   <TextField
-                    fullWidth size="small" label="UPI / GPay (₹)" type="number"
+                    fullWidth size="small" label={`UPI / GPay (${getCurrencySymbol()})`} type="number"
                     value={multiPay.upi} onChange={(e) => setMultiPay({ ...multiPay, upi: e.target.value })}
                   />
                   {parseFloat(multiPay.upi) > 0 && (
@@ -787,7 +793,7 @@ export default function PosBillingView({
                 </Grid>
                 <Grid item xs={6}>
                   <TextField
-                    fullWidth size="small" label="Card (₹)" type="number"
+                    fullWidth size="small" label={`Card (${getCurrencySymbol()})`} type="number"
                     value={multiPay.card} onChange={(e) => setMultiPay({ ...multiPay, card: e.target.value })}
                   />
                   {parseFloat(multiPay.card) > 0 && (
@@ -799,7 +805,7 @@ export default function PosBillingView({
                 </Grid>
                 <Grid item xs={6}>
                   <TextField
-                    fullWidth size="small" label="Credit (₹)" type="number"
+                    fullWidth size="small" label={`Credit (${getCurrencySymbol()})`} type="number"
                     value={multiPay.credit} onChange={(e) => setMultiPay({ ...multiPay, credit: e.target.value })}
                   />
                 </Grid>
@@ -815,17 +821,17 @@ export default function PosBillingView({
               <Divider sx={{ my: 1 }} />
               <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                 <Typography variant="caption" fontWeight={800}>Total Paid:</Typography>
-                <Typography variant="body2" fontWeight={800} color="success.main">₹{totalPaid.toFixed(2)}</Typography>
+                <Typography variant="body2" fontWeight={800} color="success.main">{formatCurrency(totalPaid)}</Typography>
               </Box>
               {changeDue > 0 ? (
                 <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                   <Typography variant="caption" fontWeight={800} color="success.main">Change Due:</Typography>
-                  <Typography variant="body2" fontWeight={800} color="success.main">₹{changeDue.toFixed(2)}</Typography>
+                  <Typography variant="body2" fontWeight={800} color="success.main">{formatCurrency(changeDue)}</Typography>
                 </Box>
               ) : balanceDue > 0 ? (
                 <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                   <Typography variant="caption" fontWeight={800} color="error.main">Balance Due:</Typography>
-                  <Typography variant="body2" fontWeight={800} color="error.main">₹{balanceDue.toFixed(2)}</Typography>
+                  <Typography variant="body2" fontWeight={800} color="error.main">{formatCurrency(balanceDue)}</Typography>
                 </Box>
               ) : null}
             </Box>
@@ -1092,7 +1098,7 @@ export default function PosBillingView({
           <Box component="form" onSubmit={handleAddCustomItem} sx={{ mt: 1 }}>
             <Stack spacing={2}>
               <TextField required label="Item / Service Name" placeholder="e.g. Frame Repair, Lens Tinting" value={customItem.name} onChange={(e) => setCustomItem({ ...customItem, name: e.target.value })} size="small" />
-              <TextField required label="Price (₹)" type="number" value={customItem.price} onChange={(e) => setCustomItem({ ...customItem, price: e.target.value })} size="small" />
+              <TextField required label={`Price (${getCurrencySymbol()})`} type="number" value={customItem.price} onChange={(e) => setCustomItem({ ...customItem, price: e.target.value })} size="small" />
               <TextField select label="Category" value={customItem.type} onChange={(e) => setCustomItem({ ...customItem, type: e.target.value })} size="small">
                 <MenuItem value="Frame">Frame</MenuItem>
                 <MenuItem value="Lens">Lens</MenuItem>

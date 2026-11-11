@@ -21,6 +21,7 @@ import {
 } from './billFields.js';
 import { normalizeConfig, effectiveTheme, elementTitle, BANDS } from './billLayout.js';
 import { unitWord } from '../utils/lensUnits.js';
+import { getTaxLabel, getTaxRegLabel, isTaxEnabled, isGstSplit, taxText } from '../utils/localeFormat.js';
 
 export const PX_PER_MM = 96 / 25.4;
 const PT_TO_MM = 25.4 / 72;
@@ -211,7 +212,7 @@ const RENDER = {
     const contact = [s.phone && c.phone && `${lbl(ctx, 'Ph')}: ${esc(c.phone)}`, s.email && c.email && esc(c.email)].filter(Boolean);
     if (contact.length) lines.push(`<div>${contact.join(' &nbsp;·&nbsp; ')}</div>`);
     if (s.website && c.website) lines.push(`<div>${esc(c.website)}</div>`);
-    const reg = [s.gstin && c.gstin && `GSTIN: <b>${esc(c.gstin)}</b>`, s.pan && c.pan && `PAN: ${esc(c.pan)}`].filter(Boolean);
+    const reg = [s.gstin && c.gstin && isTaxEnabled() && `${lbl(ctx, getTaxRegLabel())}: <b>${esc(c.gstin)}</b>`, s.pan && c.pan && `PAN: ${esc(c.pan)}`].filter(Boolean);
     if (reg.length) lines.push(`<div>${reg.join(' &nbsp;|&nbsp; ')}</div>`);
     return lines.join('') || placeholder(ctx, '[Company details — fill in Store Profile]');
   },
@@ -232,7 +233,7 @@ const RENDER = {
       if (addr) lines.push(`<div>${nl2br(addr)}</div>`);
       else if (shipping) lines.push(placeholder(ctx, '[No shipping address on this document]'));
     }
-    if (s.gstin && p.gstin) lines.push(`<div>GSTIN: <b>${esc(p.gstin)}</b></div>`);
+    if (s.gstin && p.gstin && isTaxEnabled()) lines.push(`<div>${lbl(ctx, getTaxRegLabel())}: <b>${esc(p.gstin)}</b></div>`);
     return lines.join('');
   },
 
@@ -275,8 +276,9 @@ const RENDER = {
     if (!ps) (el.rows || []).forEach((r) => {
       const meta = TOTALS_ROW_BY_KEY[r.key];
       if (!meta) return;
+      if (SPLIT_KEYS.has(r.key) && !isGstSplit()) return; // CGST / SGST / IGST are India-only
       const v = rawField(ctx.model, `totals.${r.key}`);
-      const label = r.label || meta.label;
+      const label = taxText(r.label || meta.label);
       if (v === null) {
         // Known-unknown: an "always" row shows a dash rather than a made-up 0.00.
         if (r.always || meta.grand) rows.push({ label, value: '—', grand: meta.grand });
@@ -297,6 +299,7 @@ const RENDER = {
     const items = ctx.model.items || [];
     const fmt = fmtWithCurrency(ctx.fmt, ctx.model);
     const usable = items.length && items.every((it) => it.taxAmount !== null && it.taxAmount !== undefined && it.taxPercent !== null && it.taxPercent !== undefined);
+    if (!isTaxEnabled() && !(Number(rawField(ctx.model, 'totals.tax')) > 0)) return '';
     if (!usable) return placeholder(ctx, '[Tax summary needs per-line tax on the document]');
     const groups = new Map();
     items.forEach((it) => {
@@ -312,7 +315,7 @@ const RENDER = {
     if (docTax !== null && Math.abs(docTax - sum) > 0.011) {
       ctx.warn?.({ level: 'info', elementId: el.id, message: `Tax summary lines add up to ${formatMoney(sum, fmt)} but the document's tax is ${formatMoney(docTax, fmt)} (bill-level adjustments) — the totals block shows the document figure.` });
     }
-    const head = `<tr>${el.showHsn ? '<th>HSN</th>' : ''}<th>GST %</th><th class="bd-r">Lines</th><th class="bd-r">Tax amount</th></tr>`;
+    const head = `<tr>${el.showHsn ? '<th>HSN</th>' : ''}<th>${esc(getTaxLabel())} %</th><th class="bd-r">Lines</th><th class="bd-r">${esc(getTaxLabel())} amount</th></tr>`;
     const body = list.map((g) => `<tr>${el.showHsn ? `<td>${esc(g.hsn)}</td>` : ''}<td>${esc(formatNumber(g.rate, { decimals: g.rate % 1 ? 2 : 0 }))}%</td><td class="bd-r">${g.lines}</td><td class="bd-r">${esc(formatMoney(g.tax, fmt))}</td></tr>`).join('');
     return `<table class="bd-taxsum"><thead>${head}</thead><tbody>${body}</tbody><tfoot><tr><td colspan="${el.showHsn ? 3 : 2}">Total of lines</td><td class="bd-r">${esc(formatMoney(sum, fmt))}</td></tr></tfoot></table>`;
   },
@@ -434,8 +437,14 @@ function elementBox(el, ctx, scale = 1) {
 // Items table
 // ---------------------------------------------------------------------------
 
-function visibleColumns(table) {
-  return (table.columns || []).filter((c) => c.visible !== false && COLUMN_BY_KEY[c.key]);
+const TAX_COLUMNS = new Set(['taxPercent', 'taxAmount']);
+const SPLIT_KEYS = new Set(['cgst', 'sgst', 'igst']);
+
+// Tax switched off (Settings → Tax Configuration) hides the tax columns — unless this document
+// was itself billed with tax, which then still prints so its lines add up.
+function visibleColumns(table, model) {
+  const hideTax = !isTaxEnabled() && !(Number(rawField(model || {}, 'totals.tax')) > 0);
+  return (table.columns || []).filter((c) => c.visible !== false && COLUMN_BY_KEY[c.key] && !(hideTax && TAX_COLUMNS.has(c.key)));
 }
 
 // Amounts / quantities never wrap mid-number ("₹1,000." + "00" on the next line).
@@ -491,13 +500,13 @@ function cellValue(col, item, index, ctx, table, cols) {
 }
 
 export function tableHtml(model, rows, startIndex, table, ctx, { header = true, fillerMm = 0, totalRow = false } = {}) {
-  const cols = visibleColumns(table);
+  const cols = visibleColumns(table, ctx.model);
   if (!cols.length) return '';
   const totalW = cols.reduce((s, c) => s + num(c.width, 10), 0) || 1;
   const colgroup = `<colgroup>${cols.map((c) => `<col style="width:${r2((num(c.width, 10) / totalW) * 100)}%"/>`).join('')}</colgroup>`;
   const hs = table.headerStyle || {};
   const thCss = styleCss({ ...hs, bg: hs.bg || ctx.theme.headerBg, color: hs.color || ctx.theme.headerText }, ctx);
-  const thead = header ? `<thead><tr>${cols.map((c) => `<th style="text-align:${c.align || 'left'};${thCss}">${lbl(ctx, c.label ?? COLUMN_BY_KEY[c.key].label, { stack: true })}</th>`).join('')}</tr></thead>` : '';
+  const thead = header ? `<thead><tr>${cols.map((c) => `<th style="text-align:${c.align || 'left'};${thCss}">${lbl(ctx, taxText(c.label ?? COLUMN_BY_KEY[c.key].label), { stack: true })}</th>`).join('')}</tr></thead>` : '';
   let body;
   if (!rows.length && startIndex === 0) {
     body = `<tr class="bd-row"><td colspan="${cols.length}" class="bd-empty">${lbl(ctx, table.emptyText || 'No items')}</td></tr>`;
@@ -784,7 +793,7 @@ export function layoutBill(template, model, opts = {}) {
   const css = billCss(cfg, theme);
   const bands = cfg.bands;
   const table = bands.items.table;
-  const itemsOn = bands.items.visible !== false && visibleColumns(table).length > 0;
+  const itemsOn = bands.items.visible !== false && visibleColumns(table, model).length > 0;
   const allItems = model.items || [];
   const items = opts.designRows != null ? allItems.slice(0, opts.designRows) : allItems;
 
@@ -796,7 +805,7 @@ export function layoutBill(template, model, opts = {}) {
   try {
     if (itemsOn) {
       const html = tableHtml(model, items, 0, table, ctx, { totalRow: table.totalRow });
-      measured = measurer.table(html, items.length ? items : [{ name: table.emptyText || '' }], visibleColumns(table));
+      measured = measurer.table(html, items.length ? items : [{ name: table.emptyText || '' }], visibleColumns(table, model));
       if (table.totalRow && measured.rows.length > items.length) {
         // The total row rides on the last page: fold its height into the last item row.
         const extra = measured.rows.pop();

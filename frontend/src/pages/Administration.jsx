@@ -40,6 +40,7 @@ import ServiceMasterDialog from '../components/sales/ServiceMasterDialog';
 import StaffUsersManager from '../components/admin/StaffUsersManager';
 import EditPermissionsManager from '../components/admin/EditPermissionsManager';
 import { fetchPendingEditCount } from '../utils/editPermissions';
+import { currencyPrefix, formatCurrency, getCurrencySymbol, getTaxRegLabel } from '../utils/localeFormat.js';
 
 export default function Administration() {
   const location = useLocation();
@@ -557,7 +558,7 @@ export default function Administration() {
                       <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Qualification</TableCell>
                       <TableCell sx={{ color: '#fff', fontWeight: 800 }}>License No</TableCell>
                       <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Branch</TableCell>
-                      <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Fee (₹)</TableCell>
+                      <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Fee ({getCurrencySymbol()})</TableCell>
                       <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Status</TableCell>
                     </TableRow>
                   </TableHead>
@@ -578,7 +579,7 @@ export default function Administration() {
                           <TableCell>{d.qualification}</TableCell>
                           <TableCell>{d.licenseNo}</TableCell>
                           <TableCell>{d.branch}</TableCell>
-                          <TableCell sx={{ fontWeight: 800 }}>₹{d.consultationFee}</TableCell>
+                          <TableCell sx={{ fontWeight: 800 }}>{currencyPrefix()}{d.consultationFee}</TableCell>
                           <TableCell><Chip label={d.status} color="success" size="small" sx={{ fontWeight: 700 }} /></TableCell>
                         </TableRow>
                       ))
@@ -639,7 +640,7 @@ export default function Administration() {
                       <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Service Code</TableCell>
                       <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Service Name</TableCell>
                       <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Description</TableCell>
-                      <TableCell sx={{ color: '#fff', fontWeight: 800 }} align="right">Default Price (₹)</TableCell>
+                      <TableCell sx={{ color: '#fff', fontWeight: 800 }} align="right">Default Price ({getCurrencySymbol()})</TableCell>
                       <TableCell sx={{ color: '#fff', fontWeight: 800 }} align="right">Tax %</TableCell>
                       <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Status</TableCell>
                       <TableCell sx={{ color: '#fff', fontWeight: 800 }} align="right">Actions</TableCell>
@@ -659,7 +660,7 @@ export default function Administration() {
                         <TableCell sx={{ fontWeight: 850, color: '#7c3aed' }}>{s.code}</TableCell>
                         <TableCell sx={{ fontWeight: 800 }}>{s.name}</TableCell>
                         <TableCell sx={{ maxWidth: 280, fontSize: '0.82rem' }}>{s.description || '—'}</TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 800 }}>₹{s.defaultPrice.toFixed(2)}</TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 800 }}>{formatCurrency(s.defaultPrice)}</TableCell>
                         <TableCell align="right" sx={{ fontWeight: 700 }}>{s.taxPercentage}%</TableCell>
                         <TableCell>
                           {/* ON = service is offered in New Sale → 🔧 Services; OFF hides it there. */}
@@ -772,7 +773,7 @@ export default function Administration() {
                       <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Branch Name</TableCell>
                       <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Branch Manager</TableCell>
                       <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Phone / Email</TableCell>
-                      <TableCell sx={{ color: '#fff', fontWeight: 800 }}>GSTIN</TableCell>
+                      <TableCell sx={{ color: '#fff', fontWeight: 800 }}>{getTaxRegLabel()}</TableCell>
                       <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Address</TableCell>
                       <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Status</TableCell>
                       <TableCell sx={{ color: '#fff', fontWeight: 800 }} align="right">Actions</TableCell>
@@ -1015,7 +1016,7 @@ export default function Administration() {
             <Grid item xs={12} sm={6}>
               <TextField 
                 fullWidth 
-                label="GSTIN Number" 
+                label={`${getTaxRegLabel()} Number`} 
                 size="small" 
                 value={branchInput.gstin} 
                 onChange={(e) => setBranchInput({ ...branchInput, gstin: e.target.value })}
@@ -1158,7 +1159,7 @@ export default function Administration() {
                   ))}
                 </TextField>
               </Grid>
-              <Grid item xs={6}><TextField fullWidth label="Consultation Fee (₹)" size="small" value={doctorInput.consultationFee} onChange={(e) => setDoctorInput({ ...doctorInput, consultationFee: e.target.value })} /></Grid>
+              <Grid item xs={6}><TextField fullWidth label={`Consultation Fee (${getCurrencySymbol()})`} size="small" value={doctorInput.consultationFee} onChange={(e) => setDoctorInput({ ...doctorInput, consultationFee: e.target.value })} /></Grid>
             </Grid>
           </Stack>
         </DialogContent>

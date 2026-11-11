@@ -30,6 +30,8 @@ import {
 import axios from 'axios';
 import { describeApiError } from '../../utils/apiWriteGuard';
 import { loadMaster } from '../../utils/masterDataCache';
+import { formatCurrency, getTaxLabel } from '../../utils/localeFormat.js';
+import { taxRateChoices } from '../../utils/taxRates.js';
 
 const OPTICAL_CATEGORY_MASTER_DEFAULTS = {
   'frames': {
@@ -755,7 +757,7 @@ export default function CategoryManagementView({ products = [] }) {
   // Export Categories to CSV File
   const handleExportCSV = () => {
     if (categories.length === 0) return;
-    let csv = "Category Code,Category Name,Description,GST %,HSN Code,Assigned Products,Status,Created Date\n";
+    let csv = `Category Code,Category Name,Description,${getTaxLabel()} %,HSN Code,Assigned Products,Status,Created Date\n`;
     categories.forEach(c => {
       const pCount = getProductCountForCat(c.name);
       csv += `"${c.code}","${c.name}","${(c.description || '').replace(/"/g, '""')}","${c.gst_percentage}","${c.hsn_code}","${pCount}","${c.status}","${c.created_at}"\n`;
@@ -1013,7 +1015,7 @@ export default function CategoryManagementView({ products = [] }) {
                 <TableCell>Code</TableCell>
                 <TableCell>Category Name</TableCell>
                 <TableCell>Description</TableCell>
-                <TableCell align="center">GST %</TableCell>
+                <TableCell align="center">{getTaxLabel()} %</TableCell>
                 <TableCell align="center">HSN Code</TableCell>
                 <TableCell align="center">Products</TableCell>
                 <TableCell align="center">Status</TableCell>
@@ -1206,16 +1208,14 @@ export default function CategoryManagementView({ products = [] }) {
                   select
                   required
                   fullWidth
-                  label="GST Percentage *"
+                  label={`${getTaxLabel()} Percentage *`}
                   value={formState.gst_percentage}
                   onChange={(e) => setFormState({ ...formState, gst_percentage: e.target.value })}
                   size="small"
                 >
-                  <MenuItem value="0%">0% (Exempt)</MenuItem>
-                  <MenuItem value="5%">5% GST</MenuItem>
-                  <MenuItem value="12%">12% GST</MenuItem>
-                  <MenuItem value="18%">18% GST</MenuItem>
-                  <MenuItem value="28%">28% GST</MenuItem>
+                  {taxRateChoices(undefined, formState.gst_percentage).map((o) => (
+                    <MenuItem key={o.value} value={`${o.value}%`}>{o.label}</MenuItem>
+                  ))}
                 </TextField>
               </Grid>
 
@@ -1362,7 +1362,7 @@ export default function CategoryManagementView({ products = [] }) {
 
               <Grid container spacing={2}>
                 <Grid item xs={6}>
-                  <Typography variant="caption" color="text.secondary" fontWeight={700}>GST PERCENTAGE</Typography>
+                  <Typography variant="caption" color="text.secondary" fontWeight={700}>{getTaxLabel().toUpperCase()} PERCENTAGE</Typography>
                   <Typography variant="body2" fontWeight={800}>{viewingCategory.gst_percentage}</Typography>
                 </Grid>
                 <Grid item xs={6}>
@@ -1409,7 +1409,7 @@ export default function CategoryManagementView({ products = [] }) {
                         </TableCell>
                         <TableCell><Typography variant="body2">{p.brand}</Typography></TableCell>
                         <TableCell><Typography variant="body2" fontWeight={800}>{p.stock} units</Typography></TableCell>
-                        <TableCell><Typography variant="body2" fontWeight={800}>₹{p.selling_price.toFixed(2)}</Typography></TableCell>
+                        <TableCell><Typography variant="body2" fontWeight={800}>{formatCurrency(p.selling_price)}</Typography></TableCell>
                       </TableRow>
                     ))}
                   </TableBody>

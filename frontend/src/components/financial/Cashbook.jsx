@@ -28,6 +28,8 @@ export const KIND_STYLES = {
   RECEIPT: ['#0f766e', '#ccfbf1'],
   PAYMENT: ['#b91c1c', '#fee2e2'],
   PETTY_CASH: ['#c2410c', '#ffedd5'],
+  SALES_RETURN: ['#b91c1c', '#fee2e2'],
+  PURCHASE_RETURN: ['#b91c1c', '#fee2e2'],
   DEPOSIT: ['#3730a3', '#e0e7ff'],
   WITHDRAWAL: ['#6b21a8', '#f3e8ff'],
   TRANSFER: ['#0369a1', '#e0f2fe'],

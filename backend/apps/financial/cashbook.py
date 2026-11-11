@@ -40,6 +40,8 @@ KIND_LABELS = {
     'RECEIPT': 'Cash Receipt',
     'PAYMENT': 'Cash Payment',
     'PETTY_CASH': 'Petty Cash',
+    'SALES_RETURN': 'Sales Return Refund',
+    'PURCHASE_RETURN': 'Purchase Return Refund',
     'DEPOSIT': 'Cash Deposit',
     'WITHDRAWAL': 'Cash Withdrawal',
     'TRANSFER': 'Cash Transfer',
@@ -100,6 +102,11 @@ def _kind(je, net, counters, payment_same_day):
         return 'TRANSFER'
     if counters and all(_is_cash(a) or _is_bank(a) for a in counters):
         return 'DEPOSIT' if net < 0 else 'WITHDRAWAL'
+    # Sales → Sales Return / Purchase → Purchase Return refunds (apps/inventory/returns.py).
+    if je.source_key == 'sales.sales_return':
+        return 'SALES_RETURN'
+    if je.source_key == 'purchasing.purchase_return':
+        return 'PURCHASE_RETURN'
     if net > 0:
         if je.source_key == 'sales.payment' and payment_same_day.get(je.reference_id):
             return 'CASH_SALE'

@@ -12,6 +12,7 @@ import {
 import { apiError, finGet, inr, sourceLabel, today } from './financialApi';
 import ShowBillDialog from './ShowBillDialog';
 import { billSourceFor } from './sourceBills';
+import { getCurrencySymbol } from '../../utils/localeFormat.js';
 
 const head = { fontWeight: 700 };
 const firstOfMonth = () => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().split('T')[0]; };
@@ -75,6 +76,7 @@ const REGISTER_FILTERS = [
   { key: 'wholesale', label: 'Wholesale', source: 'sales.wholesale_invoice,sales.wholesale_collection,sales.wholesale_return' },
   { key: 'purchases', label: 'Purchases', source: 'purchasing.purchase_invoice,purchasing.purchase_payment,purchasing.purchase_order' },
   { key: 'receipts', label: 'Receipts', source: 'sales.payment,sales.wholesale_collection' },
+  { key: 'returns', label: 'Returns', source: 'sales.sales_return,purchasing.purchase_return,sales.wholesale_return' },
   { key: 'stock', label: 'Stock adjustments', source: 'inventory.stock_adjustment' },
   { key: 'manual', label: 'Manual vouchers', source: 'manual' },
 ];
@@ -293,8 +295,8 @@ export function TrialBalancePanel({ onOpenLedger }) {
               <TableRow>
                 <TableCell sx={head}>Account</TableCell>
                 <TableCell sx={head}>Type</TableCell>
-                <TableCell sx={head} align="right">Debit (₹)</TableCell>
-                <TableCell sx={head} align="right">Credit (₹)</TableCell>
+                <TableCell sx={head} align="right">Debit ({getCurrencySymbol()})</TableCell>
+                <TableCell sx={head} align="right">Credit ({getCurrencySymbol()})</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>

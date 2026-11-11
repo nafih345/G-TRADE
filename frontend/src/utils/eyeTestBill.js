@@ -1,3 +1,4 @@
+import { formatCurrency } from './localeFormat.js';
 // Eye test fee rules + the printed Clinical Record & Invoice.
 //
 // Mirrors backend/apps/sales/eye_test_fees.py: the fee is procedure + medicine − medical aid;
@@ -104,7 +105,7 @@ export const isEyeTestFeeLine = (item) => item?.serviceDetails?.kind === EYE_TES
 
 // ── Print ───────────────────────────────────────────────────────────────────────────────────
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const money = (n) => `₹${(Number(n) || 0).toFixed(2)}`;
+const money = (n) => `${formatCurrency(Number(n) || 0)}`;
 const blank = (v) => v === undefined || v === null || String(v).trim() === '';
 const cell = (v) => (blank(v) ? '—' : esc(v));
 

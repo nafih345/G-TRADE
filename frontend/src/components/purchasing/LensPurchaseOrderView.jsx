@@ -32,6 +32,8 @@ import {
   eyeLabel, eyeShort, lpoQtyLabel, poQtyLabel, rxCells, rxSummary, sameRx, draftItemErrors, itemPayload, draftFromItem,
   splitPairItem, joinPairItems, setEyeSupplier, lineSupplier, groupItemsBySupplier, lensItemsFromRequirements,
 } from '../../utils/lensPurchaseOrders';
+import { currencyPrefix } from '../../utils/localeFormat.js';
+import CurrencySymbol from '../common/CurrencySymbol.jsx';
 
 const API = '/api/purchase/lens-orders/';
 const todayStr = () => new Date().toISOString().slice(0, 10);
@@ -517,9 +519,9 @@ export function LensPOEditor({ open, po, seed, suppliers, lensProducts, products
                           {full ? (
                             <TextField size="small" type="number" value={it.unit_price ?? ''} onChange={(e) => setLine(i, { unit_price: e.target.value })}
                               inputProps={{ 'aria-label': `Price for line ${i + 1}`, style: { textAlign: 'right' } }}
-                              InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment>,
+                              InputProps={{ startAdornment: <InputAdornment position="start"><CurrencySymbol /></InputAdornment>,
                                 endAdornment: <InputAdornment position="end">/{it.pricing_unit === 'PIECE' ? 'pc' : 'pr'}</InputAdornment> }} />
-                          ) : (it.unit_price ? `₹${it.unit_price}/${it.pricing_unit === 'PIECE' ? 'pc' : 'pr'}` : '—')}
+                          ) : (it.unit_price ? `${currencyPrefix()}${it.unit_price}/${it.pricing_unit === 'PIECE' ? 'pc' : 'pr'}` : '—')}
                         </TableCell>
                       )}
                       <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>

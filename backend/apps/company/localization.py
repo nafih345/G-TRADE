@@ -13,6 +13,7 @@ Storage (nothing kept twice):
 Server code reads preferences through get_preferences() (hot-cached, cleared on save).
 """
 import datetime
+import re
 from decimal import Decimal
 
 from django.db import transaction
@@ -73,6 +74,46 @@ COUNTRIES = [
     ('EG', 'Egypt', 'EGP', 'Africa/Cairo', 'DD/MM/YYYY', 'INTERNATIONAL', 'ar', 7),
 ]
 COUNTRY_CODES = {c[0] for c in COUNTRIES}
+
+# Country → tax terminology (what the tax is called and what its registration number is called).
+# Mirrored in frontend src/utils/localeFormat.js TAX_TERMS.
+EU_COUNTRIES = {'IE', 'DE', 'FR', 'IT', 'ES', 'NL', 'AT', 'BE', 'PT', 'GR', 'FI', 'SE', 'DK', 'PL', 'CZ', 'LU'}
+_VAT_COUNTRIES = {'AE', 'SA', 'OM', 'BH', 'GB'} | EU_COUNTRIES
+_GENERIC_TAX = {'label': 'Tax', 'reg_label': 'Tax Registration No'}
+
+
+def tax_terms(country):
+    """{'label', 'reg_label'} for a country code: GST/GSTIN (India), VAT/TRN (Gulf VAT states),
+    VAT/VAT No (UK / EU), Sales Tax/Tax ID (USA), Tax/Tax Registration No (everyone else)."""
+    code = str(country or '').upper()
+    if code == 'IN':
+        return {'label': 'GST', 'reg_label': 'GSTIN'}
+    if code in {'AE', 'SA', 'OM', 'BH'}:
+        return {'label': 'VAT', 'reg_label': 'TRN'}
+    if code in _VAT_COUNTRIES:
+        return {'label': 'VAT', 'reg_label': 'VAT No'}
+    if code == 'US':
+        return {'label': 'Sales Tax', 'reg_label': 'Tax ID'}
+    return dict(_GENERIC_TAX)
+
+
+GSTIN_RE = re.compile(r'^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$')
+TAX_REG_RE = re.compile(r'^[A-Z0-9][A-Z0-9-]{0,14}$')
+
+
+def clean_tax_registration(value, country):
+    """Normalised registration number for `country`, or ValueError. Blank is allowed.
+    Stored on Company.gstin (15 characters), which every bill already prints."""
+    reg = re.sub(r'\s', '', str(value or '')).upper()
+    if not reg:
+        return ''
+    terms = tax_terms(country)
+    if str(country or '').upper() == 'IN':
+        if not GSTIN_RE.match(reg):
+            raise ValueError('GSTIN must be 15 characters, e.g. 32ABCDE1234F1Z5.')
+    elif not TAX_REG_RE.match(reg):
+        raise ValueError(f"{terms['reg_label']} must be up to 15 letters, digits or hyphens.")
+    return reg
 
 # ISO 3166-2 style subdivisions where we have them; other countries take a typed region.
 REGIONS = {
@@ -186,6 +227,9 @@ DEFAULTS = {
     # Spectacle lenses priced per pair: a single lens costs this % of the pair price unless the
     # product sets its own single-lens price or %.
     'lens_single_piece_percent': 50,
+    # Tax Configuration master switch. Off = the business does not charge GST / VAT / tax: no tax
+    # rates can be added or edited, and tax inputs / columns are hidden across the app.
+    'tax_enabled': True,
 }
 BOOL_KEYS = {k for k, v in DEFAULTS.items() if isinstance(v, bool)}
 
@@ -218,7 +262,8 @@ def catalog():
     now = datetime.datetime.now(datetime.timezone.utc)
     return {
         'countries': [{'code': c[0], 'name': c[1], 'currency': c[2], 'time_zone': c[3], 'date_format': c[4],
-                       'number_format': c[5], 'language': c[6], 'fiscal_year_start_month': c[7]}
+                       'number_format': c[5], 'language': c[6], 'fiscal_year_start_month': c[7],
+                       'tax_label': tax_terms(c[0])['label'], 'tax_reg_label': tax_terms(c[0])['reg_label']}
                       for c in COUNTRIES],
         'regions': REGIONS,
         'time_zones': [{'name': n, 'offset': _utc_offset(n, now)} for n in _time_zones()],
@@ -382,6 +427,11 @@ def validate_preferences(data, current):
 
     # Cross-field rules on the merged result
     merged = {**current, **clean}
+    if 'tax_registration_number' in data:
+        try:
+            clean['tax_registration_number'] = clean_tax_registration(data['tax_registration_number'], merged['country'])
+        except ValueError as exc:
+            errors['tax_registration_number'] = str(exc)
     base = merged['base_currency']
     if 'enabled_currencies' in clean:
         clean['enabled_currencies'] = [c for c in clean['enabled_currencies'] if c != base]
@@ -427,9 +477,12 @@ def audit(request, section, action, summary, changes=None):
 
 def _payload():
     company = get_company()
+    prefs = get_preferences()
     return {
-        'preferences': get_preferences(),
+        'preferences': prefs,
         'currency_symbol': (company.currency if company else '') or '₹',
+        'tax_terms': tax_terms(prefs.get('country')),
+        'tax_registration_number': (company.gstin if company else '') or '',
         'company_exists': company is not None,
         'ui_languages': sorted(UI_LANGUAGES),
     }
@@ -461,12 +514,21 @@ class LocalizationSettingsView(OpenReadsSettingsView):
         company = get_company()
         if 'currency_symbol' in clean and company is None:
             errors['currency_symbol'] = 'Fill in the Store & Clinic Profile first — the symbol is stored on the store.'
+        if 'tax_registration_number' in clean and company is None:
+            errors['tax_registration_number'] = 'Fill in the Store & Clinic Profile first — the number is stored on the store.'
         if errors:
             return Response({'detail': 'Please fix the highlighted fields.', 'errors': errors},
                             status=status.HTTP_400_BAD_REQUEST)
 
         symbol = clean.pop('currency_symbol', None)
-        changes = {k: [current.get(k), v] for k, v in clean.items() if current.get(k) != v}
+        tax_reg = clean.pop('tax_registration_number', None)
+        # Switching the base currency without sending a symbol must not leave the old rupee sign
+        # printing on every screen and bill: adopt the new currency's own symbol.
+        new_base = clean.get('base_currency')
+        if (symbol is None and company is not None and new_base and new_base != current.get('base_currency')
+                and (company.currency or '₹') in ('₹', 'INR', CURRENCY_BY_CODE.get(current.get('base_currency'), ('',) * 3)[2])):
+            symbol = CURRENCY_BY_CODE[new_base][2]
+        changes ={k: [current.get(k), v] for k, v in clean.items() if current.get(k) != v}
         with transaction.atomic():
             obj = BusinessSettings.objects.select_for_update().get(pk=BusinessSettings.load().pk)
             stored = dict(obj.preferences or {})
@@ -477,6 +539,10 @@ class LocalizationSettingsView(OpenReadsSettingsView):
                 changes['currency_symbol'] = [company.currency, symbol]
                 company.currency = symbol
                 company.save(update_fields=['currency', 'updated_at'])
+            if tax_reg is not None and (company.gstin or '') != tax_reg:
+                changes['tax_registration_number'] = [company.gstin or '', tax_reg]
+                company.gstin = tax_reg
+                company.save(update_fields=['gstin', 'updated_at'])
             if changes:
                 audit(request, 'LOCALIZATION', 'UPDATE', f"Updated {', '.join(sorted(changes))}", changes)
         return Response(_payload())

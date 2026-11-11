@@ -1,5 +1,6 @@
 // Inventory → Opening Stock: the item fields both entry methods fill (manual grid and Excel
 // column mapping) and how a server check result reads on screen. The server re-checks everything.
+import { formatCurrency, getCurrencySymbol } from '../../../utils/localeFormat.js';
 
 export const OPENING_FIELDS = [
   { key: 'name', label: 'Item Name', required: true, max: 255 },
@@ -7,11 +8,12 @@ export const OPENING_FIELDS = [
   { key: 'category', label: 'Category', max: 150, list: 'categories' },
   { key: 'brand', label: 'Brand', max: 150, list: 'brands' },
   { key: 'quantity', label: 'Opening Qty', required: true, numeric: true },
-  { key: 'cost_price', label: 'Cost Price ₹', required: true, numeric: true, money: true },
-  { key: 'mrp', label: 'MRP / Sales ₹', numeric: true, money: true },
+  { key: 'cost_price', get label() { return `Cost Price ${getCurrencySymbol()}`; }, required: true, numeric: true, money: true },
+  { key: 'mrp', get label() { return `MRP / Sales ${getCurrencySymbol()}`; }, numeric: true, money: true },
 ];
 export const REQUIRED_FIELDS = OPENING_FIELDS.filter((f) => f.required).map((f) => f.key);
-export const FIELD_LABEL = Object.fromEntries(OPENING_FIELDS.map((f) => [f.key, f.label]));
+// Read live so money labels follow the active currency.
+export const FIELD_LABEL = new Proxy({}, { get: (_, key) => OPENING_FIELDS.find((f) => f.key === key)?.label });
 
 // The status check_rows gives each row. Only 'error' rows cannot be saved; 'duplicate' (the same
 // item twice without a barcode) can, but the Excel preview leaves it unticked.
@@ -29,7 +31,7 @@ export const resultMessages = (res) => {
 };
 
 const toNumber = (v) => {
-  const n = Number(String(v ?? '').replace(/[,₹\s]/g, ''));
+  const n = Number(String(v ?? '').replace(/[^0-9.\-]/g, ''));
   return Number.isFinite(n) ? n : 0;
 };
 export const lineValue = (row) => toNumber(row.quantity) * toNumber(row.cost_price);
@@ -37,5 +39,4 @@ export const totals = (rows) => rows.reduce((t, r) => ({
   qty: t.qty + toNumber(r.quantity), value: t.value + lineValue(r),
 }), { qty: 0, value: 0 });
 
-const inr = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-export const money = (n) => `₹${inr.format(n || 0)}`;
+export const money = (n) => formatCurrency(n || 0);

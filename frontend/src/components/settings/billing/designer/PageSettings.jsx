@@ -125,7 +125,7 @@ export default function PageSettings({
 
       <Section title="Numbers & dates">
         <Row>
-          <TextField size="small" label="Currency symbol" value={cfg.format.currencySymbol ?? '₹'} disabled={d} onChange={(e) => setFormat({ currencySymbol: e.target.value.slice(0, 6) }, 'cur')} />
+          <TextField size="small" label="Currency symbol" helperText="₹ or blank = store currency" value={cfg.format.currencySymbol ?? '₹'} disabled={d} onChange={(e) => setFormat({ currencySymbol: e.target.value.slice(0, 6) }, 'cur')} />
           <NumField label="Decimals" unit="" step={1} min={0} max={4} value={cfg.format.decimals} onChange={(v) => setFormat({ decimals: Math.round(v) }, 'dec')} disabled={d} />
         </Row>
         <SelectField label="Digit grouping" value={cfg.format.thousands || 'indian'} disabled={d} onChange={(v) => setFormat({ thousands: v })}

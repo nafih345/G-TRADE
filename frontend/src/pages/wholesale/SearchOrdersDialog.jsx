@@ -12,8 +12,9 @@ import axios from 'axios';
 import { WHOLESALE_API, fetchAllPages } from './wholesaleConstants';
 import { DOC_KINDS, ORDER_STATUS, QUOTE_STATUS, docFromApi, lineUnits } from './wholesaleOrders';
 import { describeApiError } from '../../utils/apiWriteGuard';
+import { formatCurrency } from '../../utils/localeFormat.js';
 
-const inr = (n) => `₹${(parseFloat(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const inr = (n) => `${formatCurrency(parseFloat(n) || 0)}`;
 const fmtDate = (d) => (d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—');
 const HEAD_SX = { bgcolor: '#0f172a', color: '#fff', fontWeight: 800, fontSize: '0.72rem', py: 0.8 };
 

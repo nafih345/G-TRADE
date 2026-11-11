@@ -28,6 +28,7 @@ import {
 import axios from 'axios';
 import { loadMaster } from '../../utils/masterDataCache';
 import { describeApiError } from '../../utils/apiWriteGuard';
+import { formatCurrency } from '../../utils/localeFormat.js';
 
 export default function BrandManagementView({ products = [] }) {
   const [brands, setBrands] = useState([]);
@@ -1104,7 +1105,7 @@ export default function BrandManagementView({ products = [] }) {
                         </TableCell>
                         <TableCell><Typography variant="body2">{p.category}</Typography></TableCell>
                         <TableCell><Typography variant="body2" fontWeight={800}>{p.stock} units</Typography></TableCell>
-                        <TableCell><Typography variant="body2" fontWeight={800}>₹{p.sellingPrice.toFixed(2)}</Typography></TableCell>
+                        <TableCell><Typography variant="body2" fontWeight={800}>{formatCurrency(p.sellingPrice)}</Typography></TableCell>
                       </TableRow>
                     ))}
                   </TableBody>

@@ -57,6 +57,7 @@ import BankBookPanel from '../components/financial/BankBook';
 import DayBookPanel from '../components/financial/DayBook';
 import ChequeRegister from '../components/financial/ChequeRegister';
 import FinancialStatements from '../components/financial/FinancialStatements';
+import { formatCurrency, getCurrencySymbol, getCurrencyCode, getTaxLabel } from '../utils/localeFormat.js';
 
 // Fixed Sub-Categories per Group (NO COGS!)
 const ACCOUNT_GROUPS = {
@@ -828,21 +829,21 @@ function FinancialManagementView() {
             <Grid item xs={12} sm={6} md={3}>
               <Paper variant="outlined" sx={{ p: 2.5, borderRadius: 3, borderLeft: '4px solid #2563eb', bgcolor: '#ffffff' }}>
                 <Typography variant="caption" color="text.secondary" fontWeight={700}>TOTAL ASSETS</Typography>
-                <Typography variant="h4" fontWeight={850} color="primary.main">₹{totalAssets.toLocaleString()}</Typography>
+                <Typography variant="h4" fontWeight={850} color="primary.main">{formatCurrency(totalAssets)}</Typography>
                 <Typography variant="caption" color="text.secondary">Cash, Bank, Inventory & Fixed Assets</Typography>
               </Paper>
             </Grid>
             <Grid item xs={12} sm={6} md={3}>
               <Paper variant="outlined" sx={{ p: 2.5, borderRadius: 3, borderLeft: '4px solid #ef4444', bgcolor: '#ffffff' }}>
                 <Typography variant="caption" color="text.secondary" fontWeight={700}>TOTAL LIABILITIES</Typography>
-                <Typography variant="h4" fontWeight={850} color="error.main">₹{totalLiabilities.toLocaleString()}</Typography>
-                <Typography variant="caption" color="text.secondary">Accounts Payable & GST Due</Typography>
+                <Typography variant="h4" fontWeight={850} color="error.main">{formatCurrency(totalLiabilities)}</Typography>
+                <Typography variant="caption" color="text.secondary">Accounts Payable & {getTaxLabel()} Due</Typography>
               </Paper>
             </Grid>
             <Grid item xs={12} sm={6} md={3}>
               <Paper variant="outlined" sx={{ p: 2.5, borderRadius: 3, borderLeft: '4px solid #10b981', bgcolor: '#ffffff' }}>
                 <Typography variant="caption" color="text.secondary" fontWeight={700}>GROSS REVENUE (INCOME)</Typography>
-                <Typography variant="h4" fontWeight={850} color="success.main">₹{totalIncome.toLocaleString()}</Typography>
+                <Typography variant="h4" fontWeight={850} color="success.main">{formatCurrency(totalIncome)}</Typography>
                 <Typography variant="caption" color="text.secondary">Retail, Wholesale & Services</Typography>
               </Paper>
             </Grid>
@@ -850,7 +851,7 @@ function FinancialManagementView() {
               <Paper variant="outlined" sx={{ p: 2.5, borderRadius: 3, borderLeft: '4px solid #8b5cf6', bgcolor: '#ffffff' }}>
                 <Typography variant="caption" color="text.secondary" fontWeight={700}>NET OPERATING PROFIT</Typography>
                 <Typography variant="h4" fontWeight={850} sx={{ color: netProfit >= 0 ? '#10b981' : '#ef4444' }}>
-                  ₹{netProfit.toLocaleString()}
+                  {formatCurrency(netProfit)}
                 </Typography>
                 <Typography variant="caption" color="text.secondary">Income minus Expenses</Typography>
               </Paper>
@@ -875,7 +876,7 @@ function FinancialManagementView() {
                       <TableRow key={a.id}>
                         <TableCell sx={{ fontWeight: 700, fontFamily: 'monospace' }}>{a.code}</TableCell>
                         <TableCell sx={{ fontWeight: 600 }}>{a.name}</TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 700, color: 'success.main' }}>₹{(parseFloat(a.current_balance) || 0).toLocaleString()}</TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 700, color: 'success.main' }}>{formatCurrency(parseFloat(a.current_balance) || 0)}</TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -899,7 +900,7 @@ function FinancialManagementView() {
                       <TableRow key={a.id}>
                         <TableCell sx={{ fontWeight: 700, fontFamily: 'monospace' }}>{a.code}</TableCell>
                         <TableCell sx={{ fontWeight: 600 }}>{a.name}</TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 700, color: 'error.main' }}>₹{(parseFloat(a.current_balance) || 0).toLocaleString()}</TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 700, color: 'error.main' }}>{formatCurrency(parseFloat(a.current_balance) || 0)}</TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -1036,7 +1037,7 @@ function FinancialManagementView() {
 
                         <Stack direction="row" spacing={2} alignItems="center">
                           <Typography variant="subtitle1" fontWeight={850} color="primary.main">
-                            Total Balance: ₹{groupBalance.toLocaleString()}
+                            Total Balance: {formatCurrency(groupBalance)}
                           </Typography>
                           <Button 
                             size="small" 
@@ -1093,8 +1094,8 @@ function FinancialManagementView() {
                                         <TableRow>
                                           <TableCell sx={{ fontWeight: 700, width: 120 }}>Code</TableCell>
                                           <TableCell sx={{ fontWeight: 700 }}>Account Name</TableCell>
-                                          <TableCell sx={{ fontWeight: 700, width: 130 }} align="right">Opening (₹)</TableCell>
-                                          <TableCell sx={{ fontWeight: 700, width: 140 }} align="right">Current (₹)</TableCell>
+                                          <TableCell sx={{ fontWeight: 700, width: 130 }} align="right">Opening ({getCurrencySymbol()})</TableCell>
+                                          <TableCell sx={{ fontWeight: 700, width: 140 }} align="right">Current ({getCurrencySymbol()})</TableCell>
                                           <TableCell sx={{ fontWeight: 700, width: 90 }}>Status</TableCell>
                                           <TableCell sx={{ fontWeight: 700, width: 100 }} align="center">Actions</TableCell>
                                         </TableRow>
@@ -1111,8 +1112,8 @@ function FinancialManagementView() {
                                             <TableRow key={acc.id} hover>
                                               <TableCell sx={{ fontWeight: 700, fontFamily: 'monospace', color: 'primary.main' }}>{acc.code}</TableCell>
                                               <TableCell sx={{ fontWeight: 600 }}>{acc.name}</TableCell>
-                                              <TableCell align="right">₹{(parseFloat(acc.opening_balance) || 0).toLocaleString()}</TableCell>
-                                              <TableCell align="right" sx={{ fontWeight: 700 }}>₹{(parseFloat(acc.current_balance) || 0).toLocaleString()}</TableCell>
+                                              <TableCell align="right">{formatCurrency(parseFloat(acc.opening_balance) || 0)}</TableCell>
+                                              <TableCell align="right" sx={{ fontWeight: 700 }}>{formatCurrency(parseFloat(acc.current_balance) || 0)}</TableCell>
                                               <TableCell><Chip label={acc.status} color={acc.status === 'Active' ? 'success' : 'default'} size="small" sx={{ height: 20, fontSize: '0.7rem', fontWeight: 700 }} /></TableCell>
                                               <TableCell align="center">
                                                 <Stack direction="row" spacing={0.5} justifyContent="center">
@@ -1149,8 +1150,8 @@ function FinancialManagementView() {
                       <TableCell sx={{ fontWeight: 700 }}>Account Name</TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>Sub-Category Group</TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>Type</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }} align="right">Opening Bal (₹)</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }} align="right">Current Bal (₹)</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }} align="right">Opening Bal ({getCurrencySymbol()})</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }} align="right">Current Bal ({getCurrencySymbol()})</TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>Status</TableCell>
                       <TableCell sx={{ fontWeight: 700, width: 110 }} align="center">Actions</TableCell>
                     </TableRow>
@@ -1169,8 +1170,8 @@ function FinancialManagementView() {
                           <TableCell sx={{ fontWeight: 600 }}>{a.name}</TableCell>
                           <TableCell><Chip label={a.account_group || 'General'} size="small" variant="outlined" sx={{ fontWeight: 600 }} /></TableCell>
                           <TableCell><Chip label={a.account_type} color="primary" size="small" sx={{ fontWeight: 700 }} /></TableCell>
-                          <TableCell align="right">₹{(parseFloat(a.opening_balance) || 0).toLocaleString()}</TableCell>
-                          <TableCell align="right" sx={{ fontWeight: 700 }}>₹{(parseFloat(a.current_balance) || 0).toLocaleString()}</TableCell>
+                          <TableCell align="right">{formatCurrency(parseFloat(a.opening_balance) || 0)}</TableCell>
+                          <TableCell align="right" sx={{ fontWeight: 700 }}>{formatCurrency(parseFloat(a.current_balance) || 0)}</TableCell>
                           <TableCell><Chip label={a.status} color={a.status === 'Active' ? 'success' : 'default'} size="small" sx={{ fontWeight: 700 }} /></TableCell>
                           <TableCell align="center">
                             <Stack direction="row" spacing={0.5} justifyContent="center">
@@ -1530,7 +1531,7 @@ function FinancialManagementView() {
                     fullWidth 
                     size="small" 
                     type="number" 
-                    label="Opening Balance (INR)" 
+                    label={`Opening Balance (${getCurrencyCode()})`} 
                     value={accountFormData.opening_balance} 
                     onChange={(e) => setAccountFormData({ ...accountFormData, opening_balance: e.target.value })}
                     helperText="Reaches the ledger when posted from Accounting Integration"
@@ -1620,15 +1621,15 @@ function FinancialManagementView() {
               </Stack>
               <Stack direction="row" justifyContent="space-between">
                 <Typography variant="body2" color="text.secondary">Opening Balance</Typography>
-                <Typography variant="body2" fontWeight={700}>₹{(parseFloat(selectedAccountForView.opening_balance) || 0).toLocaleString()}</Typography>
+                <Typography variant="body2" fontWeight={700}>{formatCurrency(parseFloat(selectedAccountForView.opening_balance) || 0)}</Typography>
               </Stack>
               <Stack direction="row" justifyContent="space-between">
                 <Typography variant="body2" color="text.secondary">Posted Debits / Credits</Typography>
-                <Typography variant="body2" fontWeight={700}>₹{(selectedAccountForView.total_debit || 0).toLocaleString()} / ₹{(selectedAccountForView.total_credit || 0).toLocaleString()}</Typography>
+                <Typography variant="body2" fontWeight={700}>{formatCurrency(selectedAccountForView.total_debit || 0)} / {formatCurrency(selectedAccountForView.total_credit || 0)}</Typography>
               </Stack>
               <Stack direction="row" justifyContent="space-between">
                 <Typography variant="body2" color="text.secondary">Ledger Balance ({selectedAccountForView.normal_balance === 'DEBIT' ? 'Dr' : 'Cr'})</Typography>
-                <Typography variant="body2" fontWeight={850} color="primary.main">₹{(parseFloat(selectedAccountForView.current_balance) || 0).toLocaleString()}</Typography>
+                <Typography variant="body2" fontWeight={850} color="primary.main">{formatCurrency(parseFloat(selectedAccountForView.current_balance) || 0)}</Typography>
               </Stack>
               <Stack direction="row" justifyContent="space-between">
                 <Typography variant="body2" color="text.secondary">Status</Typography>

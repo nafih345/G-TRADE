@@ -46,6 +46,7 @@ import {
   Email as EmailIcon,
   BookOnline as AppointmentIcon
 } from '@mui/icons-material';
+import { currencyPrefix, formatCurrency, getCurrencySymbol, getTaxLabel } from '../utils/localeFormat.js';
 
 // Each tab view is a large, self-contained sub-app (NewSaleWizard alone is ~2600 lines) that used
 // to be bundled eagerly into this page's chunk regardless of which tab the user actually opened —
@@ -57,6 +58,8 @@ const PosBillingView = lazy(() => import('../components/sales/PosBillingView'));
 const OrdersManagerView = lazy(() => import('../components/sales/OrdersManagerView'));
 const PaymentsManagerView = lazy(() => import('../components/sales/PaymentsManagerView'));
 const PrintInvoiceModal = lazy(() => import('../components/sales/PrintInvoiceModal'));
+const ReturnEntryView = lazy(() => import('../components/returns/ReturnEntryView'));
+const ReturnsReportSection = lazy(() => import('../components/returns/ReturnsReportSection'));
 
 const TabViewFallback = () => (
   <Box sx={{ pt: 2 }}><LinearProgress /></Box>
@@ -142,6 +145,7 @@ export default function SalesInvoice() {
   const [printModalOpen, setPrintModalOpen] = useState(false);
   const [printableInvoice, setPrintableInvoice] = useState(null);
   const getTabFromPath = (path = '') => {
+    if (path.includes('/sales/returns')) return 'returns';
     if (path.includes('dashboard')) return 'dashboard';
     if (path.includes('new')) return 'new-sale';
     if (path.includes('pos')) return 'pos-billing';
@@ -800,7 +804,7 @@ export default function SalesInvoice() {
 
     setRecordPaymentDialogOpen(false);
     setPayRecordInput({ ...EMPTY_PAY_RECORD });
-    alert(`Payment of ₹${payAmt} recorded successfully for ${custName}!`);
+    alert(`Payment of ${currencyPrefix()}${payAmt} recorded successfully for ${custName}!`);
 
     try {
       const res = await axios.post('/api/sales/payments/', {
@@ -1416,6 +1420,13 @@ export default function SalesInvoice() {
         </Suspense>
       )}
 
+      {/* SALES RETURN — customer returns: stock back in, refund / credit note posted (components/returns) */}
+      {activeTab === 'returns' && (
+        <Suspense fallback={<TabViewFallback />}>
+          <ReturnEntryView kind="sales" />
+        </Suspense>
+      )}
+
       {/* 7. REPORTS */}
       {activeTab === 'reports' && (() => {
         // Dynamic Live Calculations from Sales & Optical Services Database
@@ -1570,7 +1581,7 @@ export default function SalesInvoice() {
                   onChange={(e) => setReportCategory(e.target.value)}
                 >
                   <MenuItem value="daily">Daily Sales Summary</MenuItem>
-                  <MenuItem value="monthly">Monthly Sales Summary & GST</MenuItem>
+                  <MenuItem value="monthly">Monthly Sales Summary & {getTaxLabel()}</MenuItem>
                   <MenuItem value="customer">Customer Sales Ledger & Balances</MenuItem>
                   <MenuItem value="product">Product Category Revenue (Frames/Lenses)</MenuItem>
                   <MenuItem value="workflow">Spectacle Orders Workflow Status</MenuItem>
@@ -1615,7 +1626,7 @@ export default function SalesInvoice() {
                     <TableRow>
                       <TableCell sx={{ fontWeight: 700 }}>Report Date</TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>Total Invoices / Receipts</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }}>Collected GST (18%)</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>Collected {getTaxLabel()}</TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>Gross Revenue</TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>Est. Net Profit (40%)</TableCell>
                     </TableRow>
@@ -1637,9 +1648,9 @@ export default function SalesInvoice() {
                         <TableRow key={idx}>
                           <TableCell sx={{ fontWeight: 700 }}>{row.date}</TableCell>
                           <TableCell>{row.count} Transaction(s)</TableCell>
-                          <TableCell>₹{row.gst.toFixed(2)}</TableCell>
-                          <TableCell sx={{ fontWeight: 700, color: 'primary.main' }}>₹{row.revenue.toFixed(2)}</TableCell>
-                          <TableCell sx={{ color: 'success.main', fontWeight: 700 }}>₹{row.profit.toFixed(2)}</TableCell>
+                          <TableCell>{formatCurrency(row.gst)}</TableCell>
+                          <TableCell sx={{ fontWeight: 700, color: 'primary.main' }}>{formatCurrency(row.revenue)}</TableCell>
+                          <TableCell sx={{ color: 'success.main', fontWeight: 700 }}>{formatCurrency(row.profit)}</TableCell>
                         </TableRow>
                       ))
                     )}
@@ -1653,7 +1664,7 @@ export default function SalesInvoice() {
                     <TableRow>
                       <TableCell sx={{ fontWeight: 700 }}>Billing Month</TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>Total Invoices</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }}>GST Output Tax</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>{getTaxLabel()} Output Tax</TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>Total Sales Revenue</TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>Estimated Net Profit</TableCell>
                     </TableRow>
@@ -1671,9 +1682,9 @@ export default function SalesInvoice() {
                       <TableRow>
                         <TableCell sx={{ fontWeight: 700 }}>Current Month ({new Date().toISOString().substring(0, 7)})</TableCell>
                         <TableCell>{orders.length + payments.length} Invoices</TableCell>
-                        <TableCell>₹{(orders.reduce((sum, o) => sum + (parseFloat(o.total) || 0), 0) * 0.18).toFixed(2)}</TableCell>
-                        <TableCell sx={{ fontWeight: 700, color: 'primary.main' }}>₹{orders.reduce((sum, o) => sum + (parseFloat(o.total) || 0), 0).toFixed(2)}</TableCell>
-                        <TableCell sx={{ color: 'success.main', fontWeight: 700 }}>₹{(orders.reduce((sum, o) => sum + (parseFloat(o.total) || 0), 0) * 0.40).toFixed(2)}</TableCell>
+                        <TableCell>{formatCurrency(orders.reduce((sum, o) => sum + (parseFloat(o.total) || 0), 0) * 0.18)}</TableCell>
+                        <TableCell sx={{ fontWeight: 700, color: 'primary.main' }}>{formatCurrency(orders.reduce((sum, o) => sum + (parseFloat(o.total) || 0), 0))}</TableCell>
+                        <TableCell sx={{ color: 'success.main', fontWeight: 700 }}>{formatCurrency(orders.reduce((sum, o) => sum + (parseFloat(o.total) || 0), 0) * 0.40)}</TableCell>
                       </TableRow>
                     )}
                   </TableBody>
@@ -1708,7 +1719,7 @@ export default function SalesInvoice() {
                           <TableCell sx={{ fontWeight: 600 }}>{c.name}</TableCell>
                           <TableCell>{c.phone}</TableCell>
                           <TableCell><Chip label={loyalty.tier} size="small" sx={{ fontWeight: 700 }} /></TableCell>
-                          <TableCell sx={{ color: c.balance > 0 ? 'error.main' : 'text.primary', fontWeight: 700 }}>₹{c.balance || 0}</TableCell>
+                          <TableCell sx={{ color: c.balance > 0 ? 'error.main' : 'text.primary', fontWeight: 700 }}>{currencyPrefix()}{c.balance || 0}</TableCell>
                           <TableCell sx={{ fontWeight: 700 }}>{loyalty.points} Pts</TableCell>
                         </TableRow>
                         );
@@ -1725,7 +1736,7 @@ export default function SalesInvoice() {
                       <TableCell sx={{ fontWeight: 700 }}>Product Category</TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>Items Available Qty</TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>Total Sales Revenue</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }}>Collected Tax (GST)</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>Collected Tax ({getTaxLabel()})</TableCell>
                     </TableRow>
                   </TableHead>
                   <TableBody>
@@ -1745,8 +1756,8 @@ export default function SalesInvoice() {
                           <TableRow key={cat}>
                             <TableCell sx={{ fontWeight: 700 }}>{cat}</TableCell>
                             <TableCell>{catProds.length} Products</TableCell>
-                            <TableCell sx={{ fontWeight: 700 }}>₹{catRevenue.toFixed(2)}</TableCell>
-                            <TableCell>₹{(catRevenue * 0.18).toFixed(2)}</TableCell>
+                            <TableCell sx={{ fontWeight: 700 }}>{formatCurrency(catRevenue)}</TableCell>
+                            <TableCell>{formatCurrency(catRevenue * 0.18)}</TableCell>
                           </TableRow>
                         );
                       })
@@ -1780,7 +1791,7 @@ export default function SalesInvoice() {
                           <TableCell sx={{ fontWeight: 700 }}>{row.stage}</TableCell>
                           <TableCell>{row.count} Orders</TableCell>
                           <TableCell sx={{ fontWeight: 700 }}>{row.share}%</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>₹{row.value.toFixed(2)}</TableCell>
+                          <TableCell sx={{ fontWeight: 700 }}>{formatCurrency(row.value)}</TableCell>
                         </TableRow>
                       ))
                     )}
@@ -1797,7 +1808,7 @@ export default function SalesInvoice() {
                       <TableCell sx={{ fontWeight: 700 }}>Total Qty</TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>Open / Pending</TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>Service Revenue</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }}>Collected Tax (GST)</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>Collected Tax ({getTaxLabel()})</TableCell>
                     </TableRow>
                   </TableHead>
                   <TableBody>
@@ -1822,8 +1833,8 @@ export default function SalesInvoice() {
                             <TableCell sx={{ color: row.pending > 0 ? 'warning.main' : 'text.secondary', fontWeight: 700 }}>
                               {row.pending}
                             </TableCell>
-                            <TableCell sx={{ fontWeight: 700, color: 'primary.main' }}>₹{row.revenue.toFixed(2)}</TableCell>
-                            <TableCell>₹{row.tax.toFixed(2)}</TableCell>
+                            <TableCell sx={{ fontWeight: 700, color: 'primary.main' }}>{formatCurrency(row.revenue)}</TableCell>
+                            <TableCell>{formatCurrency(row.tax)}</TableCell>
                           </TableRow>
                         ))}
                         <TableRow sx={{ bgcolor: 'action.hover' }}>
@@ -1831,8 +1842,8 @@ export default function SalesInvoice() {
                           <TableCell sx={{ fontWeight: 800 }}>{serviceTotals.jobs} Job(s)</TableCell>
                           <TableCell sx={{ fontWeight: 800 }}>{serviceTotals.qty}</TableCell>
                           <TableCell />
-                          <TableCell sx={{ fontWeight: 800, color: 'primary.main' }}>₹{serviceTotals.revenue.toFixed(2)}</TableCell>
-                          <TableCell sx={{ fontWeight: 800 }}>₹{serviceTotals.tax.toFixed(2)}</TableCell>
+                          <TableCell sx={{ fontWeight: 800, color: 'primary.main' }}>{formatCurrency(serviceTotals.revenue)}</TableCell>
+                          <TableCell sx={{ fontWeight: 800 }}>{formatCurrency(serviceTotals.tax)}</TableCell>
                         </TableRow>
                       </>
                     )}
@@ -1864,7 +1875,7 @@ export default function SalesInvoice() {
                         <TableRow key={row.method}>
                           <TableCell sx={{ fontWeight: 700 }}>{row.method}</TableCell>
                           <TableCell>{row.count} Receipts</TableCell>
-                          <TableCell sx={{ fontWeight: 700, color: 'success.main' }}>₹{row.amount.toFixed(2)}</TableCell>
+                          <TableCell sx={{ fontWeight: 700, color: 'success.main' }}>{formatCurrency(row.amount)}</TableCell>
                           <TableCell sx={{ fontWeight: 700 }}>{row.share}%</TableCell>
                         </TableRow>
                       ))
@@ -1909,6 +1920,12 @@ export default function SalesInvoice() {
           </Card>
         );
       })()}
+      {/* Sales Returns (all dates) at the bottom of Sales → Reports; Reports → Sales Report has the dated view. */}
+      {activeTab === 'reports' && (
+        <Suspense fallback={<TabViewFallback />}>
+          <ReturnsReportSection kind="sales" />
+        </Suspense>
+      )}
 
       {/* --- ORDER DETAILS DIALOG MODAL (WITH TABS FOR EXTENSIONS) --- */}
       <Dialog open={Boolean(selectedOrder)} onClose={() => setSelectedOrder(null)} maxWidth="sm" fullWidth>
@@ -1930,7 +1947,7 @@ export default function SalesInvoice() {
                 <Typography variant="body2"><strong>Customer Name:</strong> {selectedOrder?.customer}</Typography>
                 <Typography variant="body2"><strong>Order Date:</strong> {selectedOrder?.date}</Typography>
                 <Typography variant="body2"><strong>Workflow Status:</strong> <Chip label={selectedOrder?.status} size="small" color="primary" /></Typography>
-                <Typography variant="body2"><strong>Total Amount:</strong> ₹{selectedOrder?.total}</Typography>
+                <Typography variant="body2"><strong>Total Amount:</strong> {currencyPrefix()}{selectedOrder?.total}</Typography>
               </Stack>
             )}
             {orderDetailTab === 1 && (
@@ -1949,7 +1966,7 @@ export default function SalesInvoice() {
             {orderDetailTab === 3 && (
               <Stack spacing={1}>
                 <Typography variant="body2"><strong>Payment Status:</strong> {selectedOrder?.payment}</Typography>
-                <Typography variant="body2"><strong>Amount Paid:</strong> ₹{selectedOrder?.total}</Typography>
+                <Typography variant="body2"><strong>Amount Paid:</strong> {currencyPrefix()}{selectedOrder?.total}</Typography>
               </Stack>
             )}
             {orderDetailTab === 4 && (
@@ -1993,8 +2010,8 @@ export default function SalesInvoice() {
               <Stack spacing={2}>
                 <Typography variant="body2"><strong>Patient ID:</strong> {selectedCustomer?.patient_code || `#${String(selectedCustomer?.id || '').slice(0, 8)}`}</Typography>
                 <Typography variant="body2"><strong>Contact Phone:</strong> {selectedCustomer?.phone}</Typography>
-                <Typography variant="body2"><strong>Loyalty Membership Tier:</strong> {selectedCustomer?.tier} <Typography component="span" variant="caption" color="text.secondary">(from ₹{Number(selectedCustomer?.lifetimeSpend || 0).toFixed(2)} lifetime spend)</Typography></Typography>
-                <Typography variant="body2"><strong>Outstanding Due Balance:</strong> ₹{selectedCustomer?.balance}</Typography>
+                <Typography variant="body2"><strong>Loyalty Membership Tier:</strong> {selectedCustomer?.tier} <Typography component="span" variant="caption" color="text.secondary">(from {formatCurrency(Number(selectedCustomer?.lifetimeSpend || 0))} lifetime spend)</Typography></Typography>
+                <Typography variant="body2"><strong>Outstanding Due Balance:</strong> {currencyPrefix()}{selectedCustomer?.balance}</Typography>
                 <Typography variant="body2"><strong>Loyalty Points Balance:</strong> {selectedCustomer?.points || 0} Pts</Typography>
               </Stack>
             )}
@@ -2029,14 +2046,14 @@ export default function SalesInvoice() {
                         </Typography>
                       </Typography>
                       <Typography variant="body2" fontWeight={700}>
-                        ₹{Number(inv.netTotal ?? inv.total ?? 0).toFixed(2)}
+                        {formatCurrency(Number(inv.netTotal ?? inv.total ?? 0))}
                       </Typography>
                     </Box>
                   ))}
                   <Box sx={{ display: 'flex', justifyContent: 'space-between', pt: 1, borderTop: '1px solid', borderColor: 'divider' }}>
                     <Typography variant="body2" fontWeight={700}>Lifetime Spend</Typography>
                     <Typography variant="body2" fontWeight={700}>
-                      ₹{custInvoices.reduce((s, o) => s + (Number(o.netTotal ?? o.total) || 0), 0).toFixed(2)}
+                      {formatCurrency(custInvoices.reduce((s, o) => s + (Number(o.netTotal ?? o.total) || 0), 0))}
                     </Typography>
                   </Box>
                 </Stack>
@@ -2103,7 +2120,7 @@ export default function SalesInvoice() {
                   <tr key={item.product.id}>
                     <td>{item.product.name}</td>
                     <td style={{ textAlign: 'right' }}>{item.qty}</td>
-                    <td style={{ textAlign: 'right' }}>₹{(item.product.price * item.qty).toFixed(2)}</td>
+                    <td style={{ textAlign: 'right' }}>{formatCurrency(item.product.price * item.qty)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -2111,21 +2128,21 @@ export default function SalesInvoice() {
             <Divider sx={{ borderColor: 'black', my: 1 }} />
             <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
               <span>Subtotal:</span>
-              <span>₹{subtotal.toFixed(2)}</span>
+              <span>{formatCurrency(subtotal)}</span>
             </Box>
             <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
               <span>Taxes:</span>
-              <span>₹{tax.toFixed(2)}</span>
+              <span>{formatCurrency(tax)}</span>
             </Box>
             {discount > 0 && (
               <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
                 <span>Discount:</span>
-                <span>-₹{discount}</span>
+                <span>-{currencyPrefix()}{discount}</span>
               </Box>
             )}
             <Box sx={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', fontWeight: 'bold', mt: 1 }}>
               <span>Grand Total:</span>
-              <span>₹{total.toFixed(2)}</span>
+              <span>{formatCurrency(total)}</span>
             </Box>
             <Box sx={{ mt: 3, textAlign: 'center', fontSize: '0.75rem' }}>
               <span>Thank you for choosing G OPTICALS for your vision needs!</span>
@@ -2422,13 +2439,13 @@ export default function SalesInvoice() {
               <MenuItem value="">-- Select Patient / Walk-in Customer --</MenuItem>
               {customers.map(c => (
                 <MenuItem key={c.id} value={c.id}>
-                  {c.name} ({c.phone}) {c.balance > 0 ? `• Due: ₹${c.balance}` : ''}
+                  {c.name} ({c.phone}) {c.balance > 0 ? `• Due: ${currencyPrefix()}${c.balance}` : ''}
                 </MenuItem>
               ))}
             </TextField>
 
             <TextField 
-              label="Amount Collected (₹)" 
+              label={`Amount Collected (${getCurrencySymbol()})`} 
               type="number" 
               fullWidth 
               required

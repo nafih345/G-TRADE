@@ -15,6 +15,7 @@ import { navDialogProps } from './keyboardNav';
 import PaymentModeDetails from '../../components/common/PaymentModeDetails';
 import { needsBank } from '../../utils/paymentModes';
 import { WHOLESALE_SHORTCUTS } from './posShortcuts';
+import { currencyPrefix, getCurrencySymbol, getCurrencyCode, getTaxRegLabel } from '../../utils/localeFormat.js';
 
 // ---------------------------------------------------------------------------
 // New Dealer
@@ -38,7 +39,7 @@ export function NewDealerDialog({ open, value, onChange, onClose, onSave, saving
               <TextField fullWidth size="small" label="Email Address" value={value.email} onChange={(e) => onChange({ ...value, email: e.target.value })} />
             </Grid>
           </Grid>
-          <TextField fullWidth size="small" label="GSTIN Number" value={value.gstin} onChange={(e) => onChange({ ...value, gstin: e.target.value })} />
+          <TextField fullWidth size="small" label={`${getTaxRegLabel()} Number`} value={value.gstin} onChange={(e) => onChange({ ...value, gstin: e.target.value })} />
           <TextField fullWidth size="small" multiline minRows={2} label="Billing Address" value={value.billingAddress} onChange={(e) => onChange({ ...value, billingAddress: e.target.value, shippingAddress: value.shippingAddress || e.target.value })} />
           <TextField fullWidth size="small" multiline minRows={2} label="Shipping Address" value={value.shippingAddress} onChange={(e) => onChange({ ...value, shippingAddress: e.target.value })} />
           <Grid container spacing={2}>
@@ -53,7 +54,7 @@ export function NewDealerDialog({ open, value, onChange, onClose, onSave, saving
           </Grid>
           <Grid container spacing={2}>
             <Grid item xs={6}>
-              <TextField fullWidth size="small" type="number" label="Credit Limit (INR)" value={value.creditLimit} onChange={(e) => onChange({ ...value, creditLimit: e.target.value })} />
+              <TextField fullWidth size="small" type="number" label={`Credit Limit (${getCurrencyCode()})`} value={value.creditLimit} onChange={(e) => onChange({ ...value, creditLimit: e.target.value })} />
             </Grid>
             <Grid item xs={6}>
               <TextField fullWidth size="small" type="number" label="Payment Terms (Days)" value={value.creditDays} onChange={(e) => onChange({ ...value, creditDays: e.target.value })} />
@@ -99,7 +100,7 @@ export function DealerProfileDialog({ open, dealer, onClose }) {
         <ProfileRow label="Contact Person" value={dealer.contactPerson} />
         <ProfileRow label="Phone" value={dealer.phone} />
         <ProfileRow label="Email" value={dealer.email} />
-        <ProfileRow label="GSTIN" value={dealer.gstin} />
+        <ProfileRow label={getTaxRegLabel()} value={dealer.gstin} />
         <ProfileRow label="Billing Address" value={dealer.billingAddress} />
         <ProfileRow label="Shipping Address" value={dealer.shippingAddress} />
         <ProfileRow label="Price List" value={PRICE_LIST_OPTIONS.find(p => p.value === dealer.priceList)?.label} />
@@ -186,7 +187,7 @@ export function RecordPaymentDialog({ open, dealer, onClose, onRecord }) {
       <DialogContent dividers>
         <Stack spacing={2} sx={{ pt: 1 }}>
           <Typography variant="body2" color="text.secondary">Current Outstanding: <b>{fmtINR(dealer?.outstanding)}</b></Typography>
-          <TextField fullWidth size="small" autoFocus type="number" label="Amount Received (₹)" value={amount} onChange={(e) => setAmount(e.target.value)} />
+          <TextField fullWidth size="small" autoFocus type="number" label={`Amount Received (${getCurrencySymbol()})`} value={amount} onChange={(e) => setAmount(e.target.value)} />
           <TextField select fullWidth size="small" label="Payment Mode" value={mode} onChange={(e) => setMode(e.target.value)}>
             {['Cash', 'UPI', 'Card', 'Bank Transfer'].map(m => <MenuItem key={m} value={m}>{m}</MenuItem>)}
           </TextField>
@@ -605,7 +606,7 @@ export function SchemeDialog({ open, onClose, dealer, schemes, products, invoice
           {(type === 'PERCENT' || type === 'FIXED' || type === 'PROMO') && (
             <TextField
               fullWidth size="small" type="number" value={value} onChange={(e) => setValue(e.target.value)}
-              label={type === 'FIXED' ? 'Discount Amount (₹)' : 'Discount %'}
+              label={type === 'FIXED' ? `Discount Amount (${getCurrencySymbol()})` : 'Discount %'}
             />
           )}
 
@@ -634,7 +635,7 @@ export function SchemeDialog({ open, onClose, dealer, schemes, products, invoice
           {type === 'SCHEME' && (
             <TextField select fullWidth size="small" label="Select Scheme" value={schemeId} onChange={(e) => setSchemeId(e.target.value)}>
               {schemes.map(s => (
-                <MenuItem key={s.id} value={s.id}>{s.name} ({s.type === 'FIXED' ? `₹${s.value}` : `${s.value}%`})</MenuItem>
+                <MenuItem key={s.id} value={s.id}>{s.name} ({s.type === 'FIXED' ? `${currencyPrefix()}${s.value}` : `${s.value}%`})</MenuItem>
               ))}
             </TextField>
           )}
@@ -709,7 +710,7 @@ export function CreditNoteDialog({ open, invoice, onClose, onCreate }) {
           <Typography variant="body2" color="text.secondary">
             Against Invoice <b>{invoice.invoiceNo}</b> — {invoice.customer?.name}
           </Typography>
-          <TextField fullWidth size="small" autoFocus type="number" label="Credit Note Amount (₹)" value={amount} onChange={(e) => setAmount(e.target.value)} />
+          <TextField fullWidth size="small" autoFocus type="number" label={`Credit Note Amount (${getCurrencySymbol()})`} value={amount} onChange={(e) => setAmount(e.target.value)} />
           <TextField fullWidth size="small" multiline minRows={2} label="Reason" value={reason} onChange={(e) => setReason(e.target.value)} />
         </Stack>
       </DialogContent>

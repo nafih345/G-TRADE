@@ -13,7 +13,7 @@ export const DEFAULT_PREFS = {
   base_currency: 'INR', currency_decimals: 2, enabled_currencies: [], exchange_rates: {}, enabled_languages: ['en'],
   rounding_method: 'NONE', quantity_decimals: 0, default_payment_terms_days: 0, default_sale_status: 'UNPAID',
   default_discount_mode: 'PERCENT', max_discount_percent: 100, service_charge_percent: 0, service_charge_on: 'NONE',
-  default_customer_city: '', lens_single_piece_percent: 50,
+  default_customer_city: '', lens_single_piece_percent: 50, tax_enabled: true,
 };
 
 // group separator, decimal separator, Indian lakh grouping — mirrors NUMBER_FORMATS.
@@ -38,22 +38,69 @@ const readLocal = () => {
   }
 };
 
+// Display symbol per ISO code. Codes whose symbol is ambiguous or unfamiliar print as the code
+// itself ("QAR 120.00"). Mirrors CURRENCIES in backend apps/company/localization.py.
+export const CURRENCY_SYMBOLS = {
+  INR: '₹', QAR: 'QAR', USD: '$', AED: 'AED', SAR: 'SAR', OMR: 'OMR', KWD: 'KWD', BHD: 'BHD', EUR: '€', GBP: '£',
+};
+
+/** ISO code → the symbol printed with amounts (unknown codes print as the code). */
+export function symbolForCurrency(code) {
+  const c = String(code || '').trim().toUpperCase();
+  return CURRENCY_SYMBOLS[c] || c || '₹';
+}
+
+// The symbol actually shown. The saved symbol wins (a store may type its own, e.g. "QR"),
+// except a rupee left behind after the base currency was switched away from INR — that one is
+// stale and the base currency's own symbol is shown instead.
+function resolveSymbol(stored, prefs) {
+  const base = String(prefs?.base_currency || 'INR').toUpperCase();
+  const sym = String(stored || '').trim();
+  if (!sym) return symbolForCurrency(base);
+  if (base !== 'INR' && (sym === '₹' || sym.toUpperCase() === 'INR')) return symbolForCurrency(base);
+  return sym;
+}
+
+// ---------------------------------------------------------------------------
+// Tax terminology — what the tax and its registration number are called in the business's
+// country. Mirrors tax_terms() in backend apps/company/localization.py.
+// ---------------------------------------------------------------------------
+const GULF_VAT = new Set(['AE', 'SA', 'OM', 'BH']);
+const EU_VAT = new Set(['GB', 'IE', 'DE', 'FR', 'IT', 'ES', 'NL', 'AT', 'BE', 'PT', 'GR', 'FI', 'SE', 'DK', 'PL', 'CZ', 'LU']);
+
+/** Country code → {label, regLabel}: GST/GSTIN, VAT/TRN, VAT/VAT No, Sales Tax/Tax ID, Tax/Tax Registration No. */
+export function taxTermsForCountry(country) {
+  const c = String(country || '').toUpperCase();
+  if (c === 'IN') return { label: 'GST', regLabel: 'GSTIN' };
+  if (GULF_VAT.has(c)) return { label: 'VAT', regLabel: 'TRN' };
+  if (EU_VAT.has(c)) return { label: 'VAT', regLabel: 'VAT No' };
+  if (c === 'US') return { label: 'Sales Tax', regLabel: 'Tax ID' };
+  return { label: 'Tax', regLabel: 'Tax Registration No' };
+}
+
 let state = (() => {
   const local = readLocal();
+  const preferences = { ...DEFAULT_PREFS, ...(local?.preferences || {}) };
   return {
-    preferences: { ...DEFAULT_PREFS, ...(local?.preferences || {}) },
-    currency_symbol: local?.currency_symbol || '₹',
+    preferences,
+    currency_symbol: resolveSymbol(local?.currency_symbol, preferences),
+    tax_registration_number: local?.tax_registration_number || '',
     loaded: false,
   };
 })();
 export function publishBusinessPrefs(payload) {
+  const preferences = { ...DEFAULT_PREFS, ...(payload?.preferences || {}) };
   state = {
-    preferences: { ...DEFAULT_PREFS, ...(payload?.preferences || {}) },
-    currency_symbol: payload?.currency_symbol || state.currency_symbol || '₹',
+    preferences,
+    currency_symbol: resolveSymbol(payload?.currency_symbol, preferences),
+    tax_registration_number: payload?.tax_registration_number ?? state.tax_registration_number ?? '',
     loaded: true,
   };
   try {
-    localStorage.setItem(LOCAL_KEY, JSON.stringify({ preferences: state.preferences, currency_symbol: state.currency_symbol }));
+    localStorage.setItem(LOCAL_KEY, JSON.stringify({
+      preferences: state.preferences, currency_symbol: state.currency_symbol,
+      tax_registration_number: state.tax_registration_number,
+    }));
   } catch { /* storage unavailable */ }
   try { window.dispatchEvent(new CustomEvent(BUSINESS_PREFS_EVENT, { detail: state })); } catch { /* not a browser */ }
   return state;
@@ -62,7 +109,38 @@ export function publishBusinessPrefs(payload) {
 /** Current preferences (synchronous; the cached / default copy until the first fetch lands). */
 export const getBusinessPrefs = () => state.preferences;
 export const getCurrencySymbol = () => state.currency_symbol;
+export const getCurrencyCode = () => String(state.preferences.base_currency || 'INR').toUpperCase();
+/** Symbol ready to sit in front of a number: "₹", "$", but "QAR " (codes get a space). */
+export const currencyPrefix = (symbol = getCurrencySymbol()) => (symbol && /[A-Za-z.]$/.test(symbol) ? `${symbol} ` : symbol || '');
 export const getBusinessPrefsState = () => state;
+
+/** Tax Configuration master switch (Settings → Business & Localization → Tax Configuration). */
+export const isTaxEnabled = (prefs = getBusinessPrefs()) => prefs?.tax_enabled !== false;
+/** "GST" / "VAT" / "Sales Tax" / "Tax" for the configured country. */
+export const getTaxLabel = (prefs = getBusinessPrefs()) => taxTermsForCountry(prefs?.country).label;
+/** "GSTIN" / "TRN" / "VAT No" / "Tax ID" / "Tax Registration No". */
+export const getTaxRegLabel = (prefs = getBusinessPrefs()) => taxTermsForCountry(prefs?.country).regLabel;
+/** India's GST splits into CGST + SGST (intra-state) — only show that split for GST. */
+export const isGstSplit = (prefs = getBusinessPrefs()) => getTaxLabel(prefs) === 'GST';
+/** {isTaxEnabled, taxLabel, taxRegLabel, taxRegistrationNumber} — synchronous snapshot. */
+export function getTaxSettings(prefs = getBusinessPrefs()) {
+  const terms = taxTermsForCountry(prefs?.country);
+  return {
+    isTaxEnabled: isTaxEnabled(prefs),
+    taxLabel: terms.label,
+    taxRegLabel: terms.regLabel,
+    taxRegistrationNumber: state.tax_registration_number || '',
+  };
+}
+/** The rate to charge on a NEW line: the given % while tax is on, 0 while it is switched off.
+ *  (Saved documents keep the rate they were billed at — don't run stored rates through this.) */
+export function effectiveTaxPercent(rate, prefs = getBusinessPrefs()) {
+  if (!isTaxEnabled(prefs)) return 0;
+  const n = typeof rate === 'number' ? rate : parseFloat(String(rate ?? '').replace('%', ''));
+  return Number.isFinite(n) ? n : 0;
+}
+/** Replace the word GST in a fixed English label with the active tax label ("GST 18%" → "VAT 18%"). */
+export const taxText = (text, prefs = getBusinessPrefs()) => String(text ?? '').replace(/\bGST\b/g, getTaxLabel(prefs));
 
 // ---------------------------------------------------------------------------
 // Formatting
@@ -89,14 +167,21 @@ export function formatNumber(value, decimals = 2, prefs = getBusinessPrefs()) {
   return n < 0 && Number(fixed) !== 0 ? `-${out}` : out;
 }
 
-/** Amount with the configured symbol (unless "Show Currency Symbol" is off) and decimals. */
+/** Amount with the configured symbol (unless "Show Currency Symbol" is off) and decimals.
+ *  '' for a missing / non-numeric value. */
 export function formatMoney(value, { symbol, decimals, prefs = getBusinessPrefs() } = {}) {
   const n = typeof value === 'number' ? value : parseFloat(value);
   if (!Number.isFinite(n)) return '';
   const body = formatNumber(Math.abs(n), decimals ?? prefs.currency_decimals ?? 2, prefs);
-  const sym = prefs.show_currency_symbol ? (symbol ?? getCurrencySymbol()) : '';
-  const spaced = sym && /[A-Za-z]$/.test(sym) ? `${sym} ` : sym;
-  return `${n < 0 ? '-' : ''}${spaced}${body}`;
+  const sym = prefs.show_currency_symbol ? currencyPrefix(symbol ?? getCurrencySymbol()) : '';
+  return `${n < 0 ? '-' : ''}${sym}${body}`;
+}
+
+/** formatMoney for display figures: a missing / non-numeric amount shows as 0
+ *  ("QAR 0.00") instead of disappearing. */
+export function formatCurrency(amount, opts = {}) {
+  const n = typeof amount === 'number' ? amount : parseFloat(String(amount ?? '').replace(/,/g, ''));
+  return formatMoney(Number.isFinite(n) ? n : 0, opts);
 }
 
 const pad = (v) => String(v).padStart(2, '0');

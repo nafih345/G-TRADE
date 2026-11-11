@@ -152,6 +152,6 @@ class OpeningStockTests(APITestCase):
         row = self.client.get(OVERVIEW, {'source': 'OPENING_STOCK'}).data['results'][0]
         self.assertEqual(row['stock_source'], 'OPENING_STOCK')
         counts = self.client.get(OVERVIEW + 'summary/', {'source': 'OPENING_STOCK'}).data['source_counts']
-        self.assertEqual(counts, {'ALL': 3, 'OPENING_STOCK': 1, 'EXCEL_IMPORT': 1, 'PURCHASE': 1})
+        self.assertEqual(counts, {'ALL': 3, 'OPENING_STOCK': 1, 'EXCEL_IMPORT': 1, 'PURCHASE': 1, 'RETURN': 0})
         batches = self.client.get(URL).data
         self.assertEqual([b['batch_number'] for b in batches], ['OS-000001'])

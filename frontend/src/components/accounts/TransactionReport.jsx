@@ -36,6 +36,7 @@ import {
   NAVY, head, ymd, todayYmd, monthStart, fyStart, money, esc, downloadCsv, printReport, printShell, printCards,
   SummaryCard, filterBarSx, fieldSx,
 } from './reportKit';
+import CurrencySymbol from '../common/CurrencySymbol.jsx';
 
 const IN_COLOR = '#15803d';
 const OUT_COLOR = '#b91c1c';
@@ -45,7 +46,8 @@ const ADMIN_ROLES = ['SUPER_ADMIN', 'ADMINISTRATOR', 'ACCOUNTANT'];
 const KIND_STYLES = {
   OPENING: ['#334155', '#e2e8f0'], CUSTOMER_RECEIPT: ['#166534', '#dcfce7'], EYE_TEST_FEE: ['#166534', '#dcfce7'],
   DEALER_COLLECTION: ['#0f766e', '#ccfbf1'], RECEIPT: ['#0f766e', '#ccfbf1'], REFUND: ['#c2410c', '#ffedd5'],
-  SUPPLIER_PAYMENT: ['#b91c1c', '#fee2e2'], PAYMENT: ['#b91c1c', '#fee2e2'], BANK_CHARGES: ['#c2410c', '#ffedd5'],
+  SUPPLIER_PAYMENT: ['#b91c1c', '#fee2e2'], SALES_RETURN: ['#b91c1c', '#fee2e2'], PURCHASE_RETURN: ['#b91c1c', '#fee2e2'],
+  PAYMENT: ['#b91c1c', '#fee2e2'], BANK_CHARGES: ['#c2410c', '#ffedd5'],
   CASH_DEPOSIT: ['#3730a3', '#e0e7ff'], CASH_WITHDRAWAL: ['#6b21a8', '#f3e8ff'],
   TRANSFER_IN: ['#0369a1', '#e0f2fe'], TRANSFER_OUT: ['#0369a1', '#e0f2fe'],
 };
@@ -366,7 +368,7 @@ function AddTransactionDialog({ open, onClose, onSaved, accounts, moneyAccounts 
           <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
             <TextField type="date" size="small" label="Date" value={f.date} onChange={set('date')} InputLabelProps={{ shrink: true }} />
             <TextField size="small" type="number" label="Amount" value={f.amount} onChange={set('amount')} required inputProps={{ min: 0, step: '0.01' }}
-              InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }} sx={{ flex: 1 }} />
+              InputProps={{ startAdornment: <InputAdornment position="start"><CurrencySymbol /></InputAdornment> }} sx={{ flex: 1 }} />
             <TextField select size="small" label="Mode" value={f.mode} onChange={set('mode')} sx={{ minWidth: 150 }}>
               {PAY_MODES.map(x => <MenuItem key={x} value={x}>{x}</MenuItem>)}
             </TextField>

@@ -85,6 +85,7 @@ def get_or_create_voucher_type(code, name):
 VOUCHER_TYPE_NAMES = {
     'RV': 'Receipt Voucher', 'PV': 'Payment Voucher', 'CV': 'Contra Entry', 'JV': 'Journal Voucher',
     'SV': 'Sales Voucher', 'PU': 'Purchase Voucher', 'IA': 'Inventory Adjustment', 'OB': 'Opening Balance',
+    'CN': 'Credit Note (Sales Return)', 'DN': 'Debit Note (Purchase Return)',
 }
 
 

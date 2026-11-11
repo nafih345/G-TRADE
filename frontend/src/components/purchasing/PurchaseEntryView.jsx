@@ -50,6 +50,7 @@ import { printPurchaseReceipt } from '../../utils/printPurchase';
 import { barcodeMatchesProduct } from '../../utils/barcodeMatch';
 import { useStoreProfile } from '../../utils/storeProfile';
 import { confirmPosting, peekDocumentNumber } from '../../utils/businessPrefs';
+import { formatCurrency, currencyPrefix, isTaxEnabled, getTaxLabel, getTaxRegLabel, isGstSplit } from '../../utils/localeFormat.js';
 
 const todayStr = () => new Date().toISOString().split('T')[0];
 const dmy = (iso) => (iso ? String(iso).slice(0, 10).split('-').reverse().join('-') : '');
@@ -252,6 +253,13 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
   const [warehouseId, setWarehouseId] = useState('');
   const [branchId, setBranchId] = useState('');
   const [gstType, setGstType] = useState('NO_GST');
+  // Tax Configuration: tax switched off → purchases are entered as "No tax" and every tax control
+  // is hidden. A saved purchase that was billed with tax still shows its tax so it can be edited.
+  const taxOn = isTaxEnabled();
+  const taxLabel = getTaxLabel();
+  const taxRegLabel = getTaxRegLabel();
+  const gstSplit = isGstSplit(); // CGST / SGST / IGST only exist for India's GST
+  const taxUi = taxOn || gstType !== 'NO_GST';
   const [defaultGstPercent, setDefaultGstPercent] = useState(0);
   const [defaultCessPercent, setDefaultCessPercent] = useState(0);
   const [defaultVatPercent, setDefaultVatPercent] = useState(0);
@@ -408,7 +416,7 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
   const supplierGstin = selectedSupplier?.gstin || '';
   // Interstate (IGST) vs intra-state (CGST+SGST) is derived from the GSTIN state-code
   // prefix; if either GSTIN is missing we can't tell, so default to intra-state.
-  const isInterstate = Boolean(
+  const isInterstate = Boolean(gstSplit &&
     gstinStateCode(companyGstin) && gstinStateCode(supplierGstin) &&
     gstinStateCode(companyGstin) !== gstinStateCode(supplierGstin)
   );
@@ -417,12 +425,13 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
   // purchase — hide them entirely for No GST rather than showing empty/zero columns.
   // Also respects the manual per-column tick boxes (colVis) on top of that.
   const showGst = gstType !== 'NO_GST' && colVis.gst;
-  const showCess = colVis.cess;
-  const showVat = colVis.vat;
+  const showCess = taxUi && colVis.cess;
+  const showVat = taxUi && colVis.vat;
+  const splitCols = gstSplit ? (isInterstate ? 1 : 2) : 0;
   const columnCount = 4 // #, Product, Qty, Rate — always shown
     + (colVis.barcode ? 1 : 0) + (colVis.batch ? 1 : 0) + (colVis.hsn ? 1 : 0) + (colVis.expiry ? 1 : 0) + (colVis.free ? 1 : 0)
     + (colVis.discPercent ? 1 : 0) + (colVis.discAmt ? 1 : 0)
-    + (showGst ? 2 + (isInterstate ? 1 : 2) : 0)
+    + (showGst ? 2 + splitCols : 0)
     + (showCess ? 2 : 0)
     + (showVat ? 2 : 0)
     + (colVis.mrp ? 1 : 0) + (colVis.selling ? 1 : 0) + (colVis.marginPercent ? 1 : 0)
@@ -1220,13 +1229,13 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
           <Typography variant="caption" color="text.secondary">
             {editingLabel
               ? 'Editing an existing purchase entry — items are loaded exactly as saved. Save to update.'
-              : 'Single-screen supplier purchase entry with live GST, discount & margin calculation'}
+              : `Single-screen supplier purchase entry with live ${taxOn ? `${taxLabel}, ` : ''}discount & margin calculation`}
           </Typography>
         </Box>
         {selectedSupplier && (
           <Chip
             icon={<SupplierIcon />}
-            label={`Outstanding Balance: ₹${parseFloat(selectedSupplier.balance ?? selectedSupplier.outstanding_balance ?? 0).toFixed(2)}`}
+            label={`Outstanding Balance: ${formatCurrency(parseFloat(selectedSupplier.balance ?? selectedSupplier.outstanding_balance ?? 0))}`}
             color={parseFloat(selectedSupplier.balance ?? selectedSupplier.outstanding_balance ?? 0) > 0 ? 'error' : 'success'}
             variant="outlined"
             sx={{ fontWeight: 700 }}
@@ -1236,7 +1245,7 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
 
       {duplicateWarning && (
         <Alert severity="warning" sx={{ mb: 2, borderRadius: 2 }} onClose={() => setDuplicateWarning(null)}>
-          Possible duplicate: Supplier Invoice already recorded as <strong>{duplicateWarning.invoice_number}</strong> on {duplicateWarning.purchase_date} for ₹{duplicateWarning.grand_total}.
+          Possible duplicate: Supplier Invoice already recorded as <strong>{duplicateWarning.invoice_number}</strong> on {duplicateWarning.purchase_date} for {currencyPrefix()}{duplicateWarning.grand_total}.
         </Alert>
       )}
 
@@ -1309,21 +1318,23 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
               {branches.map(b => <MenuItem key={b.id} value={String(b.id)}>{b.name}{b.is_default ? ' (Main)' : ''}</MenuItem>)}
             </TextField>
           </Grid>
+          {taxUi && (<>
           <Grid item xs={6} sm={3} md={1.5}>
-            <TextField select fullWidth size="small" label="GST Type" value={gstType} onChange={(e) => setGstType(e.target.value)} SelectProps={{ ...enterOpensSelectProps }}>
+            <TextField select fullWidth size="small" label={`${taxLabel} Type`} value={gstType} onChange={(e) => setGstType(e.target.value)} SelectProps={{ ...enterOpensSelectProps }}>
               <MenuItem value="EXCLUSIVE">Exclusive</MenuItem>
               <MenuItem value="INCLUSIVE">Inclusive</MenuItem>
-              <MenuItem value="NO_GST">No GST</MenuItem>
+              <MenuItem value="NO_GST">No {taxLabel}</MenuItem>
             </TextField>
           </Grid>
           <Grid item xs={6} sm={3} md={1.5}>
             <TextField
-              type="number" fullWidth size="small" label="Default GST %"
+              type="number" fullWidth size="small" label={`Default ${taxLabel} %`}
               value={defaultGstPercent} onChange={(e) => setDefaultGstPercent(parseFloat(e.target.value) || 0)}
               disabled={gstType === 'NO_GST'}
               helperText="Applied to newly added items"
             />
           </Grid>
+          </>)}
           <Grid item xs={6} sm={3} md={1.5}>
             <TextField select fullWidth size="small" label="Status" value={status} onChange={(e) => setStatus(e.target.value)} SelectProps={{ ...enterOpensSelectProps }}>
               <MenuItem value="CONFIRMED">Confirmed</MenuItem>
@@ -1365,25 +1376,26 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
         </Grid>
       </Card>
 
-      {/* 1b. GST Details master section — only relevant once GST actually applies */}
+      {/* 1b. Tax (GST / VAT …) details master section — only relevant once tax actually applies */}
       {gstType !== 'NO_GST' && (
         <Card variant="outlined" sx={{ p: 2, mb: 2, borderRadius: 3, borderColor: '#c7d2fe', bgcolor: '#f5f7ff' }}>
           <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1.5 }}>
-            <Typography variant="subtitle2" fontWeight={800} color="primary.main">GST Details</Typography>
-            <Chip
+            <Typography variant="subtitle2" fontWeight={800} color="primary.main">{taxLabel} Details</Typography>
+            {gstSplit && <Chip
               size="small"
               label={isInterstate ? 'Inter-State — IGST applies' : 'Intra-State — CGST + SGST applies'}
               color={isInterstate ? 'warning' : 'success'}
               sx={{ fontWeight: 700 }}
-            />
+            />}
           </Stack>
           <Grid container spacing={2}>
             <Grid item xs={6} sm={3} md={2.4}>
-              <TextField fullWidth size="small" label="Company GSTIN" value={companyGstin} placeholder="Not set in Settings" InputProps={{ readOnly: true }} />
+              <TextField fullWidth size="small" label={`Company ${taxRegLabel}`} value={companyGstin} placeholder="Not set in Settings" InputProps={{ readOnly: true }} />
             </Grid>
             <Grid item xs={6} sm={3} md={2.4}>
-              <TextField fullWidth size="small" label="Supplier GSTIN" value={supplierGstin} placeholder="No GSTIN on file" InputProps={{ readOnly: true }} />
+              <TextField fullWidth size="small" label={`Supplier ${taxRegLabel}`} value={supplierGstin} placeholder={`No ${taxRegLabel} on file`} InputProps={{ readOnly: true }} />
             </Grid>
+            {gstSplit && (<>
             <Grid item xs={6} sm={3} md={2.4}>
               <TextField fullWidth size="small" label="CGST %" value={isInterstate ? '0.00' : (defaultGstPercent / 2).toFixed(2)} InputProps={{ readOnly: true }} />
             </Grid>
@@ -1393,6 +1405,7 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
             <Grid item xs={6} sm={3} md={2.4}>
               <TextField fullWidth size="small" label="IGST %" value={isInterstate ? defaultGstPercent : '0.00'} InputProps={{ readOnly: true }} />
             </Grid>
+            </>)}
           </Grid>
           <Grid container spacing={2} sx={{ mt: 0.25 }}>
             <Grid item xs={6} sm={3} md={2.4}>
@@ -1405,7 +1418,7 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
           </Grid>
 
           <Divider sx={{ my: 1.75 }} />
-          <Typography variant="subtitle2" fontWeight={800} color="text.secondary" sx={{ mb: 1 }}>VAT Details</Typography>
+          <Typography variant="subtitle2" fontWeight={800} color="text.secondary" sx={{ mb: 1 }}>{taxLabel === 'VAT' ? 'Additional VAT' : 'VAT Details'}</Typography>
           <Grid container spacing={2}>
             <Grid item xs={6} sm={4} md={2.4}>
               <TextField
@@ -1741,7 +1754,7 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
           {[
             ['barcode', 'Barcode'], ['batch', 'Batch'], ['hsn', 'HSN/SAC'], ['expiry', 'Expiry'], ['free', 'Free Qty'],
             ['discPercent', 'Disc %'], ['discAmt', 'Disc Amt'],
-            ['gst', 'GST % / GST Amt / CGST / SGST / IGST'], ['cess', 'Cess % / Cess Amt'], ['vat', 'VAT % / VAT Amt'],
+            ['gst', gstSplit ? 'GST % / GST Amt / CGST / SGST / IGST' : `${taxLabel} % / ${taxLabel} Amt`], ['cess', 'Cess % / Cess Amt'], ['vat', taxLabel === 'VAT' ? 'Addl. VAT % / Amt' : 'VAT % / VAT Amt'],
             ['mrp', 'MRP'], ['selling', 'Selling Price'], ['marginPercent', 'Margin %']
           ].map(([key, label]) => (
             <MenuItem key={key} dense onClick={() => toggleCol(key)} sx={{ py: 0.25 }}>
@@ -1771,9 +1784,9 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
                   {colVis.discAmt && <TableCell align="right">Disc Amt</TableCell>}
                   {showGst && (
                     <>
-                      <TableCell align="right">GST %</TableCell>
-                      <TableCell align="right">GST Amt</TableCell>
-                      {isInterstate ? (
+                      <TableCell align="right">{taxLabel} %</TableCell>
+                      <TableCell align="right">{taxLabel} Amt</TableCell>
+                      {!gstSplit ? null : isInterstate ? (
                         <TableCell align="right">IGST Amt</TableCell>
                       ) : (
                         <>
@@ -1791,8 +1804,8 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
                   )}
                   {showVat && (
                     <>
-                      <TableCell align="right">VAT %</TableCell>
-                      <TableCell align="right">VAT Amt</TableCell>
+                      <TableCell align="right">{taxLabel === 'VAT' ? 'Addl. VAT %' : 'VAT %'}</TableCell>
+                      <TableCell align="right">{taxLabel === 'VAT' ? 'Addl. VAT Amt' : 'VAT Amt'}</TableCell>
                     </>
                   )}
                   {colVis.mrp && <TableCell align="right">MRP</TableCell>}
@@ -1827,7 +1840,7 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
                       )}
                       <Typography variant="caption" color="text.secondary" noWrap sx={{ display: 'block' }}>
                         Stock: {row.currentStock} → {row.currentStock + (parseFloat(row.quantity) || 0) + (parseFloat(row.freeQuantity) || 0)}
-                        {row.lastRate != null && ` | Last Rate: ₹${row.lastRate}`}
+                        {row.lastRate != null && ` | Last Rate: ${currencyPrefix()}${row.lastRate}`}
                       </Typography>
                     </TableCell>
                     {colVis.batch && <TableCell>{numCell(idx, 'batchNumber', { type: 'text', width: 90 })}</TableCell>}
@@ -1841,13 +1854,13 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
                     {showGst && (
                       <>
                         <TableCell align="right">{numCell(idx, 'gstPercent', { width: 60 })}</TableCell>
-                        <TableCell align="right" sx={{ fontSize: '0.78rem', fontWeight: 600 }}>₹{row.gstAmount}</TableCell>
-                        {isInterstate ? (
-                          <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.igstAmount}</TableCell>
+                        <TableCell align="right" sx={{ fontSize: '0.78rem', fontWeight: 600 }}>{currencyPrefix()}{row.gstAmount}</TableCell>
+                        {!gstSplit ? null : isInterstate ? (
+                          <TableCell align="right" sx={{ fontSize: '0.78rem' }}>{currencyPrefix()}{row.igstAmount}</TableCell>
                         ) : (
                           <>
-                            <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.cgstAmount}</TableCell>
-                            <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.sgstAmount}</TableCell>
+                            <TableCell align="right" sx={{ fontSize: '0.78rem' }}>{currencyPrefix()}{row.cgstAmount}</TableCell>
+                            <TableCell align="right" sx={{ fontSize: '0.78rem' }}>{currencyPrefix()}{row.sgstAmount}</TableCell>
                           </>
                         )}
                       </>
@@ -1855,19 +1868,19 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
                     {showCess && (
                       <>
                         <TableCell align="right">{numCell(idx, 'cessPercent', { width: 60 })}</TableCell>
-                        <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.cessAmount}</TableCell>
+                        <TableCell align="right" sx={{ fontSize: '0.78rem' }}>{currencyPrefix()}{row.cessAmount}</TableCell>
                       </>
                     )}
                     {showVat && (
                       <>
                         <TableCell align="right">{numCell(idx, 'vatPercent', { width: 60 })}</TableCell>
-                        <TableCell align="right" sx={{ fontSize: '0.78rem' }}>₹{row.vatAmount}</TableCell>
+                        <TableCell align="right" sx={{ fontSize: '0.78rem' }}>{currencyPrefix()}{row.vatAmount}</TableCell>
                       </>
                     )}
                     {colVis.mrp && <TableCell align="right">{numCell(idx, 'mrp', { width: 75 })}</TableCell>}
                     {colVis.selling && <TableCell align="right">{numCell(idx, 'sellingPrice', { width: 80 })}</TableCell>}
                     {colVis.marginPercent && <TableCell align="right">{numCell(idx, 'marginPercent', { width: 65 })}</TableCell>}
-                    <TableCell align="right" sx={{ fontWeight: 800, fontSize: '0.8rem' }}>₹{row.lineTotal}</TableCell>
+                    <TableCell align="right" sx={{ fontWeight: 800, fontSize: '0.8rem' }}>{currencyPrefix()}{row.lineTotal}</TableCell>
                     <TableCell>
                       <IconButton size="small" color="error" onClick={() => deleteRow(idx)}><DeleteIcon fontSize="small" /></IconButton>
                     </TableCell>
@@ -1901,7 +1914,7 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
               {totals.groups.sections.map(g => (
                 <Grid item xs={6} sm={4} key={g.key}>
                   <Typography variant="caption" color="text.secondary" display="block">{g.label}</Typography>
-                  <Typography variant="body1" fontWeight={800}>₹{g.amount.toFixed(2)}</Typography>
+                  <Typography variant="body1" fontWeight={800}>{formatCurrency(g.amount)}</Typography>
                   <Typography variant="caption" color="text.secondary">Qty {g.qty}</Typography>
                 </Grid>
               ))}
@@ -1910,7 +1923,7 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
                 <Typography variant="body1" fontWeight={800}>{totals.totalQty}</Typography>
                 {!showSummaryDetails && (Math.abs(parseFloat(otherCharges) || 0) > 0 || Math.abs(totals.roundOff) > 0) && (
                   <Typography variant="caption" color="text.secondary">
-                    {[(parseFloat(otherCharges) || 0) ? `Other charges ₹${(parseFloat(otherCharges) || 0).toFixed(2)}` : '', totals.roundOff ? `Round off ₹${totals.roundOff.toFixed(2)}` : ''].filter(Boolean).join(' · ')}
+                    {[(parseFloat(otherCharges) || 0) ? `Other charges ${formatCurrency(parseFloat(otherCharges) || 0)}` : '', totals.roundOff ? `Round off ${formatCurrency(totals.roundOff)}` : ''].filter(Boolean).join(' · ')}
                   </Typography>
                 )}
               </Grid>
@@ -1927,43 +1940,45 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
                 </Grid>
                 <Grid item xs={6} sm={4} md={3}>
                   <Typography variant="caption" color="text.secondary" display="block">Gross Amount</Typography>
-                  <Typography variant="body2" fontWeight={700}>₹{totals.gross.toFixed(2)}</Typography>
+                  <Typography variant="body2" fontWeight={700}>{formatCurrency(totals.gross)}</Typography>
                 </Grid>
                 <Grid item xs={6} sm={4} md={3}>
                   <Typography variant="caption" color="text.secondary" display="block">Discount</Typography>
-                  <Typography variant="body2" fontWeight={700} color="error.main">-₹{totals.discount.toFixed(2)}</Typography>
+                  <Typography variant="body2" fontWeight={700} color="error.main">-{formatCurrency(totals.discount)}</Typography>
                 </Grid>
+                {taxUi && (
                 <Grid item xs={6} sm={4} md={3}>
-                  <Typography variant="caption" color="text.secondary" display="block">Tax (GST)</Typography>
-                  <Typography variant="body2" fontWeight={700}>₹{totals.tax.toFixed(2)}</Typography>
+                  <Typography variant="caption" color="text.secondary" display="block">Tax ({taxLabel})</Typography>
+                  <Typography variant="body2" fontWeight={700}>{formatCurrency(totals.tax)}</Typography>
                 </Grid>
-                {gstType !== 'NO_GST' && (isInterstate ? (
+                )}
+                {gstSplit && gstType !== 'NO_GST' && (isInterstate ? (
                   <Grid item xs={6} sm={4} md={3}>
                     <Typography variant="caption" color="text.secondary" display="block">↳ IGST</Typography>
-                    <Typography variant="body2" fontWeight={700}>₹{totals.igst.toFixed(2)}</Typography>
+                    <Typography variant="body2" fontWeight={700}>{formatCurrency(totals.igst)}</Typography>
                   </Grid>
                 ) : (
                   <>
                     <Grid item xs={6} sm={4} md={3}>
                       <Typography variant="caption" color="text.secondary" display="block">↳ CGST</Typography>
-                      <Typography variant="body2" fontWeight={700}>₹{totals.cgst.toFixed(2)}</Typography>
+                      <Typography variant="body2" fontWeight={700}>{formatCurrency(totals.cgst)}</Typography>
                     </Grid>
                     <Grid item xs={6} sm={4} md={3}>
                       <Typography variant="caption" color="text.secondary" display="block">↳ SGST</Typography>
-                      <Typography variant="body2" fontWeight={700}>₹{totals.sgst.toFixed(2)}</Typography>
+                      <Typography variant="body2" fontWeight={700}>{formatCurrency(totals.sgst)}</Typography>
                     </Grid>
                   </>
                 ))}
                 {totals.cess > 0 && (
                   <Grid item xs={6} sm={4} md={3}>
                     <Typography variant="caption" color="text.secondary" display="block">Cess</Typography>
-                    <Typography variant="body2" fontWeight={700}>₹{totals.cess.toFixed(2)}</Typography>
+                    <Typography variant="body2" fontWeight={700}>{formatCurrency(totals.cess)}</Typography>
                   </Grid>
                 )}
                 {totals.vat > 0 && (
                   <Grid item xs={6} sm={4} md={3}>
                     <Typography variant="caption" color="text.secondary" display="block">VAT</Typography>
-                    <Typography variant="body2" fontWeight={700}>₹{totals.vat.toFixed(2)}</Typography>
+                    <Typography variant="body2" fontWeight={700}>{formatCurrency(totals.vat)}</Typography>
                   </Grid>
                 )}
                 <Grid item xs={6} sm={4} md={3}>
@@ -1972,7 +1987,7 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
                 </Grid>
                 <Grid item xs={6} sm={4} md={3}>
                   <Typography variant="caption" color="text.secondary" display="block">Round Off</Typography>
-                  <Typography variant="body2" fontWeight={700}>₹{totals.roundOff.toFixed(2)}</Typography>
+                  <Typography variant="body2" fontWeight={700}>{formatCurrency(totals.roundOff)}</Typography>
                 </Grid>
               </Grid>
             )}
@@ -1982,7 +1997,7 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
           <Grid item xs={12} md={4} sx={{ borderLeft: { xs: 'none', md: '1px solid' }, borderTop: { xs: '1px solid', md: 'none' }, borderColor: 'divider', pl: { md: 3 }, pt: { xs: 2, md: 0 } }}>
             <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', mb: 2 }}>
               <Typography variant="subtitle1" fontWeight={800}>Final Total Amount</Typography>
-              <Typography variant="h4" fontWeight={900} color="primary.main">₹{totals.grandTotal.toFixed(2)}</Typography>
+              <Typography variant="h4" fontWeight={900} color="primary.main">{formatCurrency(totals.grandTotal)}</Typography>
             </Box>
 
             <Typography variant="subtitle2" fontWeight={800} sx={{ mb: 1 }}>Payment</Typography>
@@ -2008,13 +2023,13 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
               onChange={(e) => setPaidAmount(e.target.value)} sx={{ mb: 1.5 }} />
             <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
               <Typography variant="body2" color="text.secondary">Balance</Typography>
-              <Typography variant="body2" fontWeight={700} color={balanceAmount > 0 ? 'error.main' : 'success.main'}>₹{balanceAmount.toFixed(2)}</Typography>
+              <Typography variant="body2" fontWeight={700} color={balanceAmount > 0 ? 'error.main' : 'success.main'}>{formatCurrency(balanceAmount)}</Typography>
             </Box>
             {((paymentMethod !== 'CASH' || cashUnpaid) && dueAmount > 0) && (
               <>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
                   <Typography variant="body2" color="text.secondary">Due Amount</Typography>
-                  <Typography variant="body2" fontWeight={700} color="error.main">₹{dueAmount.toFixed(2)}</Typography>
+                  <Typography variant="body2" fontWeight={700} color="error.main">{formatCurrency(dueAmount)}</Typography>
                 </Box>
                 <QuickDatePickerField label="Due Date" value={dueDate} onChange={setDueDate} size="small" />
               </>

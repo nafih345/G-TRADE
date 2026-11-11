@@ -3,6 +3,7 @@
 // { id, number, date, party, amount, doc } where `doc` is the raw record the matching
 // documentAdapters.toBillModel adapter understands.
 import axios from 'axios';
+import { returnPrintDoc } from '../components/returns/returnsApi';
 
 const unwrap = (res) => {
   const d = res?.data;
@@ -87,22 +88,32 @@ const LOADERS = {
       })),
     ];
   },
-  SALES_RETURN: async () => {
-    const rows = unwrap(await axios.get('/api/sales/wholesale/returns/'));
+  SALES_RETURN: async (q) => {
+    const [retail, rows] = await Promise.all([
+      axios.get('/api/sales/returns/', { params: { search: q || undefined, page_size: 50 } }).then(unwrap).catch(() => []),
+      axios.get('/api/sales/wholesale/returns/').then(unwrap).catch(() => []),
+    ]);
     const local = readLocal('optical_wholesale_returns');
-    return rows.map((r) => {
-      const doc = wholesaleReturnDoc(r, local);
-      return { id: r.id, number: r.return_number, date: r.return_date, party: doc.customer?.name || '', amount: amt(r.return_amount), doc };
-    });
+    return [
+      ...retail.map((r) => returnRow('sales', r)),
+      ...rows.map((r) => {
+        const doc = wholesaleReturnDoc(r, local);
+        return { id: r.id, number: r.return_number, date: r.return_date, party: doc.customer?.name || '', amount: amt(r.return_amount), doc };
+      }),
+    ];
   },
-  // Purchase returns are not stored in the database yet (Purchases → Returns keeps them on the
-  // screen only), so there is nothing real to preview.
-  PURCHASE_RETURN: async () => [],
+  // Purchase → Purchase Return (apps/inventory/returns.py).
+  PURCHASE_RETURN: async (q) => unwrap(await axios.get('/api/purchase/returns/', { params: { search: q || undefined, page_size: 50 } }))
+    .map((r) => returnRow('purchase', r)),
 };
 
+function returnRow(kind, r) {
+  return { id: r.id, number: r.return_number, date: r.return_date, party: r.party?.name || '', amount: amt(r.total_amount), doc: returnPrintDoc(kind, r) };
+}
+
 export const REAL_DOC_NOTES = {
-  PURCHASE_RETURN: 'Purchase returns are not saved to the database yet, so there is no real document to preview — use sample data.',
-  SALES_RETURN: 'Sales returns come from Wholesale → Sales Return. Returned lines are shown when this browser processed the return.',
+  PURCHASE_RETURN: 'Purchase returns come from Purchase → Purchase Return.',
+  SALES_RETURN: 'Sales returns come from Sales → Sales Return and Wholesale → Sales Return. Wholesale returned lines are shown when this browser processed the return.',
 };
 
 export async function loadRealDocuments(documentType, search = '') {

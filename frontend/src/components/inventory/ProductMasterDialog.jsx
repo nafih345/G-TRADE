@@ -34,6 +34,9 @@ import {
 } from './productAttributeOptions';
 import { isSpectacleLensCategory } from '../../utils/lensUnits';
 import { useCanViewCost } from '../../utils/costVisibility';
+import { formatCurrency, getCurrencySymbol } from '../../utils/localeFormat.js';
+import { useTaxSettings } from '../../context/SettingsContext';
+import { taxRateChoices } from '../../utils/taxRates';
 
 const blankProduct = (overrides = {}) => ({
   name: '', code: '', modelNo: '', hsnCode: '',
@@ -385,6 +388,7 @@ export default function ProductMasterDialog({
   onCreated
 }) {
   const isEdit = Boolean(editProduct && editProduct.id);
+  const { isTaxEnabled, taxLabel, taxSlabs } = useTaxSettings();
   const [p, setP] = useState(blankProduct());
   const [saving, setSaving] = useState(false);
   const [scanDialogOpen, setScanDialogOpen] = useState(false);
@@ -826,7 +830,7 @@ export default function ProductMasterDialog({
                 {viewCost && (
                 <Grid item xs={12} sm={6} md={2.4}>
                   <TextField
-                    label="Purchase Cost Price (₹)" fullWidth size="small" type="number"
+                    label={`Purchase Cost Price (${getCurrencySymbol()})`} fullWidth size="small" type="number"
                     value={p.purchasePrice} onChange={(e) => set({ purchasePrice: e.target.value })}
                     inputProps={{ style: { fontWeight: 800 } }}
                   />
@@ -834,7 +838,7 @@ export default function ProductMasterDialog({
                 )}
                 <Grid item xs={12} sm={6} md={2.4}>
                   <TextField
-                    label="MRP Price (₹)" fullWidth size="small" type="number"
+                    label={`MRP Price (${getCurrencySymbol()})`} fullWidth size="small" type="number"
                     value={p.mrp}
                     onChange={(e) => set({ mrp: e.target.value, salePrice: p.salePrice || e.target.value })}
                     inputProps={{ style: { fontWeight: 800 } }}
@@ -843,7 +847,7 @@ export default function ProductMasterDialog({
                 </Grid>
                 <Grid item xs={12} sm={6} md={2.4}>
                   <TextField
-                    label="Sale Price (₹)" fullWidth size="small" type="number"
+                    label={`Sale Price (${getCurrencySymbol()})`} fullWidth size="small" type="number"
                     value={p.salePrice} onChange={(e) => set({ salePrice: e.target.value })}
                     inputProps={{ style: { fontWeight: 900, color: '#059669' } }}
                     helperText="Actual selling / billing price"
@@ -851,21 +855,21 @@ export default function ProductMasterDialog({
                 </Grid>
                 <Grid item xs={12} sm={6} md={2.4}>
                   <TextField
-                    label="Wholesale Price (₹)" fullWidth size="small" type="number"
+                    label={`Wholesale Price (${getCurrencySymbol()})`} fullWidth size="small" type="number"
                     value={p.wholesaleRate} onChange={(e) => set({ wholesaleRate: e.target.value })}
                     inputProps={{ style: { fontWeight: 800, color: '#4f46e5' }, 'data-testid': 'pm-wholesale-price' }}
                     helperText="Wholesale POS rate (blank = MRP)"
                   />
                 </Grid>
+                {isTaxEnabled && (
                 <Grid item xs={12} sm={6} md={2.4}>
-                  <TextField select label="GST Tax Rate" fullWidth size="small" value={p.gst} onChange={(e) => set({ gst: e.target.value })} SelectProps={{ ...enterOpensSelectProps }} helperText="Enter, then ↑/↓ + Enter">
-                    <MenuItem value="0%">0% (Exempt)</MenuItem>
-                    <MenuItem value="5%">5% GST</MenuItem>
-                    <MenuItem value="12%">12% GST</MenuItem>
-                    <MenuItem value="18%">18% GST</MenuItem>
-                    <MenuItem value="28%">28% GST</MenuItem>
+                  <TextField select label={`${taxLabel} Tax Rate`} fullWidth size="small" value={p.gst} onChange={(e) => set({ gst: e.target.value })} SelectProps={{ ...enterOpensSelectProps }} helperText="Enter, then ↑/↓ + Enter">
+                    {taxRateChoices(taxSlabs, p.gst).map((o) => (
+                      <MenuItem key={o.value} value={`${o.value}%`}>{o.label}</MenuItem>
+                    ))}
                   </TextField>
                 </Grid>
+                )}
               </Grid>
               {(marginPct !== null || (mrpNum > 0 && saleNum > 0 && saleNum !== mrpNum)) && (
                 <Stack direction="row" spacing={1} sx={{ mt: 1.5 }}>
@@ -873,7 +877,7 @@ export default function ProductMasterDialog({
                     <Chip size="small" color={parseFloat(marginPct) >= 0 ? 'success' : 'error'} label={`Margin ${marginPct}%`} sx={{ fontWeight: 700 }} />
                   )}
                   {mrpNum > 0 && saleNum > 0 && saleNum < mrpNum && (
-                    <Chip size="small" variant="outlined" label={`Discount off MRP: ₹${(mrpNum - saleNum).toFixed(2)}`} sx={{ fontWeight: 700 }} />
+                    <Chip size="small" variant="outlined" label={`Discount off MRP: ${formatCurrency(mrpNum - saleNum)}`} sx={{ fontWeight: 700 }} />
                   )}
                 </Stack>
               )}
@@ -901,7 +905,7 @@ export default function ProductMasterDialog({
                   {p.lensPriceUnit === 'PAIR' ? (
                     <>
                       <Grid item xs={12} sm={6} md={3}>
-                        <TextField label="Single Lens Price (₹)" fullWidth size="small" type="number" value={p.lensPiecePrice}
+                        <TextField label={`Single Lens Price (${getCurrencySymbol()})`} fullWidth size="small" type="number" value={p.lensPiecePrice}
                           onChange={(e) => set({ lensPiecePrice: e.target.value })}
                           helperText="Optional — overrides the % rule" />
                       </Grid>
@@ -915,7 +919,7 @@ export default function ProductMasterDialog({
                     </>
                   ) : (
                     <Grid item xs={12} sm={6} md={3}>
-                      <TextField label="Pair Price (₹)" fullWidth size="small" type="number" value={p.lensPairPrice}
+                      <TextField label={`Pair Price (${getCurrencySymbol()})`} fullWidth size="small" type="number" value={p.lensPairPrice}
                         onChange={(e) => set({ lensPairPrice: e.target.value })}
                         helperText="Optional — blank = 2 × sale price" />
                     </Grid>

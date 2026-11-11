@@ -156,7 +156,7 @@ export function cacheProfileLocally(p) {
       documentAddress: documentAddress(p),
       gstin: p.gstin || '',
       clinicalRegNo: p.clinical_reg_no || '',
-      currency: p.currency || prev.currency || '₹',
+      currency: p.currency || prev.currency || '',
     }));
   } catch { /* storage unavailable */ }
 }

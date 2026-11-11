@@ -3,6 +3,7 @@
 // journal's reference_id is the document's id. Read-only GETs against the existing endpoints.
 import axios from 'axios';
 import { wholesaleCollectionDoc, wholesaleInvoiceDoc, wholesaleReturnDoc } from '../../billing/realDocuments';
+import { fetchReturn, returnPrintDoc } from '../returns/returnsApi';
 
 const get = async (url) => (await axios.get(url)).data;
 
@@ -36,6 +37,15 @@ const SOURCE_BILLS = {
   'sales.wholesale_return': {
     label: 'Credit note',
     load: async (id) => ({ doc: wholesaleReturnDoc(await get(`/api/sales/wholesale/returns/${id}/`)), documentType: 'SALES_RETURN' }),
+  },
+  // Sales → Sales Return / Purchase → Purchase Return (apps/inventory/returns.py).
+  'sales.sales_return': {
+    label: 'Sales return (credit note)',
+    load: async (id) => ({ doc: returnPrintDoc('sales', await fetchReturn('sales', id)), documentType: 'SALES_RETURN' }),
+  },
+  'purchasing.purchase_return': {
+    label: 'Purchase return (debit note)',
+    load: async (id) => ({ doc: returnPrintDoc('purchase', await fetchReturn('purchase', id)), documentType: 'PURCHASE_RETURN' }),
   },
   'purchasing.purchase_invoice': {
     label: 'Purchase bill',

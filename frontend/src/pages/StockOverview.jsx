@@ -42,6 +42,7 @@ import { apiErrorMessage } from '../utils/apiError';
 import { notify } from '../utils/notify';
 import { stockValue, activeOfferPrice } from '../utils/stockValue';
 import { useCanViewCost } from '../utils/costVisibility';
+import { currencyPrefix, getCurrencySymbol } from '../utils/localeFormat.js';
 
 const BLANK_FILTERS = { brand: '', category: '', rack: '', supplier: '', variant_group: '', status: '', import_batch: '', source: '', offer: '' };
 const SOURCE_VALUES = STOCK_SOURCES.map((s) => s.value);
@@ -96,16 +97,19 @@ const COLUMNS = [
   { key: 'stock', label: 'On Hand', sort: 'stock', align: 'right', always: true, w: 44, edit: 'int' },
   { key: 'ordered', label: 'Ordered (Reserved)', align: 'right', w: 46 },
   { key: 'sold', label: 'Sold Stock', align: 'right', w: 40 },
+  // Units that came back on Sales Returns (+, already inside On Hand) and went out on Purchase
+  // Returns (−) — derived from live returns (row.returns), red so returned goods stand out.
+  { key: 'returns', label: 'Return Stock', align: 'right', w: 44, danger: true },
   { key: 'available', label: 'Current Stock (Available)', align: 'right', always: true, w: 52 },
   { key: 'status', label: 'Status', w: 46 },
   { key: 'minimum_stock', label: 'Low Stock Alert', sort: 'minimum_stock', align: 'right', w: 40, edit: 'int' },
   { key: 'uom', label: 'UOM', w: 40, edit: 'unit' },
-  { key: 'cost_price', label: 'Purchase Cost ₹', sort: 'cost_price', align: 'right', w: 58, edit: 'money', costOnly: true },
-  { key: 'retail_price', label: 'Selling Price ₹', sort: 'retail_price', align: 'right', w: 52, edit: 'money' },
-  { key: 'mrp', label: 'MRP ₹', sort: 'mrp', align: 'right', w: 50, edit: 'money' },
+  { key: 'cost_price', get label() { return `Purchase Cost ${getCurrencySymbol()}`; }, sort: 'cost_price', align: 'right', w: 58, edit: 'money', costOnly: true },
+  { key: 'retail_price', get label() { return `Selling Price ${getCurrencySymbol()}`; }, sort: 'retail_price', align: 'right', w: 52, edit: 'money' },
+  { key: 'mrp', get label() { return `MRP ${getCurrencySymbol()}`; }, sort: 'mrp', align: 'right', w: 50, edit: 'money' },
   // Stock × the price it sells at: the running offer price (Settings → Pricing Rules & Offers)
   // when there is one, else the selling price; follows the typed qty / price while editing.
-  { key: 'stock_value', label: 'Stock Value ₹', align: 'right', w: 56 },
+  { key: 'stock_value', get label() { return `Stock Value ${getCurrencySymbol()}`; }, align: 'right', w: 56 },
   { key: 'offer_status', label: 'Offer Qty / Status', w: 62 },
   { key: 'supplier_name', label: 'Supplier / Vendor', w: 64, edit: 'text', list: 'suppliers' },
   { key: 'last_purchase_date', label: 'Last Purchase', sort: 'last_purchase_date', w: 58 },
@@ -704,7 +708,7 @@ export default function StockOverview() {
             title={cost ? `Received on purchase entries: ${formatQty(life.purchased)}\nTotal purchase cost ${formatMoney(life.purchase_value)}${life.avg_purchase_cost != null ? `\nAverage unit cost ${formatMoney(life.avg_purchase_cost)}` : ''}` : `Received on purchase entries: ${formatQty(life.purchased)}`}>
             <Box component="span" sx={{ fontWeight: 700 }}>{formatQty(life.purchased)}</Box>
             {cost && life.purchased > 0 && (
-              <Box sx={{ fontSize: 9.5, color: 'text.secondary', whiteSpace: 'nowrap' }}>₹{amount(life.purchase_value)}</Box>
+              <Box sx={{ fontSize: 9.5, color: 'text.secondary', whiteSpace: 'nowrap' }}>{currencyPrefix()}{amount(life.purchase_value)}</Box>
             )}
           </Box>
         );
@@ -719,6 +723,19 @@ export default function StockOverview() {
             {life.shortfall > 0 && (
               <Box sx={{ fontSize: 9.5, fontWeight: 700, color: 'error.main', whiteSpace: 'nowrap' }}>short {formatQty(life.shortfall)}</Box>
             )}
+          </Box>
+        );
+      }
+      case 'returns': {
+        const r = row.returns || {};
+        if (!r.sales && !r.purchase) return muted('0');
+        return (
+          <Box component="span" data-return-stock={row.id}
+            title={`Sales Return (back in stock): ${formatQty(r.sales || 0)}
+Purchase Return (sent to supplier): ${formatQty(r.purchase || 0)}`}
+            sx={{ color: 'error.main', fontWeight: 800, whiteSpace: 'nowrap' }}>
+            {r.sales > 0 && <Box>{formatQty(r.sales)} <Box component="span" sx={{ fontSize: 9, fontWeight: 700 }}>SR</Box></Box>}
+            {r.purchase > 0 && <Box>−{formatQty(r.purchase)} <Box component="span" sx={{ fontSize: 9, fontWeight: 700 }}>PR</Box></Box>}
           </Box>
         );
       }
@@ -805,7 +822,7 @@ export default function StockOverview() {
           {row.offer && (
             <Chip size="small" color="success" variant="outlined" data-offer-badge={row.id}
               title={row.offer.tag}
-              label={`On Offer${row.offer.offer_price != null ? ` ₹${amount(row.offer.offer_price)}` : ''}${row.offer.apply_to_all === false ? ` · ${row.offer.remaining} left` : ''}`}
+              label={`On Offer${row.offer.offer_price != null ? ` ${currencyPrefix()}${amount(row.offer.offer_price)}` : ''}${row.offer.apply_to_all === false ? ` · ${row.offer.remaining} left` : ''}`}
               sx={{ mt: 0.3, height: 16, fontSize: 9.5, fontWeight: 800, '& .MuiChip-label': { px: 0.5 } }} />
           )}
         </>
@@ -933,12 +950,24 @@ export default function StockOverview() {
             {STOCK_SOURCES.map((src) => {
               const n = s?.source_counts?.[src.countKey];
               return (
-                <ToggleButton key={src.value || 'all'} value={src.value}>
+                <ToggleButton key={src.value || 'all'} value={src.value}
+                  sx={src.danger ? {
+                    color: 'error.main', borderColor: 'error.light',
+                    '&.Mui-selected, &.Mui-selected:hover': { color: '#fff', bgcolor: 'error.main' },
+                  } : undefined}>
                   {src.label}{n !== undefined ? ` (${formatQty(n)})` : ''}
                 </ToggleButton>
               );
             })}
           </ToggleButtonGroup>
+          {s?.return_stock && (s.return_stock.sales > 0 || s.return_stock.purchase > 0) && (
+            <Box component="span" data-return-totals
+              title="Units on live returns (Sales → Sales Return / Purchase → Purchase Return). Sales-return units are already inside On Hand."
+              sx={{ px: 1, py: 0.25, borderRadius: 1, fontSize: 11.5, fontWeight: 800, color: 'error.main',
+                border: '1px solid', borderColor: 'error.light', bgcolor: (t) => (t.palette.mode === 'dark' ? 'rgba(239,68,68,0.12)' : '#fef2f2') }}>
+              Return Stock: {formatQty(s.return_stock.sales)} in (Sales Return) · {formatQty(s.return_stock.purchase)} out (Purchase Return)
+            </Box>
+          )}
           {caps.adjust_stock && (
             <Button size="small" component={RouterLink} to="/inventory/opening-stock" startIcon={<AddIcon />} sx={{ ml: 'auto', fontWeight: 700 }}>
               Add Opening Stock
@@ -1050,7 +1079,7 @@ export default function StockOverview() {
                     onChange={togglePage} inputProps={{ 'aria-label': 'Select all on this page' }} />
                 </TableCell>
                 {visibleColumns.map((c) => (
-                  <TableCell key={c.key} align={c.align || 'left'} sx={headSx}
+                  <TableCell key={c.key} align={c.align || 'left'} sx={c.danger ? { ...headSx, color: 'error.main' } : headSx}
                     title={c.edit ? `${c.label} — double-click a cell to edit` : `${c.label} (calculated, not editable)`}
                     sortDirection={ordering.replace('-', '') === c.sort ? (ordering.startsWith('-') ? 'desc' : 'asc') : false}>
                     {c.sort ? (

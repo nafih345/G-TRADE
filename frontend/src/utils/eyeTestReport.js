@@ -10,6 +10,7 @@
 // Pure (no imports beyond eyeTestBill.js) so Node's test runner can load it.
 
 import { FEE_STATUS_LABELS, eyeTestReceiptNo, payModeLabel } from './eyeTestBill.js';
+import { formatCurrency } from './localeFormat.js';
 
 const blank = (v) => v === undefined || v === null || String(v).trim() === '' || String(v).trim() === '—';
 const pick = (...vals) => {
@@ -198,7 +199,7 @@ export function reportFromExam(row = {}, billing = null) {
 
 // ── Print ───────────────────────────────────────────────────────────────────────────────────
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const money = (n) => `₹${(Number(n) || 0).toFixed(2)}`;
+const money = (n) => `${formatCurrency(Number(n) || 0)}`;
 const cell = (v) => (blank(v) ? '—' : esc(v));
 const anyIn = (...rows) => rows.some((r) => Object.values(r).some((v) => !blank(v)));
 const DOC_LABELS = { INVOICE: 'Invoice', ORDER: 'Order', QUOTATION: 'Quotation' };

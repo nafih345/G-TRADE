@@ -12,6 +12,7 @@ import PaymentModeDetails from '../common/PaymentModeDetails';
 import useBankAccounts from '../../hooks/useBankAccounts';
 import { apiError, finGet, finPost, newIdempotencyKey } from '../financial/financialApi';
 import { needsBank } from '../../utils/paymentModes';
+import { getCurrencySymbol } from '../../utils/localeFormat.js';
 
 export const EXPENSE_PAY_MODES = [
   { value: 'Cash', label: 'Cash', refLabel: '' },
@@ -144,7 +145,7 @@ export default function RecordExpenseDialog({ open, onClose, onSaved }) {
             error={tried && !form.description.trim()} onChange={(e) => set({ description: e.target.value })} />
           <Grid container spacing={2}>
             <Grid item xs={12} sm={6}>
-              <TextField label="Amount (₹)" type="number" fullWidth required value={form.amount}
+              <TextField label={`Amount (${getCurrencySymbol()})`} type="number" fullWidth required value={form.amount}
                 error={tried && !(amount > 0)} inputProps={{ min: 0, step: '0.01' }}
                 onChange={(e) => set({ amount: e.target.value })} />
             </Grid>

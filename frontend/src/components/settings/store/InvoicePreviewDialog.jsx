@@ -12,6 +12,7 @@ import { resolveCompany } from '../../../billing/documentAdapters';
 import { sampleBillModel } from '../../../billing/sampleModels';
 import { brandingFromProfile, companyFromProfile } from '../../../utils/storeProfile';
 import { GREEN, greenButtonSx } from './storeUi';
+import { getCurrencySymbol } from '../../../utils/localeFormat.js';
 
 const canPrint = (t, type) => !!t && t.is_active !== false
   && (t.compatible_types || compatibleDocTypes(t.config)).includes(type);
@@ -40,7 +41,7 @@ export default function InvoicePreviewDialog({ open, onClose, form, currency, on
   const model = useMemo(() => {
     if (!ctx) return null;
     const company = resolveCompany({
-      company: { ...companyFromProfile(form), currency: currency || '₹' },
+      company: { ...companyFromProfile(form), currency: currency || getCurrencySymbol() },
       branding: brandingFromProfile(form, ctx.settings || {}),
     });
     return sampleBillModel(docType, { company });

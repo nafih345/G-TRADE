@@ -11,6 +11,7 @@
 
 import { fetchAllPages as fetchAllPagesShared } from '../../utils/fetchAllPages.js';
 import { parseTaxPercent, productPriceTiers } from '../../utils/wholesalePricing.js';
+import { formatCurrency } from '../../utils/localeFormat.js';
 
 export const WHOLESALE_API = '/api/sales/wholesale';
 
@@ -184,9 +185,9 @@ export const INITIAL_DEMO_PRODUCTS = [
 ];
 
 export const INITIAL_DEMO_CUSTOMERS = [
-  { id: 'c1', code: 'WCUST-101', name: 'Metro Optical Store (Indiranagar)', contactPerson: 'Rajesh Kumar', phone: '+91 98450 11223', email: 'metro.optics@gmail.com', gstin: '29ABCDE1234F1Z5', priceList: 'WHOLESALE', category: 'Wholesale', dealerDiscountPercent: 2, creditLimit: 200000, outstanding: 45000, openingBalance: 0, creditDays: 30, salesExec: 'Suresh V', billingAddress: '14, Indiranagar 100ft Road, Bengaluru', shippingAddress: '14, Indiranagar 100ft Road, Bengaluru', lastPurchaseDate: '2026-07-20', totalPurchases: '₹ 12,45,000' },
-  { id: 'c2', code: 'WCUST-102', name: 'Vision Care Eye Clinic', contactPerson: 'Dr. Anita Sharma', phone: '+91 99160 44556', email: 'anita@visioncare.in', gstin: '29FGHIJ5678K1Z9', priceList: 'DEALER', category: 'Dealer', dealerDiscountPercent: 5, creditLimit: 150000, outstanding: 120000, openingBalance: 0, creditDays: 30, salesExec: 'Priya N', billingAddress: 'Vision Care Clinic, Jayanagar 4th Block, Bengaluru', shippingAddress: 'Vision Care Clinic, Jayanagar 4th Block, Bengaluru', lastPurchaseDate: '2026-07-25', totalPurchases: '₹ 8,90,000' },
-  { id: 'c3', code: 'WCUST-103', name: 'Spectrum Spectacles Wholesale Hub', contactPerson: 'Karan Patel', phone: '+91 97310 99887', email: 'karan@spectrumwholesale.com', gstin: '29KLMNO9012P1Z3', priceList: 'DISTRIBUTOR', category: 'Distributor', dealerDiscountPercent: 7, creditLimit: 500000, outstanding: 0, openingBalance: 0, creditDays: 45, salesExec: 'Suresh V', billingAddress: 'Spectrum Hub, Commercial Street, Bengaluru', shippingAddress: 'Spectrum Hub, Commercial Street, Bengaluru', lastPurchaseDate: '2026-07-28', totalPurchases: '₹ 34,10,000' },
+  { id: 'c1', code: 'WCUST-101', name: 'Metro Optical Store (Indiranagar)', contactPerson: 'Rajesh Kumar', phone: '+91 98450 11223', email: 'metro.optics@gmail.com', gstin: '29ABCDE1234F1Z5', priceList: 'WHOLESALE', category: 'Wholesale', dealerDiscountPercent: 2, creditLimit: 200000, outstanding: 45000, openingBalance: 0, creditDays: 30, salesExec: 'Suresh V', billingAddress: '14, Indiranagar 100ft Road, Bengaluru', shippingAddress: '14, Indiranagar 100ft Road, Bengaluru', lastPurchaseDate: '2026-07-20', get totalPurchases() { return formatCurrency(1245000, { decimals: 0 }); } },
+  { id: 'c2', code: 'WCUST-102', name: 'Vision Care Eye Clinic', contactPerson: 'Dr. Anita Sharma', phone: '+91 99160 44556', email: 'anita@visioncare.in', gstin: '29FGHIJ5678K1Z9', priceList: 'DEALER', category: 'Dealer', dealerDiscountPercent: 5, creditLimit: 150000, outstanding: 120000, openingBalance: 0, creditDays: 30, salesExec: 'Priya N', billingAddress: 'Vision Care Clinic, Jayanagar 4th Block, Bengaluru', shippingAddress: 'Vision Care Clinic, Jayanagar 4th Block, Bengaluru', lastPurchaseDate: '2026-07-25', get totalPurchases() { return formatCurrency(890000, { decimals: 0 }); } },
+  { id: 'c3', code: 'WCUST-103', name: 'Spectrum Spectacles Wholesale Hub', contactPerson: 'Karan Patel', phone: '+91 97310 99887', email: 'karan@spectrumwholesale.com', gstin: '29KLMNO9012P1Z3', priceList: 'DISTRIBUTOR', category: 'Distributor', dealerDiscountPercent: 7, creditLimit: 500000, outstanding: 0, openingBalance: 0, creditDays: 45, salesExec: 'Suresh V', billingAddress: 'Spectrum Hub, Commercial Street, Bengaluru', shippingAddress: 'Spectrum Hub, Commercial Street, Bengaluru', lastPurchaseDate: '2026-07-28', get totalPurchases() { return formatCurrency(3410000, { decimals: 0 }); } },
 ];
 
 export const uid = (prefix = 'id') => `${prefix}_${Date.now()}_${Math.floor(Math.random() * 9000 + 1000)}`;
@@ -306,7 +307,7 @@ export function buildDealerLedger(dealer, invoices, returns = [], payments = [])
 }
 
 export function fmtINR(n) {
-  return `₹${(parseFloat(n) || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+  return `${formatCurrency(parseFloat(n) || 0, { decimals: 0 })}`;
 }
 
 // ---- Wholesale invoice <-> backend WholesaleInvoice (details JSON carries the full record) ----

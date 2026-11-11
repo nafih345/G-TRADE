@@ -14,7 +14,7 @@ import TaxConfigTab from './TaxConfigTab';
 import NumberingTab from './NumberingTab';
 import CustomFieldsTab from './CustomFieldsTab';
 import { GREEN } from './businessUi';
-import { fetchLocalizationCatalog, saveBusinessPrefs, DEFAULT_PREFS } from '../../../utils/businessPrefs';
+import { fetchLocalizationCatalog, saveBusinessPrefs, DEFAULT_PREFS, symbolForCurrency } from '../../../utils/businessPrefs';
 import { STORE_PROFILE_EVENT, fetchStoreProfile } from '../../../utils/storeProfile';
 import { setNavigationGuard } from '../../../utils/navigationGuard';
 import { notify } from '../../../utils/notify';
@@ -31,7 +31,7 @@ export const SECTIONS = [
 const FORM_SECTIONS = new Set(['general', 'currency', 'other']);
 const LEAVE_MESSAGE = 'You have unsaved Business & Localization changes. Leave without saving?';
 
-const toForm = (payload) => ({ ...DEFAULT_PREFS, ...(payload?.preferences || {}), currency_symbol: payload?.currency_symbol || '₹' });
+const toForm = (payload) => ({ ...DEFAULT_PREFS, ...(payload?.preferences || {}), currency_symbol: payload?.currency_symbol || symbolForCurrency(payload?.preferences?.base_currency) });
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const sectionOf = (key) => SECTIONS.find((s) => s.keys.includes(key))?.id || 'general';
 
@@ -107,6 +107,15 @@ const BusinessLocalizationSettings = forwardRef(function BusinessLocalizationSet
   const setMany = useCallback((obj) => { setForm((f) => ({ ...f, ...obj })); clearErr(Object.keys(obj)); }, []);
 
   const discard = useCallback(() => { setForm(saved); setErrors({}); }, [saved]);
+
+  // Tax Configuration saves its master switch on its own; fold the result into both copies so it
+  // never shows up as an unsaved change (other sections' edits in `form` are kept).
+  const onTaxPrefsSaved = useCallback((data) => {
+    const p = data?.preferences || {};
+    const patch = { tax_enabled: p.tax_enabled !== false };
+    setSaved((s) => (s ? { ...s, ...patch } : s));
+    setForm((f) => (f ? { ...f, ...patch } : f));
+  }, []);
 
   const save = useCallback(async () => {
     if (!form || !dirty || saving) return false;
@@ -224,7 +233,7 @@ const BusinessLocalizationSettings = forwardRef(function BusinessLocalizationSet
           {section === 'currency' && (
             <CurrencyLanguageTab form={form} set={set} setMany={setMany} errors={errors} catalog={catalog} dirtyKeys={dirtyKeys} />
           )}
-          {section === 'tax' && <TaxConfigTab />}
+          {section === 'tax' && <TaxConfigTab prefs={saved} onPrefsSaved={onTaxPrefsSaved} onNavigate={setSection} />}
           {section === 'numbering' && <NumberingTab prefs={saved} onNavigate={setSection} />}
           {section === 'other' && <OtherSettingsTab form={form} set={set} errors={errors} savedAt={savedAt} />}
           {section === 'fields' && <CustomFieldsTab />}

@@ -1,3 +1,4 @@
+import { formatCurrency } from './localeFormat.js';
 // Spectacle-lens selling units for New Sale: Both Eyes (1 Pair = 2 lenses) or Single Lens
 // (1 Piece = 1 lens, one eye).
 //
@@ -93,7 +94,7 @@ export function lensPricing(product, basePrice, defaultPercent = DEFAULT_SINGLE_
 export const unitPrice = (pricing, unit) => (unit === PIECE ? pricing.piecePrice : pricing.pairPrice);
 
 /** How the unit's price was arrived at, for display beside the price. */
-export function priceBasis(pricing, unit, fmt = (n) => `₹${round2(n).toFixed(2)}`) {
+export function priceBasis(pricing, unit, fmt = (n) => `${formatCurrency(round2(n))}`) {
   if (!pricing) return '';
   if (unit === PIECE) {
     if (pricing.pieceSource === 'EXPLICIT') return 'single-lens price set on the product';

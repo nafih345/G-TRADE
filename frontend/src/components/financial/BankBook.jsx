@@ -36,6 +36,8 @@ const KIND_STYLES = {
   RECEIPT: ['#0f766e', '#ccfbf1'],
   REFUND: ['#c2410c', '#ffedd5'],
   SUPPLIER_PAYMENT: ['#b91c1c', '#fee2e2'],
+  SALES_RETURN: ['#b91c1c', '#fee2e2'],
+  PURCHASE_RETURN: ['#b91c1c', '#fee2e2'],
   PAYMENT: ['#b91c1c', '#fee2e2'],
   BANK_CHARGES: ['#c2410c', '#ffedd5'],
   CASH_DEPOSIT: ['#3730a3', '#e0e7ff'],

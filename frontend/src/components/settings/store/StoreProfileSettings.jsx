@@ -14,6 +14,7 @@ import {
   Undo as UndoIcon, Save as SaveIcon, Image as ImageIcon,
 } from '@mui/icons-material';
 import { useBranch } from '../../../context/BranchContext';
+import { useTaxSettings } from '../../../context/SettingsContext';
 import ConfirmActionDialog from '../../common/ConfirmActionDialog';
 import { invalidateBillingContext } from '../../../billing/billingContext';
 import { apiErrorMessage } from '../../../utils/apiError';
@@ -46,6 +47,7 @@ const sameForm = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const StoreProfileSettings = forwardRef(function StoreProfileSettings({ onStateChange, onOpenTab }, ref) {
   const navigate = useNavigate();
   const { multiBranchEnabled } = useBranch();
+  const { isTaxEnabled, taxLabel, taxRegLabel } = useTaxSettings();
   const [saved, setSaved] = useState(null);
   const [form, setForm] = useState(() => profileToForm({}));
   const [errors, setErrors] = useState({});
@@ -236,7 +238,8 @@ const StoreProfileSettings = forwardRef(function StoreProfileSettings({ onStateC
     });
   };
 
-  const gstinState = stateForGstin(form.gstin.replace(/\s/g, '').toUpperCase());
+  const isGstin = taxRegLabel === 'GSTIN';
+  const gstinState = isGstin ? stateForGstin(form.gstin.replace(/\s/g, '').toUpperCase()) : '';
   let gstinHelper = gstinState ? `State code ${form.gstin.slice(0, 2)} · ${gstinState}` : '';
   if (gstinState && form.state && isIndia(form.country) && form.state !== gstinState) {
     gstinHelper = `GSTIN is registered in ${gstinState}, but the address state is ${form.state}.`;
@@ -408,14 +411,16 @@ const StoreProfileSettings = forwardRef(function StoreProfileSettings({ onStateC
                       ...STORE_TYPES.map((t) => <MenuItem key={t.value} value={t.value}>{t.label}</MenuItem>)],
                   })}
                 </Grid>
+                {isTaxEnabled && (
                 <Grid item xs={12} sm={6}>
-                  {field('gstin', 'GSTIN Registration Number', {
-                    helper: gstinHelper,
+                  {field('gstin', isGstin ? 'GSTIN Registration Number' : taxRegLabel, {
+                    helper: gstinHelper || (isGstin ? '' : `Your ${taxLabel} registration number`),
                     FormHelperTextProps: { sx: gstinHelper.startsWith('GSTIN is') && !errors.gstin ? { color: 'warning.main' } : undefined },
                     inputProps: { maxLength: 15, style: { textTransform: 'uppercase' }, spellCheck: false },
-                    placeholder: 'e.g. 32ABCDE1234F1Z5',
+                    placeholder: isGstin ? 'e.g. 32ABCDE1234F1Z5' : '',
                   })}
                 </Grid>
+                )}
                 <Grid item xs={12}>{field('business_reg_no', 'Business Registration Number', { inputProps: { maxLength: 60 }, helper: 'Shop & establishment / trade licence / CIN — optional' })}</Grid>
                 <Grid item xs={12}>{field('tagline', 'Tagline', { inputProps: { maxLength: 120 }, helper: 'Optional line under the store name on documents' })}</Grid>
               </Grid>

@@ -27,6 +27,7 @@ import useBankAccounts from '../hooks/useBankAccounts';
 import { needsBank } from '../utils/paymentModes';
 import { apiError, finGet } from '../components/financial/financialApi';
 import { notify } from '../utils/notify';
+import { formatCurrency, getCurrencySymbol, getCurrencyCode } from '../utils/localeFormat.js';
 
 const initialReceipts = [];
 const initialPayments = [];
@@ -438,7 +439,7 @@ export default function AccountsCOA() {
 
   // Download Sample Excel Template for Payments
   const handleDownloadPaymentTemplate = () => {
-    const csvContent = "Payment ID,Supplier Vendor Name,Payment Date,Payment Method,Payment Amount (INR),Status\n" +
+    const csvContent = `Payment ID,Supplier Vendor Name,Payment Date,Payment Method,Payment Amount (${getCurrencyCode()}),Status\n` +
       "PAY-GRN-5738,Greensol Optical,2026-07-29,Bank Transfer,50000.00,Completed\n" +
       "PAY-EX-1002,Luxottica India,2026-07-28,UPI,15500.00,Completed\n" +
       "PAY-EX-1003,Essilor Care,2026-07-27,Cheque,22000.00,Completed";
@@ -457,7 +458,7 @@ export default function AccountsCOA() {
       alert("No payments recorded to export.");
       return;
     }
-    let csvContent = "Payment ID,Supplier Vendor Name,Payment Date,Payment Method,Payment Amount (INR),Status\n";
+    let csvContent = `Payment ID,Supplier Vendor Name,Payment Date,Payment Method,Payment Amount (${getCurrencyCode()}),Status\n`;
     payments.forEach(p => {
       csvContent += `"${p.id}","${p.supplier}","${p.date}","${p.method}","${p.amount}","${p.status}"\n`;
     });
@@ -569,7 +570,7 @@ export default function AccountsCOA() {
               <MoneyIcon color="primary" sx={{ fontSize: 36 }} />
               <Box>
                 <Typography variant="caption" color="text.secondary" fontWeight={700}>CASH & BANK BALANCE</Typography>
-                <Typography variant="h5" fontWeight={850} color="primary.main">₹{netCashBalance.toFixed(2)}</Typography>
+                <Typography variant="h5" fontWeight={850} color="primary.main">{formatCurrency(netCashBalance)}</Typography>
               </Box>
             </CardContent>
           </Card>
@@ -580,7 +581,7 @@ export default function AccountsCOA() {
               <DueIcon color="warning" sx={{ fontSize: 36 }} />
               <Box>
                 <Typography variant="caption" color="text.secondary" fontWeight={700}>TOTAL PATIENT DUES</Typography>
-                <Typography variant="h5" fontWeight={850} color="warning.main">₹{totalPatientDues.toFixed(2)}</Typography>
+                <Typography variant="h5" fontWeight={850} color="warning.main">{formatCurrency(totalPatientDues)}</Typography>
               </Box>
             </CardContent>
           </Card>
@@ -591,7 +592,7 @@ export default function AccountsCOA() {
               <DueIcon color="error" sx={{ fontSize: 36 }} />
               <Box>
                 <Typography variant="caption" color="text.secondary" fontWeight={700}>OUTSTANDING TO SUPPLIERS</Typography>
-                <Typography variant="h5" fontWeight={850} color="error.main">₹{totalSupplierDues.toFixed(2)}</Typography>
+                <Typography variant="h5" fontWeight={850} color="error.main">{formatCurrency(totalSupplierDues)}</Typography>
               </Box>
             </CardContent>
           </Card>
@@ -653,7 +654,7 @@ export default function AccountsCOA() {
                         <TableCell sx={{ fontWeight: 600 }}>{row.patient}</TableCell>
                         <TableCell>{row.date}</TableCell>
                         <TableCell>{row.method}</TableCell>
-                        <TableCell sx={{ fontWeight: 700, color: 'success.main' }}>₹{(row.amount || 0).toFixed(2)}</TableCell>
+                        <TableCell sx={{ fontWeight: 700, color: 'success.main' }}>{formatCurrency(row.amount || 0)}</TableCell>
                         <TableCell>
                           <Chip label={row.status} color="success" size="small" sx={{ borderRadius: 1, fontWeight: 700 }} />
                         </TableCell>
@@ -788,7 +789,7 @@ export default function AccountsCOA() {
                           <TableCell sx={{ fontWeight: 600 }}>{row.supplier}</TableCell>
                           <TableCell>{row.date}</TableCell>
                           <TableCell>{row.method}</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>₹{(row.amount || 0).toFixed(2)}</TableCell>
+                          <TableCell sx={{ fontWeight: 700 }}>{formatCurrency(row.amount || 0)}</TableCell>
                           <TableCell>
                             <Chip label={row.status} color="success" size="small" sx={{ borderRadius: 1, fontWeight: 700 }} />
                           </TableCell>
@@ -859,7 +860,7 @@ export default function AccountsCOA() {
                         <TableCell>{row.account_name}</TableCell>
                         <TableCell>{row.date}</TableCell>
                         <TableCell>{(row.paid_via || []).join(', ')}</TableCell>
-                        <TableCell sx={{ fontWeight: 700, color: 'error.main' }}>₹{(parseFloat(row.amount) || 0).toFixed(2)}</TableCell>
+                        <TableCell sx={{ fontWeight: 700, color: 'error.main' }}>{formatCurrency(parseFloat(row.amount) || 0)}</TableCell>
                       </TableRow>
                     ))
                   )}
@@ -904,7 +905,7 @@ export default function AccountsCOA() {
                         <TableCell sx={{ fontWeight: 600 }}>{row.patient}</TableCell>
                         <TableCell>{row.phone}</TableCell>
                         <TableCell>{row.lastExam}</TableCell>
-                        <TableCell sx={{ fontWeight: 700, color: 'warning.main' }}>₹{(row.outstanding || 0).toFixed(2)}</TableCell>
+                        <TableCell sx={{ fontWeight: 700, color: 'warning.main' }}>{formatCurrency(row.outstanding || 0)}</TableCell>
                       </TableRow>
                     ))
                   )}
@@ -950,7 +951,7 @@ export default function AccountsCOA() {
                           <Typography variant="body2">{row.phone}</Typography>
                           <Typography variant="caption" color="text.secondary">{row.email}</Typography>
                         </TableCell>
-                        <TableCell sx={{ fontWeight: 700, color: 'error.main' }}>₹{(row.balance || 0).toFixed(2)}</TableCell>
+                        <TableCell sx={{ fontWeight: 700, color: 'error.main' }}>{formatCurrency(row.balance || 0)}</TableCell>
                       </TableRow>
                     ))
                   )}
@@ -985,7 +986,7 @@ export default function AccountsCOA() {
             )}
             <Grid container spacing={2}>
               <Grid item xs={6}>
-                <TextField label="Amount (₹)" type="number" fullWidth required value={newTransaction.amount} onChange={(e) => setNewTransaction({...newTransaction, amount: e.target.value})} />
+                <TextField label={`Amount (${getCurrencySymbol()})`} type="number" fullWidth required value={newTransaction.amount} onChange={(e) => setNewTransaction({...newTransaction, amount: e.target.value})} />
               </Grid>
               <Grid item xs={6}>
                 <TextField select label="Payment Method" fullWidth value={newTransaction.method} onChange={(e) => setNewTransaction({...newTransaction, method: e.target.value, bankAccount: '', reference: ''})}>

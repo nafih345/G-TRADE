@@ -24,6 +24,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { apiErrorMessage } from '../utils/apiError';
+import { formatCurrency, getCurrencySymbol } from '../utils/localeFormat.js';
 
 export default function Dashboard() {
   const navigate = useNavigate();
@@ -102,7 +103,7 @@ export default function Dashboard() {
               <Box>
                 <Typography variant="caption" color="text.secondary" fontWeight={700}>TODAY'S REVENUE</Typography>
                 <Typography variant="h5" sx={{ fontWeight: 850, color: 'primary.main' }}>
-                  ₹{todayRevenue.toFixed(2)}
+                  {formatCurrency(todayRevenue)}
                 </Typography>
               </Box>
             </CardContent>
@@ -175,8 +176,8 @@ export default function Dashboard() {
                   <YAxis stroke="#64748b" fontSize={12} tickLine={false} axisLine={false} />
                   <Tooltip contentStyle={{ backgroundColor: '#ffffff', border: '1px solid rgba(0, 0, 0, 0.08)', borderRadius: 8 }} />
                   <Legend />
-                  <Area type="monotone" name="Sales Revenue (₹)" dataKey="Sales" stroke="#2563EB" strokeWidth={2.5} fillOpacity={1} fill="url(#colorSales)" />
-                  <Area type="monotone" name="Stock Purchase (₹)" dataKey="Purchases" stroke="#0EA5E9" strokeWidth={2.5} fillOpacity={1} fill="url(#colorPurchases)" />
+                  <Area type="monotone" name={`Sales Revenue (${getCurrencySymbol()})`} dataKey="Sales" stroke="#2563EB" strokeWidth={2.5} fillOpacity={1} fill="url(#colorSales)" />
+                  <Area type="monotone" name={`Stock Purchase (${getCurrencySymbol()})`} dataKey="Purchases" stroke="#0EA5E9" strokeWidth={2.5} fillOpacity={1} fill="url(#colorPurchases)" />
                 </AreaChart>
               </ResponsiveContainer>
             </Box>
@@ -295,7 +296,7 @@ export default function Dashboard() {
                         <TableRow key={row.id} hover>
                           <TableCell sx={{ fontWeight: 700, color: '#2563EB' }}>{row.invoice_number || row.invoiceNumber || row.id}</TableCell>
                           <TableCell sx={{ fontWeight: 600 }}>{row.customer_name || row.customerName || 'Walk-in Patient'}</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>₹{(parseFloat(row.net_amount || row.total || 0)).toFixed(2)}</TableCell>
+                          <TableCell sx={{ fontWeight: 700 }}>{formatCurrency(parseFloat(row.net_amount || row.total || 0))}</TableCell>
                           <TableCell>
                             <Chip label="Paid" color="success" size="small" sx={{ fontWeight: 700 }} />
                           </TableCell>

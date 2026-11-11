@@ -104,7 +104,7 @@ export default function ItemsTableEditor({ items, onItems, onTable, readOnly, do
         </Row>
         <Row>
           <NumField label="Cell side padding" step={0.1} min={0} max={5} value={table.cellPadX ?? 1.3} onChange={(v) => onTable({ cellPadX: v }, 'padx')} disabled={d} />
-          <Toggle label="₹ symbol in rows" checked={table.currencyInTable !== false} disabled={d} onChange={(v) => onTable({ currencyInTable: v })} />
+          <Toggle label="Currency symbol in rows" checked={table.currencyInTable !== false} disabled={d} onChange={(v) => onTable({ currencyInTable: v })} />
         </Row>
         <Row>
           <Toggle label="Striped rows" checked={!!table.zebra} disabled={d} onChange={(v) => onTable({ zebra: v })} />

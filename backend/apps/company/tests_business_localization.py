@@ -50,6 +50,17 @@ class LocalizationSettingsTests(APITestCase):
         self.assertEqual(log.performed_by, 'super_admin')
         self.assertEqual(log.changes['country'], ['IN', 'AE'])
 
+    def test_switching_base_currency_replaces_the_rupee_symbol(self):
+        # Base currency sent without a symbol: the stale ₹ must not keep printing.
+        res = self.client.put(self.URL, {'base_currency': 'QAR'}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data['currency_symbol'], 'QAR')
+        self.assertEqual(Company.objects.order_by('created_at').first().currency, 'QAR')
+        # A symbol the store typed itself is kept on a later base-currency change.
+        self.client.put(self.URL, {'currency_symbol': 'QR'}, format='json')
+        res = self.client.put(self.URL, {'base_currency': 'USD'}, format='json')
+        self.assertEqual(res.data['currency_symbol'], 'QR')
+
     def test_invalid_values_are_rejected_and_nothing_saved(self):
         res = self.client.put(self.URL, {'time_zone': 'Mars/Base', 'date_format': 'YY', 'fiscal_year_start_month': 13,
                                          'region': 'Ontario'}, format='json')
@@ -173,6 +184,54 @@ class TaxConfigTests(APITestCase):
         res = self.client.put(f'{self.URL}{tax.pk}/', {'is_active': False}, format='json')
         self.assertEqual(res.status_code, 200)
         self.assertFalse(res.data['is_active'])
+
+
+class TaxTerminologyTests(APITestCase):
+    URL = '/api/company/localization/'
+    TAX_URL = '/api/company/tax-config/'
+
+    def setUp(self):
+        ensure_company()
+        self.client.force_authenticate(user('SUPER_ADMIN'))
+
+    def test_country_mapping(self):
+        from apps.company.localization import tax_terms
+        self.assertEqual(tax_terms('IN'), {'label': 'GST', 'reg_label': 'GSTIN'})
+        for c in ('AE', 'SA', 'OM', 'BH'):
+            self.assertEqual(tax_terms(c), {'label': 'VAT', 'reg_label': 'TRN'})
+        for c in ('GB', 'DE', 'FR'):
+            self.assertEqual(tax_terms(c), {'label': 'VAT', 'reg_label': 'VAT No'})
+        self.assertEqual(tax_terms('US'), {'label': 'Sales Tax', 'reg_label': 'Tax ID'})
+        for c in ('QA', 'KW', 'JP', ''):
+            self.assertEqual(tax_terms(c), {'label': 'Tax', 'reg_label': 'Tax Registration No'})
+        cat = self.client.get(self.URL + 'catalog/').data
+        uae = next(c for c in cat['countries'] if c['code'] == 'AE')
+        self.assertEqual((uae['tax_label'], uae['tax_reg_label']), ('VAT', 'TRN'))
+
+    def test_payload_follows_country_and_saves_registration(self):
+        res = self.client.get(self.URL)
+        self.assertTrue(res.data['preferences']['tax_enabled'])
+        self.assertEqual(res.data['tax_terms']['label'], 'GST')
+        bad = self.client.put(self.URL, {'tax_registration_number': '12345'}, format='json')
+        self.assertIn('tax_registration_number', bad.data['errors'])  # not a GSTIN
+        res = self.client.put(self.URL, {'country': 'AE', 'region': '', 'tax_registration_number': '100 1234 5670 0003'},
+                              format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data['tax_terms'], {'label': 'VAT', 'reg_label': 'TRN'})
+        self.assertEqual(res.data['tax_registration_number'], '100123456700003')
+        self.assertEqual(Company.objects.order_by('created_at').first().gstin, '100123456700003')
+
+    def test_tax_rates_locked_while_disabled(self):
+        tax = Tax.objects.create(name='VAT 5%', rate=5)
+        self.client.put(self.URL, {'country': 'AE', 'region': '', 'tax_enabled': False}, format='json')
+        res = self.client.post(self.TAX_URL, {'name': 'VAT 10%', 'rate': '10'}, format='json')
+        self.assertEqual(res.status_code, 409)
+        self.assertIn('Enable VAT', res.data['detail'])
+        self.assertEqual(self.client.put(f'{self.TAX_URL}{tax.pk}/', {'rate': '6'}, format='json').status_code, 409)
+        self.assertEqual(self.client.delete(f'{self.TAX_URL}{tax.pk}/').status_code, 409)
+        self.assertEqual(self.client.get(self.TAX_URL).status_code, 200)  # reading is fine
+        self.client.put(self.URL, {'tax_enabled': True}, format='json')
+        self.assertEqual(self.client.post(self.TAX_URL, {'name': 'VAT 10%', 'rate': '10'}, format='json').status_code, 201)
 
 
 class CustomFieldTests(APITestCase):

@@ -30,6 +30,7 @@ import { sendInvoiceWhatsApp } from '../../utils/whatsappInvoice';
 import {
   rowPayment, rowCustomerName, rowFrameLens, deliveryStatusOf, PAYMENT_STATUSES
 } from '../../utils/salesDocStatus';
+import { formatCurrency, currencyPrefix } from '../../utils/localeFormat.js';
 
 const inr = (n) => (Number(n) || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
 
@@ -129,7 +130,7 @@ export default function SalesDashboardView({
               </Avatar>
             </Box>
             <Typography variant="h4" fontWeight={900} sx={{ letterSpacing: '-0.02em' }}>
-              ₹{totalRevenue.toLocaleString()}
+              {formatCurrency(totalRevenue)}
             </Typography>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mt: 1 }}>
               <Chip 
@@ -176,7 +177,7 @@ export default function SalesDashboardView({
               </Avatar>
             </Box>
             <Typography variant="h4" fontWeight={900} sx={{ letterSpacing: '-0.02em' }}>
-              ₹{avgOrderValue.toLocaleString()}
+              {formatCurrency(avgOrderValue)}
             </Typography>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mt: 1 }}>
               <Typography variant="caption" color="text.secondary">Per Customer Invoice</Typography>
@@ -380,7 +381,7 @@ export default function SalesDashboardView({
                         </Tooltip>
                       </TableCell>
                       <TableCell sx={{ fontWeight: 900, fontSize: '1rem' }}>
-                        ₹{inr(pay.net)}
+                        {currencyPrefix()}{inr(pay.net)}
                       </TableCell>
                       <TableCell>
                         <Chip
@@ -391,7 +392,7 @@ export default function SalesDashboardView({
                           sx={{ fontWeight: 700, fontSize: '0.72rem' }}
                         />
                         <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.3, whiteSpace: 'nowrap' }}>
-                          Paid ₹{inr(pay.paid)}{pay.balance > 0 ? ` · Due ₹${inr(pay.balance)}` : ''}
+                          Paid {currencyPrefix()}{inr(pay.paid)}{pay.balance > 0 ? ` · Due ${currencyPrefix()}${inr(pay.balance)}` : ''}
                           {ord.paymentMethod ? ` · ${ord.paymentMethod}` : ''}
                         </Typography>
                       </TableCell>

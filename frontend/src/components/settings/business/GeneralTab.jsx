@@ -2,11 +2,11 @@ import React, { useMemo } from 'react';
 import { Alert, Autocomplete, Box, Button, Grid, MenuItem, TextField, Typography } from '@mui/material';
 import {
   Public as GlobeIcon, Percent as PercentIcon, FormatListNumbered as NumberedIcon, Map as RegionIcon,
-  CurrencyRupee as CurrencyIcon, Inventory2 as StockIcon, Tag as NumberIcon, CurrencyExchange as ExchangeIcon,
+  Payments as CurrencyIcon, Inventory2 as StockIcon, Tag as NumberIcon, CurrencyExchange as ExchangeIcon,
   FactCheck as ConfirmIcon,
 } from '@mui/icons-material';
 import { PrefToggleRow, QuickLinkRow, SectionCard, errText } from './businessUi';
-import { MONTHS, formatDate, formatNumber, formatTime } from '../../../utils/localeFormat.js';
+import { MONTHS, formatDate, formatNumber, formatTime, taxTermsForCountry } from '../../../utils/localeFormat.js';
 import { hasBillTranslation, translateBillLabel } from '../../../billing/billI18n.js';
 
 const NUMBER_FORMAT_LABELS = {
@@ -84,7 +84,9 @@ export default function GeneralTab({ form, set, setMany, errors, catalog, dirtyK
                 disableClearable
                 renderInput={(p) => (
                   <TextField {...p} label="Default Country" required error={!!errors.country}
-                    helperText={helper(errors.country, 'Used for regional defaults and addresses.')} />
+                    helperText={helper(errors.country, country
+                      ? `Tax is called ${taxTermsForCountry(country.code).label}; registration no. ${taxTermsForCountry(country.code).regLabel}.`
+                      : 'Used for regional defaults, addresses and tax names.')} />
                 )}
               />
             </Grid>
@@ -92,7 +94,7 @@ export default function GeneralTab({ form, set, setMany, errors, catalog, dirtyK
               {regions ? (
                 <TextField select fullWidth label="State / Region" value={form.region || ''}
                   onChange={(e) => set('region', e.target.value)} error={!!errors.region}
-                  helperText={helper(errors.region, 'Home state — e.g. decides intra- vs inter-state GST.')}>
+                  helperText={helper(errors.region, form.country === 'IN' ? 'Home state — e.g. decides intra- vs inter-state GST.' : 'Home state / emirate / province.')}>
                   <MenuItem value=""><em>Not set</em></MenuItem>
                   {regions.map((r) => <MenuItem key={r} value={r}>{r}</MenuItem>)}
                 </TextField>

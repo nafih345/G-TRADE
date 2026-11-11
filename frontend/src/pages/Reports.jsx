@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import ReturnsReportSection from '../components/returns/ReturnsReportSection';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { 
   Box, Card, CardContent, Typography, Button, Tab, Tabs, 
@@ -42,19 +43,20 @@ import {
 import axios from 'axios';
 import EyeTestClinicalReport from '../components/reports/EyeTestClinicalReport';
 import SalesComprehensiveReport from '../components/reports/SalesComprehensiveReport';
+import { formatCurrency, getCurrencySymbol, getCurrencyCode, getTaxLabel } from '../utils/localeFormat.js';
 
 // 4 MASTER REPORT CATEGORIES
 const MASTER_CATEGORIES = [
   {
     id: 'sales',
     title: 'Sales & Revenue Hub',
-    subtitle: 'Revenue, Invoices, GST, Profit Margins & Pending Orders',
+    get subtitle() { return `Revenue, Invoices, ${getTaxLabel()}, Profit Margins & Pending Orders`; },
     icon: <SalesReportIcon />,
     color: '#2563eb',
     bgColor: '#dbeafe',
     reports: [
       { id: 'sales-overview', name: 'Sales Report', icon: <SalesReportIcon /> },
-      { id: 'gst-sales', name: 'GST - Sales Report', icon: <GstIcon /> },
+      { id: 'gst-sales', get name() { return `${getTaxLabel()} - Sales Report`; }, icon: <GstIcon /> },
       { id: 'sale-items-profit', name: 'Sale Items Profit', icon: <ProfitIcon /> },
       { id: 'bill-wise-profit', name: 'Bill wise Sales Profit', icon: <ProfitIcon /> },
       { id: 'customers-sales', name: 'Customers Of Sales', icon: <CustomerReportIcon /> },
@@ -108,6 +110,22 @@ const MASTER_CATEGORIES = [
     ]
   }
 ];
+
+// The "Reporting Period" picker as local dates (financial year / quarters start in April).
+const ymdLocal = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+function periodDates(period, now = new Date()) {
+  const y = now.getFullYear();
+  const m = now.getMonth();
+  const today = new Date(y, m, now.getDate());
+  let from = new Date(y, m, 1);
+  if (period === 'Today') from = today;
+  else if (period === 'This Week') from = new Date(y, m, now.getDate() - ((now.getDay() + 6) % 7));
+  else if (period === 'This Quarter') {
+    const fyMonth = (m + 9) % 12;                      // 0 = April
+    from = new Date(y, m - (fyMonth % 3), 1);
+  } else if (period === 'This Year') from = new Date(m >= 3 ? y : y - 1, 3, 1);
+  return { dateFrom: ymdLocal(from), dateTo: ymdLocal(today) };
+}
 
 export default function Reports() {
   const location = useLocation();
@@ -219,7 +237,7 @@ export default function Reports() {
   };
 
   const handleExportExcel = () => {
-    let headers = "Transaction ID,Date,Customer / Party,Category,Payment Mode,Amount (INR),Status\n";
+    let headers = `Transaction ID,Date,Customer / Party,Category,Payment Mode,Amount (${getCurrencyCode()}),Status\n`;
     let rows = "";
 
     if (activeCategory === 'sales' && salesData.length > 0) {
@@ -257,7 +275,7 @@ export default function Reports() {
             <AnalyticsIcon sx={{ color: 'primary.main', fontSize: 36 }} /> Enterprise Reports & Intelligence Hub
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, maxWidth: 850 }}>
-            Single-window analytical dashboard unifying Sales, Purchases, Stock Valuation, Expenses, GST, and Clinical Eye Examinations.
+            Single-window analytical dashboard unifying Sales, Purchases, Stock Valuation, Expenses, {getTaxLabel()}, and Clinical Eye Examinations.
           </Typography>
         </Box>
 
@@ -349,7 +367,7 @@ export default function Reports() {
         <Grid item xs={12} sm={6} md={3}>
           <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: '4px solid #2563eb', bgcolor: '#ffffff' }}>
             <Typography variant="caption" color="text.secondary" fontWeight={800}>GROSS SALES REVENUE</Typography>
-            <Typography variant="h4" fontWeight={850} color="primary.main">₹{metrics.totalRev.toFixed(2)}</Typography>
+            <Typography variant="h4" fontWeight={850} color="primary.main">{formatCurrency(metrics.totalRev)}</Typography>
             <Typography variant="caption" color="text.secondary">Invoices: {metrics.salesCount} issued</Typography>
           </Paper>
         </Grid>
@@ -357,7 +375,7 @@ export default function Reports() {
         <Grid item xs={12} sm={6} md={3}>
           <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: '4px solid #10b981', bgcolor: '#ffffff' }}>
             <Typography variant="caption" color="text.secondary" fontWeight={800}>NET OPERATING PROFIT</Typography>
-            <Typography variant="h4" fontWeight={850} color="success.main">₹{metrics.estProfit.toFixed(2)}</Typography>
+            <Typography variant="h4" fontWeight={850} color="success.main">{formatCurrency(metrics.estProfit)}</Typography>
             <Typography variant="caption" color="text.secondary">Est. 35% Gross Margin</Typography>
           </Paper>
         </Grid>
@@ -365,16 +383,16 @@ export default function Reports() {
         <Grid item xs={12} sm={6} md={3}>
           <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: '4px solid #7c3aed', bgcolor: '#ffffff' }}>
             <Typography variant="caption" color="text.secondary" fontWeight={800}>TOTAL PROCUREMENT</Typography>
-            <Typography variant="h4" fontWeight={850} sx={{ color: '#7c3aed' }}>₹{metrics.totalPurchase.toFixed(2)}</Typography>
+            <Typography variant="h4" fontWeight={850} sx={{ color: '#7c3aed' }}>{formatCurrency(metrics.totalPurchase)}</Typography>
             <Typography variant="caption" color="text.secondary">Vendor Orders: {metrics.purchaseCount}</Typography>
           </Paper>
         </Grid>
 
         <Grid item xs={12} sm={6} md={3}>
           <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: '4px solid #f59e0b', bgcolor: '#ffffff' }}>
-            <Typography variant="caption" color="text.secondary" fontWeight={800}>GST TAX LIABILITY</Typography>
-            <Typography variant="h4" fontWeight={850} sx={{ color: '#d97706' }}>₹{metrics.gstTotal.toFixed(2)}</Typography>
-            <Typography variant="caption" color="text.secondary">18% Output GST Tax</Typography>
+            <Typography variant="caption" color="text.secondary" fontWeight={800}>{getTaxLabel().toUpperCase()} TAX LIABILITY</Typography>
+            <Typography variant="h4" fontWeight={850} sx={{ color: '#d97706' }}>{formatCurrency(metrics.gstTotal)}</Typography>
+            <Typography variant="caption" color="text.secondary">Output {getTaxLabel()}</Typography>
           </Paper>
         </Grid>
       </Grid>
@@ -522,7 +540,7 @@ export default function Reports() {
                     <TableCell>Customer / Party Name</TableCell>
                     <TableCell>Category / Type</TableCell>
                     <TableCell>Payment Mode</TableCell>
-                    <TableCell align="right">Amount (₹)</TableCell>
+                    <TableCell align="right">Amount ({getCurrencySymbol()})</TableCell>
                     <TableCell align="center">Status</TableCell>
                   </TableRow>
                 </TableHead>
@@ -537,7 +555,7 @@ export default function Reports() {
                         <TableCell><Chip label="POS Billed" size="small" sx={{ fontWeight: 700 }} /></TableCell>
                         <TableCell>{s.paymentMethod || 'Cash'}</TableCell>
                         <TableCell align="right" sx={{ fontWeight: 850, color: 'primary.main' }}>
-                          ₹{(parseFloat(s.total) || 0).toFixed(2)}
+                          {formatCurrency(parseFloat(s.total) || 0)}
                         </TableCell>
                         <TableCell align="center">
                           <Chip label="Paid" color="success" size="small" sx={{ fontWeight: 800 }} />
@@ -553,7 +571,7 @@ export default function Reports() {
                         <TableCell><Chip label="Procurement" size="small" sx={{ fontWeight: 700 }} /></TableCell>
                         <TableCell>Bank Transfer</TableCell>
                         <TableCell align="right" sx={{ fontWeight: 850, color: 'success.main' }}>
-                          ₹{(parseFloat(p.total) || 0).toFixed(2)}
+                          {formatCurrency(parseFloat(p.total) || 0)}
                         </TableCell>
                         <TableCell align="center">
                           <Chip label={p.status || 'Received'} color="primary" size="small" sx={{ fontWeight: 800 }} />
@@ -580,6 +598,10 @@ export default function Reports() {
               </Table>
             </TableContainer>
           </Card>
+          {/* Purchase reports end with the period's Purchase Returns (click one for its reason). */}
+          {activeCategory === 'purchases' && ['purchase', 'purchase-bills'].includes(activeSubReport) && (
+            <ReturnsReportSection kind="purchase" {...periodDates(dateRange)} />
+          )}
         </Stack>
       )}
     </Box>

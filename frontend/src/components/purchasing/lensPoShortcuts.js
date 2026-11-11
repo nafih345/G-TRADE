@@ -6,6 +6,7 @@
 // Enter → next field, ↑/↓ → previous / next field, Enter on a list picks the highlighted option and
 // moves on, Space / Enter opens a dropdown.
 import { comboFromEvent } from '../../pages/wholesale/posShortcuts';
+import { getTaxLabel } from '../../utils/localeFormat.js';
 
 const FIELD_KEYS = [
   { id: 'enter', keys: ['Enter'], group: 'Field keys', global: false, label: 'Next field (in a list: pick the highlighted option and move on)' },
@@ -21,7 +22,7 @@ export const PURCHASE_ENTRY_SHORTCUTS = [
   { id: 'search', keys: ['F6'], group: 'Purchase Entry', label: 'Product search / barcode' },
   { id: 'batch', keys: ['F7'], group: 'Purchase Entry', label: 'Last line: Batch' },
   { id: 'disc', keys: ['F8'], group: 'Purchase Entry', label: 'Last line: Discount %' },
-  { id: 'gst', keys: ['F9'], group: 'Purchase Entry', label: 'Last line: GST %' },
+  { id: 'gst', keys: ['F9'], group: 'Purchase Entry', get label() { return `Last line: ${getTaxLabel()} %`; } },
   { id: 'paid', keys: ['F10'], group: 'Purchase Entry', label: 'Paid amount' },
   { id: 'save', keys: ['Ctrl+S'], group: 'Purchase Entry', label: 'Save purchase' },
   { id: 'print', keys: ['Ctrl+P'], group: 'Purchase Entry', label: 'Save & print' },

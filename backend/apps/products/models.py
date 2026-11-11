@@ -230,6 +230,8 @@ STOCK_SOURCES = (
     ('EXCEL_IMPORT', 'Excel Import'),
     ('PURCHASE', 'Purchase Entry'),
     ('MANUAL_ADJUSTMENT', 'Manual Adjustment'),
+    ('SALES_RETURN', 'Sales Return'),
+    ('PURCHASE_RETURN', 'Purchase Return'),
 )
 
 

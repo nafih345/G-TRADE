@@ -41,8 +41,9 @@ import { describeApiError } from '../utils/apiWriteGuard';
 import { notify } from '../utils/notify';
 import { printBill } from '../billing/printBill';
 import { useAuth } from '../context/AuthContext';
+import { formatCurrency, getTaxLabel, getTaxRegLabel } from '../utils/localeFormat.js';
 
-const inr = (n) => `₹${(parseFloat(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const inr = (n) => `${formatCurrency(parseFloat(n) || 0)}`;
 const HEAD_SX = { bgcolor: '#0f172a', color: '#fff', fontWeight: 800, fontSize: '0.72rem', whiteSpace: 'nowrap', py: 0.8 };
 const CELL_SX = { fontSize: '0.8rem', py: 0.5 };
 const dash = (v) => (v && v !== '—' ? v : '—');
@@ -418,7 +419,7 @@ export default function WholesaleOrders({ kind = 'order' }) {
                       </Box>
                     </li>
                   )}
-                  renderInput={(params) => <TextField {...params} label="Dealer / Shop *" placeholder="Search name, code, phone, GSTIN" />}
+                  renderInput={(params) => <TextField {...params} label="Dealer / Shop *" placeholder={`Search name, code, phone, ${getTaxRegLabel()}`} />}
                 />
                 <Tooltip title="Add a new dealer">
                   <IconButton color="primary" onClick={() => setNewDealerOpen(true)} sx={{ border: '1px solid', borderColor: 'divider' }}><PersonAddIcon /></IconButton>
@@ -437,7 +438,7 @@ export default function WholesaleOrders({ kind = 'order' }) {
                   <Field label="Shop Name" value={dealer.name} />
                   <Field label="Contact" value={dealer.contactPerson} />
                   <Field label="Phone" value={dealer.phone} />
-                  <Field label="GSTIN" value={dealer.gstin} />
+                  <Field label={getTaxRegLabel()} value={dealer.gstin} />
                   <Field label="Price List" value={PRICE_TIER_LABEL?.[dealer.priceList] || dealer.priceList} />
                   <Box sx={{ gridColumn: '1 / -1' }}><Field label="Address" value={dealer.billingAddress || [dealer.city, dealer.state].filter(Boolean).join(', ')} /></Box>
                 </Box>
@@ -530,7 +531,7 @@ export default function WholesaleOrders({ kind = 'order' }) {
                 <Table size="small" stickyHeader>
                   <TableHead>
                     <TableRow>
-                      {['#', 'Item', 'Avail.', 'Qty', 'Rate', 'Disc %', 'GST %', 'Total', ''].map(h => (
+                      {['#', 'Item', 'Avail.', 'Qty', 'Rate', 'Disc %', `${getTaxLabel()} %`, 'Total', ''].map(h => (
                         <TableCell key={h} sx={HEAD_SX} align={['Item', '#', ''].includes(h) ? 'left' : 'right'}>{h}</TableCell>
                       ))}
                     </TableRow>
@@ -593,7 +594,7 @@ export default function WholesaleOrders({ kind = 'order' }) {
                     <TextField fullWidth size="small" multiline minRows={2} label={`${meta.noun} notes`} value={notes} onChange={(e) => setNotes(e.target.value)} disabled={locked} />
                   </Grid>
                   <Grid item xs={12} sm={5}>
-                    {[['Sub Total', summary.subtotal], ['Discount', -summary.totalDiscount], ['GST', summary.totalGst]].map(([k, v]) => (
+                    {[['Sub Total', summary.subtotal], ['Discount', -summary.totalDiscount], [getTaxLabel(), summary.totalGst]].map(([k, v]) => (
                       <Stack key={k} direction="row" justifyContent="space-between"><Typography variant="body2" color="text.secondary" fontWeight={700}>{k}</Typography><Typography variant="body2" fontWeight={800}>{inr(v)}</Typography></Stack>
                     ))}
                     <Divider sx={{ my: 0.5 }} />

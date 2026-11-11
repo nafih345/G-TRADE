@@ -9,7 +9,8 @@ import {
 import { PRESET_TEMPLATES, presetForDocType } from './templatePresets';
 import { canonicalDocType, compatibleDocTypes } from './billFields.js';
 import { isThermalTemplate } from './renderBillHtml';
-import { fetchStoreProfile, companyFromProfile } from '../utils/storeProfile';
+import { fetchStoreProfile, companyFromProfile, STORE_PROFILE_EVENT } from '../utils/storeProfile';
+import { getCurrencySymbol, BUSINESS_PREFS_EVENT } from '../utils/localeFormat.js';
 
 let cache = { templates: null, assignments: null, settings: null, company: null, ts: 0 };
 let inflight = null;
@@ -25,7 +26,7 @@ export function readCompanyFromLocal() {
       email: s.storeEmail || '',
       website: s.website || '',
       gstin: s.gstin || '',
-      currency: s.currency || '₹',
+      currency: s.currency || getCurrencySymbol(),
       tagline: s.tagline || '',
     };
   } catch {
@@ -72,6 +73,13 @@ export async function loadBillingContext({ force = false } = {}) {
 export function invalidateBillingContext() {
   cache.ts = 0;
 }
+
+// A currency / store-profile save elsewhere must reach the next print straight away, not after
+// the cache TTL.
+try {
+  window.addEventListener(BUSINESS_PREFS_EVENT, invalidateBillingContext);
+  window.addEventListener(STORE_PROFILE_EVENT, invalidateBillingContext);
+} catch { /* not a browser */ }
 
 const canPrint = (t, documentType) => !!t && t.is_active !== false
   && (t.compatible_types || compatibleDocTypes(t.config)).includes(documentType);

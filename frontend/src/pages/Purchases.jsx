@@ -1,21 +1,10 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, lazy, Suspense } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import QuickDatePickerField from '../components/common/QuickDatePickerField';
 import PurchaseEntryView from '../components/purchasing/PurchaseEntryView';
 import PurchaseLabelQueueView from '../components/purchasing/PurchaseLabelQueueView';
 import LensPurchaseOrderView from '../components/purchasing/LensPurchaseOrderView';
 import { printPurchaseReceipt } from '../utils/printPurchase';
-import { printBill } from '../billing/printBill';
-
-// Debit note for a purchase return, printed with the PURCHASE_RETURN template. The return
-// row carries one item and the credit amount requested; nothing else is computed.
-const printPurchaseReturn = (r) => printBill({
-  documentType: 'PURCHASE_RETURN',
-  doc: {
-    returnNo: r.id, date: r.date, supplierName: r.supplier, reason: r.reason, status: r.status,
-    creditAmount: r.creditAmount, items: [{ name: r.item, qty: r.qty, total: r.creditAmount }],
-  },
-});
 import { useDebounce } from '../hooks/useDebounce';
 import { 
   Box, Card, CardContent, Typography, Button, Tab, Tabs, 
@@ -47,6 +36,11 @@ import {
 import axios from 'axios';
 import { getMasterSnapshot, loadMaster } from '../utils/masterDataCache';
 import { ensureEditAccess } from '../utils/editPermissions';
+import { formatCurrency, getCurrencySymbol, getTaxRegLabel } from '../utils/localeFormat.js';
+
+// Purchase → Purchase Return (components/returns, backend apps/inventory/returns.py).
+const ReturnEntryView = lazy(() => import('../components/returns/ReturnEntryView'));
+const ReturnsReportSection = lazy(() => import('../components/returns/ReturnsReportSection'));
 
 // Pre-cache key of the last supplier list; read once as a seed until the shared master cache
 // (utils/masterDataCache.js) has its own copy.
@@ -176,7 +170,6 @@ export default function Purchases() {
   const [purchaseOrders, setPurchaseOrders] = useState([]);
   const [purchaseEntries, setPurchaseEntries] = useState([]);
   const [stockReceives, setStockReceives] = useState([]);
-  const [purchaseReturns, setPurchaseReturns] = useState([]);
   const [products, setProducts] = useState([]);
 
   // Search & Filters
@@ -187,7 +180,6 @@ export default function Purchases() {
   const [addSupplierOpen, setAddSupplierOpen] = useState(false);
   const [editSupplierId, setEditSupplierId] = useState(null);
   const savingSupplierRef = useRef(false);
-  const [returnOpen, setReturnOpen] = useState(false);
   const [createPoOpen, setCreatePoOpen] = useState(false);
   const [selectedPo, setSelectedPo] = useState(null);
 
@@ -196,9 +188,6 @@ export default function Purchases() {
     name: '', supplierCode: '', contactPerson: '', phone: '', email: '', gstin: '', address: '', city: '', paymentTerms: 'Net 30', accountNumber: ''
   });
 
-  const [returnInput, setReturnInput] = useState({
-    supplierName: '', itemName: '', qtyReturned: '', reason: 'Defective Frame Coating', creditAmount: ''
-  });
 
   // New Purchase Order form: an order sent to a supplier, ahead of goods being received
   const [poHeader, setPoHeader] = useState({ supplierId: '', expectedDate: '' });
@@ -505,7 +494,7 @@ export default function Purchases() {
     if (!data) return '';
     if (typeof data === 'string') return data.length < 200 ? data : '';
     if (data.detail) return String(data.detail);
-    const labels = { email: 'Email', supplier_code: 'Supplier Code', name: 'Company Name', phone: 'Phone', gstin: 'GSTIN', city: 'City', account_number: 'Bank Account Number', contact_person: 'Contact Person' };
+    const labels = { email: 'Email', supplier_code: 'Supplier Code', name: 'Company Name', phone: 'Phone', gstin: getTaxRegLabel(), city: 'City', account_number: 'Bank Account Number', contact_person: 'Contact Person' };
     return Object.entries(data)
       .map(([k, v]) => `${labels[k] || k}: ${Array.isArray(v) ? v.join(' ') : String(v)}`)
       .join(' | ');
@@ -772,7 +761,7 @@ export default function Purchases() {
 
   // Sample Excel Supplier CSV Template Generator
   const handleDownloadSupplierTemplate = () => {
-    const csvContent = "Supplier Company Name,Contact Person Name,Phone Number,Email Address,GSTIN Number,City / Hub,Payment Terms\n" +
+    const csvContent = `Supplier Company Name,Contact Person Name,Phone Number,Email Address,${getTaxRegLabel()} Number,City / Hub,Payment Terms\n` +
       "Luxottica Eyewear Ltd,Robert Smith,+91 9876543210,orders@luxottica.com,07AAAAA0000A1Z5,New Delhi,Net 30\n" +
       "Essilor Lenses India,Anil Kumar,+91 9845012345,supply@essilor.in,29BBBBB1111B2Z6,Bengaluru,Net 15\n" +
       "Safilo Optics Pvt Ltd,Priya Sharma,+91 9900112233,contact@safilo.com,27CCCCC2222C3Z7,Mumbai,Net 60";
@@ -849,26 +838,6 @@ export default function Purchases() {
     }
   };
 
-  const handleSaveReturn = () => {
-    if (!returnInput.supplierName || !returnInput.itemName) {
-      alert("Please select Supplier and enter Item Name.");
-      return;
-    }
-    const newReturn = {
-      id: `RTV-${Math.floor(1000 + Math.random() * 9000)}`,
-      supplier: returnInput.supplierName,
-      item: returnInput.itemName,
-      qty: parseInt(returnInput.qtyReturned) || 1,
-      reason: returnInput.reason,
-      creditAmount: parseFloat(returnInput.creditAmount) || 0,
-      date: new Date().toISOString().split('T')[0],
-      status: 'Pending Credit Note'
-    };
-    setPurchaseReturns([newReturn, ...purchaseReturns]);
-    setReturnInput({ supplierName: '', itemName: '', qtyReturned: '', reason: 'Defective Frame Coating', creditAmount: '' });
-    setReturnOpen(false);
-    alert(`Purchase Return ${newReturn.id} logged for ${newReturn.supplier}!`);
-  };
 
   const debouncedSearchQuery = useDebounce(searchQuery, 150);
 
@@ -920,11 +889,6 @@ export default function Purchases() {
               + New Purchase Entry
             </Button>
           )}
-          {activeTab === 'returns' && (
-            <Button variant="contained" startIcon={<ReturnIcon />} onClick={() => setReturnOpen(true)} sx={{ backgroundColor: '#EF4444', color: 'white', fontWeight: 700 }}>
-              + Create Purchase Return (RTV)
-            </Button>
-          )}
         </Stack>
       </Box>
 
@@ -935,7 +899,7 @@ export default function Purchases() {
           <Tab value="suppliers" label="Suppliers Directory" icon={<SupplierIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab value="orders" label="Purchase Order Reports" icon={<POIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab value="receive" label="Stock Receive (GRN)" icon={<ReceiveIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
-          <Tab value="returns" label="Purchase Returns (RTV)" icon={<ReturnIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
+          <Tab value="returns" label="Purchase Return" icon={<ReturnIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab value="lens" label="Lens Purchase Order" icon={<LensIcon />} iconPosition="start" sx={{ fontWeight: 700 }} />
           <Tab value="labels" label="Barcode Printing" icon={<BarcodeIcon />} iconPosition="start" sx={{ fontWeight: 700 }} data-testid="purchase-tab-labels" />
         </Tabs>
@@ -1024,7 +988,7 @@ export default function Purchases() {
               <Grid item xs={12} sm={6} md={3}>
                 <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: '4px solid #ef4444', bgcolor: '#ffffff' }}>
                   <Typography variant="caption" color="text.secondary" fontWeight={700}>OUTSTANDING PAYABLES</Typography>
-                  <Typography variant="h4" fontWeight={850} color="error.main">₹{totalPayables.toFixed(2)}</Typography>
+                  <Typography variant="h4" fontWeight={850} color="error.main">{formatCurrency(totalPayables)}</Typography>
                   <Typography variant="caption" color="text.secondary">Due to suppliers</Typography>
                 </Paper>
               </Grid>
@@ -1054,7 +1018,7 @@ export default function Purchases() {
                   <TextField 
                     fullWidth 
                     size="small" 
-                    placeholder="Search Supplier Name, Contact Person, Phone, or GSTIN..."
+                    placeholder={`Search Supplier Name, Contact Person, Phone, or ${getTaxRegLabel()}...`}
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     InputProps={{ 
@@ -1124,7 +1088,7 @@ export default function Purchases() {
                       <TableCell sx={{ fontWeight: 700 }}>Supplier ID</TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>Company & Contact Person</TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>Phone & Email</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }}>GSTIN</TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>{getTaxRegLabel()}</TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>Payment Terms</TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>Outstanding Balance</TableCell>
                       <TableCell align="right" sx={{ fontWeight: 700 }}>Quick Actions</TableCell>
@@ -1185,7 +1149,7 @@ export default function Purchases() {
                           <TableCell>{s.gstin || 'N/A'}</TableCell>
                           <TableCell><Chip label={s.paymentTerms || 'Net 30'} size="small" variant="outlined" /></TableCell>
                           <TableCell sx={{ fontWeight: 700, color: s.balance > 0 ? 'error.main' : 'text.primary' }}>
-                            ₹{(s.balance || 0).toFixed(2)}
+                            {formatCurrency(s.balance || 0)}
                           </TableCell>
                           <TableCell align="right">
                             <Stack direction="row" spacing={1} justifyContent="flex-end">
@@ -1273,8 +1237,8 @@ export default function Purchases() {
               <Grid item xs={12} sm={6} md={3}>
                 <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, borderLeft: '4px solid #8b5cf6', bgcolor: '#ffffff' }}>
                   <Typography variant="caption" color="text.secondary" fontWeight={700}>TOTAL PURCHASE VALUE</Typography>
-                  <Typography variant="h4" fontWeight={850} sx={{ color: '#7c3aed' }}>₹{totalValue.toFixed(2)}</Typography>
-                  <Typography variant="caption" color="text.secondary">Outstanding ₹{totalOutstanding.toFixed(2)}</Typography>
+                  <Typography variant="h4" fontWeight={850} sx={{ color: '#7c3aed' }}>{formatCurrency(totalValue)}</Typography>
+                  <Typography variant="caption" color="text.secondary">Outstanding {formatCurrency(totalOutstanding)}</Typography>
                 </Paper>
               </Grid>
             </Grid>
@@ -1367,13 +1331,13 @@ export default function Purchases() {
                             <Typography variant="body2" fontWeight={600}>{p.itemCount} item(s)</Typography>
                             <Typography variant="caption" color="text.secondary">Qty: {p.qty}</Typography>
                           </TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>₹{p.grandTotal.toFixed(2)}</TableCell>
+                          <TableCell sx={{ fontWeight: 700 }}>{formatCurrency(p.grandTotal)}</TableCell>
                           <TableCell>
                             <Typography variant="caption" color="success.main" sx={{ display: 'block', fontWeight: 700 }}>
-                              Paid ₹{p.paidAmount.toFixed(2)}
+                              Paid {formatCurrency(p.paidAmount)}
                             </Typography>
                             <Typography variant="caption" color={p.balance > 0 ? 'error.main' : 'text.secondary'} sx={{ fontWeight: 700 }}>
-                              Bal ₹{p.balance.toFixed(2)}
+                              Bal {formatCurrency(p.balance)}
                             </Typography>
                           </TableCell>
                           <TableCell>
@@ -1435,6 +1399,12 @@ export default function Purchases() {
           </Stack>
         );
       })()}
+      {/* Purchase Returns at the bottom of the purchase report; click a return for its reason / refund. */}
+      {activeTab === 'orders' && (
+        <Suspense fallback={null}>
+          <ReturnsReportSection kind="purchase" search={searchQuery.trim()} />
+        </Suspense>
+      )}
 
       {/* 3. STOCK RECEIVE (GRN) */}
       {activeTab === 'receive' && (() => {
@@ -1526,98 +1496,12 @@ export default function Purchases() {
         );
       })()}
 
-      {/* 4. PURCHASE RETURNS (RTV) */}
-      {activeTab === 'returns' && (() => {
-        const filteredReturns = purchaseReturns.filter(r => {
-          const searchLower = searchQuery.toLowerCase();
-          return (r.id && r.id.toLowerCase().includes(searchLower)) ||
-                 (r.supplier && r.supplier.toLowerCase().includes(searchLower)) ||
-                 (r.item && r.item.toLowerCase().includes(searchLower));
-        });
-
-        return (
-          <Stack spacing={3}>
-            <Card variant="outlined" sx={{ p: 2, px: 3, borderRadius: 4, backgroundColor: '#ffffff', borderColor: 'divider' }}>
-              <TextField 
-                fullWidth 
-                size="small" 
-                placeholder="Search Return ID, Supplier, or Returned Item..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                InputProps={{ 
-                  startAdornment: <SearchIcon color="action" sx={{ mr: 1, fontSize: 20 }} />,
-                  sx: { borderRadius: 3, height: 40, backgroundColor: '#f8fafc' }
-                }}
-              />
-            </Card>
-
-            <Card sx={{ borderRadius: 4, border: '1px solid', borderColor: 'divider' }}>
-              <TableContainer>
-                <Table size="small">
-                  <TableHead sx={{ backgroundColor: 'action.hover' }}>
-                    <TableRow>
-                      <TableCell sx={{ fontWeight: 700 }}>Return ID (RTV)</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }}>Supplier</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }}>Item Returned</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }}>Return Reason</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }}>Date Logged</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }}>Requested Credit Note</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }}>Status</TableCell>
-                      <TableCell sx={{ fontWeight: 700 }} align="right">Print</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {filteredReturns.length === 0 ? (
-                      <TableRow>
-                        <TableCell colSpan={7} align="center" sx={{ py: 8 }}>
-                          <Typography variant="body2" color="text.secondary" fontWeight={500}>
-                            {searchQuery ? "No matching purchase returns found." : "No purchase returns logged in the database."}
-                          </Typography>
-                          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
-                            {searchQuery ? "Try refining your search keyword." : "Click '+ Create Purchase Return' to log defective vendor returns."}
-                          </Typography>
-                          {!searchQuery && (
-                            <Button 
-                              size="small" 
-                              variant="contained" 
-                              color="error"
-                              startIcon={<ReturnIcon />} 
-                              onClick={() => setReturnOpen(true)} 
-                              sx={{ mt: 2 }}
-                            >
-                              + Create First Purchase Return
-                            </Button>
-                          )}
-                        </TableCell>
-                      </TableRow>
-                    ) : (
-                      filteredReturns.map(r => (
-                        <TableRow key={r.id} hover>
-                          <TableCell sx={{ fontWeight: 700, color: 'error.main' }}>{r.id}</TableCell>
-                          <TableCell sx={{ fontWeight: 600 }}>{r.supplier}</TableCell>
-                          <TableCell>
-                            <Typography variant="body2" fontWeight={600}>{r.item}</Typography>
-                            <Typography variant="caption" color="text.secondary">Qty: {r.qty}</Typography>
-                          </TableCell>
-                          <TableCell><Chip label={r.reason} size="small" color="error" variant="outlined" /></TableCell>
-                          <TableCell>{r.date}</TableCell>
-                          <TableCell sx={{ fontWeight: 700 }}>₹{(r.creditAmount || 0).toFixed(2)}</TableCell>
-                          <TableCell><Chip label={r.status} color="warning" size="small" sx={{ fontWeight: 700 }} /></TableCell>
-                          <TableCell align="right">
-                            <Tooltip title="Print debit note (Purchase Return template)">
-                              <IconButton size="small" onClick={() => printPurchaseReturn(r)}><PrintIcon fontSize="small" /></IconButton>
-                            </Tooltip>
-                          </TableCell>
-                        </TableRow>
-                      ))
-                    )}
-                  </TableBody>
-                </Table>
-              </TableContainer>
-            </Card>
-          </Stack>
-        );
-      })()}
+      {/* 4. PURCHASE RETURNS (RTV) — real returns: stock out, refund / debit note posted (components/returns) */}
+      {activeTab === 'returns' && (
+        <Suspense fallback={<Box sx={{ py: 6, textAlign: 'center' }}><CircularProgress size={28} /></Box>}>
+          <ReturnEntryView kind="purchase" />
+        </Suspense>
+      )}
 
       {/* --- DIALOG: ADD NEW SUPPLIER --- */}
       <Dialog open={addSupplierOpen} onClose={() => { setAddSupplierOpen(false); setEditSupplierId(null); }} maxWidth="sm" fullWidth PaperProps={{ sx: { borderRadius: 4 } }}>
@@ -1674,7 +1558,7 @@ export default function Purchases() {
             </Grid>
             <Grid item xs={6}>
               <TextField 
-                label="GSTIN Number" 
+                label={`${getTaxRegLabel()} Number`} 
                 fullWidth 
                 placeholder="e.g. 07AAAAA0000A1Z5"
                 value={supplierInput.gstin}
@@ -1838,7 +1722,7 @@ export default function Purchases() {
                     <TableRow>
                       <TableCell>Product</TableCell>
                       <TableCell align="right">Qty</TableCell>
-                      <TableCell align="right">Unit Cost (₹)</TableCell>
+                      <TableCell align="right">Unit Cost ({getCurrencySymbol()})</TableCell>
                       <TableCell />
                     </TableRow>
                   </TableHead>
@@ -1873,91 +1757,6 @@ export default function Purchases() {
         </DialogActions>
       </Dialog>
 
-      {/* --- DIALOG: CREATE PURCHASE RETURN (RTV) --- */}
-      <Dialog open={returnOpen} onClose={() => setReturnOpen(false)} maxWidth="sm" fullWidth PaperProps={{ sx: { borderRadius: 4 } }}>
-        <DialogTitle sx={{ fontWeight: 800 }}>Create Purchase Return to Vendor (RTV)</DialogTitle>
-        <DialogContent dividers>
-          <Grid container spacing={2}>
-            <Grid item xs={6}>
-              <Box display="flex" justifyContent="space-between" alignItems="center" mb={0.5}>
-                <Typography variant="caption" fontWeight={700} color="text.secondary">Supplier Name *</Typography>
-                <Button size="small" sx={{ fontSize: '0.75rem', textTransform: 'none', py: 0 }} onClick={openAddSupplier}>
-                  + New Supplier
-                </Button>
-              </Box>
-              <Autocomplete
-                freeSolo
-                options={getDatabaseSupplierNames()}
-                value={returnInput.supplierName || ''}
-                onInputChange={(event, newInputValue) => {
-                  setReturnInput({ ...returnInput, supplierName: newInputValue || '' });
-                }}
-                onChange={(event, newValue) => {
-                  setReturnInput({ ...returnInput, supplierName: newValue || '' });
-                }}
-                renderInput={(params) => (
-                  <TextField 
-                    {...params} 
-                    label="Select Database Supplier" 
-                    required
-                    fullWidth 
-                    placeholder="Type or select supplier from database..."
-                  />
-                )}
-              />
-            </Grid>
-            <Grid item xs={6}>
-              <TextField 
-                label="Defective Item Name" 
-                fullWidth 
-                required
-                placeholder="e.g. Duravision Lens Pair"
-                value={returnInput.itemName}
-                onChange={(e) => setReturnInput({ ...returnInput, itemName: e.target.value })}
-              />
-            </Grid>
-            <Grid item xs={6}>
-              <TextField 
-                label="Quantity Returned" 
-                fullWidth 
-                type="number"
-                value={returnInput.qtyReturned}
-                onChange={(e) => setReturnInput({ ...returnInput, qtyReturned: e.target.value })}
-              />
-            </Grid>
-            <Grid item xs={6}>
-              <TextField 
-                select 
-                label="Return Reason" 
-                fullWidth 
-                value={returnInput.reason}
-                onChange={(e) => setReturnInput({ ...returnInput, reason: e.target.value })}
-              >
-                <MenuItem value="Defective Frame Coating">Defective Frame Coating</MenuItem>
-                <MenuItem value="Lens Scratched / Damaged">Lens Scratched / Damaged</MenuItem>
-                <MenuItem value="Wrong Prescription Power">Wrong Prescription Power</MenuItem>
-                <MenuItem value="Packaging Damaged">Packaging Damaged</MenuItem>
-              </TextField>
-            </Grid>
-            <Grid item xs={12}>
-              <TextField 
-                label="Requested Credit Note Amount (₹)" 
-                fullWidth 
-                type="number"
-                placeholder="e.g. 2400"
-                value={returnInput.creditAmount}
-                onChange={(e) => setReturnInput({ ...returnInput, creditAmount: e.target.value })}
-              />
-            </Grid>
-          </Grid>
-        </DialogContent>
-        <DialogActions sx={{ p: 2, justifyContent: 'space-between' }}>
-          <Button onClick={() => setReturnOpen(false)}>Cancel</Button>
-          <Button variant="contained" color="error" onClick={handleSaveReturn} sx={{ fontWeight: 700, px: 3 }}>
-            Log Return & Request Credit
-          </Button>
-        </DialogActions>
-      </Dialog>
     </Box>
   );
 }

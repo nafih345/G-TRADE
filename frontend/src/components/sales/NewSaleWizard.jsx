@@ -71,9 +71,9 @@ import ProductMasterDialog from '../inventory/ProductMasterDialog';
 import { navScopeProps, enterOpensSelectProps, focusField, focusRelative } from '../../pages/wholesale/keyboardNav';
 import { ShortcutHelpDialog, Kbd } from '../../pages/wholesale/WholesaleDialogs';
 import { NEW_SALE_SHORTCUTS, useNewSaleShortcuts } from './newSaleShortcuts';
-
-// Standard Indian GST slabs offered in the Tax % dropdowns.
-const TAX_SLABS = [0, 5, 12, 18, 28];
+import { formatCurrency, currencyPrefix, getCurrencySymbol, effectiveTaxPercent } from '../../utils/localeFormat.js';
+import { useTaxSettings } from '../../context/SettingsContext';
+import { taxRateChoices, taxRateList } from '../../utils/taxRates';
 
 // Quick-pick cards shown in the 🔧 Services entry panel. `match` is the Service Master name
 // each card maps onto (so clicking it pulls that service's default price/tax/description);
@@ -90,33 +90,26 @@ const QUICK_SERVICE_CARDS = [
 // Repair job-card workflow stages (optional — only Repair-type services use them).
 const SERVICE_STATUS_OPTIONS = ['RECEIVED', 'PENDING', 'UNDER REPAIR', 'READY', 'DELIVERED'];
 
-// Resolve a numeric GST % for a product picked from the DB. `taxRate`/`gst` are the
+// Resolve a numeric tax % for a product picked from the DB. `taxRate`/`gst` are the
 // numeric rates the product loaders derive; `tax` is a Tax-master UUID and must never
-// be treated as a rate. Returns 18 only when the product carries no tax information.
+// be treated as a rate. Returns 18 only when the product carries no tax information,
+// and 0 whenever tax is switched off in Tax Configuration.
 const resolveProductTaxPercent = (prod) => {
-  if (!prod) return 18;
+  if (!prod) return effectiveTaxPercent(18);
   const candidates = [prod.taxRate, prod.tax_rate, prod.gst];
   for (const c of candidates) {
     if (c === null || c === undefined || c === '') continue;
     const n = parseFloat(String(c).replace('%', '').trim());
-    if (!isNaN(n)) return n;
+    if (!isNaN(n)) return effectiveTaxPercent(n);
   }
-  return 18;
+  return effectiveTaxPercent(18);
 };
 
 // Build the <MenuItem> list for a Tax % select, injecting the product's own rate as an
 // extra option when it isn't one of the standard slabs (otherwise the select goes blank).
-const taxSlabItems = (currentValue) => {
-  const val = parseFloat(currentValue);
-  const slabs = [...TAX_SLABS];
-  if (!isNaN(val) && !slabs.includes(val)) slabs.push(val);
-  slabs.sort((a, b) => a - b);
-  return slabs.map(rate => (
-    <MenuItem key={rate} value={rate}>
-      {rate === 0 ? '0% (Exempt)' : `${rate}% GST`}
-    </MenuItem>
-  ));
-};
+const taxSlabItems = (currentValue) => taxRateChoices(undefined, currentValue).map(({ value, label }) => (
+  <MenuItem key={value} value={value}>{label}</MenuItem>
+));
 
 // One searchable string per product — name, barcode, SKU, brand, category and (for
 // imported items) model no / colour / size — so the Optical DB selector matches on
@@ -197,14 +190,14 @@ const resolveDiscount = (src, gross) => {
 const withLineAmounts = (row) => {
   const qty = parseInt(row.qty) || 0;
   const price = parseFloat(row.price) || 0;
-  const taxPercent = parseFloat(row.taxPercent) || 0;
+  const taxPercent = effectiveTaxPercent(row.taxPercent);
   const gross = qty * price;
   const { discMode, discValue, disc, discPercent } = resolveDiscount(row, gross);
   const tax = ((gross - disc) * taxPercent) / 100;
   return { ...row, qty, price, taxPercent, gross, discMode, discValue, disc, discPercent, tax, total: gross - disc + tax };
 };
 
-const money2 = (n) => `₹${(Number(n) || 0).toFixed(2)}`;
+const money2 = (n) => `${formatCurrency(Number(n) || 0)}`;
 
 // Compact Pair / Single Lens control + prescription summary shown in a lens row's "Unit · Power"
 // cell. Full labels live in the tooltips and in the row's edit window (Edit Rx).
@@ -333,8 +326,11 @@ function LensLineCell({ rowId, lens, errors, onUnit, onEye, onEditRx }) {
 const DiscModeToggle = ({ mode, onChange, size = 'sm' }) => {
   const isAmt = mode === 'AMT';
   const small = size === 'sm';
+  const sym = getCurrencySymbol();
+  // Letter codes ("QAR") widen the square into a pill instead of overflowing it.
+  const code = isAmt && sym.length > 1;
   return (
-    <Tooltip title={isAmt ? 'Discount is a flat ₹ amount — click to switch to %' : 'Discount is a % of gross — click to switch to ₹'}>
+    <Tooltip title={isAmt ? `Discount is a flat ${getCurrencySymbol()} amount — click to switch to %` : `Discount is a % of gross — click to switch to ${getCurrencySymbol()}`}>
       <Box
         component="button"
         type="button"
@@ -347,8 +343,10 @@ const DiscModeToggle = ({ mode, onChange, size = 'sm' }) => {
           alignItems: 'center',
           justifyContent: 'center',
           p: 0,
+          px: code ? 0.4 : 0,
           height: small ? 18 : 22,
-          width: small ? 18 : 22,
+          minWidth: small ? 18 : 22,
+          width: code ? 'auto' : (small ? 18 : 22),
           border: '1px solid',
           borderColor: isAmt ? '#0f766e' : '#dc2626',
           color: isAmt ? '#0f766e' : '#dc2626',
@@ -356,11 +354,11 @@ const DiscModeToggle = ({ mode, onChange, size = 'sm' }) => {
           borderRadius: 1,
           fontWeight: 900,
           lineHeight: 1,
-          fontSize: small ? '0.72rem' : '0.82rem',
+          fontSize: code ? (small ? '0.56rem' : '0.64rem') : (small ? '0.72rem' : '0.82rem'),
           '&:hover': { bgcolor: isAmt ? '#d1fae5' : '#fee2e2' },
         }}
       >
-        {isAmt ? '₹' : '%'}
+        {isAmt ? sym : '%'}
       </Box>
     </Tooltip>
   );
@@ -709,6 +707,7 @@ export default function NewSaleWizard({
   onBillLensOrder
 }) {
   // View Mode Selection: 'single-page' (Easy All-in-One Method) vs 'wizard' (5-Step Guided Wizard)
+  const { isTaxEnabled, taxLabel, taxRegLabel } = useTaxSettings();
   const [viewMode, setViewMode] = useState('single-page');
   const [activeStep, setActiveStep] = useState(0);
 
@@ -889,7 +888,7 @@ export default function NewSaleWizard({
         return add.length ? [...prev, ...add] : prev;
       });
       const total = pending.reduce((t, e) => t + (Number(e.fee_amount) || 0), 0);
-      notify(`Pending eye test fee ₹${total.toFixed(2)} (Test No ${pending.map(e => e.test_no).join(', ')}) added to this bill.`);
+      notify(`Pending eye test fee ${formatCurrency(total)} (Test No ${pending.map(e => e.test_no).join(', ')}) added to this bill.`);
     }).catch(() => { /* no pending fee shown — the sale itself is unaffected */ });
   }, [selectedCustomerId, editingDoc, formLocked]);
   // The selected patient's lens special orders (Sales > Orders > Lenses): one whose lenses are on
@@ -1529,7 +1528,7 @@ export default function NewSaleWizard({
   const computeEntryLine = (src) => {
     const qty = parseInt(src.qty) || 1;
     const price = parseFloat(src.price) || 0;
-    const taxPercent = parseFloat(src.taxPercent) || 0;
+    const taxPercent = effectiveTaxPercent(src.taxPercent);
     const gross = qty * price;
     const { discMode, discValue, disc, discPercent } = resolveDiscount(src, gross);
     const taxable = gross - disc;
@@ -1731,7 +1730,7 @@ export default function NewSaleWizard({
   const recalcLine = (next) => {
     const qty = parseInt(next.qty) || 0;
     const price = parseFloat(next.price) || 0;
-    const taxPercent = parseFloat(next.taxPercent) || 0;
+    const taxPercent = effectiveTaxPercent(next.taxPercent);
     const gross = qty * price;
     const { disc, discPercent } = resolveDiscount(next, gross);
     const taxable = gross - disc;
@@ -1796,7 +1795,7 @@ export default function NewSaleWizard({
       const clean = (v, fallback) => (v ?? '').toString().trim() || fallback;
       const qty = parseInt(item.qty) || 0;
       const price = parseFloat(item.price) || 0;
-      const taxPercent = parseFloat(item.taxPercent) || 0;
+      const taxPercent = effectiveTaxPercent(item.taxPercent);
       const gross = qty * price;
       const { discMode, discValue, disc, discPercent } = resolveDiscount(item, gross);
       const taxable = gross - disc;
@@ -2246,7 +2245,7 @@ export default function NewSaleWizard({
   // Stock is a browsing aid: the grid's Stock column exists only while search matches are listed
   // and is filled only on those match rows — once an item is picked it's gone from the line.
   const showStockCol = matchEntries.length > 0;
-  const gridCols = showStockCol ? 16 : 15;
+  const gridCols = (showStockCol ? 16 : 15) - (isTaxEnabled ? 0 : 1);
   const activeMatch = matchIndex >= 0 && matchIndex < matchEntries.length ? matchIndex : -1;
   const isOutOfStockMatch = (src) => {
     if (!src || src.itemType === 'SERVICE' || src.category === 'SERVICE') return false;
@@ -2580,11 +2579,11 @@ export default function NewSaleWizard({
     if (changeDue > 0.009) {
       const kept = PAY_MODES
         .filter(m => paySettlement.recorded[m.key] > 0)
-        .map(m => `${m.label} ₹${paySettlement.recorded[m.key].toFixed(2)}`)
+        .map(m => `${m.label} ${formatCurrency(paySettlement.recorded[m.key])}`)
         .join(' + ') || 'no payment';
       const ok = window.confirm(
-        `Total Paid ₹${totalPaidAmount.toFixed(2)} is more than the Net Payable ₹${round2(netTotal).toFixed(2)}.\n\n` +
-        `OK: return ₹${changeDue.toFixed(2)} to the customer as change / refund, and record ${kept} against this bill.\n` +
+        `Total Paid ${formatCurrency(totalPaidAmount)} is more than the Net Payable ${formatCurrency(round2(netTotal))}.\n\n` +
+        `OK: return ${formatCurrency(changeDue)} to the customer as change / refund, and record ${kept} against this bill.\n` +
         'Cancel: go back and correct the amounts.'
       );
       if (!ok) return;
@@ -2922,12 +2921,12 @@ export default function NewSaleWizard({
 
     const docLabel = docTypeLabel(docType);
     const savedMsg = settle
-      ? `✔ ${settleOrder?.orderNumber || 'Order'} billed as Tax Invoice ${backendInvoiceNumber} and marked delivered — collected ₹${settle.collected.toFixed(2)}, balance due ₹${paidOut.balance.toFixed(2)}.`
+      ? `✔ ${settleOrder?.orderNumber || 'Order'} billed as Tax Invoice ${backendInvoiceNumber} and marked delivered — collected ${formatCurrency(settle.collected)}, balance due ${formatCurrency(paidOut.balance)}.`
       : editingDoc
-      ? `✔ ${docLabel} ${backendInvoiceNumber} updated${editingDoc.isBackend ? ' in the database' : ' (offline copy)'} — Net Total: ₹${netTotal.toFixed(2)}.`
+      ? `✔ ${docLabel} ${backendInvoiceNumber} updated${editingDoc.isBackend ? ' in the database' : ' (offline copy)'} — Net Total: ${formatCurrency(netTotal)}.`
       : backendInvoiceId
-        ? `✔ ${docLabel} ${backendInvoiceNumber} saved to database successfully! Net Total: ₹${netTotal.toFixed(2)}.`
-        : `✔ ${docLabel} ${billNo} saved successfully (offline copy) — Net Total: ₹${netTotal.toFixed(2)}.`;
+        ? `✔ ${docLabel} ${backendInvoiceNumber} saved to database successfully! Net Total: ${formatCurrency(netTotal)}.`
+        : `✔ ${docLabel} ${billNo} saved successfully (offline copy) — Net Total: ${formatCurrency(netTotal)}.`;
     alert(sendWhatsapp
       ? `${savedMsg}\n\nPress Alt + W (or use "Show Bill") to share the receipt on WhatsApp.`
       : savedMsg);
@@ -3286,7 +3285,7 @@ export default function NewSaleWizard({
 
               <Grid item xs={12} sm={4} md={2}>
                 <TextField 
-                  fullWidth size="small" label="GSTIN No" placeholder="07AAAAA0000A1Z5"
+                  fullWidth size="small" label={taxRegLabel === 'GSTIN' ? 'GSTIN No' : taxRegLabel} placeholder={taxRegLabel === 'GSTIN' ? '07AAAAA0000A1Z5' : ''}
                   value={customerInput.gstin} onChange={(e) => setCustomerInput({ ...customerInput, gstin: e.target.value })}
                   inputProps={{ style: { fontSize: '0.82rem' } }}
                 />
@@ -3741,7 +3740,7 @@ export default function NewSaleWizard({
 
                   <Grid item xs={4} sm={3} md={1.2}>
                     <TextField
-                      fullWidth size="small" label="Price (₹)" placeholder="0.00"
+                      fullWidth size="small" label={`Price (${getCurrencySymbol()})`} placeholder="0.00"
                       value={serviceInput.price}
                       onChange={(e) => setServiceInput({ ...serviceInput, price: e.target.value })}
                       inputProps={{ style: { fontWeight: 800, fontSize: '0.8rem' } }}
@@ -3751,7 +3750,7 @@ export default function NewSaleWizard({
                   <Grid item xs={4} sm={3} md={1.4}>
                     <TextField
                       fullWidth size="small" type="number" placeholder="0"
-                      label={serviceInput.discMode === 'AMT' ? 'Disc ₹' : 'Disc %'}
+                      label={serviceInput.discMode === 'AMT' ? `Disc ${getCurrencySymbol()}` : 'Disc %'}
                       value={serviceInput.discValue}
                       onChange={(e) => setServiceInput({ ...serviceInput, discValue: e.target.value })}
                       sx={DISC_FIELD_SX}
@@ -3769,19 +3768,21 @@ export default function NewSaleWizard({
                     />
                   </Grid>
 
+                  {isTaxEnabled && (
                   <Grid item xs={6} sm={3} md={0.9}>
                     <Autocomplete
                       freeSolo
-                      options={['0', '5', '12', '18', '28']}
+                      options={taxRateList().map(String)}
                       value={String(serviceInput.taxPercent ?? 0)}
                       onChange={(e, val) => setServiceInput({ ...serviceInput, taxPercent: val == null ? 0 : val })}
                       onInputChange={(e, val) => setServiceInput({ ...serviceInput, taxPercent: val })}
                       renderInput={(params) => (
-                        <TextField {...params} fullWidth size="small" label="Tax %"
+                        <TextField {...params} fullWidth size="small" label={`${taxLabel} %`}
                           inputProps={{ ...params.inputProps, inputMode: 'decimal', style: { fontWeight: 900, textAlign: 'center', fontSize: '0.8rem' } }} />
                       )}
                     />
                   </Grid>
+                  )}
 
                   <Grid item xs={6} sm={3} md={1.5}>
                     <Button
@@ -3859,7 +3860,7 @@ export default function NewSaleWizard({
                 {(selectedProductDetail.category || selectedProductDetail.type) && (
                   <Chip size="small" label={`Category: ${(selectedProductDetail.category || selectedProductDetail.type).toString().toUpperCase()}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
                 )}
-                <Chip size="small" label={`Price: ₹${selectedProductDetail.price || selectedProductDetail.sellingPrice || 0}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
+                <Chip size="small" label={`Price: ${currencyPrefix()}${selectedProductDetail.price || selectedProductDetail.sellingPrice || 0}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
                 {selectedProductDetail.barcode && (
                   <Chip size="small" label={`Barcode: ${selectedProductDetail.barcode}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
                 )}
@@ -3881,13 +3882,15 @@ export default function NewSaleWizard({
                 {selectedProductDetail.rack && (
                   <Chip size="small" label={`Rack: ${selectedProductDetail.rack}`} variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
                 )}
+                {isTaxEnabled && (
                 <Chip
                   size="small"
-                  label={`Tax: ${entryInput.taxPercent || 0}% GST`}
+                  label={`${taxLabel}: ${entryInput.taxPercent || 0}%`}
                   color="warning"
                   variant="outlined"
                   sx={{ fontWeight: 700, fontSize: '0.7rem' }}
                 />
+                )}
               </Box>
             )}
           </Paper>
@@ -3912,7 +3915,7 @@ export default function NewSaleWizard({
                     <TableCell align="right" sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Price</TableCell>
                     <TableCell align="right" sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Disc.</TableCell>
                     <TableCell align="right" sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Gross</TableCell>
-                    <TableCell align="right" sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Tax</TableCell>
+                    {isTaxEnabled && <TableCell align="right" sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>{taxLabel}</TableCell>}
                     <TableCell align="right" sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Total</TableCell>
                     <TableCell align="center" sx={{ bgcolor: '#0f172a', color: '#ffffff', fontWeight: 900, py: 0.8, fontSize: '0.75rem' }}>Action</TableCell>
                   </TableRow>
@@ -3998,12 +4001,12 @@ export default function NewSaleWizard({
                           {line.qty}{isLensSource(src) ? <Box component="span" sx={{ display: 'block', fontSize: '0.6rem', color: 'text.secondary' }}>Pair</Box> : null}
                         </TableCell>
                         <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>
-                          ₹{line.price.toFixed(2)}{isLensSource(src) ? <Box component="span" sx={{ display: 'block', fontSize: '0.6rem', color: 'text.secondary' }}>per Pair</Box> : null}
+                          {formatCurrency(line.price)}{isLensSource(src) ? <Box component="span" sx={{ display: 'block', fontSize: '0.6rem', color: 'text.secondary' }}>per Pair</Box> : null}
                         </TableCell>
-                        <TableCell align="right" sx={{ color: 'error.main', fontSize: '0.8rem' }}>₹{line.disc.toFixed(2)}</TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>₹{line.gross.toFixed(2)}</TableCell>
-                        <TableCell align="right" sx={{ fontSize: '0.8rem', color: '#0f766e' }}>₹{line.tax.toFixed(2)} ({line.taxPercent || 0}%)</TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 900, color: 'primary.main', fontSize: '0.85rem' }}>₹{line.total.toFixed(2)}</TableCell>
+                        <TableCell align="right" sx={{ color: 'error.main', fontSize: '0.8rem' }}>{formatCurrency(line.disc)}</TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>{formatCurrency(line.gross)}</TableCell>
+                        {isTaxEnabled && <TableCell align="right" sx={{ fontSize: '0.8rem', color: '#0f766e' }}>{formatCurrency(line.tax)} ({line.taxPercent || 0}%)</TableCell>}
+                        <TableCell align="right" sx={{ fontWeight: 900, color: 'primary.main', fontSize: '0.85rem' }}>{formatCurrency(line.total)}</TableCell>
                         <TableCell align="center">
                           <Tooltip title={outOfStock ? 'Out of stock — use + Add Item for a back-order' : 'Add to bill'}>
                             <IconButton size="small" color={outOfStock ? 'error' : 'success'} onClick={(e) => { e.stopPropagation(); addMatch(src); }}>
@@ -4058,11 +4061,11 @@ export default function NewSaleWizard({
                         </TableCell>
                         <TableCell sx={{ fontSize: '0.8rem', color: '#92400e', fontWeight: 700 }}>{s.description || '—'}</TableCell>
                         <TableCell align="center" sx={{ fontWeight: 900, fontSize: '0.85rem' }}>{line.qty}</TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>₹{line.price.toFixed(2)}</TableCell>
-                        <TableCell align="right" sx={{ color: 'error.main', fontSize: '0.8rem' }}>₹{line.disc.toFixed(2)}</TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>₹{line.gross.toFixed(2)}</TableCell>
-                        <TableCell align="right" sx={{ fontSize: '0.8rem', color: '#0f766e' }}>₹{line.tax.toFixed(2)} ({line.taxPercent || 0}%)</TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 900, color: '#b45309', fontSize: '0.85rem' }}>₹{line.total.toFixed(2)}</TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>{formatCurrency(line.price)}</TableCell>
+                        <TableCell align="right" sx={{ color: 'error.main', fontSize: '0.8rem' }}>{formatCurrency(line.disc)}</TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>{formatCurrency(line.gross)}</TableCell>
+                        {isTaxEnabled && <TableCell align="right" sx={{ fontSize: '0.8rem', color: '#0f766e' }}>{formatCurrency(line.tax)} ({line.taxPercent || 0}%)</TableCell>}
+                        <TableCell align="right" sx={{ fontWeight: 900, color: '#b45309', fontSize: '0.85rem' }}>{formatCurrency(line.total)}</TableCell>
                         <TableCell align="center">
                           <Tooltip title="Add service to bill">
                             <IconButton size="small" color="success" onClick={(e) => { e.stopPropagation(); addMatch(src); }}>
@@ -4107,16 +4110,18 @@ export default function NewSaleWizard({
                         {previewLine.qty}{isLensSource(previewSource) ? <Box component="span" sx={{ display: 'block', fontSize: '0.6rem', color: 'text.secondary' }}>Pair</Box> : null}
                       </TableCell>
                       <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>
-                        ₹{previewLine.price.toFixed(2)}{isLensSource(previewSource) ? <Box component="span" sx={{ display: 'block', fontSize: '0.6rem', color: 'text.secondary' }}>per Pair</Box> : null}
+                        {formatCurrency(previewLine.price)}{isLensSource(previewSource) ? <Box component="span" sx={{ display: 'block', fontSize: '0.6rem', color: 'text.secondary' }}>per Pair</Box> : null}
                       </TableCell>
                       <TableCell align="right" sx={{ color: 'error.main', fontSize: '0.8rem' }}>
-                        ₹{previewLine.disc.toFixed(2)}{previewLine.disc ? ` (${previewLine.discPercent.toFixed(2)}%)` : ''}
+                        {formatCurrency(previewLine.disc)}{previewLine.disc ? ` (${previewLine.discPercent.toFixed(2)}%)` : ''}
                       </TableCell>
-                      <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>₹{previewLine.gross.toFixed(2)}</TableCell>
+                      <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>{formatCurrency(previewLine.gross)}</TableCell>
+                      {isTaxEnabled && (
                       <TableCell align="right" sx={{ fontSize: '0.8rem', color: '#0f766e' }}>
-                        ₹{previewLine.tax.toFixed(2)} ({previewLine.taxPercent || 0}%)
+                        {formatCurrency(previewLine.tax)} ({previewLine.taxPercent || 0}%)
                       </TableCell>
-                      <TableCell align="right" sx={{ fontWeight: 900, color: 'primary.main', fontSize: '0.85rem' }}>₹{previewLine.total.toFixed(2)}</TableCell>
+                      )}
+                      <TableCell align="right" sx={{ fontWeight: 900, color: 'primary.main', fontSize: '0.85rem' }}>{formatCurrency(previewLine.total)}</TableCell>
                       <TableCell align="center">
                         <Tooltip title="Add to bill">
                           <IconButton size="small" color="success" onClick={() => { const id = handleAddItem(previewSource); if (id) focusGridQtySoon(id); }}>
@@ -4164,7 +4169,7 @@ export default function NewSaleWizard({
                           {offersOn && !isSvcRow && (floorInfo || rowOffer) && (rowOffer ? (
                             <Tooltip title={[
                               `On Offer — ${rowOffer.tag}`,
-                              offerPrice != null ? `offer price ₹${offerPrice.toFixed(2)}` : 'may sell at any price',
+                              offerPrice != null ? `offer price ${formatCurrency(offerPrice)}` : 'may sell at any price',
                               rowOffer.apply_to_all === false ? `${Math.max(0, offerLeft === Infinity ? 0 : offerLeft)} offer unit(s) left besides this line` : '',
                               rowOffer.end_date ? `until ${rowOffer.end_date}` : '',
                               onOffer ? 'sold on the offer — ✕ for the regular price' : 'click to sell this line on the offer',
@@ -4172,7 +4177,7 @@ export default function NewSaleWizard({
                               <Chip size="small" icon={<DiscountIcon />} data-offer-status="on"
                                 data-offer-applied={onOffer ? 'true' : 'false'}
                                 label={onOffer
-                                  ? `Offer applied · ${rowOffer.tag}${offerPrice != null ? ` ₹${offerPrice.toFixed(2)}` : ''}${overOffer ? ` · only ${offerLeft} left` : ''}`
+                                  ? `Offer applied · ${rowOffer.tag}${offerPrice != null ? ` ${formatCurrency(offerPrice)}` : ''}${overOffer ? ` · only ${offerLeft} left` : ''}`
                                   : offerBadgeText(rowOffer, { left: offerLeft === Infinity ? undefined : offerLeft })}
                                 color={overOffer ? 'warning' : 'success'}
                                 variant={onOffer ? 'filled' : 'outlined'}
@@ -4223,7 +4228,7 @@ export default function NewSaleWizard({
                           {belowCost && (
                             <Tooltip title={violationText(belowCost)}>
                               <Box component="span" data-price-floor={row.id} sx={{ display: 'block', fontSize: '0.6rem', fontWeight: 900, color: '#dc2626', whiteSpace: 'nowrap' }}>
-                                Min ₹{belowCost.floorUnit.toFixed(2)}
+                                Min {formatCurrency(belowCost.floorUnit)}
                               </Box>
                             </Tooltip>
                           )}
@@ -4238,15 +4243,17 @@ export default function NewSaleWizard({
                           <Box component="span" sx={{ fontSize: '0.62rem', color: 'text.secondary', display: 'block' }}>
                             {row.discMode === 'AMT'
                               ? `${(row.discPercent || 0).toFixed(2)}%`
-                              : `₹${(row.disc || 0).toFixed(2)}`}
+                              : `${formatCurrency(row.disc || 0)}`}
                           </Box>
                         </TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>₹{(row.gross || 0).toFixed(2)}</TableCell>
+                        <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.8rem' }}>{formatCurrency(row.gross || 0)}</TableCell>
+                        {isTaxEnabled && (
                         <TableCell align="right" sx={{ fontSize: '0.8rem', color: '#0f766e' }}>
                           {cellInput('taxPercent', { type: 'number', width: 44, align: 'right' })}
-                          <Box component="span" sx={{ fontSize: '0.62rem', color: 'text.secondary', display: 'block' }}>₹{(row.tax || 0).toFixed(2)}</Box>
+                          <Box component="span" sx={{ fontSize: '0.62rem', color: 'text.secondary', display: 'block' }}>{formatCurrency(row.tax || 0)}</Box>
                         </TableCell>
-                        <TableCell align="right" sx={{ fontWeight: 900, color: 'primary.main', fontSize: '0.85rem' }}>₹{(row.total || 0).toFixed(2)}</TableCell>
+                        )}
+                        <TableCell align="right" sx={{ fontWeight: 900, color: 'primary.main', fontSize: '0.85rem' }}>{formatCurrency(row.total || 0)}</TableCell>
                         <TableCell align="center" sx={{ whiteSpace: 'nowrap' }}>
                           <Tooltip title="Edit in a window">
                             <IconButton size="small" color="primary" onClick={() => setEditDialogId(row.id)}>
@@ -4431,12 +4438,12 @@ export default function NewSaleWizard({
                       </Grid>
                       <Grid item xs={6}>
                         <TextField fullWidth size="small" type="number" value={editDialogRow.price} onChange={fld('price')}
-                          label={editDialogRow.lens ? `Price per ${unitWord(editDialogRow.lens.sellingUnit)} (₹)` : 'Price (₹)'} />
+                          label={editDialogRow.lens ? `Price per ${unitWord(editDialogRow.lens.sellingUnit)} (${getCurrencySymbol()})` : `Price (${getCurrencySymbol()})`} />
                       </Grid>
                       <Grid item xs={6}>
                         <TextField
                           fullWidth size="small" type="number"
-                          label={editDialogRow.discMode === 'AMT' ? 'Discount ₹ (flat)' : 'Discount % (of gross)'}
+                          label={editDialogRow.discMode === 'AMT' ? `Discount ${getCurrencySymbol()} (flat)` : 'Discount % (of gross)'}
                           value={editDialogRow.discValue ?? editDialogRow.discPercent ?? 0}
                           onChange={fld('discValue')}
                           inputProps={{ min: 0, max: editDialogRow.discMode === 'AMT' ? undefined : 100 }}
@@ -4453,19 +4460,21 @@ export default function NewSaleWizard({
                           }}
                         />
                       </Grid>
+                      {isTaxEnabled && (
                       <Grid item xs={6}>
-                        <TextField select fullWidth size="small" label="Tax %" value={editDialogRow.taxPercent} onChange={fld('taxPercent')}>
+                        <TextField select fullWidth size="small" label={`${taxLabel} %`} value={editDialogRow.taxPercent} onChange={fld('taxPercent')}>
                           {taxSlabItems(editDialogRow.taxPercent)}
                         </TextField>
                       </Grid>
+                      )}
                     </Grid>
 
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', bgcolor: '#f8fafc', borderRadius: 2, p: 1.2 }}>
                       <Typography variant="body2" fontWeight={700} color="text.secondary">
-                        Gross ₹{(editDialogRow.gross || 0).toFixed(2)} · Disc ₹{(editDialogRow.disc || 0).toFixed(2)} ({(editDialogRow.discPercent || 0).toFixed(2)}%) · Tax ₹{(editDialogRow.tax || 0).toFixed(2)}
+                        Gross {formatCurrency(editDialogRow.gross || 0)} · Disc {formatCurrency(editDialogRow.disc || 0)} ({(editDialogRow.discPercent || 0).toFixed(2)}%) · Tax {formatCurrency(editDialogRow.tax || 0)}
                       </Typography>
                       <Typography variant="body2" fontWeight={900} color="primary.main">
-                        Total ₹{(editDialogRow.total || 0).toFixed(2)}
+                        Total {formatCurrency(editDialogRow.total || 0)}
                       </Typography>
                     </Box>
                   </Stack>
@@ -4489,13 +4498,15 @@ export default function NewSaleWizard({
                     <Grid item xs={6}><Typography variant="body2" fontWeight={900} align="right">{totalQty}</Typography></Grid>
                     
                     <Grid item xs={6}><Typography variant="caption" color="text.secondary" fontWeight={700}>Item Price</Typography></Grid>
-                    <Grid item xs={6}><Typography variant="body2" fontWeight={900} align="right">₹{grossTotal.toFixed(2)}</Typography></Grid>
+                    <Grid item xs={6}><Typography variant="body2" fontWeight={900} align="right">{formatCurrency(grossTotal)}</Typography></Grid>
                     
                     <Grid item xs={6}><Typography variant="caption" color="text.secondary" fontWeight={700}>Item Discount</Typography></Grid>
-                    <Grid item xs={6}><Typography variant="body2" fontWeight={900} color="error.main" align="right">₹{itemDiscounts.toFixed(2)}</Typography></Grid>
+                    <Grid item xs={6}><Typography variant="body2" fontWeight={900} color="error.main" align="right">{formatCurrency(itemDiscounts)}</Typography></Grid>
 
-                    <Grid item xs={6}><Typography variant="caption" color="text.secondary" fontWeight={700}>Tax (GST)</Typography></Grid>
-                    <Grid item xs={6}><Typography variant="body2" fontWeight={900} sx={{ color: '#0f766e' }} align="right">₹{totalTax.toFixed(2)}</Typography></Grid>
+                    {isTaxEnabled && (<>
+                    <Grid item xs={6}><Typography variant="caption" color="text.secondary" fontWeight={700}>Tax ({taxLabel})</Typography></Grid>
+                    <Grid item xs={6}><Typography variant="body2" fontWeight={900} sx={{ color: '#0f766e' }} align="right">{formatCurrency(totalTax)}</Typography></Grid>
+                    </>)}
                   </Grid>
                 </Paper>
               </Grid>
@@ -4505,13 +4516,13 @@ export default function NewSaleWizard({
                 <Paper variant="outlined" sx={{ p: 1.2, borderRadius: 2, bgcolor: '#ffffff', borderLeft: '4px solid #2563eb' }}>
                   <Grid container spacing={0.8}>
                     <Grid item xs={6}><Typography variant="caption" color="text.secondary" fontWeight={700}>Gross</Typography></Grid>
-                    <Grid item xs={6}><Typography variant="body2" fontWeight={800} align="right">₹{grossTotal.toFixed(2)}</Typography></Grid>
+                    <Grid item xs={6}><Typography variant="body2" fontWeight={800} align="right">{formatCurrency(grossTotal)}</Typography></Grid>
 
                     <Grid item xs={6}><Typography variant="caption" color="text.secondary" fontWeight={700}>Discount</Typography></Grid>
-                    <Grid item xs={6}><Typography variant="body2" fontWeight={800} color="error.main" align="right">−₹{totalDiscount.toFixed(2)}</Typography></Grid>
+                    <Grid item xs={6}><Typography variant="body2" fontWeight={800} color="error.main" align="right">−{formatCurrency(totalDiscount)}</Typography></Grid>
 
                     <Grid item xs={6}><Typography variant="caption" fontWeight={900} color="primary.main">Net Payable</Typography></Grid>
-                    <Grid item xs={6}><Typography variant="body2" fontWeight={900} color="primary.main" align="right">₹{netTotal.toFixed(2)}</Typography></Grid>
+                    <Grid item xs={6}><Typography variant="body2" fontWeight={900} color="primary.main" align="right">{formatCurrency(netTotal)}</Typography></Grid>
 
                     {/* Typed as a total; the pay-mode table shows how it splits (whatever Card / UPI /
                         Bank don't hold goes under Cash). */}
@@ -4531,7 +4542,7 @@ export default function NewSaleWizard({
                     </Grid>
 
                     <Grid item xs={6}><Typography variant="caption" fontWeight={900} color="error.main">Balance Due</Typography></Grid>
-                    <Grid item xs={6}><Typography variant="body2" fontWeight={900} color="error.main" align="right">₹{balanceDue.toFixed(2)}</Typography></Grid>
+                    <Grid item xs={6}><Typography variant="body2" fontWeight={900} color="error.main" align="right">{formatCurrency(balanceDue)}</Typography></Grid>
                   </Grid>
                 </Paper>
               </Grid>
@@ -4626,17 +4637,17 @@ export default function NewSaleWizard({
                   <Box sx={{ px: 1 }}>
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <Typography variant="caption" fontWeight={900}>Total Paid:</Typography>
-                      <Typography variant="subtitle1" fontWeight={900} color="success.main">₹{totalPaidAmount.toFixed(2)}</Typography>
+                      <Typography variant="subtitle1" fontWeight={900} color="success.main">{formatCurrency(totalPaidAmount)}</Typography>
                     </Box>
                     {changeDue > 0.009 ? (
                       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <Typography variant="caption" fontWeight={900} color="warning.dark">Change to Return:</Typography>
-                        <Typography variant="subtitle1" fontWeight={900} color="warning.dark">₹{changeDue.toFixed(2)}</Typography>
+                        <Typography variant="subtitle1" fontWeight={900} color="warning.dark">{formatCurrency(changeDue)}</Typography>
                       </Box>
                     ) : (
                       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <Typography variant="caption" fontWeight={900} color="error.main">Balance Due:</Typography>
-                        <Typography variant="subtitle1" fontWeight={900} color="error.main">₹{balanceDue.toFixed(2)}</Typography>
+                        <Typography variant="subtitle1" fontWeight={900} color="error.main">{formatCurrency(balanceDue)}</Typography>
                       </Box>
                     )}
                     <Typography variant="caption" fontWeight={800} sx={{ display: 'block', textAlign: 'right', color: balanceDue <= 0.009 ? 'success.main' : 'warning.main' }}>
@@ -4745,7 +4756,7 @@ export default function NewSaleWizard({
                 <Typography variant="caption" color="text.secondary">PATIENT:</Typography>
                 <Typography variant="body2" fontWeight={800} sx={{ mb: 2 }}>{customerInput.name || 'No Patient Selected'}</Typography>
                 <Typography variant="caption" color="text.secondary">TOTAL PAYABLE:</Typography>
-                <Typography variant="h6" fontWeight={900} color="primary.main" sx={{ mb: 2 }}>₹{netTotal}</Typography>
+                <Typography variant="h6" fontWeight={900} color="primary.main" sx={{ mb: 2 }}>{currencyPrefix()}{netTotal}</Typography>
                 <Stack spacing={1}>
                   {activeStep < stepsList.length - 1 ? (
                     <Button variant="contained" fullWidth onClick={() => setActiveStep(prev => prev + 1)}>Next Step ➔</Button>
@@ -4787,7 +4798,7 @@ export default function NewSaleWizard({
               {lastCompletedOrder.invoiceNumber} · {lastCompletedOrder.customerName}
             </Typography>
             <Typography variant="h5" component="div" fontWeight={900} sx={{ my: 1 }}>
-              ₹{Number(lastCompletedOrder.netTotal || 0).toFixed(2)}
+              {formatCurrency(Number(lastCompletedOrder.netTotal || 0))}
               {lastCompletedOrder.docType !== 'Quotation' && (
                 <Chip
                   size="small"

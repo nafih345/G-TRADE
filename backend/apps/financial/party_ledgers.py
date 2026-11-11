@@ -131,7 +131,8 @@ def on_party_saved(sender, instance, created=False, raw=False, **kwargs):
 PARTY_SOURCES = {
     'supplier': [('purchasing.purchase_invoice', 'purchasing.PurchaseInvoice', 'supplier_id'),
                  ('purchasing.purchase_payment', 'purchasing.PurchaseInvoice', 'supplier_id'),
-                 ('purchasing.purchase_order', 'purchasing.PurchaseOrder', 'supplier_id')],
+                 ('purchasing.purchase_order', 'purchasing.PurchaseOrder', 'supplier_id'),
+                 ('purchasing.purchase_return', 'purchasing.PurchaseReturn', 'supplier_id')],
     'dealer': [('sales.wholesale_invoice', 'sales.WholesaleInvoice', 'dealer_id'),
                ('sales.wholesale_collection', 'sales.WholesalePaymentCollection', 'dealer_id'),
                ('sales.wholesale_return', 'sales.WholesaleReturn', 'dealer_id')],

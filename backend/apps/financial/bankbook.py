@@ -61,6 +61,8 @@ KIND_LABELS = {
     'EYE_TEST_FEE': 'Eye Test Fee',
     'DEALER_COLLECTION': 'Dealer Collection',
     'SUPPLIER_PAYMENT': 'Supplier Payment',
+    'SALES_RETURN': 'Sales Return Refund',
+    'PURCHASE_RETURN': 'Purchase Return Refund',
     'RECEIPT': 'Bank Receipt',
     'PAYMENT': 'Bank Payment',
     'BANK_CHARGES': 'Bank Charges / Expense',
@@ -186,6 +188,11 @@ def _kind(je, net, counters, mapped_ids):
         return 'EYE_TEST_FEE' if net > 0 else 'REFUND'
     if key in ('sales.wholesale_collection', 'sales.wholesale_invoice'):
         return 'DEALER_COLLECTION' if net > 0 else 'PAYMENT'
+    # Sales → Sales Return / Purchase → Purchase Return refunds (apps/inventory/returns.py).
+    if key == 'sales.sales_return':
+        return 'SALES_RETURN'
+    if key == 'purchasing.purchase_return':
+        return 'PURCHASE_RETURN'
     if key.startswith('purchasing.'):
         return 'SUPPLIER_PAYMENT' if net < 0 else 'RECEIPT'
     if net > 0:

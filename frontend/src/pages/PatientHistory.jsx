@@ -42,6 +42,7 @@ import PrintPrescriptionCard from '../components/optical/PrintPrescriptionCard';
 import EyeTestReportDialog from '../components/optical/EyeTestReportDialog';
 import { reportFromExam } from '../utils/eyeTestReport';
 import { FEE_STATUS_LABELS } from '../utils/eyeTestBill';
+import { currencyPrefix, formatCurrency } from '../utils/localeFormat.js';
 
 // Patient IDs are generated client-side and aren't guaranteed globally unique (two different
 // patients can end up with the same "P-1003" from separate sessions) — so a plain `p.id` isn't
@@ -1029,7 +1030,7 @@ export default function PatientHistory() {
                             <Typography variant="caption" color="text.secondary" display="block">EYE TEST FEE</Typography>
                             {feeLabel ? (
                               <Chip size="small" color={feeColor} variant={fee.feeStatus === 'PENDING' ? 'filled' : 'outlined'}
-                                label={`${feeLabel}${!fee.isFreeTest && fee.amount ? ` · ₹${fee.amount}` : ''}${fee.receiptNo ? ` · ${fee.receiptNo}` : ''}`}
+                                label={`${feeLabel}${!fee.isFreeTest && fee.amount ? ` · ${currencyPrefix()}${fee.amount}` : ''}${fee.receiptNo ? ` · ${fee.receiptNo}` : ''}`}
                                 sx={{ fontWeight: 700, mt: 0.25 }} />
                             ) : <Typography variant="body2" fontWeight={700}>—</Typography>}
                           </Box>
@@ -1373,19 +1374,19 @@ export default function PatientHistory() {
                         <Grid item xs={12} sm={4}>
                           <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, borderLeft: '4px solid #2563eb' }}>
                             <Typography variant="caption" color="text.secondary" fontWeight={700}>TOTAL BILLED</Typography>
-                            <Typography variant="h6" fontWeight={900}>₹{totalBilled.toLocaleString('en-IN')}</Typography>
+                            <Typography variant="h6" fontWeight={900}>{formatCurrency(totalBilled)}</Typography>
                           </Paper>
                         </Grid>
                         <Grid item xs={12} sm={4}>
                           <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, borderLeft: '4px solid #059669' }}>
                             <Typography variant="caption" color="text.secondary" fontWeight={700}>TOTAL PAID</Typography>
-                            <Typography variant="h6" fontWeight={900} color="success.main">₹{totalPaid.toLocaleString('en-IN')}</Typography>
+                            <Typography variant="h6" fontWeight={900} color="success.main">{formatCurrency(totalPaid)}</Typography>
                           </Paper>
                         </Grid>
                         <Grid item xs={12} sm={4}>
                           <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, borderLeft: '4px solid #d97706' }}>
                             <Typography variant="caption" color="text.secondary" fontWeight={700}>OUTSTANDING</Typography>
-                            <Typography variant="h6" fontWeight={900} color={totalOutstanding > 0 ? 'error.main' : 'text.primary'}>₹{totalOutstanding.toLocaleString('en-IN')}</Typography>
+                            <Typography variant="h6" fontWeight={900} color={totalOutstanding > 0 ? 'error.main' : 'text.primary'}>{formatCurrency(totalOutstanding)}</Typography>
                           </Paper>
                         </Grid>
                       </Grid>
@@ -1414,9 +1415,9 @@ export default function PatientHistory() {
                                 <TableRow key={inv.key} hover>
                                   <TableCell sx={{ fontWeight: 800, color: 'primary.main' }}>{inv.number}</TableCell>
                                   <TableCell sx={{ whiteSpace: 'nowrap' }}>{inv.date}</TableCell>
-                                  <TableCell sx={{ textAlign: 'right', fontWeight: 700 }}>₹{inv.total.toLocaleString('en-IN')}</TableCell>
-                                  <TableCell sx={{ textAlign: 'right' }}>₹{inv.paid.toLocaleString('en-IN')}</TableCell>
-                                  <TableCell sx={{ textAlign: 'right', fontWeight: 700, color: inv.balance > 0 ? 'error.main' : 'text.secondary' }}>₹{inv.balance.toLocaleString('en-IN')}</TableCell>
+                                  <TableCell sx={{ textAlign: 'right', fontWeight: 700 }}>{formatCurrency(inv.total)}</TableCell>
+                                  <TableCell sx={{ textAlign: 'right' }}>{formatCurrency(inv.paid)}</TableCell>
+                                  <TableCell sx={{ textAlign: 'right', fontWeight: 700, color: inv.balance > 0 ? 'error.main' : 'text.secondary' }}>{formatCurrency(inv.balance)}</TableCell>
                                   <TableCell>
                                     <Chip
                                       label={inv.paymentStatus}
@@ -1456,7 +1457,7 @@ export default function PatientHistory() {
                                 <TableRow key={p.key} hover>
                                   <TableCell sx={{ fontWeight: 700 }}>{p.receiptNo}</TableCell>
                                   <TableCell sx={{ whiteSpace: 'nowrap' }}>{p.date}</TableCell>
-                                  <TableCell sx={{ textAlign: 'right', fontWeight: 800, color: 'success.main' }}>₹{p.amount.toLocaleString('en-IN')}</TableCell>
+                                  <TableCell sx={{ textAlign: 'right', fontWeight: 800, color: 'success.main' }}>{formatCurrency(p.amount)}</TableCell>
                                   <TableCell sx={{ fontSize: '0.8rem' }}>{p.method}</TableCell>
                                   <TableCell>
                                     <Chip label={p.status} size="small" color="success" variant="outlined" sx={{ fontWeight: 700, fontSize: '0.7rem' }} />
@@ -1525,7 +1526,7 @@ export default function PatientHistory() {
                               </Grid>
                               <Grid item xs={6} sm={3}>
                                 <Typography variant="caption" color="text.secondary" display="block">ORDER VALUE</Typography>
-                                <Typography variant="body2" fontWeight={700}>₹{ord.total.toLocaleString('en-IN')}</Typography>
+                                <Typography variant="body2" fontWeight={700}>{formatCurrency(ord.total)}</Typography>
                               </Grid>
                               <Grid item xs={6} sm={3}>
                                 <Typography variant="caption" color="text.secondary" display="block">PAYMENT</Typography>

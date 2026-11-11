@@ -1,6 +1,7 @@
 import axios from 'axios';
 import JsBarcode from 'jsbarcode';
 import QRCode from 'qrcode';
+import { formatCurrency } from './localeFormat.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -334,7 +335,7 @@ export function labelPrice(product) {
 }
 
 export function formatPrice(value) {
-  return `₹${Number(value || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return `${formatCurrency(Number(value || 0))}`;
 }
 
 export function resolveQuantity(product, settings) {

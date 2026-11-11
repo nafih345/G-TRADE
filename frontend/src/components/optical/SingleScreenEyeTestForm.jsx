@@ -34,6 +34,8 @@ import {
 import { printEyeTestBill, printEyeTestReceipt } from '../../utils/printEyeTestBill';
 import EyeTestReportDialog from './EyeTestReportDialog';
 import PaymentModeDetails from '../common/PaymentModeDetails';
+import { currencyPrefix, formatCurrency } from '../../utils/localeFormat.js';
+import CurrencySymbol from '../common/CurrencySymbol.jsx';
 
 // Common medical aid / insurance schemes offered as quick picks on the charges bar. The field
 // is free-solo, so staff can still type any scheme not listed here.
@@ -602,10 +604,10 @@ export default function SingleScreenEyeTestForm({
           ) : paymentChoice === NO_PAYMENT ? (
             <Chip color="info" size="small" label="No Payment" sx={{ fontWeight: 800 }} />
           ) : paymentChoice === PAY_AFTER_SALE ? (
-            <Chip color="warning" size="small" label={`Pay After Sale — ₹${autoCustomerBalance} pending eye test fee`} sx={{ fontWeight: 800 }} />
+            <Chip color="warning" size="small" label={`Pay After Sale — ${currencyPrefix()}${autoCustomerBalance} pending eye test fee`} sx={{ fontWeight: 800 }} />
           ) : (
             <Chip color="success" size="small"
-              label={`Pay Now — ₹${diagnosis?.customerPaidAmount ?? 0} of ₹${autoCustomerBalance} · ${payModeLabel(diagnosis?.paymentMode) || 'Cash'}`}
+              label={`Pay Now — ${currencyPrefix()}${diagnosis?.customerPaidAmount ?? 0} of ${currencyPrefix()}${autoCustomerBalance} · ${payModeLabel(diagnosis?.paymentMode) || 'Cash'}`}
               sx={{ fontWeight: 800 }} />
           )}
           {!isLocked && (
@@ -1216,7 +1218,7 @@ export default function SingleScreenEyeTestForm({
                       {(() => {
                         const bill = billRecordFromExam(row);
                         const color = { FREE: 'info', PAID: 'success', PENDING: 'warning', BILLED: 'default' }[bill.feeStatus] || 'default';
-                        const amount = bill.isFreeTest ? '' : ` ₹${eyeTestFeeTotal(bill)}`;
+                        const amount = bill.isFreeTest ? '' : ` ${currencyPrefix()}${eyeTestFeeTotal(bill)}`;
                         const label = bill.feeStatus === 'BILLED' && bill.feeInvoiceNumber
                           ? `Billed · ${bill.feeInvoiceNumber}`
                           : `${bill.feeStatus === 'PENDING' ? 'Pending' : (FEE_STATUS_LABELS[bill.feeStatus] || '—')}${amount}`;
@@ -1341,7 +1343,7 @@ export default function SingleScreenEyeTestForm({
                 value={diagnosis?.procedureCharge || '0'}
                 onChange={(e) => setDiagnosis(prev => ({ ...prev, procedureCharge: e.target.value }))}
                 onFocus={(e) => e.target.select()}
-                InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
+                InputProps={{ startAdornment: <InputAdornment position="start"><CurrencySymbol /></InputAdornment> }}
               />
             </Grid>
             {/* Amount claimed from / covered by the medical aid — a deduction on the invoice. */}
@@ -1351,7 +1353,7 @@ export default function SingleScreenEyeTestForm({
                 value={diagnosis?.medicalAidCharge || '0'}
                 onChange={(e) => setDiagnosis(prev => ({ ...prev, medicalAidCharge: e.target.value }))}
                 onFocus={(e) => e.target.select()}
-                InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
+                InputProps={{ startAdornment: <InputAdornment position="start"><CurrencySymbol /></InputAdornment> }}
                 helperText={patientData?.medicalAidName || ' '}
               />
             </Grid>
@@ -1365,7 +1367,7 @@ export default function SingleScreenEyeTestForm({
                   setDiagnosis(prev => ({ ...prev, customerPaidAmount: e.target.value }));
                 }}
                 onFocus={(e) => e.target.select()}
-                InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
+                InputProps={{ startAdornment: <InputAdornment position="start"><CurrencySymbol /></InputAdornment> }}
                 helperText={paymentChoice === PAY_AFTER_SALE
                   ? 'Collected with the frame/lens purchase'
                   : customerPaidTouched
@@ -1379,7 +1381,7 @@ export default function SingleScreenEyeTestForm({
                 value={diagnosis?.medicineCharge || '0'}
                 onChange={(e) => setDiagnosis(prev => ({ ...prev, medicineCharge: e.target.value }))}
                 onFocus={(e) => e.target.select()}
-                InputProps={{ startAdornment: <InputAdornment position="start">₹</InputAdornment> }}
+                InputProps={{ startAdornment: <InputAdornment position="start"><CurrencySymbol /></InputAdornment> }}
                 inputProps={{ id: 'eyetest-medicine-charge-input' }}
               />
             </Grid>
@@ -1387,7 +1389,7 @@ export default function SingleScreenEyeTestForm({
 
           <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 1, p: 1.25, borderRadius: 2, bgcolor: '#f1f5f9' }}>
             <Typography variant="body2" fontWeight={700}>Total payable</Typography>
-            <Typography variant="h6" fontWeight={800}>{paymentChoice === NO_PAYMENT ? 'No payment' : `₹${autoCustomerBalance.toFixed(2)}`}</Typography>
+            <Typography variant="h6" fontWeight={800}>{paymentChoice === NO_PAYMENT ? 'No payment' : `${formatCurrency(autoCustomerBalance)}`}</Typography>
           </Box>
 
           <Typography variant="caption" color="text.secondary" fontWeight={700} sx={{ display: 'block', mt: 1.5 }}>PAYMENT</Typography>
@@ -1427,7 +1429,7 @@ export default function SingleScreenEyeTestForm({
           )}
           {paymentChoice === PAY_AFTER_SALE && (
             <Alert severity="warning" sx={{ mt: 1.5 }}>
-              ₹{autoCustomerBalance.toFixed(2)} is kept as a <b>Pending Eye Test Fee</b>. After you save the clinical record
+              {formatCurrency(autoCustomerBalance)} is kept as a <b>Pending Eye Test Fee</b>. After you save the clinical record
               you go straight to <b>Sales → New Sale</b>, where it is added to this patient's bill.
             </Alert>
           )}
@@ -1491,8 +1493,8 @@ export default function SingleScreenEyeTestForm({
                   ['Test No', bill.testNo || '—'],
                   ['Optometrist', bill.optometrist || '—'],
                   ['Fee', bill.isFreeTest ? 'Free test'
-                    : bill.feeStatus === 'PENDING' ? `₹${total.toFixed(2)} pending — with frame/lens purchase`
-                      : `₹${bill.paidAmount.toFixed(2)} paid of ₹${total.toFixed(2)} (${payModeLabel(bill.paymentMode) || 'Cash'})`],
+                    : bill.feeStatus === 'PENDING' ? `${formatCurrency(total)} pending — with frame/lens purchase`
+                      : `${formatCurrency(bill.paidAmount)} paid of ${formatCurrency(total)} (${payModeLabel(bill.paymentMode) || 'Cash'})`],
                 ].map(([label, value]) => (
                   <Box key={label} sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}>
                     <Typography variant="body2" color="text.secondary">{label}</Typography>
@@ -1505,7 +1507,7 @@ export default function SingleScreenEyeTestForm({
           {paymentChoice === PAY_AFTER_SALE && onGoToSales && (
             <Button fullWidth variant="contained" color="warning" autoFocus sx={{ mt: 2, textTransform: 'none', fontWeight: 800 }}
               onClick={() => { setPrintOptionsOpen(false); onGoToSales(autoTestNo); }}>
-              Go to Sales — collect ₹{autoCustomerBalance.toFixed(2)} with the frame / lens
+              Go to Sales — collect {formatCurrency(autoCustomerBalance)} with the frame / lens
             </Button>
           )}
           <Stack direction="row" spacing={1} sx={{ mt: 2 }}>

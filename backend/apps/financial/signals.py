@@ -18,6 +18,8 @@ WATCHED = [
     ('sales.WholesaleInvoice', ('sales.wholesale_invoice',), None),
     ('sales.WholesalePaymentCollection', ('sales.wholesale_collection',), None),
     ('sales.WholesaleReturn', ('sales.wholesale_return',), None),
+    ('sales.SalesReturn', ('sales.sales_return',), None),
+    ('purchasing.PurchaseReturn', ('purchasing.purchase_return',), None),
     ('purchasing.PurchaseInvoice', ('purchasing.purchase_invoice', 'purchasing.purchase_payment'), None),
     ('purchasing.PurchaseInvoiceItem', ('purchasing.purchase_invoice', 'purchasing.purchase_payment'), 'purchase_invoice_id'),
     ('purchasing.PurchaseOrder', ('purchasing.purchase_order',), None),

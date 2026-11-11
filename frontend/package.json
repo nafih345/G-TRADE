@@ -18,6 +18,8 @@
     "test:cheques": "node --test src/utils/__tests__/cheques.test.js",
     "test:purchase-labels": "node --test src/utils/__tests__/purchaseLabels.test.js",
     "test:pricing": "node --test src/utils/__tests__/pricingRules.test.js",
+    "test:currency": "node --test src/utils/__tests__/currency.test.js",
+    "test:tax": "node --test src/utils/__tests__/taxTerms.test.js",
     "test:wholesale-pricing": "node --test src/utils/__tests__/wholesalePricing.test.js",
     "test:wholesale-orders": "node --test src/utils/__tests__/wholesaleOrders.test.js",
     "test:stock-value": "node --test src/utils/__tests__/stockValue.test.js",

@@ -1,6 +1,7 @@
 // Thin client for /api/financial/. Every Financial screen reads the books from the server —
 // nothing here is cached in localStorage, because the posted ledger is the only source of truth.
 import axios from 'axios';
+import { formatCurrency } from '../../utils/localeFormat.js';
 
 export const FIN_API = '/api/financial';
 
@@ -30,7 +31,7 @@ export const newIdempotencyKey = () =>
 
 export const inr = (value) => {
   const n = parseFloat(value || 0) || 0;
-  return `₹${n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return `${formatCurrency(n)}`;
 };
 
 export const today = () => new Date().toISOString().split('T')[0];
@@ -41,6 +42,8 @@ export const SOURCE_LABELS = {
   'sales.wholesale_invoice': 'Wholesale invoice',
   'sales.wholesale_collection': 'Wholesale collection',
   'sales.wholesale_return': 'Wholesale return',
+  'sales.sales_return': 'Sales return',
+  'purchasing.purchase_return': 'Purchase return',
   'purchasing.purchase_invoice': 'Purchase entry',
   'purchasing.purchase_payment': 'Purchase payment',
   'purchasing.purchase_order': 'Purchase order',

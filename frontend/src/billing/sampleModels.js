@@ -2,6 +2,7 @@
 // Shaped like a real BillModel for each document family and flagged `isSample` so the canvas
 // can label the preview as sample data. The figures are illustrative and internally
 // consistent; the renderer never relies on them for any real document.
+import { getCurrencySymbol } from '../utils/localeFormat.js';
 
 const SAMPLE_LINES = [
   { name: 'Ray-Ban RB5154 Clubmaster Frame', brand: 'Ray-Ban', sku: 'RB5154-2000', hsn: '9003', size: '51', color: 'Black Gold', rate: 8490, taxPercent: 12, power: '' },
@@ -126,7 +127,7 @@ export function sampleBillModel(documentType = 'SALES_INVOICE', { company = {}, 
     isSample: true,
     company: {
       name: 'Your Store Name', tagline: '', address: 'Store address (Settings → Store Profile)', phone: '', email: '',
-      website: '', gstin: '', pan: '', logoDataUrl: '', currency: '₹', bankDetails: '', upiId: '',
+      website: '', gstin: '', pan: '', logoDataUrl: '', currency: getCurrencySymbol(), bankDetails: '', upiId: '',
       ...company,
     },
     document: {

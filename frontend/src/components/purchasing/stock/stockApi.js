@@ -2,6 +2,7 @@
 // Every value shown on the screen comes from these calls — nothing is cached locally, so the
 // table always reflects the database (and the stock ledger behind it).
 import axios from 'axios';
+import { formatCurrency } from '../../../utils/localeFormat.js';
 
 const BASE = '/api/inventory/stock-overview/';
 
@@ -70,8 +71,7 @@ export const STATUS_META = {
   out: { label: 'Out of Stock', color: '#b91c1c', bg: '#fee2e2', border: '#fca5a5' },
 };
 
-const inr = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-export const formatMoney = (v) => (v === null || v === undefined || v === '' ? '—' : `₹${inr.format(Number(v))}`);
+export const formatMoney = (v) => (v === null || v === undefined || v === '' ? '—' : formatCurrency(v));
 export const formatQty = (v) => (v === null || v === undefined ? '—' : Number(v).toLocaleString('en-IN'));
 export const formatDate = (iso) => {
   if (!iso) return '—';
@@ -124,4 +124,7 @@ export const STOCK_SOURCES = [
   { value: 'OPENING_STOCK', label: 'Opening Stock', countKey: 'OPENING_STOCK' },
   { value: 'EXCEL_IMPORT', label: 'Excel Imported', countKey: 'EXCEL_IMPORT' },
   { value: 'PURCHASE', label: 'Purchase / Regular', countKey: 'PURCHASE' },
+  // Products with live Sales Return (stock back in) or Purchase Return (stock sent out) lines —
+  // shown in red so returned goods stand out (apps/inventory/returns.py).
+  { value: 'RETURN', label: 'Return Stock', countKey: 'RETURN', danger: true },
 ];

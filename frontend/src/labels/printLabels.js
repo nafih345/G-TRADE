@@ -19,19 +19,26 @@ export function resolveCalibration(settings = {}) {
   };
 }
 
+// Browsers print the window <title> in the page header when "Headers and footers" is on —
+// on a 25 mm sticker that header ate half the label and pushed the barcode off the
+// bottom. Printed jobs therefore carry a blank title (zero-width space: an empty title
+// makes Chrome fall back to printing the URL instead). Preview windows keep their title.
+const BLANK_TITLE = '​';
+
 export function openPrintWindow(title, css, bodyHtml, { autoPrint = true } = {}) {
   const w = window.open('', '_blank', 'width=760,height=600');
   if (!w) return false;
+  const shownTitle = autoPrint ? BLANK_TITLE : title;
   w.document.open();
   w.document.write(
-    `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>` +
+    `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(shownTitle)}</title>` +
     `<style>${css}</style></head><body>${bodyHtml}</body></html>`
   );
   w.document.close();
   if (!autoPrint) return true;
   // Give the browser a moment to lay out SVG / fonts before the dialog snapshots the page.
   setTimeout(() => {
-    try { w.focus(); w.print(); } catch { /* user can print from the window */ }
+    try { w.document.title = BLANK_TITLE; w.focus(); w.print(); } catch { /* user can print from the window */ }
   }, 400);
   return true;
 }
@@ -40,10 +47,16 @@ function thermalCss(template, cal) {
   const W = num(template.width_mm);
   const H = num(template.height_mm);
   const pageH = H + Math.max(0, num(template.layout?.gapMm));
+  // Each sticker is one page that starts at the very top edge: zero page margins (no room
+  // for browser headers/footers), no body margin/padding, and nothing but labels printed.
   return `
-    @page { size: ${mm(W)} ${mm(pageH)}; margin: 0; }
-    html, body { margin: 0; padding: 0; background: #fff; }
-    .gl-page { width: ${mm(W)}; height: ${mm(pageH)}; position: relative; overflow: hidden;
+    @page { size: ${mm(W)} ${mm(pageH)}; margin: 0 !important; }
+    html, body { margin: 0 !important; padding: 0 !important; background: #fff; width: ${mm(W)}; }
+    @media print {
+      html, body { margin: 0 !important; padding: 0 !important; width: ${mm(W)}; }
+      body > :not(.gl-page), h1, h2, h3, h4, header, .gl-noprint { display: none !important; }
+    }
+    .gl-page { width: ${mm(W)}; height: ${mm(pageH)}; position: relative; overflow: hidden; box-sizing: border-box; margin: 0;
       page-break-after: always; break-after: page; page-break-inside: avoid; break-inside: avoid; }
     .gl-page:last-child { page-break-after: auto; break-after: auto; }
     .gl-shift { position: absolute; left: ${mm(cal.hOffsetMm)}; top: ${mm(cal.vOffsetMm)};
@@ -54,8 +67,9 @@ function thermalCss(template, cal) {
 function a4Css(template, cal) {
   const s = template.layout?.sheet || {};
   return `
-    @page { size: A4 portrait; margin: 0; }
-    html, body { margin: 0; padding: 0; background: #fff; }
+    @page { size: A4 portrait; margin: 0 !important; }
+    html, body { margin: 0 !important; padding: 0 !important; background: #fff; }
+    @media print { body > :not(.gl-sheet) { display: none !important; } }
     .gl-sheet { width: 210mm; height: 297mm; position: relative; overflow: hidden;
       page-break-after: always; break-after: page; }
     .gl-sheet:last-child { page-break-after: auto; break-after: auto; }

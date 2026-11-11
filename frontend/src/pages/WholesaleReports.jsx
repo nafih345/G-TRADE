@@ -34,20 +34,21 @@ import {
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer
 } from 'recharts';
+import { formatCurrency, getTaxLabel, getTaxRegLabel, isGstSplit } from '../utils/localeFormat.js';
 
 // ---- Report sections available in this hub ----
 const REPORT_TABS = [
   { id: 'sales-register', name: 'Sales Register', icon: <InvoiceIcon /> },
   { id: 'customer-summary', name: 'Customer Summary', icon: <CustomerIcon /> },
   { id: 'product-movement', name: 'Product Movement', icon: <ProductIcon /> },
-  { id: 'gst-summary', name: 'GST Summary', icon: <GstIcon /> },
+  { id: 'gst-summary', get name() { return `${getTaxLabel()} Summary`; }, icon: <GstIcon /> },
   { id: 'outstanding', name: 'Outstanding / Receivables', icon: <OutstandingIcon /> }
 ];
 
 const DATE_RANGES = ['Today', 'This Week', 'This Month', 'This Quarter', 'This Year', 'All Time'];
 
-const inr = (n) => `₹${(parseFloat(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const inr0 = (n) => `₹${Math.round(parseFloat(n) || 0).toLocaleString('en-IN')}`;
+const inr = (n) => `${formatCurrency(parseFloat(n) || 0)}`;
+const inr0 = (n) => `${formatCurrency(Math.round(parseFloat(n) || 0))}`;
 
 // Resolve the start Date for a named range (end is always "now").
 function rangeStart(range) {
@@ -318,16 +319,16 @@ export default function WholesaleReports() {
     let headers = [];
     let rows = [];
     if (activeTab === 'sales-register') {
-      headers = ['Invoice No', 'Date', 'Customer', 'Code', 'Items', 'Qty', 'Taxable', 'Discount', 'GST', 'Grand Total', 'Paid', 'Due', 'Pay Mode', 'Status'];
+      headers = ['Invoice No', 'Date', 'Customer', 'Code', 'Items', 'Qty', 'Taxable', 'Discount', getTaxLabel(), 'Grand Total', 'Paid', 'Due', 'Pay Mode', 'Status'];
       rows = invoices.map(i => [i.invoiceNo, i.date, i.customerName, i.customerCode, i.lineCount, i.totalQty, i.taxable.toFixed(2), i.discount.toFixed(2), i.gst.toFixed(2), i.grandTotal.toFixed(2), i.paid.toFixed(2), i.due.toFixed(2), i.payMode, i.status]);
     } else if (activeTab === 'customer-summary') {
-      headers = ['Customer', 'Code', 'Sales Exec', 'Invoices', 'Qty', 'Taxable', 'GST', 'Total', 'Due'];
+      headers = ['Customer', 'Code', 'Sales Exec', 'Invoices', 'Qty', 'Taxable', getTaxLabel(), 'Total', 'Due'];
       rows = customerSummary.map(c => [c.customerName, c.customerCode, c.salesExec, c.invoices, c.qty, c.taxable.toFixed(2), c.gst.toFixed(2), c.total.toFixed(2), c.due.toFixed(2)]);
     } else if (activeTab === 'product-movement') {
-      headers = ['Code', 'Product', 'Brand', 'Category', 'Qty Sold', 'Gross', 'GST', 'Total'];
+      headers = ['Code', 'Product', 'Brand', 'Category', 'Qty Sold', 'Gross', getTaxLabel(), 'Total'];
       rows = productMovement.map(p => [p.code, p.name, p.brand, p.category, p.qty, p.gross.toFixed(2), p.gst.toFixed(2), p.total.toFixed(2)]);
     } else if (activeTab === 'gst-summary') {
-      headers = ['GST Rate %', 'Taxable Value', 'CGST', 'SGST', 'Total Tax'];
+      headers = isGstSplit() ? ['GST Rate %', 'Taxable Value', 'CGST', 'SGST', 'Total Tax'] : [`${getTaxLabel()} Rate %`, 'Taxable Value', 'Total Tax'];
       rows = gstSummary.map(g => [g.rate, g.taxable.toFixed(2), g.cgst.toFixed(2), g.sgst.toFixed(2), g.total.toFixed(2)]);
     } else {
       headers = ['Customer', 'Code', 'Sales Exec', 'Credit Limit', 'Credit Days', 'Outstanding', 'Last Purchase'];
@@ -368,7 +369,7 @@ export default function WholesaleReports() {
               Wholesale Reports & Analytics
             </Typography>
             <Typography variant="caption" color="text.secondary" fontWeight={600}>
-              B2B Sales Register, Customer Ledger, Stock Movement, GST & Receivables
+              B2B Sales Register, Customer Ledger, Stock Movement, {getTaxLabel()} & Receivables
             </Typography>
           </Box>
         </Stack>
@@ -391,7 +392,7 @@ export default function WholesaleReports() {
         <Grid container spacing={2} alignItems="center">
           <Grid item xs={12} sm={6} md={4}>
             <TextField
-              fullWidth size="small" placeholder="Search invoice no, customer, GSTIN..."
+              fullWidth size="small" placeholder={`Search invoice no, customer, ${getTaxRegLabel()}...`}
               value={search} onChange={(e) => setSearch(e.target.value)}
               InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon sx={{ fontSize: 18 }} /></InputAdornment> }}
             />
@@ -431,7 +432,7 @@ export default function WholesaleReports() {
         {[
           { label: 'WHOLESALE REVENUE', value: inr0(kpi.revenue), sub: `${kpi.count} invoices`, color: '#2563eb' },
           { label: 'UNITS DISPATCHED', value: kpi.units.toLocaleString('en-IN'), sub: `Avg ticket ${inr0(kpi.avgTicket)}`, color: '#0891b2' },
-          { label: 'GST COLLECTED', value: inr0(kpi.gst), sub: `Taxable ${inr0(kpi.taxable)}`, color: '#d97706' },
+          { label: `${getTaxLabel().toUpperCase()} COLLECTED`, value: inr0(kpi.gst), sub: `Taxable ${inr0(kpi.taxable)}`, color: '#d97706' },
           { label: 'DISCOUNT GIVEN', value: inr0(kpi.discount), sub: 'On wholesale rates', color: '#7c3aed' },
           { label: 'OUTSTANDING DUE', value: inr0(kpi.due), sub: 'Unpaid on filtered bills', color: '#dc2626' }
         ].map((c) => (
@@ -463,7 +464,7 @@ export default function WholesaleReports() {
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                 <XAxis dataKey="date" tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} width={70} tickFormatter={(v) => `₹${(v / 1000).toFixed(0)}k`} />
+                <YAxis tick={{ fontSize: 11 }} width={70} tickFormatter={(v) => `${formatCurrency(v / 1000, { decimals: 0 })}k`} />
                 <RechartsTooltip formatter={(v) => inr0(v)} />
                 <Area type="monotone" dataKey="value" stroke="#4f46e5" strokeWidth={2} fill="url(#wsRev)" />
               </AreaChart>
@@ -522,7 +523,7 @@ export default function WholesaleReports() {
                     <TableCell align="center">Qty</TableCell>
                     <TableCell align="right">Taxable</TableCell>
                     <TableCell align="right">Discount</TableCell>
-                    <TableCell align="right">GST</TableCell>
+                    <TableCell align="right">{getTaxLabel()}</TableCell>
                     <TableCell align="right">Grand Total</TableCell>
                     <TableCell align="right">Due</TableCell>
                     <TableCell>Pay Mode</TableCell>
@@ -587,7 +588,7 @@ export default function WholesaleReports() {
                     <TableCell align="center">Invoices</TableCell>
                     <TableCell align="center">Qty</TableCell>
                     <TableCell align="right">Taxable</TableCell>
-                    <TableCell align="right">GST</TableCell>
+                    <TableCell align="right">{getTaxLabel()}</TableCell>
                     <TableCell align="right">Total Business</TableCell>
                     <TableCell align="right">Outstanding</TableCell>
                   </TableRow>
@@ -671,7 +672,7 @@ export default function WholesaleReports() {
                     <TableCell>Category</TableCell>
                     <TableCell align="center">Qty Sold</TableCell>
                     <TableCell align="right">Gross</TableCell>
-                    <TableCell align="right">GST</TableCell>
+                    <TableCell align="right">{getTaxLabel()}</TableCell>
                     <TableCell align="right">Total</TableCell>
                   </TableRow>
                 </TableHead>
@@ -697,10 +698,10 @@ export default function WholesaleReports() {
               <Table size="small" sx={{ minWidth: 640 }}>
                 <TableHead sx={{ '& th': { bgcolor: '#f1f5f9', fontWeight: 850, whiteSpace: 'nowrap' } }}>
                   <TableRow>
-                    <TableCell>GST Slab</TableCell>
+                    <TableCell>{getTaxLabel()} Slab</TableCell>
                     <TableCell align="right">Taxable Value</TableCell>
-                    <TableCell align="right">CGST</TableCell>
-                    <TableCell align="right">SGST</TableCell>
+                    {isGstSplit() && <TableCell align="right">CGST</TableCell>}
+                    {isGstSplit() && <TableCell align="right">SGST</TableCell>}
                     <TableCell align="right">Total Tax</TableCell>
                   </TableRow>
                 </TableHead>
@@ -709,8 +710,8 @@ export default function WholesaleReports() {
                     <TableRow key={g.rate} hover>
                       <TableCell sx={{ fontWeight: 800 }}>{g.rate}%</TableCell>
                       <TableCell align="right">{inr(g.taxable)}</TableCell>
-                      <TableCell align="right">{inr(g.cgst)}</TableCell>
-                      <TableCell align="right">{inr(g.sgst)}</TableCell>
+                      {isGstSplit() && <TableCell align="right">{inr(g.cgst)}</TableCell>}
+                      {isGstSplit() && <TableCell align="right">{inr(g.sgst)}</TableCell>}
                       <TableCell align="right" sx={{ fontWeight: 850, color: '#b45309' }}>{inr(g.total)}</TableCell>
                     </TableRow>
                   ))}
@@ -719,8 +720,8 @@ export default function WholesaleReports() {
                   <TableRow sx={{ '& td': { fontWeight: 900, color: '#0f172a', borderTop: '2px solid #e2e8f0', fontSize: '0.85rem' } }}>
                     <TableCell>TOTAL</TableCell>
                     <TableCell align="right">{inr(gstSummary.reduce((a, g) => a + g.taxable, 0))}</TableCell>
-                    <TableCell align="right">{inr(gstSummary.reduce((a, g) => a + g.cgst, 0))}</TableCell>
-                    <TableCell align="right">{inr(gstSummary.reduce((a, g) => a + g.sgst, 0))}</TableCell>
+                    {isGstSplit() && <TableCell align="right">{inr(gstSummary.reduce((a, g) => a + g.cgst, 0))}</TableCell>}
+                    {isGstSplit() && <TableCell align="right">{inr(gstSummary.reduce((a, g) => a + g.sgst, 0))}</TableCell>}
                     <TableCell align="right" sx={{ color: '#b45309' }}>{inr(gstSummary.reduce((a, g) => a + g.total, 0))}</TableCell>
                   </TableRow>
                 </TableFooter>
@@ -803,7 +804,7 @@ export default function WholesaleReports() {
                   <Typography variant="caption" color="text.secondary" fontWeight={700} display="block">Billed To</Typography>
                   <Typography variant="subtitle2" fontWeight={850}>{detailInvoice.customerName}</Typography>
                   <Typography variant="caption" display="block">Code: {detailInvoice.customerCode || 'N/A'}</Typography>
-                  <Typography variant="caption" display="block">GSTIN: {detailInvoice.customerGstin || 'N/A'}</Typography>
+                  <Typography variant="caption" display="block">{getTaxRegLabel()}: {detailInvoice.customerGstin || 'N/A'}</Typography>
                 </Grid>
                 <Grid item xs={12} sm={6} sx={{ textAlign: { sm: 'right' } }}>
                   <Typography variant="caption" display="block">Date: {detailInvoice.date}</Typography>
@@ -826,7 +827,7 @@ export default function WholesaleReports() {
                       <TableCell align="center">Qty</TableCell>
                       <TableCell align="right">Rate</TableCell>
                       <TableCell align="center">Disc %</TableCell>
-                      <TableCell align="center">GST %</TableCell>
+                      <TableCell align="center">{getTaxLabel()} %</TableCell>
                       <TableCell align="right">Total</TableCell>
                     </TableRow>
                   </TableHead>
@@ -857,7 +858,7 @@ export default function WholesaleReports() {
               <Stack spacing={0.6} sx={{ mt: 2, alignItems: 'flex-end' }}>
                 <Typography variant="caption">Subtotal: {inr(detailInvoice.subtotal)}</Typography>
                 <Typography variant="caption" sx={{ color: '#dc2626' }}>Discount: −{inr(detailInvoice.discount)}</Typography>
-                <Typography variant="caption" sx={{ color: '#b45309' }}>GST: +{inr(detailInvoice.gst)}</Typography>
+                <Typography variant="caption" sx={{ color: '#b45309' }}>{getTaxLabel()}: +{inr(detailInvoice.gst)}</Typography>
                 <Divider sx={{ width: 180 }} />
                 <Typography variant="subtitle1" fontWeight={900} color="primary.main">Grand Total: {inr(detailInvoice.grandTotal)}</Typography>
                 <Typography variant="caption" sx={{ color: detailInvoice.due > 0 ? '#dc2626' : '#059669' }}>

@@ -4,6 +4,7 @@ import { ThemeProvider, CssBaseline, Box, Typography, LinearProgress, useMediaQu
 import { getTheme } from './theme/theme';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { BranchProvider } from './context/BranchContext';
+import { SettingsProvider } from './context/SettingsContext';
 import Sidebar from './components/Sidebar';
 import Header from './components/Header';
 import NotificationHost from './components/NotificationHost';
@@ -11,6 +12,12 @@ import EditPermissionHost from './components/EditPermissionHost';
 import ReauthDialogHost from './components/security/ReauthDialogHost';
 import SessionActivityMonitor from './components/security/SessionActivityMonitor';
 import { loadBusinessPrefs } from './utils/businessPrefs';
+import { BUSINESS_PREFS_EVENT, getBusinessPrefs, getCurrencySymbol } from './utils/localeFormat.js';
+
+const moneyFormatKey = () => {
+  const p = getBusinessPrefs();
+  return [getCurrencySymbol(), p.currency_decimals, p.number_format, p.show_currency_symbol, p.country, p.tax_enabled].join('|');
+};
 import BackendStatusBanner from './components/BackendStatusBanner';
 import WorkspaceBanner from './components/WorkspaceBanner';
 import Login from './pages/Login';
@@ -82,6 +89,17 @@ function MainLayout() {
   // retried after signing in.)
   const prefsUserKey = user ? `${user.id || user.username}:${user.tenant_id ?? ''}` : null;
   useEffect(() => { if (prefsUserKey) loadBusinessPrefs(); }, [prefsUserKey]);
+
+  // Currency / number format / tax name + tax switch saved in Settings apply everywhere at once: re-render the open
+  // screen (amounts are formatted from the global copy at render time). Keyed on the
+  // display-relevant fields so unrelated preference saves don't re-render the app.
+  // (billing/billingContext.js drops its own cached store profile on the same event.)
+  const [, setMoneyKey] = useState(moneyFormatKey);
+  useEffect(() => {
+    const onPrefs = () => setMoneyKey(moneyFormatKey());
+    window.addEventListener(BUSINESS_PREFS_EVENT, onPrefs);
+    return () => window.removeEventListener(BUSINESS_PREFS_EVENT, onPrefs);
+  }, []);
 
   // 🚀 GLOBAL ENTER KEY SMART HANDLER (Form navigation, modal submission & search execution)
   useEffect(() => {
@@ -241,6 +259,7 @@ function MainLayout() {
                 <Route path="/sales/orders" element={<SalesInvoice />} />
                 <Route path="/sales/customers" element={<SalesInvoice />} />
                 <Route path="/sales/payments" element={<SalesInvoice />} />
+                <Route path="/sales/returns" element={<SalesInvoice />} />
                 <Route path="/sales/reports" element={<SalesInvoice />} />
 
                 {/* Wholesale Sub-Routes */}
@@ -409,9 +428,11 @@ export default function App() {
   return (
     <AuthProvider>
       <BranchProvider>
-        <Router>
-          <MainLayout />
-        </Router>
+        <SettingsProvider>
+          <Router>
+            <MainLayout />
+          </Router>
+        </SettingsProvider>
       </BranchProvider>
     </AuthProvider>
   );

@@ -7,7 +7,7 @@
 // comes pre-computed from documentAdapters.js.
 import JsBarcode from 'jsbarcode';
 import QRCode from 'qrcode';
-import { formatMoney, formatDate } from '../utils/localeFormat.js';
+import { formatMoney, formatDate, getCurrencySymbol, getTaxLabel, getTaxRegLabel, isTaxEnabled, isGstSplit, taxText } from '../utils/localeFormat.js';
 import { unitWord } from '../utils/lensUnits.js';
 import { billLabel as L, billLabelText, billHtmlAttrs, BILL_I18N_CSS } from './billI18n.js';
 
@@ -47,7 +47,7 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => (
 
 // A missing amount prints blank — never as a made-up 0.00. Grouping, decimals and whether the
 // symbol shows follow Settings → Business & Localization.
-function money(v, currency = '₹') {
+function money(v, currency = getCurrencySymbol()) {
   const n = v === null || v === undefined || v === '' ? NaN : parseFloat(v);
   if (!Number.isFinite(n)) return '';
   return formatMoney(n, { symbol: currency });
@@ -172,12 +172,13 @@ function buildTotalsRows(model, cfg, currency) {
   wanted.forEach((key) => {
     const meta = TOTALS_META[key];
     if (!meta) return;
+    if ((key === 'cgst' || key === 'sgst' || key === 'igst') && !isGstSplit()) return; // India-only split
     const raw = model.totals[key];
     const n = parseFloat(raw);
     if (!Number.isFinite(n)) return;
     if (n === 0 && !ALWAYS_TOTALS.has(key)) return;
     const value = meta.negative && n > 0 ? `- ${money(n, currency)}` : money(n, currency);
-    rows.push({ ...meta, key, value });
+    rows.push({ ...meta, label: key === 'tax' ? getTaxLabel() : meta.label, key, value });
   });
   return rows;
 }
@@ -200,7 +201,7 @@ function renderCompany(model, cfg, thermal) {
   if (cfg.showWebsite && c.website) contact.push(esc(c.website));
   if (contact.length) lines.push(contact.join(' &nbsp;|&nbsp; '));
   const reg = [];
-  if (cfg.showGstin && c.gstin) reg.push(`GSTIN: ${esc(c.gstin)}`);
+  if (cfg.showGstin && c.gstin && isTaxEnabled()) reg.push(`${L(getTaxRegLabel())}: ${esc(c.gstin)}`);
   if (cfg.showPan && c.pan) reg.push(`PAN: ${esc(c.pan)}`);
   if (reg.length) lines.push(reg.join(' &nbsp;|&nbsp; '));
 
@@ -226,7 +227,7 @@ function renderCompany(model, cfg, thermal) {
   }
   // split layout: identity block on the logo's side, address block opposite
   const identity = `<td style="vertical-align:top;text-align:${override === 'right' ? 'right' : 'left'};">${logo}${nameHtml}${taglineHtml}
-      ${cfg.showGstin && c.gstin ? `<div class="co-line">GSTIN: ${esc(c.gstin)}${cfg.showPan && c.pan ? ` | PAN: ${esc(c.pan)}` : ''}</div>` : ''}
+      ${cfg.showGstin && c.gstin && isTaxEnabled() ? `<div class="co-line">${L(getTaxRegLabel())}: ${esc(c.gstin)}${cfg.showPan && c.pan ? ` | PAN: ${esc(c.pan)}` : ''}</div>` : ''}
     </td>`;
   const contactTd = `<td style="vertical-align:top;text-align:${override === 'right' ? 'left' : 'right'};">
       ${cfg.showAddress && c.address ? `<div class="co-line">${esc(c.address)}</div>` : ''}
@@ -285,7 +286,7 @@ function renderCustomer(model, cfg, thermal) {
   if (cfg.showName !== false && c.name) lines.push(`<strong>${esc(c.name)}</strong>`);
   if (cfg.showPhone && c.phone) lines.push(esc(c.phone));
   if (cfg.showAddress && c.address) lines.push(esc(c.address));
-  if (cfg.showGstin && c.gstin) lines.push(`GSTIN: ${esc(c.gstin)}`);
+  if (cfg.showGstin && c.gstin && isTaxEnabled()) lines.push(`${L(getTaxRegLabel())}: ${esc(c.gstin)}`);
   if (cfg.showEmail && c.email) lines.push(esc(c.email));
   if (!lines.length) return '';
   return `<div class="sec customer">
@@ -295,10 +296,12 @@ function renderCustomer(model, cfg, thermal) {
 }
 
 function renderItems(model, cfg, thermal, currency) {
-  const cols = (cfg.columns || []).filter((c) => c.enabled);
+  // Tax switched off hides the tax column — unless this document was billed with tax.
+  const hideTax = !isTaxEnabled() && !(parseFloat(model.totals?.tax) > 0);
+  const cols = (cfg.columns || []).filter((c) => c.enabled && !(hideTax && c.key === 'tax'));
   if (!cols.length || !model.items.length) return '';
   const head = `<tr>${cols.map((c) =>
-    `<th style="text-align:${c.align || 'left'};">${L(c.label, { stack: true })}</th>`).join('')}</tr>`;
+    `<th style="text-align:${c.align || 'left'};">${L(taxText(c.label), { stack: true })}</th>`).join('')}</tr>`;
   const body = model.items.map((item, idx) => {
     const tds = cols.map((c) => {
       let val = columnValue(c.key, item, idx, currency);
@@ -507,7 +510,7 @@ export function renderBillHtml(template, model, opts = {}) {
   const assets = opts.assets || { barcodeDataUrl: '', qrDataUrl: '' };
   const thermal = isThermalTemplate(template);
   const styles = { ...(template?.config?.styles || {}) };
-  const currency = model.company.currency || '₹';
+  const currency = model.company.currency || getCurrencySymbol();
   const sections = template?.config?.sections || [];
 
   const bodyInner = sections

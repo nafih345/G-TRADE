@@ -97,6 +97,7 @@ import {
   DOC_KINDS, STATUS_META, docFromApi, isOpenDoc, orderLineToCartLine, combineReservations,
 } from './wholesale/wholesaleOrders';
 import { useCanViewCost } from '../utils/costVisibility';
+import { currencyPrefix, formatCurrency, getCurrencySymbol, isTaxEnabled, getTaxLabel, getTaxRegLabel, effectiveTaxPercent } from '../utils/localeFormat.js';
 
 // One "label: value" row used in the credit panel.
 function SummaryLine({ label, value, valueColor, dense }) {
@@ -200,6 +201,9 @@ const isNearExpiry = (dateStr) => {
 };
 
 export default function WholesaleSales() {
+  // Tax Configuration: switched off → every new line is 0% and the tax column / rows are hidden.
+  const taxOn = isTaxEnabled();
+  const taxLabel = getTaxLabel();
   const viewCost = useCanViewCost();
   const location = useLocation();
   const navigate = useNavigate();
@@ -567,7 +571,7 @@ export default function WholesaleSales() {
         schemeLabel = `Promo ${invoiceDiscount.value}%`;
       } else if (schemeActive && invoiceDiscount.type === 'FIXED') {
         schemeDiscount = Math.min(netAfterProductDiscount, parseFloat(invoiceDiscount.value) || 0);
-        schemeLabel = `Flat ₹${invoiceDiscount.value}`;
+        schemeLabel = `Flat ${currencyPrefix()}${invoiceDiscount.value}`;
       } else if (invoiceDiscount.type === 'SCHEME') {
         schemeDiscount = invoiceDiscount.valueKind === 'FIXED'
           ? Math.min(netAfterProductDiscount, parseFloat(invoiceDiscount.value) || 0)
@@ -602,8 +606,9 @@ export default function WholesaleSales() {
       const lineTaxable = t.gross * factor;
       return acc + (lineTaxable * ((parseFloat(item.gst) || 0) / 100));
     }, 0);
-    // Taxable additional charges are assumed GST-18% (matches the rest of this module's default rate).
-    const chargesGst = taxableCharges * 0.18;
+    // Taxable additional charges are assumed 18% (matches the rest of this module's default rate);
+    // nothing while tax is switched off.
+    const chargesGst = taxableCharges * (effectiveTaxPercent(18) / 100);
     const totalGst = productGst + chargesGst;
     // Per-slab view (0% / exempt lines included) for the GST tooltip and the zero-tax row.
     const { slabs: gstBreakup, zeroTaxValue } = taxBreakup(cartItems, factor, computeLineTotals);
@@ -778,7 +783,7 @@ export default function WholesaleSales() {
       priceTier: tier,
       discount: 0,
       // `prod.gst || 18` turned every 0% (zero-tax) product into 18%.
-      gst: parseTaxPercent(prod.gst) ?? 18,
+      gst: effectiveTaxPercent(parseTaxPercent(prod.gst) ?? 18),
       taxCategory: prod.taxCategory || '',
       // Price hierarchy snapshot (reference only — never billed): cost for margin, MRP benchmark.
       costPrice: parseFloat(prod.costPrice ?? prod.purchasePrice ?? 0) || 0,
@@ -788,7 +793,7 @@ export default function WholesaleSales() {
       isFreeGift: false,
     };
     // List prices follow the product's tax treatment (Tax master Inclusive / Exclusive).
-    return pricedLine(line, rate, Boolean(prod.taxInclusive));
+    return pricedLine(line, rate, Boolean(prod.taxInclusive) && isTaxEnabled());
   };
 
   // Typed price / tax from the bulk entry: tax first so an inclusive price is split on the
@@ -797,7 +802,7 @@ export default function WholesaleSales() {
     if (!overrides) return line;
     const { rate, gst, ...rest } = overrides;
     let next = { ...line, ...rest };
-    if (gst !== undefined) next = setLineTax(next, gst);
+    if (gst !== undefined) next = setLineTax(next, effectiveTaxPercent(gst));
     if (rate !== undefined && rate !== shownPrice(line)) next = { ...setLinePrice(next, rate), priceTier: 'CUSTOM' };
     return next;
   };
@@ -834,7 +839,7 @@ export default function WholesaleSales() {
       name: svc.name, brand: '', category: 'SERVICE', modelNo: '', color: '', size: '', power: '',
       lensType: '', cylinder: '', axis: '', batch: '', expiry: '', hsn: '', image: '', unit: 'Nos',
       availableStock: null, qty: parseFloat(qty) || 1, freeQty: 0,
-      rate: svc.price, priceTier: 'CUSTOM', discount: 0, gst: svc.gst,
+      rate: svc.price, priceTier: 'CUSTOM', discount: 0, gst: effectiveTaxPercent(svc.gst),
       notes: svc.description || '', isFreeGift: false,
       ...overrides,
     }]);
@@ -1191,7 +1196,7 @@ export default function WholesaleSales() {
         dealerDiscountPercent: parseFloat(newDealer.dealerDiscountPercent) || 0,
         creditLimit: parseFloat(newDealer.creditLimit) || 100000, outstanding: 0, openingBalance: 0,
         creditDays: parseInt(newDealer.creditDays) || 30, salesExec: newDealer.salesExec || 'Default Exec',
-        lastPurchaseDate: new Date().toISOString().split('T')[0], totalPurchases: '₹ 0',
+        lastPurchaseDate: new Date().toISOString().split('T')[0], totalPurchases: `${getCurrencySymbol()} 0`,
       };
       const updated = [createdCust, ...customers];
       setCustomers(updated);
@@ -1551,7 +1556,7 @@ export default function WholesaleSales() {
     if (expiredLine && !canOverride) return { msg: `${expiredLine.name} has expired stock (batch ${expiredLine.batch || '—'}). Only Managers/Admins can override an expired sale.` };
     if (delivery.type !== 'Pickup' && !String(delivery.address || '').trim()) return { msg: 'Please provide a shipping address for this delivery method (Alt+D).', focus: 'ws-ship-address' };
     if (payMode === 'Split Payment' && Math.abs(splitTotal - summary.grandTotal) > 0.5) {
-      return { msg: `Split payment total (₹${splitTotal.toFixed(2)}) must equal the Net Payable (₹${summary.grandTotal.toFixed(2)}).`, focus: 'ws-pay-mode' };
+      return { msg: `Split payment total (${formatCurrency(splitTotal)}) must equal the Net Payable (${formatCurrency(summary.grandTotal)}).`, focus: 'ws-pay-mode' };
     }
     if (payMode === 'Cash' && amountReceived !== '' && !(parseFloat(amountReceived) >= 0)) return { msg: 'Amount Paid must be a number of 0 or more.', focus: 'ws-amount-paid' };
     return null;
@@ -1965,7 +1970,7 @@ export default function WholesaleSales() {
     writeLS(LS_KEYS.creditNotes, [{ id: record.returnNo, noteNo: record.returnNo, date: record.date, invoiceNo: printableInvoice.invoiceNo, customer: printableInvoice.customer, amount, reason }, ...notes]);
     adjustDealerOutstanding(printableInvoice.customer, -amount);
     setCreditNoteOpen(false);
-    showToast(`Credit note ${record.returnNo} created for ₹${amount.toLocaleString('en-IN')}.`, 'success');
+    showToast(`Credit note ${record.returnNo} created for ${formatCurrency(amount)}.`, 'success');
   }
 
   // Record Payment (dealer ledger) — posts a real WholesalePaymentCollection row and reduces
@@ -1995,8 +2000,8 @@ export default function WholesaleSales() {
     adjustDealerOutstanding(selectedCustomer, -amount);
     setRecordPaymentOpen(false);
     showToast(offline
-      ? `Payment of ₹${amount.toLocaleString('en-IN')} kept on this device only (${receiptNo}) — the server could not be reached.`
-      : `Payment of ₹${amount.toLocaleString('en-IN')} recorded (${receiptNo}).`, offline ? 'warning' : 'success');
+      ? `Payment of ${formatCurrency(amount)} kept on this device only (${receiptNo}) — the server could not be reached.`
+      : `Payment of ${formatCurrency(amount)} recorded (${receiptNo}).`, offline ? 'warning' : 'success');
   }
 
   // The trailing "Add New Dealer" row keeps dealer creation reachable with ArrowDown + Enter.
@@ -2179,7 +2184,7 @@ export default function WholesaleSales() {
     ? ([selectedCustomer.city, selectedCustomer.state, selectedCustomer.pincode].filter(Boolean).join(', ') || selectedCustomer.shippingAddress || selectedCustomer.billingAddress || '')
     : '';
   const showPowerCol = cartItems.some(i => cellText(i.power));
-  const gridColCount = showPowerCol ? 17 : 16;
+  const gridColCount = (showPowerCol ? 17 : 16) - (taxOn ? 0 : 1);
   const totalPaid = paymentCalc.paidNow;
   const balanceDue = paymentCalc.dueAmount;
   const changeDue = paymentCalc.balanceAmount;
@@ -2390,7 +2395,7 @@ export default function WholesaleSales() {
                   <TextField
                     {...params}
                     size="small"
-                    placeholder="Search name, code, phone, GSTIN, email…"
+                    placeholder={`Search name, code, phone, ${getTaxRegLabel()}, email…`}
                     onKeyDown={(e) => {
                       // "+" on an empty search = Add New Dealer ("+91..." can still be typed after a digit).
                       if (e.key === '+' && !e.target.value) { e.preventDefault(); openNewDealer(); }
@@ -2473,7 +2478,7 @@ export default function WholesaleSales() {
                   <DealerField label="Phone" value={selectedCustomer.phone} />
                   <DealerField label="Email" value={selectedCustomer.email} />
                   <DealerField label="Location" value={dealerLocation} />
-                  <DealerField label="GSTIN" value={selectedCustomer.gstin} />
+                  <DealerField label={getTaxRegLabel()} value={selectedCustomer.gstin} />
                   <DealerField label="Credit Limit" value={fmtINR(selectedCustomer.creditLimit)} />
                   <DealerField label="Outstanding" value={fmtINR(selectedCustomer.outstanding)} color={outstandingColor} />
                   <DealerField label="Available Credit" value={fmtINR(availableCredit)} color="#059669" />
@@ -2643,7 +2648,7 @@ export default function WholesaleSales() {
                 <TableCell align="right" sx={HEAD_CELL_SX}>MRP</TableCell>
                 <TableCell align="center" sx={HEAD_CELL_SX}>Unit Price</TableCell>
                 <TableCell align="center" sx={HEAD_CELL_SX}>Disc %</TableCell>
-                <TableCell align="center" sx={HEAD_CELL_SX}>Tax %</TableCell>
+                {taxOn && <TableCell align="center" sx={HEAD_CELL_SX}>{taxLabel} %</TableCell>}
                 <TableCell align="right" sx={HEAD_CELL_SX}>Line Total</TableCell>
                 <TableCell align="center" sx={HEAD_CELL_SX}>Action</TableCell>
               </TableRow>
@@ -2667,7 +2672,7 @@ export default function WholesaleSales() {
                 const svc = itemMode === 'service';
                 const stock = svc ? null : (parseFloat(p.availableStock ?? p.stock ?? 0) || 0) + heldFor(p.id);
                 const price = svc ? (parseFloat(p.price) || 0) : priceForProduct(p).rate;
-                const tax = parseTaxPercent(p.gst) ?? 0;
+                const tax = effectiveTaxPercent(parseTaxPercent(p.gst) ?? 0);
                 const previewLine = pricedLine({ qty: 1, discount: 0, gst: tax }, price, Boolean(p.taxInclusive));
                 const inBill = cartItems.find(it => !it.isFreeGift && (svc ? isServiceLine(it) : !isServiceLine(it)) && it.id === p.id);
                 return (
@@ -2718,9 +2723,11 @@ export default function WholesaleSales() {
                       {!svc && p.taxInclusive && <Typography component="span" sx={{ fontSize: '0.58rem', color: '#64748b', ml: 0.3 }}>incl.</Typography>}
                     </TableCell>
                     <TableCell align="center" sx={{ color: '#94a3b8' }}>0%</TableCell>
+                    {taxOn && (
                     <TableCell align="center" sx={{ color: '#0f766e', fontWeight: 700 }}>
                       {tax}%{tax === 0 && <Typography component="span" sx={{ fontSize: '0.58rem', color: '#64748b', ml: 0.3 }}>{zeroTaxLabel(0, p.taxCategory)}</Typography>}
                     </TableCell>
+                    )}
                     <TableCell align="right" sx={{ fontWeight: 900, color: '#2563eb' }}>{fmtINR(computeLineTotals(previewLine).total)}</TableCell>
                     <TableCell align="center">
                       {active
@@ -2865,9 +2872,10 @@ export default function WholesaleSales() {
                           />
                         </Tooltip>
                       </TableCell>
+                      {taxOn && (
                       <TableCell align="center" onClick={(e) => e.stopPropagation()}>
                         {canOverride ? (
-                          <Tooltip title={errs.gst || (zeroTag ? `${zeroTag} — no GST on this line` : `GST ${fmtINR(t.gst)}`)} placement="top">
+                          <Tooltip title={errs.gst || (zeroTag ? `${zeroTag} — no ${taxLabel} on this line` : `${taxLabel} ${fmtINR(t.gst)}`)} placement="top">
                             <TextField
                               size="small" type="number" value={zeroAsBlank(item.gst)} placeholder="0" error={Boolean(errs.gst)}
                               onChange={(e) => handleUpdateItemField(idx, 'gst', typedNumber(e.target.value))}
@@ -2890,6 +2898,7 @@ export default function WholesaleSales() {
                           </Box>
                         </Stack>
                       </TableCell>
+                      )}
                       <TableCell align="right" sx={{ fontWeight: '900 !important', color: 'primary.main' }}>{fmtINR(t.total)}</TableCell>
                       <TableCell align="center" onClick={(e) => e.stopPropagation()} sx={{ whiteSpace: 'nowrap' }}>
                         <Tooltip title="Line details — free qty, batch, expiry, note">
@@ -2940,7 +2949,7 @@ export default function WholesaleSales() {
           <Typography variant="caption" fontWeight={800} color="#475569">
             {summary.totalItems} line{summary.totalItems === 1 ? '' : 's'} · {summary.totalQty} unit{summary.totalQty === 1 ? '' : 's'}{summary.totalFreeQty ? ` + ${summary.totalFreeQty} free` : ''}
           </Typography>
-          {cartItems.length > 0 && (() => {
+          {taxOn && cartItems.length > 0 && (() => {
             const allIncl = cartItems.every(it => it.taxInclusive);
             const allExcl = cartItems.every(it => !it.taxInclusive);
             return (
@@ -2976,7 +2985,8 @@ export default function WholesaleSales() {
               <SumRow label="Item Discount" value={`−${fmtINR(summary.productDiscount)}`} color="#dc2626" />
               <SumRow label="Scheme Discount" value={`−${fmtINR(summary.schemeDiscount)}`} color="#dc2626" />
               <SumRow label="Taxable Amount" value={fmtINR(summary.taxableAmount)} />
-              {summary.zeroTaxValue > 0 && <SumRow label="incl. 0% / Exempt Value" value={fmtINR(summary.zeroTaxValue)} color="#64748b" />}
+              {taxOn && summary.zeroTaxValue > 0 && <SumRow label="incl. 0% / Exempt Value" value={fmtINR(summary.zeroTaxValue)} color="#64748b" />}
+              {taxOn && (
               <Tooltip
                 placement="right"
                 title={summary.gstBreakup.length ? (
@@ -2984,12 +2994,13 @@ export default function WholesaleSales() {
                     {summary.gstBreakup.map(b => (
                       <div key={b.rate}>{b.rate}%: {fmtINR(b.tax)} on {fmtINR(b.taxable)}{b.rate === 0 ? ' (zero tax)' : ''}</div>
                     ))}
-                    {summary.taxableCharges > 0 && <div>Charges 18%: {fmtINR(summary.taxableCharges * 0.18)}</div>}
+                    {summary.taxableCharges > 0 && <div>Charges 18%: {fmtINR(summary.chargesGst ?? summary.taxableCharges * 0.18)}</div>}
                   </Box>
                 ) : ''}
               >
-                <Box data-testid="ws-gst-row"><SumRow label="GST" value={fmtINR(summary.totalGst)} color="#0f766e" /></Box>
+                <Box data-testid="ws-gst-row"><SumRow label={taxLabel} value={fmtINR(summary.totalGst)} color="#0f766e" /></Box>
               </Tooltip>
+              )}
               <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ py: 0.2 }}>
                 <Button
                   size="small" onClick={() => setChargesOpen(v => !v)} aria-expanded={chargesOpen}
@@ -3005,11 +3016,13 @@ export default function WholesaleSales() {
                   {chargesList.map((c, idx) => (
                     <Stack direction="row" spacing={0.5} alignItems="center" key={c.name}>
                       <Typography variant="caption" color="text.secondary" sx={{ flex: 1, fontSize: '0.66rem' }}>{c.name.replace(' Charge', '')}</Typography>
+                      {taxOn && (
                       <Chip
-                        label={c.taxable ? 'GST' : 'No GST'} size="small" clickable
+                        label={c.taxable ? taxLabel : `No ${taxLabel}`} size="small" clickable
                         onClick={() => setChargesList(prev => prev.map((p, pi) => pi === idx ? { ...p, taxable: !p.taxable } : p))}
                         sx={{ height: 18, fontSize: '0.58rem', fontWeight: 800, bgcolor: c.taxable ? '#eef2ff' : '#f1f5f9', color: c.taxable ? '#4f46e5' : '#64748b' }}
                       />
+                      )}
                       <TextField
                         size="small" type="number" placeholder="0" value={c.amount}
                         onChange={(e) => setChargesList(prev => prev.map((p, pi) => pi === idx ? { ...p, amount: e.target.value } : p))}
@@ -3104,7 +3117,7 @@ export default function WholesaleSales() {
                 <Stack spacing={1}>
                   <Stack direction="row" spacing={0.75} alignItems="flex-start">
                     <TextField
-                      fullWidth size="small" id="ws-amount-paid" type="number" label="Amount Paid (Cash) ₹" InputLabelProps={{ shrink: true }}
+                      fullWidth size="small" id="ws-amount-paid" type="number" label={`Amount Paid (Cash) ${getCurrencySymbol()}`} InputLabelProps={{ shrink: true }}
                       disabled={cashUnpaid}
                       placeholder={String(summary.grandTotal)} value={cashUnpaid ? '' : amountReceived} onChange={(e) => setAmountReceived(e.target.value)}
                       error={amountReceived !== '' && !(parseFloat(amountReceived) >= 0)}
@@ -3118,7 +3131,7 @@ export default function WholesaleSales() {
               )}
               {!paymentLocked && (payMode === 'UPI' || payMode === 'Card') && (
                 <Stack spacing={1}>
-                  <TextField fullWidth size="small" label="Amount Paid ₹" InputLabelProps={{ shrink: true }} value={summary.grandTotal} InputProps={{ readOnly: true }} inputProps={{ tabIndex: -1, style: { textAlign: 'center' } }} />
+                  <TextField fullWidth size="small" label={`Amount Paid ${getCurrencySymbol()}`} InputLabelProps={{ shrink: true }} value={summary.grandTotal} InputProps={{ readOnly: true }} inputProps={{ tabIndex: -1, style: { textAlign: 'center' } }} />
                   <TextField fullWidth size="small" label="Reference / Txn ID" InputLabelProps={{ shrink: true }} placeholder={payMode === 'UPI' ? 'UPI ref' : 'Approval code'} value={refNo} onChange={(e) => setRefNo(e.target.value)} />
                   {payMode === 'UPI' && <PaymentModeDetails method="UPI" bankAccount={payBankAccount} onBankAccountChange={(id) => setPayBankAccount(id || '')} />}
                 </Stack>

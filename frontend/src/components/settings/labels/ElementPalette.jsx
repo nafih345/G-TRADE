@@ -11,6 +11,7 @@ import {
   Lock as LockIcon, AutoFixHigh,
 } from '@mui/icons-material';
 import { FIELD_GROUPS, LABEL_FIELDS } from '../../../labels/labelFields';
+import { getCurrencySymbol } from '../../../utils/localeFormat.js';
 
 const SHAPES = [
   { type: 'barcode', label: 'Barcode', icon: <ViewWeek fontSize="small" />, tip: 'Barcode bars generated from the product barcode (or SKU).' },
@@ -110,7 +111,7 @@ export default function ElementPalette({ mode, onModeChange, onAdd, allowedField
                     key={f.id}
                     payload={{ type: 'field', field: f.id }}
                     label={f.label}
-                    icon={<Chip label={f.kind === 'price' ? '₹' : f.kind === 'date' ? 'D' : 'Aa'} size="small" sx={{ height: 18, fontSize: 10, minWidth: 26 }} />}
+                    icon={<Chip label={f.kind === 'price' ? `${getCurrencySymbol()}` : f.kind === 'date' ? 'D' : 'Aa'} size="small" sx={{ height: 18, fontSize: 10, minWidth: 26 }} />}
                     tip={f.job ? 'Typed per print batch (e.g. from the purchase row) — hidden when not given.' : 'Filled from the product record.'}
                     onAdd={onAdd}
                     disabled={readOnly || !allowedFields.has(f.id)}

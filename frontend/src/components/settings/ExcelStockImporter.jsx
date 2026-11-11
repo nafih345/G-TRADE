@@ -16,6 +16,7 @@ import {
   Delete as DeleteIcon
 } from '@mui/icons-material';
 import axios from 'axios';
+import { currencyPrefix, getCurrencyCode } from '../../utils/localeFormat.js';
 
 // Dynamically load SheetJS XLSX parser library from CDN
 const loadSheetJS = () => {
@@ -41,7 +42,7 @@ export default function ExcelStockImporter({ onImportSuccess }) {
 
   // Sample CSV Template Downloader
   const handleDownloadSampleTemplate = () => {
-    const headers = "Barcode,SKU/Code,Product Name,Category,Brand,Frame/Lens Type,Cost Price (INR),Selling Price (INR),Stock Quantity,Reorder Level,Supplier,Rack Location\n";
+    const headers = `Barcode,SKU/Code,Product Name,Category,Brand,Frame/Lens Type,Cost Price (${getCurrencyCode()}),Selling Price (${getCurrencyCode()}),Stock Quantity,Reorder Level,Supplier,Rack Location\n`;
     const sampleRows = [
       "880194821001,FRAME-RB-01,RayBan Wayfarer Classic Black,Frames,RayBan,Full Rim,2500,4990,25,5,RayBan India,Rack A-1",
       "880194821002,LENS-CRZ-02,Crizal Prevencia Anti-Blue 1.56,Prescription Lenses,Crizal,Single Vision,1200,2800,50,10,Essilor India,Rack B-3",
@@ -410,8 +411,8 @@ export default function ExcelStockImporter({ onImportSuccess }) {
                     <TableCell sx={{ fontWeight: 800, color: 'primary.main' }}>{row.name}</TableCell>
                     <TableCell><Chip label={row.category} size="small" variant="outlined" /></TableCell>
                     <TableCell>{row.brand}</TableCell>
-                    <TableCell align="right">₹{row.purchasePrice}</TableCell>
-                    <TableCell align="right" sx={{ fontWeight: 800, color: '#059669' }}>₹{row.sellingPrice}</TableCell>
+                    <TableCell align="right">{currencyPrefix()}{row.purchasePrice}</TableCell>
+                    <TableCell align="right" sx={{ fontWeight: 800, color: '#059669' }}>{currencyPrefix()}{row.sellingPrice}</TableCell>
                     <TableCell align="center">
                       <Chip label={`${row.stock} pcs`} size="small" color="success" sx={{ fontWeight: 800 }} />
                     </TableCell>

@@ -64,7 +64,7 @@ export function effectiveTheme(theme = {}, branding = {}) {
 // ---------------------------------------------------------------------------
 
 export const ELEMENT_LIBRARY = [
-  { type: 'companyBlock', label: 'Company header', group: 'Header', w: 95, h: 26, hint: 'Store name, address, phone, GSTIN from Store Profile / Branding' },
+  { type: 'companyBlock', label: 'Company header', group: 'Header', w: 95, h: 26, hint: 'Store name, address, phone, tax registration no. from Store Profile / Branding' },
   { type: 'logo', label: 'Company logo', group: 'Header', w: 26, h: 20, hint: 'Logo from Logo & Branding' },
   { type: 'field', label: 'Document title', group: 'Header', w: 64, h: 9, preset: { field: 'document.title', style: { fontSize: 15, fontWeight: 800, align: 'right', uppercase: true, shrinkToFit: true }, hideIfEmpty: false } },
   { type: 'field', label: 'Document number', group: 'Header', w: 60, h: 6, preset: { field: 'document.number', label: 'Invoice No', labelPosition: 'left', labelWidth: 24 } },
@@ -79,7 +79,7 @@ export const ELEMENT_LIBRARY = [
   { type: 'field', label: 'Paid amount', group: 'Amounts', w: 60, h: 6, preset: { field: 'totals.paid', label: 'Paid', labelPosition: 'left', labelWidth: 26 } },
   { type: 'field', label: 'Outstanding balance', group: 'Amounts', w: 60, h: 6, preset: { field: 'totals.balance', label: 'Balance', labelPosition: 'left', labelWidth: 26, style: { fontWeight: 700 } } },
   { type: 'field', label: 'Amount in words', group: 'Amounts', w: 110, h: 10, preset: { field: 'totals.amountInWords', label: 'Amount in words', labelPosition: 'top', style: { italic: true } } },
-  { type: 'taxSummary', label: 'GST / tax summary', group: 'Amounts', w: 110, h: 22, hint: 'Tax grouped by rate (needs per-line tax)' },
+  { type: 'taxSummary', label: 'Tax summary (by rate)', group: 'Amounts', w: 110, h: 22, hint: 'Tax grouped by rate (needs per-line tax)' },
   { type: 'payment', label: 'Payment details', group: 'Amounts', w: 100, h: 18, hint: 'Method, reference, split, bank, UPI' },
   { type: 'field', label: 'Payment reference', group: 'Amounts', w: 70, h: 6, preset: { field: 'payment.reference', label: 'Ref', labelPosition: 'left', labelWidth: 16 } },
   { type: 'qr', label: 'QR code', group: 'Codes', w: 24, h: 24, hint: 'UPI payment, document number or custom text' },

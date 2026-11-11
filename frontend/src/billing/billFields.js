@@ -7,6 +7,7 @@
 //
 // Money is never computed here: a missing amount resolves to null and prints as blank (or the
 // row is dropped), never as 0 or a guessed value.
+import { getTaxLabel, getTaxRegLabel } from '../utils/localeFormat.js';
 
 export const SALES_FAMILY = ['SALES_INVOICE', 'WHOLESALE_BILL', 'ORDER_BILL', 'QUOTATION', 'SALES_RETURN'];
 export const PURCHASE_FAMILY = ['PURCHASE_BILL', 'PURCHASE_RETURN'];
@@ -30,6 +31,9 @@ export const DOC_TYPE_ALIASES = { RETURN_BILL: 'SALES_RETURN' };
 export const canonicalDocType = (t) => DOC_TYPE_ALIASES[t] || t;
 
 const f = (id, label, group, kind = 'text', scope = null, extra = {}) => ({ id, label, group, kind, scope, ...extra });
+// Tax field / column names follow the business's tax (GST, VAT, Sales Tax, Tax) — live getters
+// so a country change shows at once without rebuilding the catalog.
+const liveTaxLabel = (obj, fn) => Object.defineProperty(obj, 'label', { get: fn, enumerable: true, configurable: true });
 
 export const FIELD_GROUPS = ['Company', 'Document', 'Customer / Supplier', 'Totals', 'Payment', 'Receipt', 'Return'];
 
@@ -104,6 +108,10 @@ export const BILL_FIELDS = [
   f('return.originalInvoice', 'Original bill number', 'Return', 'text', RETURN_TYPES),
   f('return.action', 'Return action / status', 'Return', 'text', RETURN_TYPES),
 ];
+BILL_FIELDS.forEach((fld) => {
+  if (fld.id === 'company.gstin') liveTaxLabel(fld, () => `Store ${getTaxRegLabel()}`);
+  if (fld.id === 'party.gstin') liveTaxLabel(fld, () => getTaxRegLabel());
+});
 export const FIELD_BY_ID = Object.fromEntries(BILL_FIELDS.map((x) => [x.id, x]));
 
 // Items-table columns.
@@ -133,6 +141,10 @@ export const ITEM_COLUMNS = [
   c('taxAmount', 'GST Amt', 'money', 'right', 10),
   c('total', 'Amount', 'money', 'right', 13),
 ];
+ITEM_COLUMNS.forEach((col) => {
+  if (col.key === 'taxPercent') liveTaxLabel(col, () => `${getTaxLabel()} %`);
+  if (col.key === 'taxAmount') liveTaxLabel(col, () => `${getTaxLabel()} Amt`);
+});
 export const COLUMN_BY_KEY = Object.fromEntries(ITEM_COLUMNS.map((x) => [x.key, x]));
 
 export const TOTALS_ROWS = [
@@ -226,10 +238,14 @@ export function fieldText(model, id, fmt = {}) {
   return String(raw);
 }
 
-export const fmtWithCurrency = (fmt = {}, model) => ({
-  ...fmt,
-  currencySymbol: fmt.currencySymbol !== undefined ? fmt.currencySymbol : (model?.company?.currency || '₹'),
-});
+// A template's symbol of '₹' (the designer's shipped default, saved into every template) or
+// blank means "the store's currency", so a store billing in QAR prints QAR without re-saving
+// each template. Any other symbol typed in the designer is a deliberate override.
+export const fmtWithCurrency = (fmt = {}, model) => {
+  const tpl = fmt.currencySymbol;
+  const follow = tpl === undefined || tpl === null || tpl === '' || tpl === '₹';
+  return { ...fmt, currencySymbol: follow ? (model?.company?.currency || tpl || '₹') : tpl };
+};
 
 // ---------------------------------------------------------------------------
 // Formatting
@@ -261,7 +277,9 @@ export function formatMoney(v, fmt = {}) {
   if (n === 0 && fmt.zeroAsDash) return '—';
   const decimals = fmt.decimals ?? 2;
   const body = formatNumber(Math.abs(n), { decimals, thousands: fmt.thousands || 'indian' });
-  const sym = fmt.currencySymbol ?? '₹';
+  const raw = fmt.currencySymbol ?? '₹';
+  // Letter codes read as "QAR 1,200.00", symbols stay tight ("₹1,200.00").
+  const sym = raw && /[A-Za-z.]$/.test(raw) ? `${raw} ` : raw;
   return `${n < 0 && Number(Math.abs(n).toFixed(decimals)) !== 0 ? '-' : ''}${sym}${body}`;
 }
 
@@ -336,16 +354,47 @@ function indianWords(n) {
   return parts.join(' ');
 }
 
+function internationalWords(n) {
+  if (n === 0) return 'Zero';
+  const parts = [];
+  [[1e9, 'Billion'], [1e6, 'Million'], [1e3, 'Thousand']].forEach(([size, word]) => {
+    const chunk = Math.floor(n / size);
+    if (chunk) parts.push(`${below1000(chunk)} ${word}`);
+    n %= size;
+  });
+  if (n) parts.push(below1000(n));
+  return parts.join(' ');
+}
+
+// symbol / code → [main unit, sub-unit, sub-units per unit]. Rupees keep Indian numbering
+// (lakh / crore); everything else reads in millions.
+const CURRENCY_WORDS = {
+  INR: ['Rupees', 'Paise', 100],
+  QAR: ['Qatari Riyals', 'Dirhams', 100],
+  AED: ['Dirhams', 'Fils', 100],
+  SAR: ['Saudi Riyals', 'Halalas', 100],
+  OMR: ['Omani Rials', 'Baisa', 1000],
+  KWD: ['Kuwaiti Dinars', 'Fils', 1000],
+  BHD: ['Bahraini Dinars', 'Fils', 1000],
+  USD: ['Dollars', 'Cents', 100],
+  EUR: ['Euros', 'Cents', 100],
+  GBP: ['Pounds', 'Pence', 100],
+};
+const SYMBOL_TO_CODE = { '₹': 'INR', RS: 'INR', 'RS.': 'INR', $: 'USD', '€': 'EUR', '£': 'GBP', QR: 'QAR' };
+
 export function amountInWords(value, currency = '₹') {
   const n = finite(value);
   if (n === null) return '';
+  const key = String(currency || '').trim().toUpperCase();
+  const code = SYMBOL_TO_CODE[key] || key;
+  const [unit, sub, per] = CURRENCY_WORDS[code] || ['', '', 100];
   const abs = Math.abs(n);
   let whole = Math.floor(abs + 1e-9);
-  let paise = Math.round((abs - whole) * 100);
-  if (paise === 100) { whole += 1; paise = 0; }
-  const rupee = currency === '₹' || currency === 'Rs' || currency === 'Rs.' || currency === 'INR';
-  const main = rupee ? `Rupees ${indianWords(whole)}` : indianWords(whole);
-  const tail = paise ? (rupee ? ` and ${below100(paise)} Paise` : ` and ${paise}/100`) : '';
+  let minor = Math.round((abs - whole) * per);
+  if (minor === per) { whole += 1; minor = 0; }
+  const words = code === 'INR' ? indianWords(whole) : internationalWords(whole);
+  const main = unit ? `${unit} ${words}` : words;
+  const tail = minor ? (sub ? ` and ${below1000(minor)} ${sub}` : ` and ${minor}/${per}`) : '';
   return `${n < 0 ? 'Minus ' : ''}${main}${tail} Only`;
 }
 

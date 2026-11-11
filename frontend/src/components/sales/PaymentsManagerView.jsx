@@ -25,6 +25,7 @@ import {
 } from '@mui/icons-material';
 import { printBill } from '../../billing/printBill';
 import { notify } from '../../utils/notify';
+import { formatCurrency, currencyPrefix, getCurrencySymbol } from '../../utils/localeFormat.js';
 
 // Prints a receipt with the template assigned to PAYMENT_RECEIPT (Settings → Bill & Invoice Designer).
 const printPaymentReceipt = (p) => {
@@ -159,7 +160,7 @@ export default function PaymentsManagerView({
         <Grid item xs={12} sm={6} md={3}>
           <Card elevation={0} sx={{ p: 2.5, border: '1px solid', borderColor: 'divider', borderRadius: 3, borderLeft: '4px solid #10b981', bgcolor: 'background.paper' }}>
             <Typography variant="caption" fontWeight={700} color="text.secondary" display="block">TOTAL PAYMENTS COLLECTED</Typography>
-            <Typography variant="h4" fontWeight={900} color="success.main" sx={{ my: 0.5 }}>₹{totalCollected.toLocaleString()}</Typography>
+            <Typography variant="h4" fontWeight={900} color="success.main" sx={{ my: 0.5 }}>{formatCurrency(totalCollected)}</Typography>
             <Typography variant="caption" color="text.secondary">{payments.length} verified transactions</Typography>
           </Card>
         </Grid>
@@ -167,7 +168,7 @@ export default function PaymentsManagerView({
         <Grid item xs={12} sm={6} md={3}>
           <Card elevation={0} sx={{ p: 2.5, border: '1px solid', borderColor: 'divider', borderRadius: 3, borderLeft: '4px solid #ef4444', bgcolor: 'background.paper' }}>
             <Typography variant="caption" fontWeight={700} color="text.secondary" display="block">OUTSTANDING CUSTOMER DUES</Typography>
-            <Typography variant="h4" fontWeight={900} color="error.main" sx={{ my: 0.5 }}>₹{totalOutstandingDues.toLocaleString()}</Typography>
+            <Typography variant="h4" fontWeight={900} color="error.main" sx={{ my: 0.5 }}>{formatCurrency(totalOutstandingDues)}</Typography>
             <Typography variant="caption" color="text.secondary">{customersWithDues.length} patient accounts pending</Typography>
           </Card>
         </Grid>
@@ -175,7 +176,7 @@ export default function PaymentsManagerView({
         <Grid item xs={12} sm={6} md={3}>
           <Card elevation={0} sx={{ p: 2.5, border: '1px solid', borderColor: 'divider', borderRadius: 3, borderLeft: '4px solid #2563eb', bgcolor: 'background.paper' }}>
             <Typography variant="caption" fontWeight={700} color="text.secondary" display="block">DIGITAL UPI / GPAY SETTLEMENTS</Typography>
-            <Typography variant="h4" fontWeight={900} color="primary.main" sx={{ my: 0.5 }}>₹{upiCollected.toLocaleString()}</Typography>
+            <Typography variant="h4" fontWeight={900} color="primary.main" sx={{ my: 0.5 }}>{formatCurrency(upiCollected)}</Typography>
             <Typography variant="caption" color="text.secondary">Instant bank settlements</Typography>
           </Card>
         </Grid>
@@ -183,7 +184,7 @@ export default function PaymentsManagerView({
         <Grid item xs={12} sm={6} md={3}>
           <Card elevation={0} sx={{ p: 2.5, border: '1px solid', borderColor: 'divider', borderRadius: 3, borderLeft: '4px solid #f59e0b', bgcolor: 'background.paper' }}>
             <Typography variant="caption" fontWeight={700} color="text.secondary" display="block">CASH IN DRAWER LOG</Typography>
-            <Typography variant="h4" fontWeight={900} sx={{ color: '#d97706', my: 0.5 }}>₹{cashCollected.toLocaleString()}</Typography>
+            <Typography variant="h4" fontWeight={900} sx={{ color: '#d97706', my: 0.5 }}>{formatCurrency(cashCollected)}</Typography>
             <Typography variant="caption" color="text.secondary">Physical cash register</Typography>
           </Card>
         </Grid>
@@ -280,7 +281,7 @@ export default function PaymentsManagerView({
                           <Chip label={p.method || 'Cash'} size="small" color="primary" variant="outlined" sx={{ fontWeight: 700 }} />
                         </TableCell>
                         <TableCell sx={{ fontWeight: 900, color: 'success.main', fontSize: '1rem' }}>
-                          +₹{parseFloat(p.amount || 0).toLocaleString()}
+                          +{formatCurrency(parseFloat(p.amount || 0))}
                         </TableCell>
                         <TableCell align="right">
                           <Stack direction="row" spacing={0.5} justifyContent="flex-end">
@@ -337,7 +338,7 @@ export default function PaymentsManagerView({
                         <Typography variant="caption" color="text.secondary">📞 {cust.phone || 'No Phone'}</Typography>
                       </Box>
                       <Typography variant="subtitle1" fontWeight={900} color="error.main">
-                        ₹{parseFloat(cust.balance).toLocaleString()}
+                        {formatCurrency(parseFloat(cust.balance))}
                       </Typography>
                     </Box>
 
@@ -355,7 +356,7 @@ export default function PaymentsManagerView({
                       <IconButton 
                         size="small" 
                         color="success" 
-                        onClick={() => alert(`Sending WhatsApp payment reminder of ₹${cust.balance} to ${cust.name}...`)}
+                        onClick={() => alert(`Sending WhatsApp payment reminder of ${currencyPrefix()}${cust.balance} to ${cust.name}...`)}
                         sx={{ border: '1px solid', borderColor: 'success.main' }}
                       >
                         <WhatsAppIcon fontSize="small" />
@@ -386,14 +387,14 @@ export default function PaymentsManagerView({
                 <MenuItem value="">-- Select Patient --</MenuItem>
                 {customers.map(c => (
                   <MenuItem key={c.id} value={c.id}>
-                    {c.name} ({c.phone}) {c.balance > 0 ? `• Due: ₹${c.balance}` : ''}
+                    {c.name} ({c.phone}) {c.balance > 0 ? `• Due: ${currencyPrefix()}${c.balance}` : ''}
                   </MenuItem>
                 ))}
               </TextField>
 
               <TextField
                 required
-                label="Amount Collected (₹)"
+                label={`Amount Collected (${getCurrencySymbol()})`}
                 type="number"
                 value={paymentForm.amount}
                 onChange={(e) => setPaymentForm({ ...paymentForm, amount: e.target.value })}

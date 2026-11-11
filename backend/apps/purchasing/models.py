@@ -398,3 +398,41 @@ class LensPurchaseOrderPiece(BaseUUIDModel):
 
     class Meta:
         ordering = ['piece_number']
+
+
+# ---------------------------------------------------------------------------------------------
+# Purchase Return (Purchase → Purchase Return, "RTV"). Goods sent back to a supplier: stock goes
+# out, the value comes back as Cash / GPay / Bank or is set off against what we owe the supplier
+# (Credit), and the accounting engine books it (posting_rules.build_purchase_return).
+# ---------------------------------------------------------------------------------------------
+from apps.inventory.return_models import ReturnDocumentBase, ReturnLineBase  # noqa: E402
+
+
+class PurchaseReturn(ReturnDocumentBase):
+    supplier = models.ForeignKey(Supplier, on_delete=models.PROTECT, related_name='purchase_returns')
+    # Null for a manual return (products picked without the original purchase bill).
+    original_bill = models.ForeignKey(PurchaseInvoice, on_delete=models.SET_NULL, null=True, blank=True,
+                                      related_name='purchase_returns')
+    original_bill_number = models.CharField(max_length=100, blank=True, default='')
+    # The supplier's own bill number for the original purchase, for the debit note.
+    supplier_invoice_number = models.CharField(max_length=100, blank=True, default='')
+
+    class Meta(ReturnDocumentBase.Meta):
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'return_number'], name='purchasing_purchasereturn_number_tenant'),
+        ]
+
+    def __str__(self):
+        return f"Purchase Return {self.return_number}"
+
+
+class PurchaseReturnItem(ReturnLineBase):
+    purchase_return = models.ForeignKey(PurchaseReturn, on_delete=models.CASCADE, related_name='items')
+    original_item = models.ForeignKey(PurchaseInvoiceItem, on_delete=models.SET_NULL, null=True, blank=True,
+                                      related_name='return_lines')
+
+    class Meta(ReturnLineBase.Meta):
+        pass
+
+    def __str__(self):
+        return f"{self.description} × {self.return_qty}"

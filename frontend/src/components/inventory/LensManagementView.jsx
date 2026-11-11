@@ -25,6 +25,7 @@ import {
 import axios from 'axios';
 import { notify } from '../../utils/notify';
 import { describeApiError } from '../../utils/apiWriteGuard';
+import { currencyPrefix, getCurrencySymbol } from '../../utils/localeFormat.js';
 
 const initialLensCatalog = [
   {
@@ -371,7 +372,7 @@ export default function LensManagementView({ onProductAdded }) {
                 onClick={() => handleInstallPreset('Essilor Crizal Sapphire HR 1.67', 'Essilor', 'Single Vision', '1.67', 'DuraVision ARC', 1800, 4200, '🔬 High Myopia')}
                 sx={{ mt: 1.5, fontWeight: 900, fontSize: '0.75rem', bgcolor: '#2563eb', textTransform: 'none' }}
               >
-                + Add (₹4,200)
+                + Add ({getCurrencySymbol()}4,200)
               </Button>
             </Paper>
           </Grid>
@@ -388,7 +389,7 @@ export default function LensManagementView({ onProductAdded }) {
                 onClick={() => handleInstallPreset('Hoya BlueControl UV420 1.56', 'Hoya', 'Single Vision', '1.56', 'Blue Cut UV420', 450, 1450, '💻 Digital Screen Shield')}
                 sx={{ mt: 1.5, fontWeight: 900, fontSize: '0.75rem', textTransform: 'none' }}
               >
-                + Add (₹1,450)
+                + Add ({getCurrencySymbol()}1,450)
               </Button>
             </Paper>
           </Grid>
@@ -405,7 +406,7 @@ export default function LensManagementView({ onProductAdded }) {
                 onClick={() => handleInstallPreset('Zeiss SmartLife Progressive 1.60', 'Zeiss', 'Progressive Digital', '1.60', 'LotuTec Anti-Reflective', 2400, 6800, '👁 Presbyopia HD')}
                 sx={{ mt: 1.5, fontWeight: 900, fontSize: '0.75rem', bgcolor: '#ca8a04', '&:hover': { bgcolor: '#a16207' }, textTransform: 'none' }}
               >
-                + Add (₹6,800)
+                + Add ({getCurrencySymbol()}6,800)
               </Button>
             </Paper>
           </Grid>
@@ -422,7 +423,7 @@ export default function LensManagementView({ onProductAdded }) {
                 onClick={() => handleInstallPreset('Kodak CityLens Photochromic 1.56', 'Kodak', 'Single Vision', '1.56', 'Photochromic Auto-Tint', 850, 2400, '☀️ Outdoor Transition')}
                 sx={{ mt: 1.5, fontWeight: 900, fontSize: '0.75rem', bgcolor: '#9333ea', '&:hover': { bgcolor: '#7e22ce' }, textTransform: 'none' }}
               >
-                + Add (₹2,400)
+                + Add ({getCurrencySymbol()}2,400)
               </Button>
             </Paper>
           </Grid>
@@ -439,7 +440,7 @@ export default function LensManagementView({ onProductAdded }) {
                 onClick={() => handleInstallPreset('Standard Anti-Reflective CR39 1.50', 'Generic', 'Single Vision', '1.50', 'Anti-Glare (ARC)', 200, 650, 'Budget Daily')}
                 sx={{ mt: 1.5, fontWeight: 900, fontSize: '0.75rem', bgcolor: '#475569', '&:hover': { bgcolor: '#334155' }, textTransform: 'none' }}
               >
-                + Add (₹650)
+                + Add ({getCurrencySymbol()}650)
               </Button>
             </Paper>
           </Grid>
@@ -542,8 +543,8 @@ export default function LensManagementView({ onProductAdded }) {
                       <Typography variant="caption" display="block">SPH: {lens.sphRange}</Typography>
                       <Typography variant="caption" color="text.secondary" display="block">CYL: {lens.cylRange}</Typography>
                     </TableCell>
-                    <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.82rem' }}>₹{lens.purchasePrice}</TableCell>
-                    <TableCell align="right" sx={{ fontWeight: 900, color: 'success.main', fontSize: '0.88rem' }}>₹{lens.sellingPrice}</TableCell>
+                    <TableCell align="right" sx={{ fontWeight: 700, fontSize: '0.82rem' }}>{currencyPrefix()}{lens.purchasePrice}</TableCell>
+                    <TableCell align="right" sx={{ fontWeight: 900, color: 'success.main', fontSize: '0.88rem' }}>{currencyPrefix()}{lens.sellingPrice}</TableCell>
                     <TableCell align="center">
                       <Chip 
                         label={`${lens.stock} Pcs`} size="small"
@@ -645,7 +646,7 @@ export default function LensManagementView({ onProductAdded }) {
 
             <Grid item xs={6}>
               <TextField 
-                fullWidth size="small" label="Purchase Price (₹)" placeholder="400" type="number"
+                fullWidth size="small" label={`Purchase Price (${getCurrencySymbol()})`} placeholder="400" type="number"
                 value={newLens.purchasePrice} onChange={(e) => setNewLens({ ...newLens, purchasePrice: e.target.value })}
                 inputProps={{ style: { fontWeight: 800 } }}
               />
@@ -653,7 +654,7 @@ export default function LensManagementView({ onProductAdded }) {
 
             <Grid item xs={6}>
               <TextField 
-                fullWidth size="small" label="Selling MRP Price (₹)" placeholder="1200" type="number"
+                fullWidth size="small" label={`Selling MRP Price (${getCurrencySymbol()})`} placeholder="1200" type="number"
                 value={newLens.sellingPrice} onChange={(e) => setNewLens({ ...newLens, sellingPrice: e.target.value })}
                 inputProps={{ style: { fontWeight: 900, color: '#059669' } }}
               />

@@ -16,6 +16,7 @@ import { planBarcode, moduleWidthOptions, minSafeModuleMm, RECOMMENDED_MODULE_MM
 import {
   BARCODE_FORMATS, FONT_FAMILIES, THERMAL_PRESET_SIZES, A4_SHEET_PRESETS, elementTitle, sheetUsage, r2,
 } from '../../../labels/labelModel';
+import { getCurrencySymbol } from '../../../utils/localeFormat.js';
 
 // Numeric input that lets the user type freely ("1.", "-") and commits parsed numbers.
 export function NumField({ value, onChange, min, max, step = 0.1, unit, label, width, disabled, helperText }) {
@@ -325,8 +326,8 @@ export default function PropertiesPanel({ template, selection, onTemplate, onEle
           </Row>
           {def?.kind === 'price' && (
             <TextField select size="small" label="Price format" value={el.priceFormat || 'currency'} onChange={(e) => set({ priceFormat: e.target.value })}>
-              <MenuItem value="currency">₹1,234.00</MenuItem>
-              <MenuItem value="currency0">₹1,234</MenuItem>
+              <MenuItem value="currency">{getCurrencySymbol()}1,234.00</MenuItem>
+              <MenuItem value="currency0">{getCurrencySymbol()}1,234</MenuItem>
               <MenuItem value="number">1,234.00</MenuItem>
             </TextField>
           )}

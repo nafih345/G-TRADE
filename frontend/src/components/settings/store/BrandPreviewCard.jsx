@@ -6,6 +6,7 @@ import {
 } from '@mui/icons-material';
 import { documentAddress, storeTypeLabel } from '../../../utils/storeProfile';
 import { GREEN, GREEN_SOFT } from './storeUi';
+import { useTaxSettings } from '../../../context/SettingsContext';
 
 function Line({ icon, children, label }) {
   if (!children) return null;
@@ -21,6 +22,7 @@ const initials = (name) => (name || '').split(/\s+/).filter(Boolean).slice(0, 2)
 
 /** Live header preview built from the (unsaved) form. */
 export default function BrandPreviewCard({ form, onPreviewInvoice }) {
+  const { isTaxEnabled, taxRegLabel } = useTaxSettings();
   const name = (form.display_name || form.name).trim();
   const address = documentAddress(form);
   const country = form.country && form.country !== 'India' ? form.country : '';
@@ -71,11 +73,11 @@ export default function BrandPreviewCard({ form, onPreviewInvoice }) {
             <Typography variant="body2" color="text.disabled">Contact details will appear here.</Typography>
           )}
         </Stack>
-        {form.gstin && (
+        {form.gstin && isTaxEnabled && (
           <>
             <Divider />
             <Box sx={{ px: 2, py: 1.25, display: 'flex', justifyContent: 'center' }}>
-              <Chip size="small" label={`GSTIN: ${form.gstin.toUpperCase()}`} sx={{ fontWeight: 700, bgcolor: GREEN_SOFT, color: GREEN }} />
+              <Chip size="small" label={`${taxRegLabel}: ${form.gstin.toUpperCase()}`} sx={{ fontWeight: 700, bgcolor: GREEN_SOFT, color: GREEN }} />
             </Box>
           </>
         )}

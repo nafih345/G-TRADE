@@ -60,6 +60,10 @@ ROLES = {
     'DISCOUNT_ALLOWED': ('Discount allowed', '5050', ('Expense', 'Income'), 'Bill-level discounts on sales.'),
     'STOCK_LOSS': ('Stock loss / write-off', '5060', ('Expense',), 'Stock removed by adjustment (damage, loss, write-off).'),
     'ROUND_OFF': ('Round off', '5070', ('Expense', 'Income'), 'Rounding differences on purchase bills.'),
+    # Perpetual stock: goods sent back to a supplier leave Inventory at the price returned, so the
+    # default is the Inventory head. Remap it to a separate "Purchase Returns" account to keep them apart.
+    'PURCHASE_RETURNS': ('Purchase returns', '1003', ('Asset', 'Expense', 'Income'),
+                         'Goods returned to suppliers (credited at the return value). Defaults to Inventory.'),
 }
 
 # Operational documents the engine books. source_key -> (label, description of the rule)
@@ -70,6 +74,8 @@ SOURCES = {
     'sales.wholesale_invoice': ('Wholesale invoice', 'Dr Wholesale receivable; Cr Wholesale revenue + GST output'),
     'sales.wholesale_collection': ('Wholesale collection', 'Dr Cash/Bank; Cr Wholesale receivable'),
     'sales.wholesale_return': ('Wholesale return / credit note', 'Dr Sales returns + GST output; Cr Wholesale receivable'),
+    'sales.sales_return': ('Sales return (customer)', 'Dr Sales returns + GST output; Cr Cash / selected Bank (refund) or Customer receivable (credit); Dr Inventory / Cr COGS for the restocked goods'),
+    'purchasing.purchase_return': ('Purchase return (to supplier)', 'Dr Cash / selected Bank (refund) or Supplier payable (credit); Cr Purchase returns + GST input'),
     'purchasing.purchase_invoice': ('Purchase entry (supplier invoice)', 'Dr Inventory + GST input (+/- round off); Cr Supplier payable'),
     'purchasing.purchase_payment': ('Purchase entry payment', 'Dr Supplier payable; Cr Cash/Bank'),
     'purchasing.purchase_order': ('Purchase order received directly', 'Dr Inventory + GST input; Cr Supplier payable (only when the PO itself moved stock)'),

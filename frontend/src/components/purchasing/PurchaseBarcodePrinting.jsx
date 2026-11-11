@@ -26,6 +26,7 @@ import { renderLabelHtml, hasUsableLogo, summarizeWarnings } from '../../labels/
 import { printLabelJob, resolveCalibration } from '../../labels/printLabels';
 import { buildPrintLines, buildReprintLines, countThrough, jobSize, lineSize, positionOf, printRows } from '../../utils/purchaseLabels';
 import { notify } from '../../utils/notify';
+import { formatCurrency } from '../../utils/localeFormat.js';
 
 const api = (id) => `/api/purchase/invoices/${id}`;
 const errText = (err, fallback) => err?.response?.data?.detail || (err?.response ? fallback : 'Cannot reach the server.');
@@ -467,7 +468,7 @@ export default function PurchaseBarcodePrinting({ invoiceId, refreshKey = 0, onI
                             {problem && <Tooltip title={problem}><WarningAmber color="error" fontSize="small" sx={{ ml: 0.5, verticalAlign: 'middle' }} /></Tooltip>}
                           </TableCell>
                           <TableCell sx={{ fontSize: 12 }}>{it.batch_number || '—'}{it.expiry_date ? ` · ${it.expiry_date}` : ''}</TableCell>
-                          <TableCell align="right">{it.mrp ? `₹${it.mrp.toFixed(2)}` : '—'}</TableCell>
+                          <TableCell align="right">{it.mrp ? `${formatCurrency(it.mrp)}` : '—'}</TableCell>
                           <TableCell align="right">{it.total}</TableCell>
                           <TableCell align="right">{it.printed}</TableCell>
                           <TableCell align="right">

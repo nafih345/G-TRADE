@@ -1,3 +1,4 @@
+import { currencyPrefix, formatCurrency } from './localeFormat.js';
 // Builds the WhatsApp receipt text + share URL for an invoice/order snapshot. Split out from
 // sendInvoiceWhatsApp so the "Show Bill" preview can display exactly what will be sent before
 // anything opens, and so an Alt+W shortcut can share the same text on demand.
@@ -57,9 +58,9 @@ Thank you for choosing Greensol Super Speciality Eye Care! Here are your optical
 📅 *Date:* ${invDate}
 👓 *Frame:* ${frameName}
 🔍 *Lens:* ${lensName}
-💳 *Total Amount:* ₹${totalAmount}
-✅ *Amount Paid:* ₹${amountPaidNum.toLocaleString()}
-🧾 *Balance Due:* ₹${balanceDueNum.toLocaleString()} (${payStatus})
+💳 *Total Amount:* ${currencyPrefix()}${totalAmount}
+✅ *Amount Paid:* ${formatCurrency(amountPaidNum)}
+🧾 *Balance Due:* ${formatCurrency(balanceDueNum)} (${payStatus})
 
 We hope you enjoy your new eyewear! For frame alignment or warranty support, visit our branch or call +91 98470 12345.
 -----------------------------------------

@@ -166,6 +166,10 @@ def attach_lifecycle(rows, products, *, view_cost=True):
     """Add the lifecycle figures to serialized rows (dicts with 'id') for those products."""
     data = lifecycle_for(products, view_cost=view_cost)
     by_id = {str(pk): v for pk, v in data.items()}
+    # Return Stock (Sales Return in / Purchase Return out), derived from live return lines.
+    from .returns import return_stock_by_product
+    returns = {str(pk): v for pk, v in return_stock_by_product([p.pk for p in products]).items()} if products else {}
     for row in rows:
         row['lifecycle'] = by_id.get(row['id'])
+        row['returns'] = returns.get(row['id'], {'sales': 0, 'purchase': 0})
     return rows

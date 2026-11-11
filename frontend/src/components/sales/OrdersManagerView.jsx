@@ -41,6 +41,7 @@ import LensOrdersQueue from './LensOrdersQueue';
 import {
   rowPayment, rowCustomerName, rowFrameLens, deliveryStatusOf, PAYMENT_STATUSES
 } from '../../utils/salesDocStatus';
+import { formatCurrency, currencyPrefix, getTaxLabel, isTaxEnabled } from '../../utils/localeFormat.js';
 
 const todayStr = () => new Date().toISOString().split('T')[0];
 const inr = (n) => (Number(n) || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
@@ -70,7 +71,7 @@ const DOC_VIEWS = {
     label: 'Invoices',
     icon: <InvoiceIcon />,
     title: 'Tax Invoices',
-    subtitle: 'Billed sales — payment status, receipts and GST invoice reprints.',
+    get subtitle() { return `Billed sales — payment status, receipts and ${isTaxEnabled() ? `${getTaxLabel()} ` : ''}invoice reprints.`; },
     createLabel: '+ New Invoice'
   },
   QUOTATION: {
@@ -236,18 +237,18 @@ export default function OrdersManagerView({
       { label: 'TOTAL ORDERS', value: scopedCount, color: '#2563eb', hint: 'Confirmed spectacle jobs' },
       { label: 'IN LAB PROCESSING', value: inLabCount, color: '#d97706', hint: 'Lens cutting & fitting in progress' },
       { label: 'READY FOR PICKUP', value: readyCount, color: '#10b981', hint: 'QC passed & ready for delivery' },
-      { label: 'ORDER VALUE', value: `₹${scopedValue.toLocaleString()}`, color: '#7c3aed', hint: 'Gross value of open orders' }
+      { label: 'ORDER VALUE', value: `${formatCurrency(scopedValue)}`, color: '#7c3aed', hint: 'Gross value of open orders' }
     ],
     INVOICE: [
       { label: 'TOTAL INVOICES', value: scopedCount, color: '#2563eb', hint: 'Billed sales recorded' },
       { label: 'PAID IN FULL', value: paidCount, color: '#10b981', hint: 'Settled invoices' },
       { label: 'OUTSTANDING', value: outstandingCount, color: '#d97706', hint: 'Partly paid or unpaid' },
-      { label: 'REVENUE COLLECTED', value: `₹${collectedValue.toLocaleString()}`, color: '#7c3aed', hint: 'Payments received against invoices' }
+      { label: 'REVENUE COLLECTED', value: `${formatCurrency(collectedValue)}`, color: '#7c3aed', hint: 'Payments received against invoices' }
     ],
     QUOTATION: [
       { label: 'TOTAL QUOTATIONS', value: scopedCount, color: '#2563eb', hint: 'Estimates issued to customers' },
       { label: 'OPEN QUOTES', value: scopedCount, color: '#d97706', hint: 'Awaiting customer decision' },
-      { label: 'QUOTED VALUE', value: `₹${scopedValue.toLocaleString()}`, color: '#7c3aed', hint: 'Total value of open estimates' }
+      { label: 'QUOTED VALUE', value: `${formatCurrency(scopedValue)}`, color: '#7c3aed', hint: 'Total value of open estimates' }
     ]
   }[docView];
 
@@ -669,7 +670,7 @@ export default function OrdersManagerView({
                         </Tooltip>
                       </TableCell>
                       <TableCell sx={{ fontWeight: 900, fontSize: '1rem' }}>
-                        ₹{inr(pay.net)}
+                        {currencyPrefix()}{inr(pay.net)}
                       </TableCell>
                       <TableCell>
                         <Chip
@@ -680,7 +681,7 @@ export default function OrdersManagerView({
                           sx={{ fontWeight: 700, fontSize: '0.72rem' }}
                         />
                         <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5, whiteSpace: 'nowrap' }}>
-                          Paid ₹{inr(pay.paid)}{pay.balance > 0 ? ` · Due ₹${inr(pay.balance)}` : ''}
+                          Paid {currencyPrefix()}{inr(pay.paid)}{pay.balance > 0 ? ` · Due ${currencyPrefix()}${inr(pay.balance)}` : ''}
                         </Typography>
                       </TableCell>
                       {docView === 'ORDER' && (
@@ -854,12 +855,12 @@ export default function OrdersManagerView({
                     <Typography variant="caption" color="text.secondary" display="block">{selLines.summary}</Typography>
                   )}
                   <Typography variant="subtitle1" fontWeight={900} sx={{ mt: 0.5 }}>
-                    Total: ₹{inr(selPay.net)}
+                    Total: {currencyPrefix()}{inr(selPay.net)}
                   </Typography>
                   <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 0.5 }}>
                     <Chip label={selPay.label} size="small" color={selPay.color} sx={{ fontWeight: 700 }} />
                     <Typography variant="caption" color="text.secondary">
-                      Paid ₹{inr(selPay.paid)} · Balance ₹{inr(selPay.balance)}
+                      Paid {currencyPrefix()}{inr(selPay.paid)} · Balance {currencyPrefix()}{inr(selPay.balance)}
                     </Typography>
                   </Stack>
                 </Card>
@@ -985,7 +986,7 @@ function renderPaymentBlock(order, onOpenRecordPayment) {
     return (
       <Box sx={{ mt: 2, p: 2.5, bgcolor: '#f0fdf4', borderRadius: 2.5, border: '1px solid', borderColor: 'success.light' }}>
         <Typography variant="subtitle2" fontWeight={800} color="success.main">
-          Settled in full — ₹{inr(pay.paid)} paid
+          Settled in full — {currencyPrefix()}{inr(pay.paid)} paid
         </Typography>
       </Box>
     );
@@ -993,9 +994,9 @@ function renderPaymentBlock(order, onOpenRecordPayment) {
   return (
     <Box sx={{ mt: 2, p: 2.5, bgcolor: '#fffbeb', borderRadius: 2.5, border: '1px solid', borderColor: 'warning.light', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
       <Box>
-        <Typography variant="subtitle2" fontWeight={800}>{pay.label} — ₹{inr(pay.balance)} outstanding</Typography>
+        <Typography variant="subtitle2" fontWeight={800}>{pay.label} — {currencyPrefix()}{inr(pay.balance)} outstanding</Typography>
         <Typography variant="caption" color="text.secondary">
-          Paid ₹{inr(pay.paid)} of ₹{inr(pay.net)}.
+          Paid {currencyPrefix()}{inr(pay.paid)} of {currencyPrefix()}{inr(pay.net)}.
         </Typography>
       </Box>
       <Button variant="contained" color="warning" onClick={() => onOpenRecordPayment?.(order)} sx={{ borderRadius: 2, textTransform: 'none', fontWeight: 700 }}>

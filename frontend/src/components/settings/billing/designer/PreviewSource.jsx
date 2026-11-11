@@ -7,6 +7,7 @@ import { Science, ReceiptLong } from '@mui/icons-material';
 import { DOC_TYPE_LABELS } from '../../../../billing/billFields';
 import { loadRealDocuments, REAL_DOC_NOTES } from '../../../../billing/realDocuments';
 import { SAMPLE_COUNTS } from '../../../../billing/sampleModels';
+import { formatCurrency } from '../../../../utils/localeFormat.js';
 
 export default function PreviewSource({ value, onChange, docTypes }) {
   const [rows, setRows] = useState([]);
@@ -61,7 +62,7 @@ export default function PreviewSource({ value, onChange, docTypes }) {
               <li {...props} key={o.id}>
                 <Stack sx={{ width: '100%' }}>
                   <Typography variant="body2" fontWeight={700}>{o.number || '—'} <Typography component="span" variant="caption" color="text.secondary">{o.date}</Typography></Typography>
-                  <Typography variant="caption" color="text.secondary">{o.party}{o.amount !== null ? ` · ₹${Number(o.amount).toLocaleString('en-IN')}` : ''}</Typography>
+                  <Typography variant="caption" color="text.secondary">{o.party}{o.amount !== null ? ` · ${formatCurrency(Number(o.amount))}` : ''}</Typography>
                 </Stack>
               </li>
             )}

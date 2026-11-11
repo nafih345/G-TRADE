@@ -24,6 +24,7 @@ const PIPELINE_STAGES = [
 
 import PaymentModeDetails from '../common/PaymentModeDetails';
 import { needsBank } from '../../utils/paymentModes';
+import { formatCurrency } from '../../utils/localeFormat.js';
 
 const PAYMENT_METHODS = ['Cash', 'Card', 'UPI', 'Bank', 'Credit'];
 
@@ -154,8 +155,8 @@ export default function UpdateDocumentDialog({ open, docView, doc, fullDoc, onCl
           </Grid>
           <Grid item xs={12} sm={7}>
             <Typography variant="body2" color={balance > 0 ? 'warning.main' : 'success.main'} fontWeight={700}>
-              Total ₹{num(form.total).toLocaleString()} · Paid ₹{num(form.paidAmount).toLocaleString()} ·{' '}
-              {balance > 0 ? `Balance Due ₹${balance.toLocaleString()}` : 'No balance due'}
+              Total {formatCurrency(num(form.total))} · Paid {formatCurrency(num(form.paidAmount))} ·{' '}
+              {balance > 0 ? `Balance Due ${formatCurrency(balance)}` : 'No balance due'}
             </Typography>
           </Grid>
         </Grid>

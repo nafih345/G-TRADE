@@ -16,8 +16,9 @@ import {
 } from './wholesale/wholesaleConstants';
 import { describeApiError } from '../utils/apiWriteGuard';
 import { notify } from '../utils/notify';
+import { formatCurrency, getCurrencySymbol, getTaxRegLabel } from '../utils/localeFormat.js';
 
-const inr = (n) => `₹${(parseFloat(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const inr = (n) => `${formatCurrency(parseFloat(n) || 0)}`;
 const HEAD_SX = { bgcolor: '#0f172a', color: '#fff', fontWeight: 800, fontSize: '0.74rem', whiteSpace: 'nowrap', py: 1 };
 const STATUSES = ['Active', 'Inactive', 'Blocked'];
 
@@ -101,7 +102,7 @@ export default function WholesaleDealers() {
 
   const save = async () => {
     if (!form.name.trim() || !form.phone.trim()) { notify('Shop / Firm Name and Phone are required.', 'warning'); return; }
-    if (form.gstin && !/^[0-9A-Z]{15}$/i.test(form.gstin.trim())) { notify('GSTIN must be 15 letters / digits.', 'warning'); return; }
+    if (form.gstin && !/^[0-9A-Z]{15}$/i.test(form.gstin.trim())) { notify(`${getTaxRegLabel()} must be 15 letters / digits.`, 'warning'); return; }
     setSaving(true);
     const local = {
       ...form,
@@ -147,7 +148,7 @@ export default function WholesaleDealers() {
   };
 
   const exportCsv = () => {
-    const head = ['Code', 'Shop / Firm', 'Contact Person', 'Phone', 'Email', 'GSTIN', 'Billing Address', 'Shipping Address', 'Credit Limit', 'Terms (days)', 'Invoices', 'Total Business', 'Outstanding', 'Status'];
+    const head = ['Code', 'Shop / Firm', 'Contact Person', 'Phone', 'Email', getTaxRegLabel(), 'Billing Address', 'Shipping Address', 'Credit Limit', 'Terms (days)', 'Invoices', 'Total Business', 'Outstanding', 'Status'];
     const body = filtered.map(r => [r.code, r.name, r.contactPerson, r.phone, r.email, r.gstin, r.billingAddress, r.shippingAddress, r.creditLimit, r.creditDays, r.invoiceCount, r.totalBusiness.toFixed(2), r.billsDue.toFixed(2), r.status]);
     const csv = [head, ...body].map(line => line.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
     const a = document.createElement('a');
@@ -176,7 +177,7 @@ export default function WholesaleDealers() {
       <Paper variant="outlined" sx={{ p: 1.5, mb: 1.5, borderRadius: 1, borderColor: '#cbd5e1' }}>
         <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems={{ md: 'center' }}>
           <TextField
-            size="small" fullWidth placeholder="Search name, code, contact, phone, GSTIN, address…" value={search} onChange={(e) => setSearch(e.target.value)}
+            size="small" fullWidth placeholder={`Search name, code, contact, phone, ${getTaxRegLabel()}, address…`} value={search} onChange={(e) => setSearch(e.target.value)}
             InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon sx={{ fontSize: 18 }} /></InputAdornment> }}
           />
           <TextField select size="small" label="Status" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} sx={{ minWidth: 150 }}>
@@ -197,7 +198,7 @@ export default function WholesaleDealers() {
                 <TableCell sx={HEAD_SX}>Shop / Firm Name</TableCell>
                 <TableCell sx={HEAD_SX}>Contact Person</TableCell>
                 <TableCell sx={HEAD_SX}>Phone</TableCell>
-                <TableCell sx={HEAD_SX}>GSTIN / Tax ID</TableCell>
+                <TableCell sx={HEAD_SX}>{getTaxRegLabel()}</TableCell>
                 <TableCell sx={HEAD_SX}>Billing Address</TableCell>
                 <TableCell sx={HEAD_SX}>Shipping Address</TableCell>
                 <TableCell sx={HEAD_SX} align="center">Invoices</TableCell>
@@ -297,7 +298,7 @@ export default function WholesaleDealers() {
               <Grid item xs={12} sm={4}><TextField fullWidth size="small" label="Phone *" value={form.phone} onChange={(e) => set({ phone: e.target.value })} /></Grid>
               <Grid item xs={12} sm={4}><TextField fullWidth size="small" label="WhatsApp" value={form.whatsapp} onChange={(e) => set({ whatsapp: e.target.value })} /></Grid>
               <Grid item xs={12} sm={6}><TextField fullWidth size="small" label="Email" value={form.email} onChange={(e) => set({ email: e.target.value })} /></Grid>
-              <Grid item xs={12} sm={6}><TextField fullWidth size="small" label="GSTIN / Tax ID" value={form.gstin} onChange={(e) => set({ gstin: e.target.value.toUpperCase() })} inputProps={{ maxLength: 15, style: { fontFamily: 'monospace' } }} /></Grid>
+              <Grid item xs={12} sm={6}><TextField fullWidth size="small" label={getTaxRegLabel()} value={form.gstin} onChange={(e) => set({ gstin: e.target.value.toUpperCase() })} inputProps={{ maxLength: 15, style: { fontFamily: 'monospace' } }} /></Grid>
               <Grid item xs={12}><TextField fullWidth size="small" multiline minRows={2} label="Billing Address" value={form.billingAddress} onChange={(e) => set({ billingAddress: e.target.value })} /></Grid>
               <Grid item xs={12} sm={4}><TextField fullWidth size="small" label="City" value={form.city} onChange={(e) => set({ city: e.target.value })} /></Grid>
               <Grid item xs={12} sm={4}><TextField fullWidth size="small" label="State" value={form.state} onChange={(e) => set({ state: e.target.value })} /></Grid>
@@ -313,7 +314,7 @@ export default function WholesaleDealers() {
                   {PRICE_LIST_OPTIONS.map(p => <MenuItem key={p.value} value={p.value}>{p.label}</MenuItem>)}
                 </TextField>
               </Grid>
-              <Grid item xs={12} sm={3}><TextField fullWidth size="small" type="number" label="Credit Limit (₹)" value={form.creditLimit} onChange={(e) => set({ creditLimit: e.target.value })} /></Grid>
+              <Grid item xs={12} sm={3}><TextField fullWidth size="small" type="number" label={`Credit Limit (${getCurrencySymbol()})`} value={form.creditLimit} onChange={(e) => set({ creditLimit: e.target.value })} /></Grid>
               <Grid item xs={12} sm={3}><TextField fullWidth size="small" type="number" label="Payment Terms (days)" value={form.creditDays} onChange={(e) => set({ creditDays: e.target.value })} /></Grid>
               <Grid item xs={12} sm={3}><TextField fullWidth size="small" label="Sales Executive" value={form.salesExec} onChange={(e) => set({ salesExec: e.target.value })} /></Grid>
               {form.id && (

@@ -4,6 +4,7 @@
 // paid and who served the customer — with the original bill one click away. Rows come from
 // GET /api/sales/invoices/report/ (apps/sales/sales_report.py), already joined server-side.
 import React, { Fragment, useEffect, useMemo, useState } from 'react';
+import ReturnsReportSection from '../returns/ReturnsReportSection';
 import axios from 'axios';
 import {
   Alert, Box, Button, Card, Chip, Collapse, Dialog, DialogActions, DialogContent, DialogTitle, Grid,
@@ -18,8 +19,9 @@ import {
 import BillPreview from '../../billing/BillPreview';
 import { printBill } from '../../billing/printBill';
 import { notify } from '../../utils/notify';
+import { formatCurrency } from '../../utils/localeFormat.js';
 
-const inr = (n) => `₹${(Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const inr = (n) => `${formatCurrency(Number(n) || 0)}`;
 const isoDay = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const monthStart = () => { const d = new Date(); return isoDay(new Date(d.getFullYear(), d.getMonth(), 1)); };
 
@@ -76,6 +78,8 @@ export default function SalesComprehensiveReport() {
   const [expanded, setExpanded] = useState(null);
   const [billRow, setBillRow] = useState(null);
   const [reloadKey, setReloadKey] = useState(0);
+  // Sales Returns in the same period (ReturnsReportSection) — netted off the revenue KPIs.
+  const [returnsSummary, setReturnsSummary] = useState(null);
 
   useEffect(() => {
     let alive = true;
@@ -193,10 +197,13 @@ export default function SalesComprehensiveReport() {
       </Card>
 
       {/* KPIs */}
-      <Box sx={{ display: 'grid', gap: 1.5, gridTemplateColumns: { xs: 'repeat(2, minmax(0, 1fr))', md: 'repeat(5, minmax(0, 1fr))' } }}>
+      <Box sx={{ display: 'grid', gap: 1.5, gridTemplateColumns: { xs: 'repeat(2, minmax(0, 1fr))', md: 'repeat(4, minmax(0, 1fr))', lg: 'repeat(7, minmax(0, 1fr))' } }}>
         {[
           ['Documents', String(kpis.docs), `${kpis.invoices} tax invoice${kpis.invoices === 1 ? '' : 's'}`, '#475569'],
           ['Net Sales', inr(kpis.net), 'Tax invoices, after discount', '#2563eb'],
+          ['Sales Returns', returnsSummary ? `−${inr(parseFloat(returnsSummary.total_amount) || 0)}` : '—',
+            returnsSummary ? `${returnsSummary.count} return${returnsSummary.count === 1 ? '' : 's'} · ${returnsSummary.total_qty} units` : 'Loading…', '#ef4444'],
+          ['Net After Returns', inr(kpis.net - (parseFloat(returnsSummary?.total_amount) || 0)), 'Net sales − sales returns', '#0f766e'],
           ['Discount Given', inr(kpis.discount), 'On tax invoices', '#7c3aed'],
           ['Collected', inr(kpis.paid), 'Total paid incl. later receipts', '#059669'],
           ['Balance Due', inr(kpis.balance), 'Still to collect', '#dc2626'],
@@ -263,6 +270,9 @@ export default function SalesComprehensiveReport() {
           </Table>
         </TableContainer>
       </Card>
+
+      {/* Sales Returns for the same dates, at the bottom of the report; click a return for its reason. */}
+      <ReturnsReportSection key={reloadKey} kind="sales" dateFrom={dateFrom} dateTo={dateTo} onSummary={setReturnsSummary} />
 
       <ViewBillDialog row={billRow} onClose={() => setBillRow(null)} />
     </Stack>
