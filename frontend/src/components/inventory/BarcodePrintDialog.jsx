@@ -7,37 +7,23 @@
 // optional per-batch values (offer price, batch, expiry) when the template uses them.
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  Dialog, DialogTitle, DialogContent, DialogActions, Button, Box, Stack, TextField, MenuItem, Typography,
+  Dialog, DialogTitle, DialogContent, DialogActions, Button, Box, Stack, TextField, Typography,
   Alert, Table, TableHead, TableRow, TableCell, TableBody, IconButton, Tooltip, Chip, ToggleButtonGroup,
-  ToggleButton, CircularProgress, ListSubheader, LinearProgress,
+  ToggleButton, CircularProgress, LinearProgress,
 } from '@mui/material';
 import { Tune as TuneIcon, DeleteOutline, AccountTree, CheckCircle, ErrorOutline, WarningAmber } from '@mui/icons-material';
 import useLabelBundle, { templateForWorkflow, WORKFLOWS } from '../../labels/useLabelBundle';
 import { fetchLabelData, fetchVariantSiblings } from '../../labels/labelApi';
 import { renderLabelHtml, labelCss, hasUsableLogo, summarizeWarnings } from '../../labels/renderLabel';
 import { printLabelJob, resolveCalibration } from '../../labels/printLabels';
-import { templateFieldIds, templateUsesRestricted, jobTotals, a4SheetCount, sheetUsage } from '../../labels/labelModel';
+import { templateFieldIds, templateUsesRestricted, jobTotals, a4SheetCount, sheetUsage, startSkipFor, FRESH_START } from '../../labels/labelModel';
+import { LabelTemplateSelect, SheetStartOptions } from './LabelPrintOptions';
 import { todayIso } from '../../labels/labelFields';
 import { notify } from '../../utils/notify';
 
 export const BARCODE_SETTINGS_HASH = '#/settings?tab=barcode-labels';
 const PX_PER_MM = 96 / 25.4;
 const rowKey = (p, i) => String(p?.id ?? `row-${i}`);
-
-function StartPositionGrid({ rows, cols, skip }) {
-  if (!rows || !cols || rows * cols > 260) return null;
-  return (
-    <Box sx={{ display: 'grid', gap: '3px', my: 1, gridTemplateColumns: `repeat(${cols}, 15px)` }}>
-      {Array.from({ length: rows * cols }, (_, i) => (
-        <Box key={i} sx={{
-          width: 15, height: 11, borderRadius: '2px', border: '1px solid',
-          borderColor: i === skip ? 'primary.main' : i < skip ? 'transparent' : 'divider',
-          bgcolor: i === skip ? 'primary.main' : i < skip ? 'action.disabledBackground' : 'transparent',
-        }} />
-      ))}
-    </Box>
-  );
-}
 
 function LabelThumb({ template, html, css, maxW = 300, maxH = 200 }) {
   const W = template.width_mm * PX_PER_MM;
@@ -69,7 +55,7 @@ export default function BarcodePrintDialog({ open, onClose, products, rows: rows
   const [customQty, setCustomQty] = useState(1);
   const [job, setJob] = useState({ offer_price: '', batch_no: '', expiry_date: '', print_date: todayIso() });
   const [manualBarcode, setManualBarcode] = useState('');
-  const [start, setStart] = useState({ enabled: false, row: 1, col: 1 });
+  const [start, setStart] = useState(FRESH_START);
   const [confirming, setConfirming] = useState(false);
   const [printing, setPrinting] = useState(false);
 
@@ -85,7 +71,7 @@ export default function BarcodePrintDialog({ open, onClose, products, rows: rows
     if (!open) return;
     setConfirming(false);
     setManualBarcode('');
-    setStart({ enabled: false, row: 1, col: 1 });
+    setStart(FRESH_START);
     setTemplateId(templateOverride ? '__design' : '');
     const init = rowsInit?.length
       ? rowsInit.map((r, i) => ({
@@ -161,9 +147,7 @@ export default function BarcodePrintDialog({ open, onClose, products, rows: rows
   const fieldIds = template ? templateFieldIds(template) : new Set();
   const isA4 = template?.printer_type === 'a4';
   const per = isA4 ? sheetUsage(template).perSheet : 1;
-  const sheetRows = isA4 ? template.layout.sheet.rows : 0;
-  const sheetCols = isA4 ? template.layout.sheet.cols : 0;
-  const startSkip = isA4 && start.enabled ? (Math.min(start.row, sheetRows) - 1) * sheetCols + (Math.min(start.col, sheetCols) - 1) : 0;
+  const startSkip = startSkipFor(template, start);
   const previewRow = checked.find((r) => r.html && !r.skipReason) || checked.find((r) => r.html);
   const css = useMemo(() => labelCss({ logo }), [logo]);
 
@@ -231,13 +215,13 @@ export default function BarcodePrintDialog({ open, onClose, products, rows: rows
         {template && (
           <Box sx={{ display: 'grid', gap: 3, gridTemplateColumns: { xs: '1fr', md: 'minmax(0,1.5fr) minmax(280px,1fr)' } }}>
             <Stack spacing={2} sx={{ minWidth: 0 }}>
-              <TextField select size="small" label="Label template" value={templateValue} onChange={(e) => { setTemplateId(e.target.value); setConfirming(false); }} inputProps={{ 'data-testid': 'print-template-select' }}>
-                {templateOverride && <MenuItem value="__design">Current design — {templateOverride.name || 'Untitled'} (as shown in the designer)</MenuItem>}
-                {templateOverride && <ListSubheader>Saved templates</ListSubheader>}
-                {templates.map((t) => (
-                  <MenuItem key={t.id} value={t.id}>{t.is_default ? '★ ' : ''}{t.name} — {t.width_mm} × {t.height_mm} mm{t.printer_type === 'a4' ? ' (A4)' : ''} · v{t.version}</MenuItem>
-                ))}
-              </TextField>
+              <LabelTemplateSelect
+                templates={templates} value={templateValue} showVersion
+                keepIds={[templateForWorkflow(bundle, workflow)?.id]}
+                designOption={templateOverride ? { value: '__design', label: `Current design — ${templateOverride.name || 'Untitled'} (as shown in the designer)` } : undefined}
+                onChange={(v) => { setTemplateId(v); setStart(FRESH_START); setConfirming(false); }}
+                inputProps={{ 'data-testid': 'print-template-select' }}
+              />
 
               {confirming ? (
                 <Box data-testid="print-confirm">
@@ -246,6 +230,7 @@ export default function BarcodePrintDialog({ open, onClose, products, rows: rows
                     {totals.variants ? ` (${totals.variants} variant${totals.variants === 1 ? '' : 's'})` : ''} with “{template.name}”
                     {isA4 ? ` on ${a4SheetCount(totals.labels, template, startSkip)} A4 sheet(s)` : ` on ${template.width_mm} × ${template.height_mm} mm thermal labels`}.
                     {totals.skipped ? ` ${totals.skipped} line(s) will be skipped.` : ''}
+                    {startSkip ? ` Starting at the first unused position (${startSkip} used label${startSkip === 1 ? '' : 's'} skipped).` : ''}
                   </Alert>
                   <Box sx={{ maxHeight: 340, overflow: 'auto', border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
                     <Table size="small" stickyHeader>
@@ -348,30 +333,7 @@ export default function BarcodePrintDialog({ open, onClose, products, rows: rows
                       helperText={manualBarcode.trim() ? 'This exact value prints on every label and is registered to the product so it scans at billing.' : "Leave blank to use the product's saved barcode."} />
                   )}
 
-                  {isA4 && (
-                    <Box>
-                      <Stack direction="row" spacing={1.5} alignItems="center">
-                        <Typography variant="subtitle2" fontWeight={700}>Start position</Typography>
-                        <ToggleButtonGroup exclusive size="small" value={start.enabled ? 'on' : 'off'} onChange={(e, v) => v && setStart((s) => ({ ...s, enabled: v === 'on' }))}>
-                          <ToggleButton value="off">Fresh sheet</ToggleButton>
-                          <ToggleButton value="on">Part-used sheet</ToggleButton>
-                        </ToggleButtonGroup>
-                      </Stack>
-                      {start.enabled && (
-                        <>
-                          <Stack direction="row" spacing={1.5} sx={{ mt: 1 }}>
-                            <TextField select size="small" label="Row" value={Math.min(start.row, sheetRows)} onChange={(e) => setStart((s) => ({ ...s, row: Number(e.target.value) }))} sx={{ width: 100 }}>
-                              {Array.from({ length: sheetRows }, (_, i) => <MenuItem key={i} value={i + 1}>{i + 1}</MenuItem>)}
-                            </TextField>
-                            <TextField select size="small" label="Column" value={Math.min(start.col, sheetCols)} onChange={(e) => setStart((s) => ({ ...s, col: Number(e.target.value) }))} sx={{ width: 100 }}>
-                              {Array.from({ length: sheetCols }, (_, i) => <MenuItem key={i} value={i + 1}>{i + 1}</MenuItem>)}
-                            </TextField>
-                          </Stack>
-                          <StartPositionGrid rows={sheetRows} cols={sheetCols} skip={startSkip} />
-                        </>
-                      )}
-                    </Box>
-                  )}
+                  <SheetStartOptions template={template} value={start} onChange={setStart} />
                 </>
               )}
             </Stack>

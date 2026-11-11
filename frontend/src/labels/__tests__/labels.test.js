@@ -237,3 +237,49 @@ test('the product barcode is never swapped for an internal code, even on older t
   assert.ok(warnings.some((w) => w.kind === 'barcode-fit'), 'too-long codes still warn');
   assert.ok(warnings.every((w) => !(w.fixes || []).some((f) => f.id === 'internal')));
 });
+
+// ---- Print Label options: label type, Past Used Sheet, template visibility -------------
+import {
+  labelTypeOf, isJewelleryTemplate, startSkipFor, startFromSkip, sheetSideLabels, visibleTemplates, hiddenCount, FRESH_START,
+} from '../labelModel.js';
+
+const dumbbell = normalizeTemplate({
+  id: 'd', name: 'A4 Jewellery Dumbbell', printer_type: 'a4', width_mm: 92, height_mm: 14.5, label_type: 'jewellery',
+  layout: { sheet: { cols: 2, rows: 19, marginTopMm: 10, marginLeftMm: 12, colGapMm: 6, rowGapMm: 0 }, elements: [] },
+});
+
+test('label type: stored value wins, name fallback for cached templates', () => {
+  assert.equal(labelTypeOf({ label_type: 'optical', name: 'Jewel card' }), 'optical');
+  assert.equal(labelTypeOf({ name: 'Jewellery Rat-Tail 90 × 13 mm' }), 'jewellery');
+  assert.equal(labelTypeOf({ name: 'Standard 50 × 25' }), 'standard');
+  assert.ok(isJewelleryTemplate(dumbbell));
+  assert.equal(normalizeTemplate({ name: 'x', is_default: true, is_hidden: true }).is_hidden, false);
+});
+
+test('past used sheet: row + side -> labels skipped, and back', () => {
+  assert.equal(startSkipFor(dumbbell, FRESH_START), 0);
+  assert.equal(startSkipFor(dumbbell, { enabled: true, row: 1, col: 2 }), 1); // right side of row 1
+  assert.equal(startSkipFor(dumbbell, { enabled: true, row: 4, col: 1 }), 6);
+  assert.equal(startSkipFor(dumbbell, { enabled: true, row: 99, col: 9 }), 37); // clamped to the last cell
+  assert.equal(startSkipFor(dumbbell, { enabled: false, row: 4, col: 1 }), 0);
+  assert.deepEqual(startFromSkip(dumbbell, 7), { enabled: true, row: 4, col: 2 });
+  assert.deepEqual(startFromSkip(dumbbell, 0), { enabled: false, row: 1, col: 1 });
+  const roll = normalizeTemplate({ name: 'Rat-tail', printer_type: 'thermal', width_mm: 90, height_mm: 13 });
+  assert.equal(startSkipFor(roll, { enabled: true, row: 3, col: 2 }), 0); // thermal rolls never skip
+  assert.deepEqual(sheetSideLabels(2), ['Left side', 'Right side']);
+  assert.equal(sheetSideLabels(5)[4], 'Column 5');
+  assert.equal(a4SheetCount(38, dumbbell, startSkipFor(dumbbell, { enabled: true, row: 1, col: 2 })), 2);
+});
+
+test('template visibility: default + kept ids always listed', () => {
+  const ts = [
+    { id: 'a', is_default: true, is_hidden: false },
+    { id: 'b', is_hidden: true },
+    { id: 'c', is_hidden: false },
+    { id: 'd', is_hidden: true },
+  ];
+  assert.deepEqual(visibleTemplates(ts).map((t) => t.id), ['a', 'c']);
+  assert.deepEqual(visibleTemplates(ts, { keepIds: ['d', null] }).map((t) => t.id), ['a', 'c', 'd']);
+  assert.equal(visibleTemplates(ts, { showAll: true }).length, 4);
+  assert.equal(hiddenCount(ts), 2);
+});

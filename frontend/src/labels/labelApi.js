@@ -61,7 +61,7 @@ export async function fetchLabelBundle() {
 
 const payload = (t) => ({
   name: t.name, description: t.description || '', printer_type: t.printer_type,
-  width_mm: t.width_mm, height_mm: t.height_mm, layout: t.layout,
+  width_mm: t.width_mm, height_mm: t.height_mm, layout: t.layout, label_type: t.label_type || 'standard',
 });
 
 export const createTemplate = (t) => axios.post(`${BASE}/label-templates/`, payload(t)).then((r) => normalizeTemplate(r.data));
@@ -69,6 +69,7 @@ export const updateTemplate = (t) => axios.put(`${BASE}/label-templates/${t.id}/
 export const renameTemplate = (t, name) => axios.patch(`${BASE}/label-templates/${t.id}/`, { name, expected_version: t.version }).then((r) => normalizeTemplate(r.data));
 export const duplicateTemplate = (id, name) => axios.post(`${BASE}/label-templates/${id}/duplicate/`, name ? { name } : {}).then((r) => normalizeTemplate(r.data));
 export const deleteTemplate = (id) => axios.delete(`${BASE}/label-templates/${id}/`);
+export const setTemplateVisibility = (id, hidden) => axios.post(`${BASE}/label-templates/${id}/visibility/`, { is_hidden: !!hidden }).then((r) => normalizeTemplate(r.data));
 export const setDefaultTemplate = (id) => axios.post(`${BASE}/label-templates/${id}/set-default/`).then((r) => normalizeTemplate(r.data));
 export const restoreDefaultTemplate = (id) => axios.post(`${BASE}/label-templates/${id}/restore-default/`).then((r) => normalizeTemplate(r.data));
 export const fetchVersions = (id) => axios.get(`${BASE}/label-templates/${id}/versions/`).then((r) => r.data);

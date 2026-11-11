@@ -107,6 +107,7 @@ export function blankTemplate(printerType = 'thermal') {
   return {
     id: null, name: '', description: '', printer_type: printerType,
     width_mm: isA4 ? 63.5 : 38, height_mm: isA4 ? 33.9 : 25, version: 0, is_default: false,
+    label_type: 'standard', is_hidden: false,
     layout: {
       schema: 1, paddingMm: 1, gapMm: 0, defaultBarcodeFormat: 'CODE128', elements: [],
       ...(isA4 ? { sheet: { ...A4_SHEET_PRESETS[0].sheet } } : {}),
@@ -120,6 +121,8 @@ export function normalizeTemplate(t) {
   const layout = t.layout && typeof t.layout === 'object' ? t.layout : {};
   return {
     ...t,
+    label_type: labelTypeOf(t),
+    is_hidden: !!t.is_hidden && !t.is_default,
     width_mm: num(t.width_mm, 38),
     height_mm: num(t.height_mm, 25),
     layout: {
@@ -426,3 +429,69 @@ export function a4SheetCount(labelCount, template, startSkip = 0) {
   const per = sheetUsage(template).perSheet || 1;
   return Math.ceil((labelCount + startSkip) / per);
 }
+
+// ---------------------------------------------------------------------------
+// Label type (standard / optical / jewellery) — LabelTemplate.label_type
+// ---------------------------------------------------------------------------
+export const LABEL_TYPES = [
+  { id: 'standard', label: 'Standard' },
+  { id: 'optical', label: 'Optical' },
+  { id: 'jewellery', label: 'Jewellery' },
+];
+const JEWELLERY_NAME = /jewel|rat.?tail|dumbbell/i;
+
+// Stored type when the server sent one; older cached templates fall back to the name.
+export function labelTypeOf(t) {
+  if (!t) return 'standard';
+  if (LABEL_TYPES.some((x) => x.id === t.label_type)) return t.label_type;
+  return JEWELLERY_NAME.test(`${t.name || ''} ${t.preset_key || ''}`) ? 'jewellery' : 'standard';
+}
+export const isJewelleryTemplate = (t) => labelTypeOf(t) === 'jewellery';
+
+// ---------------------------------------------------------------------------
+// Past Used Sheet — where on a part-used A4 sheet the job starts.
+// start = { enabled, row, col } (1-based). Only sheet (A4) templates can skip positions:
+// a thermal roll always continues from the next label.
+// ---------------------------------------------------------------------------
+export const FRESH_START = Object.freeze({ enabled: false, row: 1, col: 1 });
+const clampInt = (v, lo, hi) => Math.min(hi, Math.max(lo, parseInt(v, 10) || lo));
+
+export function sheetGrid(template) {
+  if (template?.printer_type !== 'a4') return null;
+  const sheet = template.layout?.sheet || DEFAULT_SHEET;
+  const rows = Math.max(1, parseInt(sheet.rows, 10) || 1);
+  const cols = Math.max(1, parseInt(sheet.cols, 10) || 1);
+  return { rows, cols, perSheet: rows * cols };
+}
+
+// Labels to leave blank before the first printed one.
+export function startSkipFor(template, start) {
+  const g = sheetGrid(template);
+  if (!g || !start?.enabled) return 0;
+  return (clampInt(start.row, 1, g.rows) - 1) * g.cols + (clampInt(start.col, 1, g.cols) - 1);
+}
+
+// Inverse of startSkipFor: "N labels already used" -> the start cell.
+export function startFromSkip(template, skip) {
+  const g = sheetGrid(template);
+  if (!g) return { ...FRESH_START };
+  const n = clampInt(skip, 0, g.perSheet - 1);
+  return { enabled: n > 0, row: Math.floor(n / g.cols) + 1, col: (n % g.cols) + 1 };
+}
+
+// Names for the sheet's columns: jewellery sheets are two tags across (left / right side).
+export function sheetSideLabels(cols) {
+  if (cols === 2) return ['Left side', 'Right side'];
+  if (cols === 3) return ['Left side', 'Middle', 'Right side'];
+  return Array.from({ length: cols }, (_, i) => `Column ${i + 1}`);
+}
+
+// ---------------------------------------------------------------------------
+// Template visibility — LabelTemplate.is_hidden. The default template is always listed,
+// as is anything in keepIds (the current selection / a workflow's assigned template).
+// ---------------------------------------------------------------------------
+export function visibleTemplates(templates, { showAll = false, keepIds = [] } = {}) {
+  const keep = new Set(keepIds.filter(Boolean));
+  return (templates || []).filter((t) => showAll || !t.is_hidden || t.is_default || keep.has(t.id));
+}
+export const hiddenCount = (templates) => (templates || []).filter((t) => t.is_hidden && !t.is_default).length;

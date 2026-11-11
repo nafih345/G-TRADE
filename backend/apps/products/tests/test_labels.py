@@ -202,6 +202,37 @@ class TemplateApiTests(APITestCase):
         self.client.post(f'{URL}{tid}/set-default/')
         self.assertEqual(list(LabelTemplate.objects.filter(is_default=True).values_list('id', flat=True)), [LabelTemplate.objects.get(pk=tid).id])
 
+    def test_seed_shows_only_default_and_types_presets(self):
+        data = self.client.get(URL).data
+        shown = [t for t in data if not t['is_hidden']]
+        self.assertEqual([t['is_default'] for t in shown], [True])
+        by_key = {t['preset_key']: t['label_type'] for t in data}
+        self.assertEqual(by_key['a4_dumbbell_92x14'], 'jewellery')
+        self.assertEqual(by_key['optical_frame_50x30'], 'optical')
+        self.assertEqual(by_key['standard_50x25'], 'standard')
+
+    def test_visibility_toggle_and_default_guard(self):
+        self.client.get(URL)
+        hidden = LabelTemplate.objects.filter(is_hidden=True).first()
+        res = self.client.post(f'{URL}{hidden.id}/visibility/', {'is_hidden': False}, format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertFalse(res.data['is_hidden'])
+        hidden.refresh_from_db()
+        self.assertEqual(hidden.version, 1)  # not a design change
+        default = LabelTemplate.objects.get(is_default=True)
+        self.assertEqual(self.client.post(f'{URL}{default.id}/visibility/', {'is_hidden': True}, format='json').status_code, 400)
+        self.assertEqual(self.client.post(f'{URL}{hidden.id}/visibility/', {'is_hidden': 'yes'}, format='json').status_code, 400)
+        # making a hidden template the default shows it
+        self.client.post(f'{URL}{hidden.id}/visibility/', {'is_hidden': True}, format='json')
+        self.assertFalse(self.client.post(f'{URL}{hidden.id}/set-default/').data['is_hidden'])
+
+    def test_label_type_saved_and_validated(self):
+        res = self.client.post(URL, dict(body(), label_type='jewellery'), format='json')
+        self.assertEqual(res.status_code, 201, res.content)
+        self.assertEqual(res.data['label_type'], 'jewellery')
+        self.assertFalse(res.data['is_hidden'])
+        self.assertEqual(self.client.post(URL, dict(body(), name='Other', label_type='bogus'), format='json').status_code, 400)
+
     def test_duplicate_name_rejected(self):
         self.client.post(URL, body(), format='json')
         res = self.client.post(URL, body(), format='json')

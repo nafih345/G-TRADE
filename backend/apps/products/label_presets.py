@@ -168,6 +168,14 @@ PRESETS = [
     },
 ]
 
+# Label type per preset (jewellery labels get the Past Used Sheet print option).
+PRESET_LABEL_TYPES = {
+    'jewel_card_38x25': 'jewellery', 'rattail_90x13': 'jewellery', 'a4_dumbbell_92x14': 'jewellery',
+    'optical_frame_50x30': 'optical',
+}
+for _p in PRESETS:
+    _p.setdefault('label_type', PRESET_LABEL_TYPES.get(_p['preset_key'], 'standard'))
+
 PRESETS_BY_KEY = {p['preset_key']: p for p in PRESETS}
 
 

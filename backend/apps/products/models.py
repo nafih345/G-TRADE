@@ -429,6 +429,14 @@ class LabelTemplate(BaseUUIDModel):
     layout = models.JSONField(default=dict, blank=True)
     version = models.PositiveIntegerField(default=1)
     is_default = models.BooleanField(default=False)
+    # What the label is for. Jewellery labels get the "Past Used Sheet" (start row / side)
+    # option in every print dialog (frontend: labels/labelModel.js isJewelleryTemplate).
+    LABEL_TYPES = [('standard', 'Standard'), ('optical', 'Optical'), ('jewellery', 'Jewellery')]
+    label_type = models.CharField(max_length=20, choices=LABEL_TYPES, default='standard')
+    # Hidden templates stay usable but drop out of the designer's template bar and the
+    # print dialogs' template lists until "Show all barcode templates". The default
+    # template is never hidden.
+    is_hidden = models.BooleanField(default=False)
     # Starter preset this template was seeded from — "Restore Default" resets to it.
     preset_key = models.CharField(max_length=60, blank=True, default='')
     updated_by_name = models.CharField(max_length=150, blank=True, default='')
@@ -442,6 +450,8 @@ class LabelTemplate(BaseUUIDModel):
     def save(self, *args, **kwargs):
         from django.db import transaction
         with transaction.atomic():
+            if self.is_default:
+                self.is_hidden = False
             if self.is_default and not self.is_deleted:
                 LabelTemplate.all_objects.filter(is_default=True).exclude(pk=self.pk).update(is_default=False)
             super().save(*args, **kwargs)

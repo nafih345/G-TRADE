@@ -4,6 +4,7 @@
   /api/products/label-templates/<id>/            retrieve / update (optimistic lock) / soft delete
   /api/products/label-templates/<id>/duplicate/  copy into a new independent template
   /api/products/label-templates/<id>/set-default/
+  /api/products/label-templates/<id>/visibility/      {is_hidden} — show / hide in template lists
   /api/products/label-templates/<id>/restore-default/   reset to its starter preset
   /api/products/label-templates/<id>/versions/          previous saved states
   /api/products/label-templates/<id>/restore-version/   {version}
@@ -80,18 +81,20 @@ def ensure_seeded():
             if LabelTemplate.all_objects.exists():
                 return  # another request seeded while we waited for the lock
             for spec in PRESETS:
-                _create_from_spec(spec)
+                # Only the default starter is shown at first; the rest are a click away
+                # behind "Show all barcode templates".
+                _create_from_spec(spec, is_hidden=not spec.get('is_default', False))
     except (ProgrammingError, OperationalError):
         pass  # not migrated yet — /api/health/ reports pending migrations
 
 
-def _create_from_spec(spec, name=None, is_default=None):
+def _create_from_spec(spec, name=None, is_default=None, is_hidden=False):
     w, h, layout = validate_template(spec['printer_type'], spec['width_mm'], spec['height_mm'],
                                      spec['layout'], allow_restricted=True)
     return LabelTemplate.objects.create(
         name=name or spec['name'], description=spec.get('description', ''),
         printer_type=spec['printer_type'], width_mm=w, height_mm=h, layout=layout,
-        preset_key=spec['preset_key'],
+        preset_key=spec['preset_key'], label_type=spec.get('label_type', 'standard'), is_hidden=is_hidden,
         is_default=spec.get('is_default', False) if is_default is None else is_default,
     )
 
@@ -105,10 +108,10 @@ class LabelTemplateSerializer(serializers.ModelSerializer):
         model = LabelTemplate
         fields = (
             'id', 'name', 'description', 'printer_type', 'width_mm', 'height_mm', 'layout',
-            'version', 'is_default', 'preset_key', 'updated_by_name', 'created_at', 'updated_at',
+            'version', 'is_default', 'label_type', 'is_hidden', 'preset_key', 'updated_by_name', 'created_at', 'updated_at',
             'expected_version', 'uses_restricted_fields',
         )
-        read_only_fields = ('version', 'is_default', 'preset_key', 'updated_by_name', 'created_at', 'updated_at')
+        read_only_fields = ('version', 'is_default', 'is_hidden', 'preset_key', 'updated_by_name', 'created_at', 'updated_at')
 
     def get_uses_restricted_fields(self, obj):
         return layout_uses_restricted(obj.layout)
@@ -224,7 +227,7 @@ class LabelTemplateViewSet(viewsets.ModelViewSet):
         clone = LabelTemplate.objects.create(
             name=name, description=src.description, printer_type=src.printer_type,
             width_mm=src.width_mm, height_mm=src.height_mm, layout=copy.deepcopy(src.layout),
-            preset_key=src.preset_key, updated_by_name=_actor(request),
+            preset_key=src.preset_key, label_type=src.label_type, updated_by_name=_actor(request),
         )
         return Response(self.get_serializer(clone).data, status=status.HTTP_201_CREATED)
 
@@ -232,7 +235,22 @@ class LabelTemplateViewSet(viewsets.ModelViewSet):
     def set_default(self, request, pk=None):
         tpl = self.get_object()
         tpl.is_default = True
-        tpl.save()
+        tpl.save()  # also un-hides it (LabelTemplate.save)
+        return Response(self.get_serializer(tpl).data)
+
+    @action(detail=True, methods=['post'])
+    def visibility(self, request, pk=None):
+        """Show / hide a template in the template lists. Not a design change: no version
+        bump, no snapshot. The default template can't be hidden."""
+        tpl = self.get_object()
+        raw = request.data.get('is_hidden')
+        if not isinstance(raw, bool):
+            return Response({'detail': 'is_hidden must be true or false.'}, status=status.HTTP_400_BAD_REQUEST)
+        if raw and tpl.is_default:
+            return Response({'detail': 'The default template is always shown. Make another template the default first.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        LabelTemplate.objects.filter(pk=tpl.pk).update(is_hidden=raw)
+        tpl.is_hidden = raw
         return Response(self.get_serializer(tpl).data)
 
     @action(detail=True, methods=['post'], url_path='restore-default')
@@ -297,7 +315,7 @@ class LabelTemplateViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def presets(self, request):
-        return Response([{k: p[k] for k in ('preset_key', 'name', 'description', 'printer_type', 'width_mm', 'height_mm')}
+        return Response([{k: p[k] for k in ('preset_key', 'name', 'description', 'printer_type', 'width_mm', 'height_mm', 'label_type')}
                          for p in PRESETS])
 
     @action(detail=False, methods=['post'], url_path='from-preset')

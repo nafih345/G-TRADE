@@ -14,7 +14,7 @@ import {
 import { FIELD_GROUPS, LABEL_FIELDS, FIELD_BY_ID } from '../../../labels/labelFields';
 import { planBarcode, moduleWidthOptions, minSafeModuleMm, RECOMMENDED_MODULE_MM } from '../../../labels/renderLabel';
 import {
-  BARCODE_FORMATS, FONT_FAMILIES, THERMAL_PRESET_SIZES, A4_SHEET_PRESETS, elementTitle, sheetUsage, r2,
+  BARCODE_FORMATS, FONT_FAMILIES, THERMAL_PRESET_SIZES, A4_SHEET_PRESETS, LABEL_TYPES, elementTitle, sheetUsage, r2,
 } from '../../../labels/labelModel';
 import { getCurrencySymbol } from '../../../utils/localeFormat.js';
 
@@ -130,6 +130,14 @@ function LabelSettings({ template, onTemplate, onResize }) {
       <H>Label</H>
       <TextField size="small" label="Template name" value={template.name} onChange={(e) => onTemplate((t) => ({ ...t, name: e.target.value }), 'name')} />
       <TextField size="small" label="Description (optional)" value={template.description || ''} onChange={(e) => onTemplate((t) => ({ ...t, description: e.target.value }), 'desc')} />
+      <TextField
+        select size="small" label="Barcode type" value={template.label_type || 'standard'}
+        onChange={(e) => onTemplate((t) => ({ ...t, label_type: e.target.value }))}
+        inputProps={{ 'data-testid': 'label-type-select' }}
+        helperText={template.label_type === 'jewellery' ? 'Print dialogs offer “Past Used Sheet” (start row & side) for this label.' : undefined}
+      >
+        {LABEL_TYPES.map((x) => <MenuItem key={x.id} value={x.id}>{x.label}</MenuItem>)}
+      </TextField>
       <ToggleButtonGroup
         exclusive size="small" fullWidth value={template.printer_type}
         onChange={(e, v) => {

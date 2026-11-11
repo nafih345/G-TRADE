@@ -24,6 +24,8 @@ import useLabelBundle, { templateForWorkflow } from '../../labels/useLabelBundle
 import { fetchLabelData } from '../../labels/labelApi';
 import { renderLabelHtml, hasUsableLogo, summarizeWarnings } from '../../labels/renderLabel';
 import { printLabelJob, resolveCalibration } from '../../labels/printLabels';
+import { startSkipFor, FRESH_START } from '../../labels/labelModel';
+import { LabelTemplateSelect, SheetStartOptions } from '../inventory/LabelPrintOptions';
 import { buildPrintLines, buildReprintLines, countThrough, jobSize, lineSize, positionOf, printRows } from '../../utils/purchaseLabels';
 import { notify } from '../../utils/notify';
 import { formatCurrency } from '../../utils/localeFormat.js';
@@ -44,17 +46,29 @@ function details(it) {
 
 const labelsWord = (n) => `${n} label${n === 1 ? '' : 's'}`;
 
-// Before anything goes to the printer: "Do you want to print all N labels?" with what's in the job.
-function PrePrintDialog({ kind, lines, items, onCancel, onConfirm }) {
+// Before anything goes to the printer: "Do you want to print all N labels?" with what's in the job,
+// plus the shared Print Label options — barcode template / type and, for jewellery labels,
+// the Past Used Sheet start row & side (same components as Inventory → Products).
+function PrePrintDialog({ kind, lines, items, onCancel, onConfirm, templatePicker, template, start, onStart, problems = {} }) {
   const total = jobSize(lines);
   const reprint = kind === 'REPRINT';
   const nameOf = (l) => items.find((i) => i.id === l.item)?.product_name || 'Item';
+  const blocked = lines.filter((l) => problems[l.item]);
   return (
     <Dialog open onClose={onCancel} maxWidth="sm" fullWidth>
       <DialogTitle sx={{ fontWeight: 800 }}>
         {reprint ? `Re-print ${total === 1 ? 'this label' : `these ${total} labels`}?` : `Do you want to print ${total === 1 ? 'this label' : `all ${total} labels`}?`}
       </DialogTitle>
       <DialogContent dividers>
+        <Stack spacing={1.5} sx={{ mb: 1.5 }}>
+          {templatePicker}
+          <SheetStartOptions template={template} value={start} onChange={onStart} />
+          {blocked.length > 0 && (
+            <Alert severity="error" sx={{ py: 0 }}>
+              {blocked.length} item(s) can't print with “{template?.name}” ({problems[blocked[0].item]}). Pick another template or deselect them.
+            </Alert>
+          )}
+        </Stack>
         <Box sx={{ maxHeight: 240, overflow: 'auto', border: '1px solid', borderColor: 'divider', borderRadius: 1, mb: 1.5 }}>
           <Table size="small" stickyHeader>
             <TableHead><TableRow><TableCell>#</TableCell><TableCell>Item</TableCell><TableCell align="right">Units</TableCell><TableCell align="right">Labels</TableCell></TableRow></TableHead>
@@ -79,7 +93,7 @@ function PrePrintDialog({ kind, lines, items, onCancel, onConfirm }) {
       <DialogActions>
         <Button onClick={onCancel}>Cancel</Button>
         <Button variant="contained" color={reprint ? 'secondary' : 'primary'} startIcon={reprint ? <ReprintIcon /> : <PrintIcon />}
-          onClick={onConfirm} data-testid="labels-preprint-confirm">
+          onClick={onConfirm} disabled={!template || blocked.length > 0} data-testid="labels-preprint-confirm">
           {reprint ? `Re-print ${labelsWord(total)}` : `Yes, print ${labelsWord(total)}`}
         </Button>
       </DialogActions>
@@ -197,6 +211,7 @@ export default function PurchaseBarcodePrinting({ invoiceId, refreshKey = 0, onI
   const [selected, setSelected] = useState({}); // pending: { itemId: count }
   const [reprint, setReprint] = useState({}); // printed: { itemId: { from, to } }
   const [templateId, setTemplateId] = useState('');
+  const [start, setStart] = useState(FRESH_START); // Past Used Sheet start cell (A4 / jewellery sheets)
   const [labelData, setLabelData] = useState({ byId: {}, store: {}, logo: '' });
   const [busy, setBusy] = useState(false);
   const [confirmJob, setConfirmJob] = useState(null);
@@ -204,7 +219,12 @@ export default function PurchaseBarcodePrinting({ invoiceId, refreshKey = 0, onI
   const [entries, setEntries] = useState([]);
 
   const templates = bundle?.templates || [];
-  const template = templates.find((t) => t.id === templateId) || templateForWorkflow(bundle, 'purchase');
+  const workflowTemplate = templateForWorkflow(bundle, 'purchase');
+  const template = templates.find((t) => t.id === templateId) || workflowTemplate;
+  const chooseTemplate = (id) => { setTemplateId(id); setStart(FRESH_START); };
+  const templatePicker = (props) => (
+    <LabelTemplateSelect templates={templates} value={template?.id || ''} onChange={chooseTemplate} keepIds={[workflowTemplate?.id]} {...props} />
+  );
   const items = useMemo(() => status?.items || [], [status]);
   const openJob = status?.open_job || null;
 
@@ -307,11 +327,16 @@ export default function PurchaseBarcodePrinting({ invoiceId, refreshKey = 0, onI
     return next;
   });
 
-  const runPrint = async (lines) => printLabelJob({
-    template,
-    rows: printRows(lines, items, labelData.byId),
-    settings, store: labelData.store, logo: labelData.logo,
-  });
+  const runPrint = async (lines) => {
+    const res = await printLabelJob({
+      template,
+      rows: printRows(lines, items, labelData.byId),
+      settings, store: labelData.store, logo: labelData.logo,
+      startSkip: startSkipFor(template, start),
+    });
+    if (res.printed) setStart(FRESH_START); // the sheet used for this job is no longer the same part-used sheet
+    return res;
+  };
 
   const handlePrint = () => {
     if (!template) { notify('No label template — create one in Settings → Barcode Labels.', 'error'); return; }
@@ -390,9 +415,7 @@ export default function PurchaseBarcodePrinting({ invoiceId, refreshKey = 0, onI
           onChange={(e, v) => onInvoiceChange?.(v?.id || '')}
           renderInput={(params) => <TextField {...params} label="Purchase entry" placeholder="Pick a saved entry" />} />}
         {invoiceId && (
-          <TextField select size="small" label="Label template" sx={{ minWidth: 220 }} value={template?.id || ''} onChange={(e) => setTemplateId(e.target.value)}>
-            {templates.map((t) => <MenuItem key={t.id} value={t.id}>{t.name} — {t.width_mm} × {t.height_mm} mm{t.printer_type === 'a4' ? ' (A4)' : ''}</MenuItem>)}
-          </TextField>
+          templatePicker({ sx: { minWidth: 260 }, inputProps: { 'data-testid': 'labels-template-select' } })
         )}
         {invoiceId && <Tooltip title="Refresh"><span><IconButton onClick={load} disabled={loading}><RefreshIcon /></IconButton></span></Tooltip>}
       </Stack>
@@ -626,6 +649,11 @@ export default function PurchaseBarcodePrinting({ invoiceId, refreshKey = 0, onI
           kind={prePrint.kind}
           lines={prePrint.lines}
           items={items}
+          templatePicker={templatePicker({ fullWidth: true })}
+          template={template}
+          start={start}
+          onStart={setStart}
+          problems={problems}
           onCancel={() => setPrePrint(null)}
           onConfirm={() => { const { kind, lines } = prePrint; setPrePrint(null); (kind === 'PRINT' ? doPrint : doReprint)(lines); }}
         />

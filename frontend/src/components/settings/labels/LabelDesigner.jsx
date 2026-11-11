@@ -6,13 +6,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Box, Stack, Typography, Button, IconButton, Tooltip, TextField, MenuItem, Divider, Alert, Chip,
-  Menu, ListItemIcon, ListItemText, ToggleButton, CircularProgress, Paper, ListSubheader,
+  Menu, ListItemIcon, ListItemText, ToggleButton, CircularProgress, Paper, ListSubheader, Switch, FormControlLabel,
 } from '@mui/material';
 import {
   Undo, Redo, ZoomIn, ZoomOut, FitScreen, GridOn, Straighten, ContentCopy, DeleteOutline,
   FlipToFront, FlipToBack, KeyboardArrowUp, KeyboardArrowDown, Save, SaveAs, MoreVert, Add,
   DriveFileRenameOutline, Star, RestartAlt, History, RestoreFromTrash, Visibility, Print,
-  CenterFocusStrong, Replay, ErrorOutline, WarningAmber, InfoOutlined, Science,
+  CenterFocusStrong, Replay, ErrorOutline, WarningAmber, InfoOutlined, Science, VisibilityOff, StarBorder,
 } from '@mui/icons-material';
 import DesignerCanvas, { PX_PER_MM } from './DesignerCanvas';
 import ElementPalette from './ElementPalette';
@@ -22,13 +22,13 @@ import ManualBarcodeField from './ManualBarcodeField';
 import { NamePrompt, NewTemplateDialog, VersionsDialog, DeletedDialog } from './TemplateDialogs';
 import {
   createElement, alignElements, scaleElements, fitElementsToLabel, autoLayout, blankTemplate,
-  newElementId, r2,
+  newElementId, r2, visibleTemplates, hiddenCount, labelTypeOf, LABEL_TYPES,
 } from '../../../labels/labelModel';
 import { LABEL_FIELDS, SAMPLE_JOB, SAMPLE_SCENARIOS, SAMPLE_STORE } from '../../../labels/labelFields';
 import { renderLabelHtml, labelCss, hasUsableLogo, summarizeWarnings } from '../../../labels/renderLabel';
 import { openPrintWindow, buildPrintDocument, printCalibration, resolveCalibration } from '../../../labels/printLabels';
 import {
-  createTemplate, updateTemplate, renameTemplate, duplicateTemplate, deleteTemplate, setDefaultTemplate,
+  createTemplate, updateTemplate, renameTemplate, duplicateTemplate, deleteTemplate, setDefaultTemplate, setTemplateVisibility,
   restoreDefaultTemplate, restoreVersion, undeleteTemplate, createFromPreset, fetchLabelData, fetchTemplate, apiError,
 } from '../../../labels/labelApi';
 import { WORKFLOWS } from '../../../labels/useLabelBundle';
@@ -36,6 +36,8 @@ import { notify } from '../../../utils/notify';
 
 const clone = (x) => JSON.parse(JSON.stringify(x));
 const isTyping = (el) => el && (['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) || el.isContentEditable);
+const SHOW_ALL_KEY = 'label_designer_show_all_templates';
+const readShowAll = () => { try { return localStorage.getItem(SHOW_ALL_KEY) === '1'; } catch { return false; } };
 const LEVEL_ICON = { error: <ErrorOutline color="error" fontSize="small" />, warning: <WarningAmber color="warning" fontSize="small" />, info: <InfoOutlined color="info" fontSize="small" /> };
 
 export default function LabelDesigner({ bundle, setBundle, reload, onPrintLabels }) {
@@ -68,6 +70,10 @@ export default function LabelDesigner({ bundle, setBundle, reload, onPrintLabels
   const [dialog, setDialog] = useState(null); // 'new' | 'saveas' | 'rename' | 'versions' | 'deleted'
   const [menuAnchor, setMenuAnchor] = useState(null);
   const [testAnchor, setTestAnchor] = useState(null);
+  // "Show all barcode templates": hidden templates (LabelTemplate.is_hidden) are listed too,
+  // with show / hide and set-default controls. Remembered per browser.
+  const [showAll, setShowAllState] = useState(readShowAll);
+  const setShowAll = (v) => { setShowAllState(v); try { localStorage.setItem(SHOW_ALL_KEY, v ? '1' : '0'); } catch { /* storage blocked */ } };
   const canvasBoxRef = useRef(null);
 
   const setDraft = (next) => { draftRef.current = next; setDraftState(next); };
@@ -352,14 +358,38 @@ export default function LabelDesigner({ bundle, setBundle, reload, onPrintLabels
     }
   };
 
+  // Default / visibility aren't design edits: patch them into the draft AND its saved
+  // snapshot so they don't show up as "Unsaved changes".
+  const patchDraftMeta = (patch) => {
+    setDraft({ ...draftRef.current, ...patch });
+    setSavedJson((j) => (j ? JSON.stringify({ ...JSON.parse(j), ...patch }) : j));
+  };
+
+  const setDefaultFor = async (tpl) => {
+    const saved = await guard(() => setDefaultTemplate(tpl.id), `“${tpl.name}” is now the default label.`);
+    if (!saved) return;
+    setBundle((b) => ({
+      ...b,
+      templates: b.templates
+        .map((t) => (t.id === saved.id ? { ...t, is_default: true, is_hidden: false } : { ...t, is_default: false }))
+        .sort((a, c) => (c.is_default - a.is_default) || a.name.localeCompare(c.name)),
+    }));
+    const cur = draftRef.current;
+    if (cur?.id === saved.id) patchDraftMeta({ is_default: true, is_hidden: false });
+    else if (cur?.is_default) patchDraftMeta({ is_default: false });
+  };
+
   const handleSetDefault = async () => {
     setMenuAnchor(null);
-    const saved = await guard(() => setDefaultTemplate(draft.id), `“${draft.name}” is now the default label.`);
-    if (saved) {
-      setBundle((b) => ({ ...b, templates: b.templates.map((t) => ({ ...t, is_default: t.id === saved.id })) }));
-      setDraft({ ...draftRef.current, is_default: true });
-      setSavedJson(JSON.stringify({ ...JSON.parse(savedJson), is_default: true }));
-    }
+    await setDefaultFor(draft);
+  };
+
+  const toggleHidden = async (tpl) => {
+    const hide = !tpl.is_hidden;
+    const saved = await guard(() => setTemplateVisibility(tpl.id, hide), hide ? `“${tpl.name}” is hidden from template lists.` : `“${tpl.name}” is shown in template lists.`);
+    if (!saved) return;
+    setBundle((b) => ({ ...b, templates: b.templates.map((t) => (t.id === saved.id ? { ...t, is_hidden: saved.is_hidden } : t)) }));
+    if (draftRef.current?.id === saved.id) patchDraftMeta({ is_hidden: saved.is_hidden });
   };
 
   const handleRestoreDefault = async () => {
@@ -446,16 +476,73 @@ export default function LabelDesigner({ bundle, setBundle, reload, onPrintLabels
   }
   const selectedSingle = selection.length === 1;
   const usedBy = WORKFLOWS.filter((w) => settings[w.key] === draft.id || (!settings[w.key] && draft.is_default));
-  const thermalTemplates = templates.filter((t) => t.printer_type !== 'a4');
-  const a4Templates = templates.filter((t) => t.printer_type === 'a4');
+  const listed = visibleTemplates(templates, { showAll, keepIds: [draft.id] });
+  const hiddenTotal = hiddenCount(templates);
+  const defaultTpl = templates.find((t) => t.is_default);
+  const thermalTemplates = listed.filter((t) => t.printer_type !== 'a4');
+  const a4Templates = listed.filter((t) => t.printer_type === 'a4');
+  const typeName = (t) => LABEL_TYPES.find((x) => x.id === labelTypeOf(t))?.label;
   const templateOption = (t) => (
     <MenuItem key={t.id} value={t.id}>
-      {t.is_default ? '★ ' : ''}{t.name} <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 1 }}>{t.width_mm} × {t.height_mm} mm · v{t.version}</Typography>
+      {t.is_default ? '★ ' : ''}{t.name} <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 1 }}>{t.width_mm} × {t.height_mm} mm · {typeName(t)} · v{t.version}{t.is_hidden ? ' · hidden' : ''}</Typography>
     </MenuItem>
   );
 
   return (
     <Box>
+      {/* Default template + visibility controls */}
+      <Paper variant="outlined" sx={{ p: 1, px: 1.5, mb: 1.5 }} data-testid="template-visibility-bar">
+        <Stack direction={{ xs: 'column', md: 'row' }} spacing={1} alignItems={{ md: 'center' }}>
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
+            <Star fontSize="small" sx={{ color: 'warning.main' }} />
+            <Typography variant="body2" noWrap>
+              Default template: <b data-testid="default-template-name">{defaultTpl?.name || 'none'}</b>
+              {defaultTpl && <Typography component="span" variant="caption" color="text.secondary"> · {defaultTpl.width_mm} × {defaultTpl.height_mm} mm · {typeName(defaultTpl)}</Typography>}
+            </Typography>
+            {defaultTpl && draft.id !== defaultTpl.id && <Button size="small" onClick={() => switchTemplate(defaultTpl.id)}>Open</Button>}
+          </Stack>
+          <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
+            Pre-selected in every Print Label screen. {hiddenTotal ? `${hiddenTotal} template${hiddenTotal === 1 ? ' is' : 's are'} hidden from the template lists.` : 'All templates are shown.'}
+          </Typography>
+          <FormControlLabel
+            sx={{ mr: 0 }}
+            control={<Switch size="small" checked={showAll} onChange={(e) => setShowAll(e.target.checked)} inputProps={{ 'data-testid': 'show-all-templates' }} />}
+            label={<Typography variant="body2" fontWeight={600}>Show all barcode templates{hiddenTotal ? ` (${hiddenTotal} hidden)` : ''}</Typography>}
+          />
+        </Stack>
+        {showAll && (
+          <Box sx={{ mt: 1, display: 'grid', gap: 0.5, gridTemplateColumns: { xs: '1fr', md: 'repeat(2, minmax(0,1fr))', xl: 'repeat(3, minmax(0,1fr))' } }} data-testid="template-visibility-list">
+            {templates.map((t) => (
+              <Stack
+                key={t.id} direction="row" alignItems="center" spacing={0.5} data-testid="template-visibility-row"
+                sx={{ border: '1px solid', borderColor: t.id === draft.id ? 'primary.main' : 'divider', borderRadius: 1, px: 0.5, py: 0.25, opacity: t.is_hidden ? 0.6 : 1 }}
+              >
+                <Tooltip title={t.is_default ? 'The default template is always shown' : t.is_hidden ? 'Hidden — click to show in template lists' : 'Shown — click to hide from template lists'}>
+                  <span>
+                    <IconButton size="small" disabled={t.is_default || !canDesign || busy} onClick={() => toggleHidden(t)} data-testid="template-visibility-toggle" aria-label={t.is_hidden ? `Show ${t.name}` : `Hide ${t.name}`}>
+                      {t.is_hidden ? <VisibilityOff fontSize="small" /> : <Visibility fontSize="small" color={t.is_default ? 'disabled' : 'action'} />}
+                    </IconButton>
+                  </span>
+                </Tooltip>
+                <Tooltip title={t.is_default ? 'Default template' : 'Set as default'}>
+                  <span>
+                    <IconButton size="small" disabled={t.is_default || !canDesign || busy} onClick={() => setDefaultFor(t)} data-testid="template-set-default" aria-label={`Set ${t.name} as default`}>
+                      {t.is_default ? <Star fontSize="small" sx={{ color: 'warning.main' }} /> : <StarBorder fontSize="small" />}
+                    </IconButton>
+                  </span>
+                </Tooltip>
+                <Box sx={{ minWidth: 0, flex: 1, cursor: 'pointer' }} onClick={() => switchTemplate(t.id)}>
+                  <Typography variant="body2" fontWeight={t.id === draft.id ? 700 : 500} noWrap>{t.name}</Typography>
+                  <Typography variant="caption" color="text.secondary" noWrap sx={{ display: 'block' }}>
+                    {t.width_mm} × {t.height_mm} mm{t.printer_type === 'a4' ? ' (A4)' : ''} · {typeName(t)}{t.is_hidden ? ' · hidden' : ''}
+                  </Typography>
+                </Box>
+              </Stack>
+            ))}
+          </Box>
+        )}
+      </Paper>
+
       {/* Template bar */}
       <Stack direction={{ xs: 'column', lg: 'row' }} spacing={1.5} alignItems={{ lg: 'center' }} sx={{ mb: 1.5 }}>
         <TextField
