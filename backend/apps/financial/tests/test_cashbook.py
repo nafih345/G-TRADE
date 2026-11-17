@@ -37,7 +37,7 @@ class CashbookBase(APITestCase):
 
     def book(self, **params):
         params.setdefault('account', str(self.cash.pk))
-        res = self.client.get(URL, params)
+        res = self.client.get(URL, params, **getattr(self, 'caller_headers', {}))
         self.assertEqual(res.status_code, 200, res.content)
         return res.data
 
@@ -274,6 +274,9 @@ class CashbookBranchTests(CashbookBase):
         settings_obj = BusinessSettings.load()
         settings_obj.multi_branch_enabled = True
         settings_obj.save()
+        # Decision 1 (fail-closed): the 'sees every branch' caller must be explicitly unrestricted.
+        UserBranchAccess.objects.create(username='boss', access_all_branches=True)
+        self.caller_headers = {'HTTP_X_USER_NAME': 'boss', 'HTTP_X_USER_ROLE': 'ACCOUNTANT'}
         self.opening(D('1000'))  # no branch: head-office opening
         post('RV', self.cash, acc('1004'), D('100'), JAN5, branch=self.main)
         post('RV', self.cash, acc('1004'), D('30'), JAN10, branch=self.north)

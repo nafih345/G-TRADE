@@ -57,7 +57,17 @@ class CustomerSerializer(ModelSerializer):
         model = Customer
         fields = '__all__'
 
-class EyeExaminationSerializer(ModelSerializer):
+class _BranchRefMixin:
+    """branch_name for exams / appointments (P1 Task 6): the relational branch's name, else the
+    legacy text label."""
+
+    def get_branch_name(self, obj):
+        ref = getattr(obj, 'branch_ref', None) if getattr(obj, 'branch_ref_id', None) else None
+        return ref.name if ref is not None else (obj.branch or None)
+
+
+class EyeExaminationSerializer(_BranchRefMixin, ModelSerializer):
+    branch_name = SerializerMethodField()
     # The partial UNIQUE constraint on test_no makes DRF auto-attach a UniqueValidator, but
     # that validator isn't condition-aware (it would reject a blank '' against legacy blank
     # rows) and, more to the point, uniqueness here is enforced server-side by
@@ -89,7 +99,8 @@ class EyeExaminationSerializer(ModelSerializer):
         attrs.update(fee)
         return attrs
 
-class AppointmentSerializer(ModelSerializer):
+class AppointmentSerializer(_BranchRefMixin, ModelSerializer):
+    branch_name = SerializerMethodField()
     # Read-only convenience field so the frontend doesn't have to separately look up the
     # linked Customer just to show its human-readable Patient ID (e.g. in the booking dialog
     # and appointment list) — the `customer` field itself is just the FK's UUID.
@@ -549,9 +560,25 @@ class CustomerViewSet(viewsets.ModelViewSet):
     def next_patient_code(self, request):
         return Response({'patient_code': peek_next_patient_code()})
 
-class EyeExaminationViewSet(EditApprovalMixin, viewsets.ModelViewSet):
+def _exam_branch_kwargs(view, serializer):
+    """Stamp `branch_ref` (P1 Task 6) the BranchScopedViewSetMixin way, and fill the printed text
+    label from it when the client left it empty. Called without a request (internal callers,
+    tests): nothing is stamped, as before P1."""
+    if getattr(view, 'request', None) is None:
+        return {}
+    kwargs = view._branch_stamp_kwargs(serializer)
+    ref = kwargs.get('branch_ref') or serializer.validated_data.get('branch_ref')
+    if ref is not None and not (serializer.validated_data.get('branch') or '').strip():
+        kwargs['branch'] = ref.name[:100]
+    return kwargs
+
+
+class EyeExaminationViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewsets.ModelViewSet):
     # Direct Edit switch 'eye_test' (Administration → Edit Permissions): with it OFF a saved visit
     # is changed only through an approved edit request.
+    # P1 Task 6: branch-scoped on the relational `branch_ref` (the text `branch` is a label).
+    branch_field = 'branch_ref'
+    show_unassigned_to_unrestricted = True
     edit_module = 'eye_test'
     edit_ref_fields = ('test_no', 'patient_id')
     queryset = EyeExamination.objects.all().order_by('-examination_date')
@@ -593,6 +620,8 @@ class EyeExaminationViewSet(EditApprovalMixin, viewsets.ModelViewSet):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         existing = find_duplicate_exam(serializer.validated_data)
+        if existing is not None and not self.branch_row_visible(existing.pk):
+            existing = None  # another branch's visit is never returned (or named)
         if existing is not None:
             return Response(self.get_serializer(existing).data, status=200)
         self.perform_create(serializer)
@@ -634,10 +663,11 @@ class EyeExaminationViewSet(EditApprovalMixin, viewsets.ModelViewSet):
         # the loser lands here instead of persisting a duplicate — re-roll and retry, the
         # same recovery CustomerViewSet.perform_create uses for patient_code.
         patient_id = self._resolve_patient_id(serializer)
+        branch_kwargs = _exam_branch_kwargs(self, serializer)
         for attempts_left in (2, 1, 0):
             try:
                 with transaction.atomic():
-                    serializer.save(test_no=test_no, **patient_id)
+                    serializer.save(test_no=test_no, **patient_id, **branch_kwargs)
                 return
             except IntegrityError:
                 if attempts_left <= 0:
@@ -709,7 +739,8 @@ class EyeExaminationViewSet(EditApprovalMixin, viewsets.ModelViewSet):
         end = parse_datetime((params.get('to') or '').strip())
         if not start or not end:
             return Response({'detail': 'from and to (ISO datetimes) are required.'}, status=400)
-        exams = (EyeExamination.objects.filter(examination_date__gte=start, examination_date__lt=end)
+        # Branch-scoped like the list (P1 Task 6): another branch's tests are not offered.
+        exams = (BranchScopedViewSetMixin.get_queryset(self).filter(examination_date__gte=start, examination_date__lt=end)
                  .select_related('customer').order_by('-examination_date')[:LOOKUP_LIMIT + 1])
         exams = list(exams)
         return Response({'results': lookup_rows(exams[:LOOKUP_LIMIT]), 'truncated': len(exams) > LOOKUP_LIMIT})
@@ -727,10 +758,13 @@ class EyeExaminationViewSet(EditApprovalMixin, viewsets.ModelViewSet):
         exam.delete()  # soft delete; the Test No stays used, so the series never repeats it
         return Response(status=204)
 
-class AppointmentViewSet(viewsets.ModelViewSet):
+class AppointmentViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
     queryset = Appointment.objects.all()
     serializer_class = AppointmentSerializer
     permission_classes = [permissions.AllowAny]
+    # P1 Task 6: branch-scoped on the relational `branch_ref` (the text `branch` is a label).
+    branch_field = 'branch_ref'
+    show_unassigned_to_unrestricted = True
 
     def perform_create(self, serializer):
         appointment_code = serializer.validated_data.get('appointment_code')
@@ -742,7 +776,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         # reserve_unused_test_numbers so a sequence lagging behind directly-assigned numbers
         # can't collide with an existing exam/appointment.
         test_no = reserve_unused_test_numbers()[0]
-        serializer.save(appointment_code=appointment_code, test_no=test_no)
+        serializer.save(appointment_code=appointment_code, test_no=test_no, **_exam_branch_kwargs(self, serializer))
 
 class InvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewsets.ModelViewSet):
     edit_module = 'sales'
@@ -1401,6 +1435,9 @@ class PaymentViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
     serializer_class = PaymentSerializer
     pagination_class = SalesListPagination
     permission_classes = [permissions.AllowAny]
+    # A receipt raises its bill's Total Paid: it may only be recorded against a bill the caller's
+    # branches cover (never another branch's, nor an unassigned one for a restricted user).
+    branch_parent_fields = ('invoice',)
 
     @transaction.atomic
     def perform_create(self, serializer):
@@ -1591,6 +1628,7 @@ class _WholesaleDocSerializer(ModelSerializer):
     line shape as a Wholesale POS invoice), validated against the product master."""
     dealer_name = serializers.CharField(source='dealer.business_name', read_only=True, default='')
     dealer_code = serializers.CharField(source='dealer.dealer_code', read_only=True, default='')
+    branch_name = serializers.CharField(source='branch.name', read_only=True, default=None)
 
     def validate_details(self, value):
         from .wholesale_orders import validate_items
@@ -1625,16 +1663,19 @@ class WholesaleOrderSerializer(_WholesaleDocSerializer):
         read_only_fields = ('status', 'reserved_items', 'invoice', 'billed_at')
 
 class WholesaleDeliveryChallanSerializer(ModelSerializer):
+    branch_name = serializers.CharField(source='branch.name', read_only=True, default=None)
     class Meta:
         model = WholesaleDeliveryChallan
         fields = '__all__'
 
 class WholesaleInvoiceSerializer(ModelSerializer):
+    branch_name = serializers.CharField(source='branch.name', read_only=True, default=None)
     class Meta:
         model = WholesaleInvoice
         fields = '__all__'
 
 class WholesalePaymentCollectionSerializer(ModelSerializer):
+    branch_name = serializers.CharField(source='branch.name', read_only=True, default=None)
     bank_account_name = serializers.CharField(source='bank_account.name', read_only=True, default=None)
 
     class Meta:
@@ -1645,6 +1686,7 @@ class WholesalePaymentCollectionSerializer(ModelSerializer):
         return validate_bank_account(value)
 
 class WholesaleReturnSerializer(ModelSerializer):
+    branch_name = serializers.CharField(source='branch.name', read_only=True, default=None)
     class Meta:
         model = WholesaleReturn
         fields = '__all__'
@@ -1681,13 +1723,17 @@ class DealerViewSet(viewsets.ModelViewSet):
         from django.db.models import Count, Max, Sum
         from apps.financial.settlements import open_bills
 
+        from apps.common.branch_context import get_allowed_branch_ids, is_branch_restricted, scope_to_permitted
         dealers = list(self.get_queryset().order_by('business_name'))
         ids = [d.pk for d in dealers]
-        live = WholesaleInvoice.objects.filter(dealer_id__in=ids).exclude(
-            status__in=('Draft', 'Cancelled', 'draft', 'cancelled'))
+        # Dealers are company-wide; their business and dues are not: a branch-restricted user
+        # sees only their branches' bills (P1 Task 8 - wholesale document visibility).
+        live = scope_to_permitted(request, WholesaleInvoice.objects.filter(dealer_id__in=ids).exclude(
+            status__in=('Draft', 'Cancelled', 'draft', 'cancelled')))
         stats = {row['dealer_id']: row for row in live.values('dealer_id').annotate(
             invoices=Count('id'), business=Sum('grand_total'), last=Max('invoice_date'))}
-        bills_by_dealer = open_bills('dealer', party_ids=ids) if ids else {}
+        scope = sorted(get_allowed_branch_ids(request)) if is_branch_restricted(request) else None
+        bills_by_dealer = open_bills('dealer', party_ids=ids, branch_ids=scope) if ids else {}
         due = {pid: sum((Decimal(str(b['due'])) for b in bills), Decimal('0')) for pid, bills in bills_by_dealer.items()}
         open_count = {pid: len(bills) for pid, bills in bills_by_dealer.items()}
 
@@ -1727,8 +1773,10 @@ def _wholesale_doc_filters(qs, params, number_field, date_field):
     return qs
 
 
-class WholesaleQuotationViewSet(viewsets.ModelViewSet):
-    """Wholesale -> Quotations. Estimates only: they never reserve or move stock."""
+class WholesaleQuotationViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
+    show_unassigned_to_unrestricted = True
+    """Wholesale -> Quotations. Estimates only: they never reserve or move stock.
+    Branch-scoped (P1 Task 5): stamped with the working branch, visible in that branch."""
     queryset = WholesaleQuotation.objects.select_related('dealer').order_by('-date', '-created_at')
     serializer_class = WholesaleQuotationSerializer
     permission_classes = [permissions.AllowAny]
@@ -1744,7 +1792,7 @@ class WholesaleQuotationViewSet(viewsets.ModelViewSet):
             serializer.save(
                 quotation_number=issue_document_number(WholesaleQuotation, 'quotation_number', 'WHOLESALE_QUOTATION', 'WQ-'),
                 date=day, expiry_date=serializer.validated_data.get('expiry_date') or day + timedelta(days=15),
-                status=QUOTE_OPEN)
+                status=QUOTE_OPEN, **self._branch_stamp_kwargs(serializer))
 
     def perform_update(self, serializer):
         from .wholesale_orders import QUOTE_OPEN
@@ -1770,7 +1818,8 @@ class WholesaleQuotationViewSet(viewsets.ModelViewSet):
         return Response(self.get_serializer(quote).data)
 
 
-class WholesaleOrderViewSet(viewsets.ModelViewSet):
+class WholesaleOrderViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
+    show_unassigned_to_unrestricted = True
     """Wholesale -> Wholesale Orders. A CONFIRMED order reserves its units (Stock Overview
     "Ordered"); the Wholesale POS invoice that bills it deducts them and marks it BILLED
     (sales.wholesale_orders)."""
@@ -1787,7 +1836,7 @@ class WholesaleOrderViewSet(viewsets.ModelViewSet):
             order = serializer.save(
                 order_number=issue_document_number(WholesaleOrder, 'order_number', 'WHOLESALE_ORDER', 'WO-'),
                 order_date=serializer.validated_data.get('order_date') or timezone.localdate(),
-                status=ORDER_CONFIRMED)
+                status=ORDER_CONFIRMED, **self._branch_stamp_kwargs(serializer))
             sync_reservation(order)
 
     def perform_update(self, serializer):
@@ -1832,12 +1881,39 @@ class WholesaleOrderViewSet(viewsets.ModelViewSet):
         wholesale, retail = open_reservations(exclude_wholesale_order=exclude if is_uuid(exclude) else None)
         return Response({'wholesale': wholesale, 'retail': retail})
 
-class WholesaleDeliveryChallanViewSet(viewsets.ModelViewSet):
+def _inherit_branch(view, serializer, parent):
+    """Stamp kwargs for a document that follows its source document's branch (challan -> order,
+    collection / return -> invoice): the parent's branch when it has one (and the caller may use
+    it), else the usual working-branch stamp. P1 Task 5."""
+    from apps.common.branch_context import require_branch_permitted
+    kwargs = view._branch_stamp_kwargs(serializer)
+    if parent is not None and getattr(parent, 'branch_id', None) and 'branch' not in serializer.validated_data:
+        require_branch_permitted(view.request, parent.branch_id,
+                                 'The source document belongs to a branch you cannot use.')
+        kwargs['branch_id'] = parent.branch_id
+        kwargs.pop('branch', None)
+    elif parent is not None and getattr(parent, 'branch_id', 'x') is None:
+        # An unassigned (legacy) source document: only for callers who may see unassigned rows.
+        require_branch_permitted(view.request, None, 'The source document is not assigned to a branch you can use.')
+    return kwargs
+
+
+def _invoice_by_number(number):
+    return WholesaleInvoice.all_objects.filter(invoice_number=number).first() if number else None
+
+
+class WholesaleDeliveryChallanViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
+    show_unassigned_to_unrestricted = True
     queryset = WholesaleDeliveryChallan.objects.all()
     serializer_class = WholesaleDeliveryChallanSerializer
     permission_classes = [permissions.AllowAny]
+    branch_parent_fields = ('order',)
 
-class WholesaleInvoiceViewSet(EditApprovalMixin, viewsets.ModelViewSet):
+    def perform_create(self, serializer):
+        serializer.save(**_inherit_branch(self, serializer, serializer.validated_data.get('order')))
+
+class WholesaleInvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewsets.ModelViewSet):
+    show_unassigned_to_unrestricted = True
     edit_module = 'wholesale'
     edit_ref_fields = ('invoice_number',)
     edit_draft_statuses = ('Draft',)
@@ -1860,7 +1936,7 @@ class WholesaleInvoiceViewSet(EditApprovalMixin, viewsets.ModelViewSet):
         sync_wholesale_invoice_stock(invoice, self.request, enforce_stock=self._enforce_stock())
         # A bill made from a Wholesale Order closes it (and re-opens it if the bill is
         # cancelled / drafted / deleted) in this same transaction.
-        link_invoice_orders(invoice)
+        link_invoice_orders(invoice, self.request)
 
     def _enforce_stock(self):
         from apps.billing.views import user_role
@@ -1871,7 +1947,7 @@ class WholesaleInvoiceViewSet(EditApprovalMixin, viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         with transaction.atomic():
-            self._sync_stock(serializer.save())
+            self._sync_stock(serializer.save(**self._branch_stamp_kwargs(serializer)))
 
     def perform_update(self, serializer):
         with transaction.atomic():
@@ -1897,13 +1973,46 @@ class WholesaleInvoiceViewSet(EditApprovalMixin, viewsets.ModelViewSet):
             qs = qs.filter(invoice_number=invoice_number)
         return qs
 
-class WholesalePaymentCollectionViewSet(viewsets.ModelViewSet):
+class WholesalePaymentCollectionViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
+    show_unassigned_to_unrestricted = True
+    """Branch-scoped (P1 Task 5): a receipt follows the branch of the invoice it pays."""
     queryset = WholesalePaymentCollection.objects.all()
     serializer_class = WholesalePaymentCollectionSerializer
     permission_classes = [permissions.AllowAny]
 
-class WholesaleReturnViewSet(viewsets.ModelViewSet):
+    def perform_create(self, serializer):
+        parent = _invoice_by_number(serializer.validated_data.get('invoice_number'))
+        serializer.save(**_inherit_branch(self, serializer, parent))
+
+    def perform_update(self, serializer):
+        number = serializer.validated_data.get('invoice_number')
+        if number and number != serializer.instance.invoice_number:
+            parent = _invoice_by_number(number)
+            if parent is not None:
+                from apps.common.branch_context import require_branch_permitted
+                require_branch_permitted(self.request, parent.branch_id,
+                                         'That invoice belongs to a branch you cannot use.')
+        serializer.save()
+
+
+class WholesaleReturnViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
+    show_unassigned_to_unrestricted = True
+    """Branch-scoped (P1 Task 5): a return follows the branch of the invoice it credits."""
     queryset = WholesaleReturn.objects.all()
     serializer_class = WholesaleReturnSerializer
     permission_classes = [permissions.AllowAny]
+
+    def perform_create(self, serializer):
+        parent = _invoice_by_number(serializer.validated_data.get('invoice_number'))
+        serializer.save(**_inherit_branch(self, serializer, parent))
+
+    def perform_update(self, serializer):
+        number = serializer.validated_data.get('invoice_number')
+        if number and number != serializer.instance.invoice_number:
+            parent = _invoice_by_number(number)
+            if parent is not None:
+                from apps.common.branch_context import require_branch_permitted
+                require_branch_permitted(self.request, parent.branch_id,
+                                         'That invoice belongs to a branch you cannot use.')
+        serializer.save()
 

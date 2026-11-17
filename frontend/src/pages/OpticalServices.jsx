@@ -1787,10 +1787,10 @@ export default function OpticalServices() {
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3, flexWrap: 'wrap', gap: 2 }}>
         <Box>
           <Typography variant="h4" sx={{ fontWeight: 800, color: 'primary.main', display: 'flex', alignItems: 'center', gap: 1.5 }}>
-            <EyeIcon sx={{ fontSize: 36 }} /> Greensol Optical Eye Examination System
+            <EyeIcon sx={{ fontSize: 36 }} /> Eye Examination
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            Enterprise Ophthalmic Refraction & Clinical Workflow Manager • Powered by Greensol ERP
+            Refraction and clinical workflow
           </Typography>
         </Box>
 

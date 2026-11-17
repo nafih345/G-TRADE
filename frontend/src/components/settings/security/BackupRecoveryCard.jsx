@@ -80,7 +80,7 @@ export default function BackupRecoveryCard({ health, timezone, canRestore, busy,
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
               Creates a fresh, verified snapshot of the whole database — sales, stock, patients, prescriptions, accounts,
               users and settings — as a <b>.zip</b> file you can keep off the server. It is checksummed and can be restored
-              here or on another Greensol installation. Uploaded images are not included.
+              here or on another installation of this software. Uploaded images are not included.
             </Typography>
             <Box sx={{ mt: 'auto' }}>
               <Button variant="contained" startIcon={busy ? <CircularProgress size={16} sx={{ color: 'inherit' }} /> : <DownloadIcon />}

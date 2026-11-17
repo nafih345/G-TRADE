@@ -3,10 +3,12 @@ from django.contrib import admin
 from django.urls import path, include
 from django.http import JsonResponse, HttpResponse
 
+from apps.common.edition import product_name
+
 def home_api_status(request):
     return JsonResponse({
         "status": "online",
-        "message": "Greensol Optical ERP Django Backend API Server is running successfully."
+        "message": f"{product_name()} backend API server is running."
     })
 
 def favicon_silent_view(request):
@@ -57,6 +59,25 @@ def health_live_view(request):
     response = JsonResponse({"status": "ok", "commit": (os.environ.get('RENDER_GIT_COMMIT') or '')[:7] or None})
     response['Cache-Control'] = 'no-store'
     return response
+
+
+def _edition_health():
+    """Extra /api/health/ fields for the Windows local edition (nothing secret, no install paths)."""
+    if getattr(settings, 'GTRADE_EDITION', 'cloud') != 'local':
+        return {"edition": "cloud"}
+    out = {
+        "edition": "local",
+        "mode": getattr(settings, 'GTRADE_MODE', ''),
+        "server_version": getattr(settings, 'GTRADE_VERSION', ''),
+        "min_client_version": getattr(settings, 'GTRADE_MIN_CLIENT_VERSION', ''),
+        "install_id": getattr(settings, 'GTRADE_INSTALL_ID', ''),
+    }
+    try:
+        from apps.common.edition import local_health_extras
+        out.update(local_health_extras())
+    except Exception as exc:  # never break the health endpoint
+        out["extras_error"] = type(exc).__name__
+    return out
 
 
 def health_check_view(request):
@@ -183,6 +204,8 @@ def health_check_view(request):
         # The commit this process was built from (Render / Vercel set these), so which build is
         # live can be checked from outside without dashboard access.
         "commit": (os.environ.get('RENDER_GIT_COMMIT') or os.environ.get('VERCEL_GIT_COMMIT_SHA') or '')[:7] or None,
+        # "cloud" or "local" (Windows edition). Additive; the cloud frontend ignores it.
+        **_edition_health(),
     })
 
 urlpatterns = [
@@ -193,6 +216,7 @@ urlpatterns = [
     path('api/health/', health_check_view),
     path('api/auth/', include('apps.authentication.urls')),
     path('api/superadmin/', include('apps.common.superadmin_urls')),
+    path('api/organization/', include('apps.common.organization_urls')),  # Phase 2 multi-company
     path('api/company/', include('apps.company.urls')),
     path('api/billing/', include('apps.billing.urls')),
     path('api/masters/', include('apps.masters.urls')),
@@ -207,21 +231,31 @@ urlpatterns = [
     path('api/backups/', include(backup_urlpatterns)),
 ]
 
-if settings.DEBUG:
-    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
-elif getattr(settings, 'IS_CLOUD', False):
-    # `static()` above is a no-op once DEBUG=False, and there is no nginx in front of the
-    # app on Render/Vercel — so uploaded files (product images, the company logo used on
-    # every printed bill) would 404 in production with nothing serving them. WhiteNoise only
-    # covers STATIC_ROOT, so wire MEDIA_ROOT up explicitly.
+if getattr(settings, 'GTRADE_EDITION', '') == 'local':
+    # Django admin is neither tenant-scoped nor audited. The Windows edition's only superuser is the
+    # Local Super Admin, who works through Client Management (scoped, audited), so /admin/ is off.
+    urlpatterns = [p for p in urlpatterns if str(p.pattern) != 'admin/']
+    from apps.common.local_views import ServerBackupsView
+    urlpatterns += [path('api/licensing/', include('apps.licensing.urls')),
+                    path('api/local/backups/', ServerBackupsView.as_view())]
+
+# The Windows local edition (config/settings_local.py) has DEBUG off and no cloud flag, but nginx
+# proxies /media/ here so the same public-only rule applies.
+if settings.DEBUG or getattr(settings, 'IS_CLOUD', False) or getattr(settings, 'GTRADE_EDITION', '') == 'local':
+    # Uploaded files. On Render/Vercel there is no nginx in front of the app and `static()` is a
+    # no-op once DEBUG=False, so MEDIA_ROOT is wired up here for both cases.
     #
-    # NOTE: the filesystem on these hosts is ephemeral — files uploaded at runtime are lost
-    # on the next deploy or restart. Moving MEDIA to object storage (S3/Cloudinary) is the
-    # durable fix; this only makes uploads work for the life of a deploy.
-    from django.views.static import serve as _serve
+    # P1 Task 2: only *public* images (product images, company logos) are served from /media/.
+    # Supplier bills and import spreadsheets live under private/ (or the legacy private
+    # folders) and answer 404 here; they are downloaded through authenticated, object-checked
+    # endpoints (e.g. /api/purchase/invoices/<id>/attachment/) or a 60-second signed link.
+    #
+    # NOTE: the filesystem on these hosts is ephemeral: files uploaded at runtime are lost on
+    # the next deploy or restart. Moving MEDIA to object storage is the durable fix.
     from django.urls import re_path as _re_path
+    from apps.common.media_paths import public_media_view as _public_media
 
     urlpatterns += [
-        _re_path(r'^media/(?P<path>.*)$', _serve, {'document_root': settings.MEDIA_ROOT}),
+        _re_path(r'^media/(?P<path>.*)$', _public_media),
     ]
 

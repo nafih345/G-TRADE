@@ -39,6 +39,7 @@ import BarcodePrintingManager from '../components/admin/BarcodePrintingManager';
 import ServiceMasterDialog from '../components/sales/ServiceMasterDialog';
 import StaffUsersManager from '../components/admin/StaffUsersManager';
 import EditPermissionsManager from '../components/admin/EditPermissionsManager';
+import SecurityAuditPanel from '../components/settings/security/SecurityAuditPanel';
 import { fetchPendingEditCount } from '../utils/editPermissions';
 import { currencyPrefix, formatCurrency, getCurrencySymbol, getTaxRegLabel } from '../utils/localeFormat.js';
 
@@ -431,12 +432,6 @@ export default function Administration() {
     await refetchBranchAccess();
     setAssignAccessOpen(false);
   };
-
-  const auditLogs = [
-    { id: 'LOG-901', user: 'Greensol Admin', action: 'User Created', target: 'Dr. Sarah Miller', time: 'Just now' },
-    { id: 'LOG-902', user: 'Greensol Admin', action: 'Permissions Modified', target: 'John Sales Exec', time: '1 hour ago' },
-    { id: 'LOG-903', user: 'System', action: 'Successful Login', target: 'admin@greensol.com', time: '2 hours ago' }
-  ];
 
   return (
     <Box sx={{ p: 4, pb: 8 }}>
@@ -908,32 +903,8 @@ export default function Administration() {
 
       {/* 7. AUDIT LOGS TAB */}
       {activeTab === 'audit' && (
-        <Card sx={{ borderRadius: 3 }}>
-          <TableContainer>
-            <Table size="small">
-              <TableHead sx={{ backgroundColor: '#0f172a' }}>
-                <TableRow>
-                  <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Log ID</TableCell>
-                  <TableCell sx={{ color: '#fff', fontWeight: 800 }}>User</TableCell>
-                  <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Action</TableCell>
-                  <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Target</TableCell>
-                  <TableCell sx={{ color: '#fff', fontWeight: 800 }}>Timestamp</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {auditLogs.map(l => (
-                  <TableRow key={l.id} hover>
-                    <TableCell sx={{ fontWeight: 800, color: 'primary.main' }}>{l.id}</TableCell>
-                    <TableCell sx={{ fontWeight: 700 }}>{l.user}</TableCell>
-                    <TableCell>{l.action}</TableCell>
-                    <TableCell>{l.target}</TableCell>
-                    <TableCell>{l.time}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </TableContainer>
-        </Card>
+        // The real security audit trail (sign-ins, security settings, backups, restores).
+        <SecurityAuditPanel />
       )}
 
       {/* ------------------ DIALOG: ADD / EDIT SERVICE (shared component) ------------------ */}

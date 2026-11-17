@@ -44,9 +44,29 @@ run_db_step() {
   return 0
 }
 
-run_db_step migrate --no-input
+# Schema migrations are an administrator's decision (P1 policy decision 5): a release applies
+# them only when RUN_MIGRATIONS=True is set on the service for that deploy, after the release
+# procedure in DEPLOYMENT.md ("Database migrations": backup, Neon-branch rehearsal, approval).
+# Otherwise the build only reports what is pending; /api/health/ keeps reporting it too.
+if [ "${RUN_MIGRATIONS:-False}" = "True" ]; then
+  run_db_step migrate --no-input
+else
+  echo "RUN_MIGRATIONS is not True: migrations are NOT applied by this build."
+  python manage.py showmigrations --plan 2>/dev/null | grep '\[ \]' || echo "No pending migrations (or the database was unreachable)."
+fi
 
 # Idempotent: creates the admin login only if DJANGO_SUPERUSER_* are set and no such user
 # exists yet. A brand-new empty database has no users at all, so without this there is no
 # way to log in.
 run_db_step bootstrap_admin
+# Platform-owner recovery on a host without a shell (Render free plan): set
+# BOOTSTRAP_ADMIN_RESET=True for ONE deploy to reset DJANGO_SUPERUSER_USERNAME's password to
+# DJANGO_SUPERUSER_PASSWORD and restore its platform-owner rights. bootstrap_admin refuses any
+# account that belongs to a client (it never promotes a client administrator). Set it back to False.
+if [ "${BOOTSTRAP_ADMIN_RESET:-False}" = "True" ]; then
+  echo "BOOTSTRAP_ADMIN_RESET=True: repairing the platform owner account (set it back to False)."
+  run_db_step bootstrap_admin --reset-password
+fi
+# Read-only: who can open Client Management, printed into every build log (no shell needed).
+# Never fails the build.
+python manage.py platform_admin_status || echo "platform_admin_status: see the lines above (non-fatal)."

@@ -3,6 +3,7 @@ import { Alert, Box, Button, CircularProgress, Stack, TextField, Typography } fr
 import ShieldOutlinedIcon from '@mui/icons-material/ShieldOutlined';
 import ArrowBackRoundedIcon from '@mui/icons-material/ArrowBackRounded';
 import OtpQrCode from './OtpQrCode';
+import BRAND from '../../utils/brand';
 
 /**
  * The second sign-in step. `setup` ({secret, otpauth_uri}) is present when two-factor sign-in is
@@ -47,7 +48,7 @@ export default function TwoFactorLoginStep({ setup, onVerify, onCancel }) {
         </>
       ) : (
         <Typography color="text.secondary" sx={{ mb: 2.5, fontSize: '0.92rem' }}>
-          Open your authenticator app and enter the 6-digit code for Greensol Optical ERP.
+          Open your authenticator app and enter the 6-digit code for {BRAND.productName}.
         </Typography>
       )}
       {error && <Alert severity="error" sx={{ mb: 2, borderRadius: 2.5 }}>{error}</Alert>}

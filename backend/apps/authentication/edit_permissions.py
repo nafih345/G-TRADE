@@ -189,6 +189,13 @@ class EditApprovalMixin:
     edit_draft_statuses = ()         # rows in these statuses (case-insensitive) aren't submitted yet
     edit_status_field = 'status'
 
+    def edit_row_visible(self, pk):
+        """False for a row this caller may not see (outside their branch scope): the request then
+        skips the approval prompt, which would name the record, and the handler answers 404.
+        Default: the branch scope of a BranchScopedViewSetMixin viewset, else no extra rule."""
+        branch_visible = getattr(self, 'branch_row_visible', None)
+        return branch_visible(pk) if branch_visible is not None else True
+
     def edit_is_exempt(self, request, row):
         keys = set(getattr(request, 'data', {}) or {})
         return bool(keys) and bool(self.edit_exempt_fields) and keys <= set(self.edit_exempt_fields)
@@ -210,7 +217,7 @@ class EditApprovalMixin:
             fields |= {f for f in self.edit_exempt_fields if _is_concrete(model, f)}
         row = model.all_objects.filter(pk=pk).values(*fields).first() if hasattr(model, 'all_objects') \
             else model.objects.filter(pk=pk).values(*fields).first()
-        if row is None:
+        if row is None or not self.edit_row_visible(pk):
             return  # the handler answers 404
         if self.edit_draft_statuses and str(row.get(self.edit_status_field) or '').upper() in \
                 {s.upper() for s in self.edit_draft_statuses}:
@@ -324,7 +331,11 @@ class EditPermissionsView(APIView):
         from .user_admin import can_manage_role
         User = get_user_model()
         roles = dict(User.ROLE_CHOICES)
-        users = User.objects.filter(tenant_id=_tenant_id(request)).order_by('date_joined')
+        tenant_id = _tenant_id(request)
+        users = list(User.objects.filter(tenant_id=tenant_id).order_by('date_joined'))
+        # Phase 2: members whose home is another company of the organization, with THIS company's
+        # role and switches (their home switches belong to their home company's admins).
+        users += _company_members(tenant_id)
         rows = []
         for u in users:
             direct = always_direct(u)
@@ -332,6 +343,7 @@ class EditPermissionsView(APIView):
                 'id': str(u.pk), 'username': u.username, 'name': _display_name(u), 'role': u.role,
                 'role_label': roles.get(_role(u), u.role), 'is_active': u.is_active,
                 'always_direct': direct,
+                'is_member': getattr(u, '_company_tenant_id', None) is not None,
                 'permissions': {m: direct or bool(getattr(u, flag_field(m))) for m in EDIT_MODULE_KEYS},
                 'can_manage': (not direct and u.pk != request.user.pk and can_manage_role(request.user, u.role)),
             })
@@ -349,7 +361,18 @@ class EditPermissionsDetailView(APIView):
         from apps.common.models import Tenant
         from .user_admin import can_manage_role
         tenant = Tenant.objects.get(pk=_tenant_id(request))
-        user = get_object_or_404(get_user_model(), pk=user_id, tenant=tenant)
+        # A home user of this company: the switches on the account. A member from another company
+        # of the organization: this company's switches on their membership (never the account,
+        # whose switches belong to their home company).
+        membership = None
+        user = get_user_model().objects.filter(pk=user_id, tenant=tenant).first()
+        if user is None:
+            from apps.common.models import UserCompanyMembership
+            from apps.common.organizations import company_user
+            membership = UserCompanyMembership.objects.filter(user_id=user_id, company=tenant, is_active=True)                 .select_related('user').first()
+            user = company_user(membership.user, tenant.pk) if membership is not None else None
+            if user is None:
+                raise exceptions.NotFound()
         if always_direct(user):
             return Response({'detail': 'Owners always edit directly.'}, status=status.HTTP_400_BAD_REQUEST)
         if user.pk == request.user.pk:
@@ -368,11 +391,27 @@ class EditPermissionsDetailView(APIView):
                         changes[field] = {'from': getattr(user, field), 'to': value}
                         setattr(user, field, value)
         if changes:
-            user.save(update_fields=list(changes))
+            target = membership if membership is not None else user
+            for field, change in changes.items():
+                setattr(target, field, change['to'])
+            target.save(update_fields=[*changes, 'updated_at'] if membership is not None else list(changes))
             log_event(tenant, 'USER_UPDATED', request.user, username=user.username, changes=changes,
-                      via='edit-permissions')
+                      via='edit-permissions', scope='company membership' if membership is not None else 'account')
         return Response({'id': str(user.pk),
                          'permissions': {m: bool(getattr(user, flag_field(m))) for m in EDIT_MODULE_KEYS}})
+
+
+def _company_members(tenant_id):
+    """Active members of company `tenant_id` whose home is another company, as company-scoped users
+    (membership role and switches)."""
+    from apps.common.models import UserCompanyMembership
+    from apps.common.organizations import company_user
+    out = []
+    for m in UserCompanyMembership.objects.filter(company_id=tenant_id, is_active=True)             .select_related('user').order_by('user__username'):
+        member = company_user(m.user, tenant_id)
+        if member is not None:
+            out.append(member)
+    return out
 
 
 def _scoped_requests():

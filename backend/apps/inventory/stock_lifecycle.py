@@ -9,6 +9,11 @@ For a set of products, where their units have gone over their whole life:
   sold       units on completed sales: retail Invoices (document_type INVOICE, not draft or
              cancelled) + Wholesale invoices (what each one holds out of stock, stock_applied)
   on_hand    Product.stock — the physical count (an Order never moves it; only an Invoice does)
+
+Branch scope (P1 policy decision 2): with branch_ids, every figure counts only documents of those
+branches (a document with no branch — legacy "Unassigned" — is left out, as everywhere else for a
+branch-restricted user) and on_hand is the row's per-branch figure (the `on_hand` annotation from
+stock_overview.with_scoped_stock). branch_ids=None = company-wide, unchanged.
   available  on_hand − ordered, never below 0 — free for an immediate sale
   shortfall  ordered units the shelf cannot cover yet (e.g. a lens ordered from the lab)
   other      on_hand − (purchased − sold): opening stock, Excel loads, manual adjustments and
@@ -37,13 +42,15 @@ def _blank():
             'sold_retail': 0, 'sold_wholesale': 0, 'ordered_wholesale': 0}
 
 
-def _purchases(ids, out):
+def _purchases(ids, out, branch_ids=None):
     from apps.purchasing.models import PurchaseInvoiceItem
     money = DecimalField(max_digits=20, decimal_places=2)
     rows = (PurchaseInvoiceItem.objects
             .filter(product_id__in=ids, purchase_invoice__is_deleted=False)
-            .exclude(purchase_invoice__status__in=INACTIVE_DOC_STATUSES)
-            .values('product_id')
+            .exclude(purchase_invoice__status__in=INACTIVE_DOC_STATUSES))
+    if branch_ids is not None:
+        rows = rows.filter(purchase_invoice__branch_id__in=branch_ids)
+    rows = (rows.values('product_id')
             .annotate(qty=Sum('quantity'), free=Sum('free_quantity'),
                       value=Sum(ExpressionWrapper(F('quantity') * F('purchase_rate'), output_field=money))))
     for r in rows:
@@ -52,7 +59,7 @@ def _purchases(ids, out):
         o['purchase_value'] += r['value'] or Decimal('0')
 
 
-def _sales_docs(ids, out):
+def _sales_docs(ids, out, branch_ids=None):
     """Retail Orders (reserved) and Invoices (sold) in stock units."""
     from apps.sales.lens_units import SELLING_UNITS, stock_units_by_product
     from apps.sales.models import InvoiceItem
@@ -60,6 +67,8 @@ def _sales_docs(ids, out):
     active = (InvoiceItem.objects
               .filter(product_id__in=ids, invoice__is_deleted=False)
               .exclude(invoice__status__in=INACTIVE_DOC_STATUSES))
+    if branch_ids is not None:
+        active = active.filter(invoice__branch_id__in=branch_ids)
     open_order = Q(invoice__document_type='ORDER') & ~Q(invoice__fulfillment_status__iregex=(
         r'^\s*(' + '|'.join(CLOSED_ORDER_STAGES) + r')\s*$'))
     kinds = (('sold_retail', active.filter(invoice__document_type='INVOICE')),
@@ -79,13 +88,14 @@ def _sales_docs(ids, out):
                 out[pid][key] += int(units or 0)
 
 
-def _wholesale(ids, out):
+def _wholesale(ids, out, branch_ids=None):
     from apps.sales.models import WholesaleInvoice
     keys = [str(pk) for pk in ids]
     wanted = set(keys)
-    docs = (WholesaleInvoice.objects
-            .filter(stock_applied__isnull=False, stock_applied__items__has_any_keys=keys)
-            .values_list('stock_applied', flat=True))
+    docs = WholesaleInvoice.objects.filter(stock_applied__isnull=False, stock_applied__items__has_any_keys=keys)
+    if branch_ids is not None:
+        docs = docs.filter(branch_id__in=branch_ids)
+    docs = docs.values_list('stock_applied', flat=True)
     by_str = {str(pk): pk for pk in ids}
     for applied in docs:
         for pid, units in ((applied or {}).get('items') or {}).items():
@@ -96,11 +106,11 @@ def _wholesale(ids, out):
                     continue
 
 
-def _wholesale_orders(ids, out):
+def _wholesale_orders(ids, out, branch_ids=None):
     """CONFIRMED Wholesale Orders: reserved, not yet billed (billing moves them to sold)."""
     from apps.sales.wholesale_orders import reserved_by_product
     by_str = {str(pk): pk for pk in ids}
-    for pid, units in reserved_by_product(list(by_str)).items():
+    for pid, units in reserved_by_product(list(by_str), branch_ids=branch_ids).items():
         out[by_str[pid]]['ordered'] += units
         out[by_str[pid]]['ordered_wholesale'] += units
 
@@ -123,22 +133,30 @@ def open_reservations(exclude_wholesale_order=None):
     return wholesale, retail
 
 
-def lifecycle_for(products, *, view_cost=True):
-    """{product pk: lifecycle dict} for an iterable of Product rows (one page of the grid)."""
+def on_hand_of(product):
+    """The row's on-hand figure: the branch-scoped `on_hand` annotation when present, else
+    Product.stock (company-wide)."""
+    value = getattr(product, 'on_hand', None)
+    return int((product.stock if value is None else value) or 0)
+
+
+def lifecycle_for(products, *, view_cost=True, branch_ids=None):
+    """{product pk: lifecycle dict} for an iterable of Product rows (one page of the grid).
+    branch_ids: limit every figure to those branches (None = company-wide)."""
     products = list(products)
     if not products:
         return {}
     ids = [p.pk for p in products]
     out = defaultdict(_blank)
-    _purchases(ids, out)
-    _sales_docs(ids, out)
-    _wholesale(ids, out)
-    _wholesale_orders(ids, out)
+    _purchases(ids, out, branch_ids)
+    _sales_docs(ids, out, branch_ids)
+    _wholesale(ids, out, branch_ids)
+    _wholesale_orders(ids, out, branch_ids)
 
     result = {}
     for p in products:
         o = out[p.pk]
-        on_hand = int(p.stock or 0)
+        on_hand = on_hand_of(p)
         sold = o['sold_retail'] + o['sold_wholesale']
         ordered = o['ordered']
         available = max(on_hand - ordered, 0)
@@ -162,13 +180,16 @@ def lifecycle_for(products, *, view_cost=True):
     return result
 
 
-def attach_lifecycle(rows, products, *, view_cost=True):
-    """Add the lifecycle figures to serialized rows (dicts with 'id') for those products."""
-    data = lifecycle_for(products, view_cost=view_cost)
+def attach_lifecycle(rows, products, *, view_cost=True, branch_ids=None):
+    """Add the lifecycle figures to serialized rows (dicts with 'id') for those products.
+    branch_ids: limit every figure to those branches (None = company-wide)."""
+    data = lifecycle_for(products, view_cost=view_cost, branch_ids=branch_ids)
     by_id = {str(pk): v for pk, v in data.items()}
     # Return Stock (Sales Return in / Purchase Return out), derived from live return lines.
     from .returns import return_stock_by_product
-    returns = {str(pk): v for pk, v in return_stock_by_product([p.pk for p in products]).items()} if products else {}
+    returns = ({str(pk): v for pk, v in
+                return_stock_by_product([p.pk for p in products], branch_ids=branch_ids).items()}
+               if products else {})
     for row in rows:
         row['lifecycle'] = by_id.get(row['id'])
         row['returns'] = returns.get(row['id'], {'sales': 0, 'purchase': 0})

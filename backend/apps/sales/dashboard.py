@@ -30,7 +30,13 @@ def _scoped(request, qs):
         def get_queryset(self_inner):
             return qs
 
+    names = {f.name for f in qs.model._meta.get_fields()}
+
     class Scoper(BranchScopedViewSetMixin, Base):
+        # Eye exams / appointments are scoped on their relational branch (P1 Task 6).
+        branch_field = 'branch_ref' if 'branch_ref' in names else 'branch'
+        show_unassigned_to_unrestricted = 'branch_ref' in names
+
         def __init__(self):
             self.request = request
 

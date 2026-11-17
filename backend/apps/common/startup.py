@@ -14,6 +14,12 @@ never raises into the WSGI bootstrap.
 
 Disable with AUTO_MIGRATE=False (e.g. when a managed platform already runs a release
 command).
+
+Production policy (P1 decision 5, P1_FINAL_RELEASE_READINESS.md): AUTO_MIGRATE is False in
+production — schema changes are applied only by an administrator following the documented
+release procedure (DEPLOYMENT.md "Database migrations"). On a managed host (Render / Vercel)
+the hook is therefore OFF unless AUTO_MIGRATE=True is set explicitly; local and desktop runs
+keep the old default. /api/health/ still reports pending migrations either way.
 """
 
 import logging
@@ -24,8 +30,13 @@ logger = logging.getLogger('django')
 _ran = False
 
 
+def _is_managed_host():
+    return bool(os.environ.get('RENDER') or os.environ.get('VERCEL') or os.environ.get('AWS_LAMBDA_FUNCTION_NAME'))
+
+
 def _enabled():
-    return os.environ.get('AUTO_MIGRATE', 'True').lower() not in ('0', 'false', 'no')
+    default = 'False' if _is_managed_host() else 'True'
+    return os.environ.get('AUTO_MIGRATE', default).lower() not in ('0', 'false', 'no')
 
 
 def run_startup_migrations():

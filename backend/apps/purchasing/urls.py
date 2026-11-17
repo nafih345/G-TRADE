@@ -12,6 +12,9 @@ router.register('lens-orders', LensPurchaseOrderViewSet, basename='lens-purchase
 from apps.inventory.returns import PurchaseReturnViewSet  # noqa: E402
 router.register('returns', PurchaseReturnViewSet, basename='purchase-return')
 
+from .attachments import AttachmentDownloadView  # noqa: E402
+
 urlpatterns = [
+    path('attachments/download/', AttachmentDownloadView.as_view(), name='purchase-attachment-download'),
     path('', include(router.urls)),
 ]

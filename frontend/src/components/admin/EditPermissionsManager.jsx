@@ -226,6 +226,7 @@ export default function EditPermissionsManager({ onPendingCountChange }) {
                         {u.name}
                         <Typography variant="caption" display="block" color="text.secondary">
                           {u.username}{u.is_active ? '' : ' · inactive'}
+                          {u.is_member ? ' · member from another company (switches apply here only)' : ''}
                         </Typography>
                       </TableCell>
                       <TableCell>{u.role_label}</TableCell>

@@ -17,6 +17,7 @@ import {
 } from '@mui/icons-material';
 import axios from 'axios';
 import { currencyPrefix, getCurrencyCode } from '../../utils/localeFormat.js';
+import { XLSX_SCRIPT_URL } from '../../utils/edition';
 
 // Dynamically load SheetJS XLSX parser library from CDN
 const loadSheetJS = () => {
@@ -26,7 +27,7 @@ const loadSheetJS = () => {
       return;
     }
     const script = document.createElement('script');
-    script.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+    script.src = XLSX_SCRIPT_URL;
     script.onload = () => resolve(window.XLSX);
     script.onerror = () => reject(new Error('Failed to load XLSX library'));
     document.head.appendChild(script);

@@ -35,7 +35,7 @@ export default function PatientSearchModal({
     address: '',
     occupation: '',
     branch: 'Main Branch',
-    assignedOptometrist: 'Dr. Sarah Connor'
+    assignedOptometrist: ''
   });
 
   const searchPool = dbPatients;

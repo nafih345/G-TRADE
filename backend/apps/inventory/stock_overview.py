@@ -60,7 +60,7 @@ from apps.products.models import (
 from apps.purchasing.models import PurchaseInvoice, PurchaseInvoiceItem, PurchaseOrder, Supplier
 
 from .models import StockAdjustment, StockAdjustmentSequence, StockLedger
-from .stock_lifecycle import attach_lifecycle
+from .stock_lifecycle import attach_lifecycle, on_hand_of
 from .stock_utils import adjust_branch_stock
 
 # ---------------------------------------------------------------------------------------------
@@ -134,15 +134,18 @@ class StockOverviewPermission(permissions.BasePermission):
 # evaluated only for the rows returned, barcode-series matches are EXISTS, never a join that
 # would duplicate rows and need DISTINCT.
 # ---------------------------------------------------------------------------------------------
+# Every quantity rule below reads `on_hand`, annotated by with_scoped_stock(): Product.stock
+# (company-wide) for unrestricted users, the sum over the caller's permitted branches for a
+# branch-restricted user (P1 policy decision 2).
 STATUS_FILTERS = {
-    'out': Q(stock__lte=0),
-    'low': Q(stock__gt=0, stock__lte=F('minimum_stock')),
-    'in': Q(stock__gt=F('minimum_stock')) & Q(stock__gt=0),
+    'out': Q(on_hand__lte=0),
+    'low': Q(on_hand__gt=0, on_hand__lte=F('minimum_stock')),
+    'in': Q(on_hand__gt=F('minimum_stock')) & Q(on_hand__gt=0),
 }
 
 ORDERING = {
     'name': 'name', 'sku': 'sku', 'barcode': 'barcode', 'brand': 'brand_name', 'category': 'category_name',
-    'rack': 'rack_location', 'bin': 'bin_location', 'stock': 'stock', 'minimum_stock': 'minimum_stock',
+    'rack': 'rack_location', 'bin': 'bin_location', 'stock': 'on_hand', 'minimum_stock': 'minimum_stock',
     'cost_price': 'cost_price', 'retail_price': 'retail_price', 'mrp': 'wholesale_price',
     'last_purchase_date': 'last_purchase_date', 'updated_at': 'updated_at',
 }
@@ -185,12 +188,45 @@ def _last_purchase_items():
             .order_by('-purchase_invoice__purchase_date', '-created_at'))
 
 
-def base_queryset():
+def quantity_scope(request):
+    """Branch ids whose stock a caller's Stock Overview figures may show, or None for
+    company-wide figures (Multi-Branch off, or an unrestricted user). P1 policy decision 2."""
+    from apps.common.branch_context import get_allowed_branch_ids, is_branch_restricted
+    if request is None or not is_branch_restricted(request):
+        return None
+    return sorted(get_allowed_branch_ids(request))
+
+
+def scoped_quantity(product_id, branch_ids):
+    """The on-hand figure of one product for a quantity scope (see quantity_scope)."""
+    if branch_ids is None:
+        return int(Product.objects.filter(pk=product_id).values_list('stock', flat=True).first() or 0)
+    from apps.company.models import BranchStock
+    total = (BranchStock.objects.filter(product_id=product_id, branch_id__in=branch_ids)
+             .aggregate(s=Sum('quantity'))['s'])
+    return int(total or 0)
+
+
+def with_scoped_stock(qs, branch_ids):
+    """Annotate `on_hand`: Product.stock when branch_ids is None, else the product's BranchStock
+    summed over those branches (0 when it has none there — stock held only as a legacy
+    company-wide total belongs to no branch)."""
+    if branch_ids is None:
+        return qs.annotate(on_hand=F('stock'))
+    from apps.company.models import BranchStock
+    per_branch = (BranchStock.objects.filter(product=OuterRef('pk'), branch_id__in=list(branch_ids))
+                  .order_by().values('product').annotate(s=Sum('quantity')).values('s')[:1])
+    return qs.annotate(on_hand=Coalesce(Subquery(per_branch), Value(0)))
+
+
+def base_queryset(branch_ids=None):
     last = _last_purchase_items()
-    return (Product.objects.filter(is_active=True)
-            .select_related('unit', 'variant_group')
-            .annotate(last_purchase_date=Subquery(last.values('purchase_invoice__purchase_date')[:1]),
-                      last_supplier_name=Subquery(last.values('purchase_invoice__supplier__name')[:1])))
+    return with_scoped_stock(
+        Product.objects.filter(is_active=True)
+        .select_related('unit', 'variant_group')
+        .annotate(last_purchase_date=Subquery(last.values('purchase_invoice__purchase_date')[:1]),
+                  last_supplier_name=Subquery(last.values('purchase_invoice__supplier__name')[:1])),
+        branch_ids)
 
 
 def _search_q(word):
@@ -220,6 +256,8 @@ def _is_uuid(value):
 
 
 def apply_filters(qs, params, *, skip_source=False):
+    if 'on_hand' not in qs.query.annotations:
+        qs = with_scoped_stock(qs, None)
     q = (params.get('q') or params.get('search') or '').strip()
     for word in q.split()[:8]:
         qs = qs.filter(_search_q(word))
@@ -318,7 +356,7 @@ def offer_status_text(offer):
 
 
 def stock_status(product):
-    stock = int(product.stock or 0)
+    stock = on_hand_of(product)
     if stock <= 0:
         return 'out'
     if stock <= int(product.minimum_stock or 0):
@@ -370,7 +408,7 @@ def serialize_row(p, caps, offers=None):
         'variant_group_name': p.variant_group.name if p.variant_group_id and p.variant_group else '',
         'rack_location': p.rack_location or '',
         'bin_location': p.bin_location or '',
-        'stock': int(p.stock or 0),
+        'stock': on_hand_of(p),
         'minimum_stock': int(p.minimum_stock or 0),
         'unit': str(unit.pk) if unit else None,
         'uom': (unit.code if unit else None) or str(_extra(p, 'uom', 'unit') or ''),
@@ -639,7 +677,18 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
     pagination_class = StockOverviewPagination
 
     def get_queryset(self):
-        return base_queryset()
+        return base_queryset(self._scope())
+
+    def _scope(self):
+        """Branch ids this caller's quantities cover, or None = company-wide (decision 2)."""
+        if not hasattr(self, '_quantity_scope'):
+            self._quantity_scope = quantity_scope(self.request)
+        return self._quantity_scope
+
+    def _require_company_scope(self, message):
+        """Company-wide stock tools (Excel import review: its quantities are company totals)."""
+        if self._scope() is not None:
+            raise PermissionDenied(message)
 
     def _caps(self):
         return capabilities(self.request.user)
@@ -660,9 +709,9 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
         return product
 
     def _row(self, pk):
-        product, caps = base_queryset().get(pk=pk), self._caps()
+        product, caps = self.get_queryset().get(pk=pk), self._caps()
         return attach_lifecycle([serialize_row(product, caps, offer_resolver())], [product],
-                                view_cost=caps['view_cost'])[0]
+                                view_cost=caps['view_cost'], branch_ids=self._scope())[0]
 
     # -- list / summary / facets ---------------------------------------------------------------
     def list(self, request):
@@ -670,37 +719,42 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
         caps = self._caps()
         page = self.paginate_queryset(qs)
         offers = offer_resolver()
-        rows = attach_lifecycle([serialize_row(p, caps, offers) for p in page], page, view_cost=caps['view_cost'])
+        rows = attach_lifecycle([serialize_row(p, caps, offers) for p in page], page, view_cost=caps['view_cost'],
+                                branch_ids=self._scope())
         return self.get_paginated_response(rows)
 
     @action(detail=False, methods=['get'])
     def summary(self, request):
-        qs = apply_filters(Product.objects.filter(is_active=True), request.query_params)
-        positive = Q(stock__gt=0)
+        scope = self._scope()
+        products = with_scoped_stock(Product.objects.filter(is_active=True), scope)
+        qs = apply_filters(products, request.query_params)
+        positive = Q(on_hand__gt=0)
         money = DecimalField(max_digits=20, decimal_places=2)
         agg = qs.aggregate(
             total_products=Count('id'),
-            total_quantity=Coalesce(Sum('stock', filter=positive), 0),
+            total_quantity=Coalesce(Sum('on_hand', filter=positive), 0),
             low_stock=Count('id', filter=STATUS_FILTERS['low']),
             out_of_stock=Count('id', filter=STATUS_FILTERS['out']),
-            purchase_value=Coalesce(Sum(ExpressionWrapper(F('stock') * F('cost_price'), output_field=money),
+            purchase_value=Coalesce(Sum(ExpressionWrapper(F('on_hand') * F('cost_price'), output_field=money),
                                         filter=positive), Value(Decimal('0')), output_field=money),
-            selling_value=Coalesce(Sum(ExpressionWrapper(F('stock') * F('retail_price'), output_field=money),
+            selling_value=Coalesce(Sum(ExpressionWrapper(F('on_hand') * F('retail_price'), output_field=money),
                                        filter=positive), Value(Decimal('0')), output_field=money),
         )
         # Per-source counts under every other filter, for the source switch's badges.
-        src = (apply_filters(Product.objects.filter(is_active=True), request.query_params, skip_source=True)
+        src = (apply_filters(products, request.query_params, skip_source=True)
                .aggregate(ALL=Count('id'), **{k: Count('id', filter=source_q(k))
                                               for k in ('OPENING_STOCK', 'EXCEL_IMPORT', 'PURCHASE', 'RETURN')}))
         caps = self._caps()
         # Return Stock totals for the badge: every product when unfiltered, else the filtered set.
         filtered_ids = None
         if any(request.query_params.get(k) for k in request.query_params):
-            filtered_ids = list(apply_filters(Product.objects.filter(is_active=True), request.query_params)
+            filtered_ids = list(apply_filters(products, request.query_params)
                                 .values_list('pk', flat=True)[:20000])
         from .returns import return_stock_by_product
-        ret = return_stock_by_product(filtered_ids)
+        ret = return_stock_by_product(filtered_ids, branch_ids=scope)
         body = {
+            # 'branches' = every figure covers only the caller's permitted branches (decision 2).
+            'quantity_scope': 'company' if scope is None else 'branches',
             'source_counts': src,
             'return_stock': {'sales': sum(v['sales'] for v in ret.values()),
                              'purchase': sum(v['purchase'] for v in ret.values())},
@@ -740,6 +794,7 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
             'adjustment_reasons': ['Physical stock count', 'Damaged / broken', 'Lost / theft',
                                    'Found during audit', 'Opening stock correction', 'Expired', 'Other'],
             'permissions': self._caps(),
+            'quantity_scope': 'company' if self._scope() is None else 'branches',
         })
 
     @action(detail=False, methods=['get'])
@@ -749,8 +804,9 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
             return Response({'found': False, 'results': []})
         caps = self._caps()
         offers = offer_resolver()
-        found = list(base_queryset().filter(_code_q(code)).order_by('name')[:5])
-        rows = attach_lifecycle([serialize_row(p, caps, offers) for p in found], found, view_cost=caps['view_cost'])
+        found = list(self.get_queryset().filter(_code_q(code)).order_by('name')[:5])
+        rows = attach_lifecycle([serialize_row(p, caps, offers) for p in found], found, view_cost=caps['view_cost'],
+                                branch_ids=self._scope())
         return Response({'found': bool(rows), 'results': rows})
 
     # -- export ---------------------------------------------------------------------------------
@@ -782,6 +838,7 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
         stamp = timezone.localtime().strftime('%Y%m%d-%H%M')
 
         offers = offer_resolver()
+        scope = self._scope()
 
         def serialized():
             chunk = []
@@ -789,11 +846,11 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
                 chunk.append(p)
                 if len(chunk) >= 1000:
                     yield from attach_lifecycle([serialize_row(x, caps, offers) for x in chunk], chunk,
-                                                view_cost=caps['view_cost'])
+                                                view_cost=caps['view_cost'], branch_ids=scope)
                     chunk = []
             if chunk:
                 yield from attach_lifecycle([serialize_row(x, caps, offers) for x in chunk], chunk,
-                                            view_cost=caps['view_cost'])
+                                            view_cost=caps['view_cost'], branch_ids=scope)
 
         def rows():
             for r in serialized():
@@ -1034,6 +1091,14 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
                 return Response({'adjustment': _adjustment_json(done), 'row': self._row(done.product_id),
                                  'replayed': True})
 
+        scope = self._scope()
+        if scope is not None:
+            # A branch-restricted user counts the stock of a branch they may use (decision 2):
+            # never the client's default branch as a fallback, never a company-wide total.
+            from apps.common.branch_context import get_active_branch
+            active = get_active_branch(request)
+            if active is None or str(active.pk) not in scope:
+                raise PermissionDenied('Select one of your branches to adjust its stock.')
         branch, warehouse = _resolve_branch_and_warehouse(request)
         if warehouse is None:
             return Response({'detail': 'Set up a branch first (Settings → Company): stock adjustments are '
@@ -1049,7 +1114,15 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
             if _is_uuid(pk):
                 list(BranchStock.all_objects.select_for_update().filter(product_id=pk).values_list('pk', flat=True))
             product = self._get_product(pk)
-            current = int(product.stock or 0)
+            # The figure the user saw: company-wide, or their permitted branches' sum.
+            current = int(product.stock or 0) if scope is None else scoped_quantity(product.pk, scope)
+            if scope is not None:
+                own = scoped_quantity(product.pk, [str(branch.pk)])
+                if own + (new_qty - current) < 0:
+                    return Response({'detail': f'{branch.name} holds only {own} of this product, so the count '
+                                               f'cannot be applied there. Switch to the branch that holds the '
+                                               f'stock, or count each branch separately.'},
+                                    status=status.HTTP_400_BAD_REQUEST)
             if expected is not None and expected != current:
                 return Response({
                     'detail': f'Stock changed to {current} while you were editing (a sale, purchase or '
@@ -1079,7 +1152,8 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
                 'source_type': 'MANUAL_ADJUSTMENT',
             })
             product.refresh_from_db(fields=['stock'])
-            if product.stock != new_qty:
+            after = product.stock if scope is None else scoped_quantity(product.pk, scope)
+            if after != new_qty:
                 # Product.stock is the sum over branches; another branch's figure moved under us.
                 # Undo the whole transaction rather than record an adjustment that doesn't add up.
                 transaction.set_rollback(True)
@@ -1096,6 +1170,10 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
         product = self._get_product(pk)
         params = request.query_params
         qs = StockLedger.objects.filter(product=product).select_related('branch', 'created_by')
+        # P1 Task 8: a branch-restricted user sees only their branches' movements (another
+        # branch's rows name its documents, staff and costs). Unrestricted users: every branch.
+        from apps.common.branch_context import scope_to_permitted
+        qs = scope_to_permitted(request, qs)
         date_from, date_to = parse_date(params.get('date_from') or ''), parse_date(params.get('date_to') or '')
         if date_from:
             qs = qs.filter(created_at__date__gte=date_from)
@@ -1116,20 +1194,22 @@ class StockOverviewViewSet(RequestActorMixin, viewsets.GenericViewSet):
             for e in entries:
                 e.pop('unit_cost', None)
         resp = paginator.get_paginated_response(entries)
-        resp.data['product'] = serialize_row(base_queryset().get(pk=product.pk), caps, offer_resolver())
+        resp.data['product'] = serialize_row(self.get_queryset().get(pk=product.pk), caps, offer_resolver())
         return resp
 
 
     # -- Excel import review ---------------------------------------------------------------------
     @action(detail=False, methods=['get'], url_path='import-batches')
     def import_batches(self, request):
-        batches = (ImportBatch.objects.filter(status__in=('SUCCESS', 'PARTIAL'), is_deleted=False)
+        self._require_company_scope('Excel import review covers every branch; it needs access to all branches.')
+        batches =(ImportBatch.objects.filter(status__in=('SUCCESS', 'PARTIAL'), is_deleted=False)
                    .defer('file_data').order_by(F('completed_at').desc(nulls_last=True), '-uploaded_date')[:30])
         return Response([{**_review_counts(b), **_batch_json(b)} for b in batches])
 
     @action(detail=False, methods=['get', 'post'], url_path='import-review')
     def import_review(self, request):
-        batch = _review_batch(request.query_params.get('batch') or request.data.get('batch'))
+        self._require_company_scope('Excel import review covers every branch; it needs access to all branches.')
+        batch =_review_batch(request.query_params.get('batch') or request.data.get('batch'))
         if request.method == 'POST':
             return self._decide_import_rows(request, batch)
 
@@ -1218,7 +1298,7 @@ def _batch_json(b):
         'id': str(b.pk), 'batch_number': b.batch_number, 'file_name': b.original_file_name or b.file_name,
         'status': b.status, 'uploaded_by': b.uploaded_by,
         'completed_at': (b.completed_at or b.updated_at).isoformat() if (b.completed_at or b.updated_at) else None,
-        'imported_rows': b.imported_rows, 'updated_rows': b.updated_rows,
+        'imported_rows': b.imported_rows, 'updated_rows': b.updated_rows, 'merged_rows': b.merged_rows,
         'skipped_rows': (b.duplicate_rows or 0) + (b.failed_rows or 0),
     }
 

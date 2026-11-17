@@ -1,0 +1,7 @@
+# G-TRADE ERP Windows local edition (Standalone / LAN Server).
+# Cloud deploys keep using requirements.txt only; nothing here is installed on Render/Vercel.
+#   Embedded runtime build: windows/tooling/build_runtime.py installs this file into
+#   runtime\python\Lib\site-packages with exact pins.
+-r requirements.txt
+waitress==3.0.2          # production WSGI server on Windows (gunicorn has no Windows support)
+cryptography==50.0.2     # local TLS CA/certificates, Ed25519 licence + update-manifest verification

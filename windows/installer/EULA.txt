@@ -1,0 +1,18 @@
+G OPTICALS - END USER LICENCE AGREEMENT
+
+*** DRAFT PLACEHOLDER - NOT LEGAL TEXT ***
+The publisher's legal name and the final licence terms are owner decisions (see
+COMMERCIAL_RELEASE_CHECKLIST.md). This placeholder must be replaced by text approved by the
+publisher's legal adviser before any commercial distribution.
+
+Summary of what the installer does on this computer:
+- Installs the G OPTICALS desktop application.
+- Standalone / LAN Server: installs a private PostgreSQL 17 database server, the G OPTICALS
+  application service and an HTTPS web service, listening on this computer only (Standalone) or
+  on the local network (LAN Server, firewall rule limited to the Private network profile).
+- Stores business data in the chosen data folder (default C:\ProgramData\G-TRADE). Uninstalling
+  keeps this data unless you explicitly choose to delete it.
+
+Third-party components and their licences: Python (PSF License), PostgreSQL (PostgreSQL
+License), nginx (2-clause BSD), WinSW (MIT), Electron/Chromium (MIT and others), SheetJS
+Community Edition (Apache-2.0). Licence texts are included in the installation folder.

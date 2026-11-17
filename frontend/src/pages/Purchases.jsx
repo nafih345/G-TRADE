@@ -37,6 +37,7 @@ import axios from 'axios';
 import { getMasterSnapshot, loadMaster } from '../utils/masterDataCache';
 import { ensureEditAccess } from '../utils/editPermissions';
 import { formatCurrency, getCurrencySymbol, getTaxRegLabel } from '../utils/localeFormat.js';
+import { XLSX_SCRIPT_URL } from '../utils/edition';
 
 // Purchase → Purchase Return (components/returns, backend apps/inventory/returns.py).
 const ReturnEntryView = lazy(() => import('../components/returns/ReturnEntryView'));
@@ -661,7 +662,7 @@ export default function Purchases() {
         return;
       }
       const script = document.createElement('script');
-      script.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+      script.src = XLSX_SCRIPT_URL;
       script.onload = () => resolve(window.XLSX);
       script.onerror = () => reject(new Error('Failed to load SheetJS XLSX library'));
       document.body.appendChild(script);

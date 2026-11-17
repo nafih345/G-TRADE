@@ -3,11 +3,14 @@ from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.db.models import Sum
+from django.utils import timezone
 
 from apps.financial.models import ChartOfAccount, JournalEntry, LedgerEntry
 
 D = Decimal
-TODAY = datetime.date.today()
+# The server's business date (timezone.localdate(), TIME_ZONE=UTC), not this PC's local date:
+# with date.today() every date-checked test failed between 00:00 and 05:30 IST (fixture one day ahead).
+TODAY = timezone.localdate()
 
 
 def account(code):

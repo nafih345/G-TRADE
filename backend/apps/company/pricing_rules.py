@@ -717,8 +717,14 @@ class PricingApproveView(APIView):
         tenant = _tenant_id()
         if tenant and getattr(user, 'tenant_id', None) and str(user.tenant_id) != str(tenant) \
                 and not user.is_superuser:
-            login_protection.record_failure(username, request, reason='price-approval')
-            return Response({'detail': 'Incorrect username or password.'}, status=status.HTTP_400_BAD_REQUEST)
+            # Phase 2: a manager of this company may be a member whose home is another company of
+            # the organization; they approve with their role here, never their home role.
+            from apps.common.organizations import company_user
+            member = company_user(user, tenant)
+            if member is None:
+                login_protection.record_failure(username, request, reason='price-approval')
+                return Response({'detail': 'Incorrect username or password.'}, status=status.HTTP_400_BAD_REQUEST)
+            user = member
         if not is_pricing_admin(user):
             return Response({'detail': f'{user.username} is not an Administrator or Manager and cannot approve '
                                        'a price below cost.'}, status=status.HTTP_403_FORBIDDEN)
@@ -744,6 +750,9 @@ def _approver_from_token(token):
     if str(data.get('t') or '') != str(_tenant_id() or ''):
         return None
     user = get_user_model().objects.filter(pk=data.get('u'), is_active=True).first()
+    # Phase 2: the approver's role in THIS company (membership role outside their home company).
+    from apps.common.organizations import company_user
+    user = company_user(user, _tenant_id()) if user is not None else None
     return user if user is not None and is_pricing_admin(user) else None
 
 

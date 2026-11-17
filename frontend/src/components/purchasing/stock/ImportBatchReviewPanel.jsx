@@ -111,7 +111,7 @@ export default function ImportBatchReviewPanel({ canAdjust, onShowInGrid, onStoc
             </TextField>
             {batch && (
               <Typography variant="body2" color="text.secondary">
-                {formatQty(batch.imported_rows)} new · {formatQty(batch.updated_rows)} updated · {formatQty(batch.skipped_rows)} skipped
+                {formatQty(batch.imported_rows)} new · {formatQty(batch.updated_rows)} updated · {formatQty(batch.merged_rows || 0)} merged · {formatQty(batch.skipped_rows)} skipped
               </Typography>
             )}
             <Box sx={{ flex: 1 }} />

@@ -120,8 +120,16 @@ def _location(inv, request):
     wid = str((inv.details or {}).get('warehouseId') or '')
     warehouse = Warehouse.objects.filter(pk=wid).select_related('branch').first() if is_uuid(wid) else None
     if warehouse is not None:
+        # The warehouse id comes from the POS: never take its branch on trust (P1 / N5). A
+        # PermissionDenied here rolls back the whole save — invoice and stock alike.
+        if request is not None:
+            from apps.common.branch_context import require_branch_permitted
+            require_branch_permitted(request, warehouse.branch_id,
+                                     'The selected warehouse belongs to a branch you cannot use.')
         return warehouse.branch, warehouse
-    branch = (get_active_branch(request) if request is not None else None) or Branch.get_default()
+    # The invoice's own branch (P1 Task 5: stamped from the working branch on create) wins, so the
+    # stock leaves the branch the bill belongs to; then the request's branch, then the default.
+    branch = (getattr(inv, 'branch', None) if getattr(inv, 'branch_id', None) else None)         or (get_active_branch(request) if request is not None else None) or Branch.get_default()
     warehouse = None
     if branch is not None:
         warehouse = Warehouse.objects.filter(branch=branch).order_by('created_at').first()
@@ -158,6 +166,12 @@ def sync_wholesale_invoice_stock(inv, request=None, enforce_stock=True):
         return
     applied = inv.stock_applied if inv.stock_applied is not None else _legacy_applied(inv)
     old_items = {k: int(v) for k, v in (applied.get('items') or {}).items() if int(v) > 0}
+    if request is not None and old_items and applied.get('branch'):
+        # Editing / deleting puts the held stock back into the branch it came from: only for a
+        # caller who may use that branch.
+        from apps.common.branch_context import require_branch_permitted
+        require_branch_permitted(request, applied['branch'],
+                                 "This wholesale bill's stock was taken from a branch you cannot use.")
     new_items = desired_quantities(inv)
 
     if new_items:
@@ -187,7 +201,13 @@ def sync_wholesale_invoice_stock(inv, request=None, enforce_stock=True):
             _move(inv, products[pid], b, w, delta, enforce_stock and delta > 0)
 
     inv.stock_applied = {**new_loc, 'items': new_items}
-    type(inv).all_objects.filter(pk=inv.pk).update(stock_applied=inv.stock_applied)
+    fields = {'stock_applied': inv.stock_applied}
+    if branch is not None and new_items and getattr(inv, 'branch_id', None) != branch.pk:
+        # The bill belongs to the branch its stock left from (P1 Task 5) - the POS may pick a
+        # warehouse of another permitted branch than the working one.
+        inv.branch = branch
+        fields['branch'] = branch
+    type(inv).all_objects.filter(pk=inv.pk).update(**fields)
 
 
 def guard_legacy_pos_adjustment(reason):

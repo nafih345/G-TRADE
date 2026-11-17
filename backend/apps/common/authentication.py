@@ -30,6 +30,20 @@ class LenientJWTAuthentication(JWTAuthentication):
             from apps.common.tenant_context import check_user_tenant
             check_user_tenant(result[0], result[1])
             check_request(request, *result)
+            # Phase 2: inside a company other than the user's home company the request runs as
+            # that company's member — a read-only copy of the user carrying the membership role.
+            from apps.common import tenancy
+            from apps.common.organizations import company_user
+            user = result[0]
+            active = tenancy.current_tenant_id()
+            if active is not None and user.tenant_id is not None and int(active) != int(user.tenant_id) \
+                    and not result[1].get('workspace'):
+                member = company_user(user, active)
+                if member is None:  # check_user_tenant has just verified it; never fall back silently
+                    from rest_framework import exceptions
+                    raise exceptions.AuthenticationFailed('Your sign-in is no longer valid for this business.',
+                                                          code='tenant_mismatch')
+                result = (member, result[1])
         return result
 
     def get_user(self, validated_token):

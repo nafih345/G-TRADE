@@ -17,6 +17,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from apps.billing.views import user_role
+from apps.common.organizations import is_org_admin
 from apps.common.pagination import PageSizePagination
 
 from . import login_protection, policy, totp
@@ -48,25 +49,54 @@ OwnerOnly = _role_permission(OWNER_ROLES, OWNER_ROLES)
 
 class SingleTenantInstall(permissions.BasePermission):
     """Backups and restores copy / replace the whole database, and the security policy and audit
-    trail are server-wide — with several tenants on one server any of them would reach into the
-    other businesses' data. They stay available only while the server hosts a single tenant."""
+    trail are server-wide — with several customers on one server any of them would reach into the
+    other customers' data. They stay available only while the server hosts a single organization
+    (Phase 2), and once that organization holds several companies only an administrator of the
+    organization may use them: the archive and the audit trail span every company."""
     message = ('Backups, restores and server-wide security settings are disabled while this '
                'server hosts more than one business.')
+    org_admin_message = ('This server holds several companies. Backups, restores and server-wide security '
+                         'settings cover all of them, so only an organization administrator can use them.')
     writes_only = False
+    check_org_admin = True
 
     def has_permission(self, request, view):
         if self.writes_only and request.method in permissions.SAFE_METHODS:
             return True
-        return single_tenant_install()
+        if not single_tenant_install():
+            return False
+        if self.check_org_admin and multi_company_install() and not _org_admin_caller(request):
+            self.message = self.org_admin_message
+            return False
+        return True
 
 
 def single_tenant_install():
+    # One rule for the UI, the API and the backup service (P1 Task 3, Phase 2 organization rule).
+    from apps.security.backup.policy import whole_db_allowed
+    return whole_db_allowed()
+
+
+def multi_company_install():
     from apps.common.models import Tenant
-    return Tenant.objects.count() <= 1
+    return Tenant.objects.count() > 1
+
+
+def _org_admin_caller(request):
+    from apps.common.organizations import is_org_admin
+    token = getattr(request, 'auth', None)
+    if token is not None and hasattr(token, 'get') and token.get('workspace'):
+        return False
+    return is_org_admin(getattr(request, 'user', None))
 
 
 class SingleTenantWrites(SingleTenantInstall):
     writes_only = True
+
+
+class SingleOrganizationOnly(SingleTenantInstall):
+    """Token-blind views (signed links) check the link's user themselves."""
+    check_org_admin = False
 
 
 def _bad(errors, detail='Please fix the highlighted fields.'):
@@ -94,6 +124,9 @@ SETTING_FIELDS = ('inactivity_timeout_minutes', 'sensitive_action_reauth', 'logi
 def _settings_payload(obj, user):
     tf = UserTwoFactor.objects.filter(user_id=user.pk).first()
     server_wide = single_tenant_install()
+    locked_reason = '' if server_wide else SingleTenantInstall.message
+    if server_wide and multi_company_install() and not is_org_admin(user):
+        server_wide, locked_reason = False, SingleTenantInstall.org_admin_message
     return {
         **{f: getattr(obj, f) for f in SETTING_FIELDS},
         'version': obj.version,
@@ -113,7 +146,7 @@ def _settings_payload(obj, user):
         # False while several businesses share this server: backups / restores / schedule / audit
         # log and policy edits are refused (SingleTenantInstall), so the page shows a notice instead.
         'server_wide_available': server_wide,
-        'server_wide_locked_reason': '' if server_wide else SingleTenantInstall.message,
+        'server_wide_locked_reason': locked_reason,
         'reauth_window_seconds': int(policy.REAUTH_WINDOW.total_seconds()),
     }
 
@@ -421,7 +454,7 @@ class BackupDownloadLinkView(APIView):
 class BackupDownloadView(APIView):
     authentication_classes = []
     token_authentication = False  # token-blind by design (see tenant_context.install_drf_hook)
-    permission_classes = [permissions.AllowAny, SingleTenantInstall]
+    permission_classes = [permissions.AllowAny, SingleOrganizationOnly]
 
     def get(self, request, pk):
         from django.contrib.auth import get_user_model
@@ -437,6 +470,9 @@ class BackupDownloadView(APIView):
         user = get_user_model().objects.filter(pk=claims.get('u'), is_active=True).first()
         if user is None or user_role(user) not in ADMIN_ROLES:
             return Response({'detail': 'You are not allowed to download backups.'}, status=status.HTTP_403_FORBIDDEN)
+        if multi_company_install() and not is_org_admin(user):
+            # Phase 2: the archive spans every company of the organization.
+            return Response({'detail': SingleTenantInstall.org_admin_message}, status=status.HTTP_403_FORBIDDEN)
         record = get_object_or_404(service.whole_db_records(), pk=pk)
         if not record.available:
             return Response({'detail': 'This backup is not available for download.'}, status=status.HTTP_409_CONFLICT)

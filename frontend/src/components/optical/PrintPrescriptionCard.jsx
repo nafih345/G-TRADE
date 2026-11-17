@@ -382,19 +382,18 @@ export default function PrintPrescriptionCard({
             </Typography>
             <BarcodeIcon sx={{ fontSize: 56, color: '#475569' }} />
             <Typography variant="caption" display="block" sx={{ fontSize: '0.7rem', color: '#64748b' }}>
-              Greensol Optical ERP Certified Refraction System
+              {storeCompany.name || 'Refraction record'}
             </Typography>
           </Grid>
 
           <Grid item xs={6} sx={{ textAlign: 'right' }}>
             <Box sx={{ display: 'inline-block', textAlign: 'center' }}>
               <Typography variant="h6" fontWeight={800} sx={{ fontStyle: 'italic', textDecoration: 'underline black' }}>
-                {patientData?.assignedOptometrist || 'Dr. Sarah Connor, M.Optom'}
+                {patientData?.assignedOptometrist || ' ' /* blank signature line, never a sample name */}
               </Typography>
               <Typography variant="body2" color="text.secondary" display="block">
-                Senior Consultant Optometrist
+                Optometrist signature
               </Typography>
-              <Chip icon={<VerifiedIcon sx={{ fontSize: '16px !important' }} />} label="Digitally Signed & Verified" color="success" sx={{ mt: 1, height: 26, fontSize: '0.75rem' }} />
             </Box>
           </Grid>
         </Grid>

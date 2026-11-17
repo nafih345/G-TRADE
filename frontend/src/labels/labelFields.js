@@ -207,5 +207,5 @@ export const SAMPLE_SCENARIOS = [
   },
 ];
 
-export const SAMPLE_STORE = { store_name: 'Greensol Opticals', store_phone: '+91 98765 43210' };
+export const SAMPLE_STORE = { store_name: 'Your Store Name', store_phone: '+91 00000 00000' };
 export const SAMPLE_JOB = { batch_no: 'B-2410', expiry_date: '2027-12-31', offer_price: '3990' };

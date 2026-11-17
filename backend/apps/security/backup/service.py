@@ -24,9 +24,11 @@ from django.db import connections, transaction
 from django.db.models import Q, Sum
 from django.utils import timezone
 
+from apps.common.edition import product_file_prefix
+
 from ..audit import log_event
 from ..models import BackupRecord, BackupSchedule, OperationLock, RestoreJob
-from . import archive, storage
+from . import archive, policy, storage
 
 logger = logging.getLogger('django')
 
@@ -135,7 +137,7 @@ def _safe_error(exc, ref):
 def _new_identity(now):
     suffix = secrets.token_hex(2).upper()
     ident = f'BKP-{now:%Y%m%d-%H%M%S}-{suffix}'
-    filename = f'GreensolERP_Backup_{now:%Y%m%d_%H%M%S}_{suffix}.zip'
+    filename = f'{product_file_prefix()}_Backup_{now:%Y%m%d_%H%M%S}_{suffix}.zip'
     return ident, filename
 
 
@@ -149,8 +151,19 @@ def _new_record(backup_type, user=None, actor_name=''):
         initiated_by_name=(actor_name or getattr(user, 'username', '') or 'System')[:150])
 
 
+def _refused(event, exc, *, request=None, user=None, actor_name=''):
+    log_event(event, 'BACKUP', str(exc)[:255], request=request, user=user, actor_name=actor_name or 'System',
+              severity='WARNING')
+
+
 def start_backup(backup_type, *, user=None, actor_name='', request=None, run_async=True):
-    """Queue a backup; returns its BackupRecord. Raises BackupBusy when another backup / restore runs."""
+    """Queue a backup; returns its BackupRecord. Raises BackupBusy when another backup / restore runs,
+    policy.WholeDatabaseBlocked when the server hosts several tenants (P1 Task 3 interim rule)."""
+    try:
+        policy.assert_whole_db_allowed('Whole-database backup')
+    except policy.WholeDatabaseBlocked as exc:
+        _refused('BACKUP_REFUSED', exc, request=request, user=user, actor_name=actor_name)
+        raise
     recover_stale()
     record = _new_record(backup_type, user, actor_name)
     holder = f'backup:{record.pk}'
@@ -173,7 +186,7 @@ def _client_identity(now, tenant, sections):
     code = re.sub(r'[^A-Za-z0-9]+', '-', tenant.code or '').strip('-')[:40] or f'client{tenant.pk}'
     part = 'Full' if not sections else '-'.join(s.capitalize() for s in sections)[:60]
     ident = f'BKP-T{tenant.pk}-{now:%Y%m%d-%H%M%S}-{suffix}'
-    filename = f'GreensolERP_{code}_{part}_{now:%Y%m%d_%H%M%S}_{suffix}.zip'
+    filename = f'{product_file_prefix()}_{code}_{part}_{now:%Y%m%d_%H%M%S}_{suffix}.zip'
     return ident, filename
 
 
@@ -252,6 +265,10 @@ def _produce(record, holder):
     tmp = storage.new_temp_path()
     try:
         scope = _scope_for(record)
+        if scope is None:
+            # Last line of defence: no whole-database archive is ever written on a multi-tenant
+            # server, whichever path queued the record (P1 Task 3).
+            policy.assert_whole_db_allowed('Whole-database backup')
         with _Heartbeat(BackupRecord, record.pk, holder):
             with open(tmp, 'wb') as fh:
                 manifest = archive.write_archive(fh, backup_identifier=record.backup_identifier, scope=scope)
@@ -299,6 +316,11 @@ def _produce(record, holder):
 def import_upload(uploaded, *, user, request=None):
     """Validate an uploaded archive and keep it as an UPLOADED backup (ready to restore).
     Raises archive.BackupError with an operator-safe message."""
+    try:
+        policy.assert_whole_db_allowed('Uploading a whole-database backup')
+    except policy.WholeDatabaseBlocked as exc:
+        _refused('BACKUP_UPLOAD_REFUSED', exc, request=request, user=user)
+        raise
     limit = int(getattr(settings, 'BACKUP_MAX_UPLOAD_MB', 1024)) * 1024 * 1024
     if uploaded.size > limit:
         raise archive.BackupError(f'The file is larger than the {limit // (1024 * 1024)} MB upload limit.')
@@ -313,6 +335,12 @@ def import_upload(uploaded, *, user, request=None):
         if archive.is_scoped(manifest):
             raise archive.BackupError('This is a per-client backup (an export of one business from the platform '
                                       'console). It cannot be restored over the whole database.')
+        try:
+            # Another customer's archive is refused at upload, before it is ever stored here.
+            policy.assert_archive_restorable(tmp)
+        except archive.BackupError as exc:
+            _refused('BACKUP_UPLOAD_REFUSED', exc, request=request, user=user)
+            raise
         duplicate = _available().filter(checksum=checksum).first()
         if duplicate:
             return duplicate, result, True
@@ -404,6 +432,11 @@ def apply_retention():
 def start_restore(record, *, user, request=None, keep_session=None):
     """Queue a restore. `keep_session` (the operator's sign-in) survives the sign-out-everyone at the
     end, so the operator's screen can still read the result."""
+    try:
+        policy.assert_whole_db_allowed('Restoring a whole-database backup')
+    except policy.WholeDatabaseBlocked as exc:
+        _refused('RESTORE_REFUSED', exc, request=request, user=user)
+        raise
     recover_stale()
     if record.client_tenant_id is not None:
         raise archive.BackupError('A per-client backup cannot be restored over the whole database.')
@@ -438,6 +471,9 @@ def _run_restore_job(job_id, holder, keep_session=None):
                 if record.checksum and _sha256(path) != record.checksum:
                     raise archive.BackupError('The backup file failed its integrity check.')
                 validation = archive.validate_archive(path)
+                # Ownership before anything else: never even take the safety copy for another
+                # customer's archive (restore_archive re-checks inside its transaction).
+                policy.assert_archive_restorable(path)
 
                 # A verified safety copy of the current data comes first — no copy, no restore.
                 _stage(job, 'SAFETY_BACKUP')

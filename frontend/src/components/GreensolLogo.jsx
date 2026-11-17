@@ -1,5 +1,6 @@
 import React from 'react';
 import { Box, Typography } from '@mui/material';
+import BRAND from '../utils/brand';
 
 export const GreensolLogo = ({ iconOnly = false, size = 'medium' }) => {
   const iconDimensions = size === 'small' ? 32 : size === 'large' ? 44 : 38;
@@ -71,7 +72,7 @@ export const GreensolLogo = ({ iconOnly = false, size = 'medium' }) => {
               fontFamily: '"Outfit", "Plus Jakarta Sans", sans-serif',
             }}
           >
-            Greensol
+            {BRAND.wordmark}
           </Typography>
           <Typography
             component="span"
@@ -85,7 +86,7 @@ export const GreensolLogo = ({ iconOnly = false, size = 'medium' }) => {
               mt: 0.3,
             }}
           >
-            Optical ERP
+            {BRAND.tagline}
           </Typography>
         </Box>
       )}

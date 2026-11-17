@@ -53,12 +53,16 @@ def install():
         return field_class, field_kwargs
 
     def get_unique_together_constraints(self, model):
-        for fields, queryset in orig_constraints(self, model):
+        # DRF <= 3.15 yields (fields, queryset); DRF >= 3.16 yields (fields, queryset,
+        # condition_fields, condition, nulls_distinct, unused_constraint). Only the field list is
+        # rewritten; everything after it is passed through untouched, so both shapes work.
+        for item in orig_constraints(self, model):
+            fields, rest = item[0], tuple(item[1:])
             if _is_tenant_owned(model) and 'tenant' in fields:
                 fields = tuple(f for f in fields if f != 'tenant')
                 if len(fields) < 2:
                     continue  # single field: handled by build_standard_field
-            yield fields, queryset
+            yield (fields, *rest)
 
     base.build_standard_field = build_standard_field
     base.get_unique_together_constraints = get_unique_together_constraints

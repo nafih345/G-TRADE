@@ -15,6 +15,7 @@ const PAGE_SIZE = 50;
 export const PREVIEW_KIND_META = {
   NEW: { label: 'New', color: 'success', bg: 'transparent' },
   UPDATE: { label: 'Update', color: 'info', bg: 'transparent' },
+  MERGED: { label: 'Merged', color: 'secondary', bg: 'rgba(124, 58, 237, 0.06)' },
   DUPLICATE: { label: 'Duplicate', color: 'warning', bg: 'rgba(245, 158, 11, 0.08)' },
   ERROR: { label: 'Invalid', color: 'error', bg: 'rgba(239, 68, 68, 0.08)' },
 };
@@ -24,13 +25,14 @@ const FILTERS = [
   { value: 'valid', label: 'Will Import', count: (s) => s.valid },
   { value: 'new', label: 'New', count: (s) => s.new },
   { value: 'update', label: 'Updates', count: (s) => s.update },
+  { value: 'merged', label: 'Merged', count: (s) => s.merged },
   { value: 'duplicate', label: 'Duplicates', count: (s) => s.duplicate },
   { value: 'error', label: 'Invalid', count: (s) => s.error },
 ];
 
 function Stat({ label, value, color, hint }) {
   return (
-    <Grid item xs={6} sm={4} md={2}>
+    <Grid item xs={6} sm={4} md>
       <Tooltip title={hint || ''} placement="top-start">
         <Box>
           <Typography variant="caption" color="text.secondary">{label}</Typography>
@@ -103,12 +105,28 @@ export default function ImportPreviewReview({ batch, onConfirmed, onCancelled })
         <Stat label="New Products" value={summary.new} color="success.main" />
         <Stat label="Update Existing" value={summary.update} color="info.main"
           hint="Details are updated; their stock is not changed. The file's quantity goes to Stock Overview for review." />
+        <Stat label="Merged (Same Item)" value={summary.merged} color="secondary.main"
+          hint="Rows listing an item an earlier row already lists (another lot): one product, quantities added together" />
         <Stat label="Duplicates (Skipped)" value={summary.duplicate} color="warning.main"
-          hint="Rows repeating an earlier row of the file, or products that already exist under Skip Duplicates" />
+          hint="Products that already exist, under Skip Duplicates" />
         <Stat label="Invalid (Skipped)" value={summary.error} color="error.main" />
         <Stat label="Will Import" value={summary.valid} color="primary.main" />
       </Grid>
 
+      {summary.previous_import && (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          This file was already imported as {summary.previous_import.batch_number}
+          {summary.previous_import.completed_at ? ` on ${new Date(summary.previous_import.completed_at).toLocaleString()}` : ''}.
+          Its products are matched again, so nothing is created twice.
+        </Alert>
+      )}
+      {summary.merged > 0 && (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          {summary.merged.toLocaleString()} row{summary.merged === 1 ? ' lists an item' : 's list items'} that an earlier row already lists
+          (same barcode or code, colour and details). {summary.merged === 1 ? 'It is' : 'They are'} imported into that product: its quantity
+          is added, and no duplicate product is created. Filter by Merged to check them.
+        </Alert>
+      )}
       {summary.valid === 0 && !isLoading && (
         <Alert severity="error" sx={{ mb: 2 }}>No row of this file can be imported. Fix the rows marked Invalid and upload the file again.</Alert>
       )}

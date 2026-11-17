@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:">
+  <title>Connect to G OPTICALS server</title>
+  <link rel="stylesheet" href="pages.css">
+</head>
+<body>
+  <main>
+    <h1>Connect to your G OPTICALS server</h1>
+    <p class="muted">Use the address and pairing code printed on the server's <b>connection sheet</b>
+      (Server Manager → Workstation connection).</p>
+
+    <label for="server">Server address</label>
+    <input id="server" placeholder="SHOP-SERVER or 192.168.1.20:8443" autocomplete="off" spellcheck="false">
+    <button id="check" type="button">Check server</button>
+
+    <section id="confirm" hidden>
+      <p>Server certificate fingerprint:</p>
+      <code id="fingerprint"></code>
+      <label for="code">Pairing code (8 characters, e.g. 7Q4K-29AB)</label>
+      <input id="code" maxlength="9" autocomplete="off" spellcheck="false">
+      <button id="pair" type="button" class="primary">Connect</button>
+    </section>
+
+    <p id="message" role="alert"></p>
+    <hr>
+    <button id="local" type="button" class="link">Use this computer's default server</button>
+  </main>
+  <script src="connect.js"></script>
+</body>
+</html>

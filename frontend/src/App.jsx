@@ -1,4 +1,4 @@
-import React, { useState, useEffect, lazy, Suspense } from 'react';
+import React, { useState, useEffect, useMemo, lazy, Suspense } from 'react';
 import { HashRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { ThemeProvider, CssBaseline, Box, Typography, LinearProgress, useMediaQuery } from '@mui/material';
 import { getTheme } from './theme/theme';
@@ -8,6 +8,9 @@ import { SettingsProvider } from './context/SettingsContext';
 import Sidebar from './components/Sidebar';
 import Header from './components/Header';
 import NotificationHost from './components/NotificationHost';
+import DesktopStatus from './components/DesktopStatus';
+import LicenseBanner from './components/LicenseBanner';
+import { IS_LOCAL_EDITION } from './utils/edition';
 import EditPermissionHost from './components/EditPermissionHost';
 import ReauthDialogHost from './components/security/ReauthDialogHost';
 import SessionActivityMonitor from './components/security/SessionActivityMonitor';
@@ -27,6 +30,8 @@ import { moduleForPath, canOpenModule } from './utils/moduleAccess';
 // too: it is the only startup screen using recharts, and eager import made the sign-in page
 // download the ~420 KB charts bundle before showing anything.
 const Dashboard = lazy(() => import('./pages/Dashboard'));
+const LicensePage = lazy(() => import('./pages/LicensePage'));
+const ServerBackupsPage = lazy(() => import('./pages/ServerBackupsPage'));
 const Products = lazy(() => import('./pages/Products'));
 const SalesInvoice = lazy(() => import('./pages/SalesInvoice'));
 const WholesaleSales = lazy(() => import('./pages/WholesaleSales'));
@@ -42,11 +47,17 @@ const Appointments = lazy(() => import('./pages/Appointments'));
 const PatientHistory = lazy(() => import('./pages/PatientHistory'));
 const Purchases = lazy(() => import('./pages/Purchases'));
 const StockOverview = lazy(() => import('./pages/StockOverview'));
+const BranchTransfers = lazy(() => import('./pages/BranchTransfers'));
 const OpeningStock = lazy(() => import('./pages/OpeningStock'));
 const Administration = lazy(() => import('./pages/Administration'));
 const Reports = lazy(() => import('./pages/Reports'));
 const Settings = lazy(() => import('./pages/Settings'));
 const TenantManagement = lazy(() => import('./pages/TenantManagement'));
+const AcceptInvite = lazy(() => import('./pages/AcceptInvite'));
+// Phase 2 — multi-company
+const CompanySelect = lazy(() => import('./pages/CompanySelect'));
+const OrganizationCompanies = lazy(() => import('./pages/OrganizationCompanies'));
+const ConsolidatedSummary = lazy(() => import('./pages/ConsolidatedSummary'));
 
 // A module the client isn't subscribed to, or this role has no access to (user.module_access),
 // can't be opened by typing its URL either. The server enforces writes on its own.
@@ -67,10 +78,11 @@ function ModuleGate({ user, children }) {
 }
 
 function MainLayout() {
-  const { user, loading } = useAuth();
+  const { user, loading, pickCompany } = useAuth();
   const [themeMode, setThemeMode] = useState('light');
 
-  const theme = getTheme(themeMode);
+  const theme = useMemo(() => getTheme(themeMode), [themeMode]);
+  const loginTheme = useMemo(() => getTheme('light'), []);
   const toggleTheme = () => setThemeMode(prev => prev === 'dark' ? 'light' : 'dark');
 
   // The sidebar was a fixed-width permanent Drawer regardless of screen size, so on phones it
@@ -210,13 +222,33 @@ function MainLayout() {
 
   if (!user) {
     return (
-      <ThemeProvider theme={getTheme('light')}>
+      <ThemeProvider theme={loginTheme}>
         <CssBaseline />
-        <Routes>
-          <Route path="/super-admin/login" element={<Login key="super-admin" variant="superAdmin" />} />
-          <Route path="*" element={<Login key="staff" />} />
-        </Routes>
+        <Suspense fallback={<LinearProgress color="primary" sx={{ height: 3 }} />}>
+          <Routes>
+            {/* Platform owner sign-in: the cloud Super Admin, or on the Windows edition the Local
+                Super Admin (authenticated against the installation's own database). */}
+            <Route path="/super-admin/login" element={<Login key="super-admin" variant="superAdmin" />} />
+            <Route path="/accept-invite" element={<AcceptInvite />} />
+            <Route path="*" element={<Login key="staff" />} />
+          </Routes>
+        </Suspense>
         <NotificationHost />
+        <DesktopStatus />
+      </ThemeProvider>
+    );
+  }
+
+  // Phase 2: a user with several companies picks one right after signing in.
+  if (pickCompany && !user.workspace) {
+    return (
+      <ThemeProvider theme={theme}>
+        <CssBaseline />
+        <Suspense fallback={<LinearProgress color="primary" sx={{ height: 3 }} />}>
+          <CompanySelect />
+        </Suspense>
+        <NotificationHost />
+        <DesktopStatus />
       </ThemeProvider>
     );
   }
@@ -232,6 +264,7 @@ function MainLayout() {
         <Box sx={{ flexGrow: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
           <BackendStatusBanner />
           <WorkspaceBanner />
+          <LicenseBanner />
           <Header toggleTheme={toggleTheme} mode={themeMode} onMenuClick={() => setSidebarOpen(true)} />
           
           <Box component="main" sx={{ flexGrow: 1, overflowY: 'auto' }}>
@@ -291,6 +324,7 @@ function MainLayout() {
                 <Route path="/inventory/lens" element={<Products />} />
                 <Route path="/inventory/stock-overview" element={<StockOverview />} />
                 <Route path="/inventory/opening-stock" element={<OpeningStock />} />
+                <Route path="/inventory/stock-transfer" element={<BranchTransfers />} />
 
                 {/* Purchase Sub-Routes */}
                 <Route path="/purchase" element={<Purchases />} />
@@ -370,6 +404,13 @@ function MainLayout() {
                   path="/superadmin/tenants"
                   element={user.is_platform_admin ? <TenantManagement /> : <Navigate to="/" replace />}
                 />
+                {/* A setup link opened in a browser that is already signed in (another account) */}
+                <Route path="/accept-invite" element={<AcceptInvite />} />
+                {/* Phase 2 — organization administrators (enforced again by the API) */}
+                <Route path="/organization/companies"
+                       element={user.is_org_admin ? <OrganizationCompanies /> : <Navigate to="/" replace />} />
+                <Route path="/organization/summary"
+                       element={user.is_org_admin ? <ConsolidatedSummary /> : <Navigate to="/" replace />} />
 
                 {/* Reports Sub-Routes (All 22 Enterprise Reports) */}
                 <Route path="/reports" element={<Reports />} />
@@ -398,6 +439,8 @@ function MainLayout() {
 
 
                 <Route path="/settings" element={<Settings />} />
+                {IS_LOCAL_EDITION && <Route path="/license" element={<LicensePage />} />}
+                {IS_LOCAL_EDITION && <Route path="/server-backups" element={<ServerBackupsPage />} />}
                 <Route path="*" element={<Navigate to="/" />} />
               </Routes>
               </ModuleGate>
@@ -406,6 +449,7 @@ function MainLayout() {
         </Box>
       </Box>
       <NotificationHost />
+      <DesktopStatus />
       <EditPermissionHost />
       <ReauthDialogHost />
       <SessionActivityMonitor />

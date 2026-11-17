@@ -67,6 +67,11 @@ class Command(BaseCommand):
         return sorted(set(tables))
 
     def handle(self, *args, **options):
+        from django.core.management.base import CommandError
+        from apps.common.edition import is_local
+        if is_local():
+            # A customer's installation must never offer a one-command wipe of its books.
+            raise CommandError('wipe_database is disabled in the G-TRADE Windows edition.')
         app_labels = list(BUSINESS_APPS)
         if not options['keep_settings']:
             app_labels += SETTINGS_APPS

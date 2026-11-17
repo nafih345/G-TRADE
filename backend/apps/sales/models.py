@@ -317,6 +317,10 @@ class EyeExamination(BaseUUIDModel):
     appointment_id = models.CharField(max_length=50, blank=True, null=True)
     visit_number = models.CharField(max_length=50, blank=True, null=True)
     branch = models.CharField(max_length=100, blank=True, null=True)
+    # P1 Task 6: the relational branch (the text above stays as the printed / historical label).
+    # NULL = Unassigned (no unambiguous match for the legacy text): unrestricted users only.
+    branch_ref = models.ForeignKey('company.Branch', on_delete=models.SET_NULL, null=True, blank=True,
+                                   db_index=True, related_name='+')
     optometrist = models.CharField(max_length=100, blank=True, null=True)
     # The Eye Test form's Test Type (FREE EYE TEST / COMPREHENSIVE EYE TEST / ...). Older rows
     # only had it inside raw_data's diagnosis snapshot — migration 0026 copied it out.
@@ -523,6 +527,10 @@ class Appointment(BaseUUIDModel):
     appointment_time = models.CharField(max_length=20, blank=True, null=True)
     appointment_type = models.CharField(max_length=50, blank=True, null=True)
     branch = models.CharField(max_length=100, blank=True, null=True)
+    # P1 Task 6: the relational branch (the text above stays as the printed / historical label).
+    # NULL = Unassigned (no unambiguous match for the legacy text): unrestricted users only.
+    branch_ref = models.ForeignKey('company.Branch', on_delete=models.SET_NULL, null=True, blank=True,
+                                   db_index=True, related_name='+')
     room = models.CharField(max_length=50, blank=True, null=True)
     priority = models.CharField(max_length=40, default='Standard Booking')
     status = models.CharField(max_length=20, default='Booked')
@@ -615,6 +623,11 @@ class WholesaleQuotation(BaseUUIDModel):
     # Set when the quotation is turned into an order / billed (sales.wholesale_orders).
     converted_order_number = models.CharField(max_length=50, blank=True, default='')
     converted_invoice_number = models.CharField(max_length=50, blank=True, default='')
+    # P1 Task 5: the branch this document belongs to (NULL = Unassigned: legacy rows without
+    # reliable evidence; only unrestricted users see those). Stamped by the server, never trusted
+    # from the client (BranchScopedViewSetMixin).
+    branch = models.ForeignKey('company.Branch', on_delete=models.SET_NULL, null=True, blank=True,
+                               db_index=True, related_name='+')
 
     class Meta:
         constraints = [
@@ -645,6 +658,11 @@ class WholesaleOrder(BaseUUIDModel):
     invoice = models.ForeignKey('WholesaleInvoice', on_delete=models.SET_NULL, null=True, blank=True,
                                 related_name='source_orders')
     billed_at = models.DateTimeField(null=True, blank=True)
+    # P1 Task 5: the branch this document belongs to (NULL = Unassigned: legacy rows without
+    # reliable evidence; only unrestricted users see those). Stamped by the server, never trusted
+    # from the client (BranchScopedViewSetMixin).
+    branch = models.ForeignKey('company.Branch', on_delete=models.SET_NULL, null=True, blank=True,
+                               db_index=True, related_name='+')
 
     class Meta:
         constraints = [
@@ -664,6 +682,11 @@ class WholesaleDeliveryChallan(BaseUUIDModel):
     driver_name = models.CharField(max_length=100, blank=True, null=True)
     driver_phone = models.CharField(max_length=20, blank=True, null=True)
     delivery_status = models.CharField(max_length=30, default='In Transit')
+    # P1 Task 5: the branch this document belongs to (NULL = Unassigned: legacy rows without
+    # reliable evidence; only unrestricted users see those). Stamped by the server, never trusted
+    # from the client (BranchScopedViewSetMixin).
+    branch = models.ForeignKey('company.Branch', on_delete=models.SET_NULL, null=True, blank=True,
+                               db_index=True, related_name='+')
 
     class Meta:
         constraints = [
@@ -691,6 +714,11 @@ class WholesaleInvoice(BaseUUIDModel):
     # {product_id: units}} — kept by sales.wholesale_stock so every save moves only the
     # difference. Null = saved before the backend moved wholesale stock (see that module).
     stock_applied = models.JSONField(null=True, blank=True, editable=False)
+    # P1 Task 5: the branch this document belongs to (NULL = Unassigned: legacy rows without
+    # reliable evidence; only unrestricted users see those). Stamped by the server, never trusted
+    # from the client (BranchScopedViewSetMixin).
+    branch = models.ForeignKey('company.Branch', on_delete=models.SET_NULL, null=True, blank=True,
+                               db_index=True, related_name='+')
 
     class Meta:
         constraints = [
@@ -712,6 +740,11 @@ class WholesalePaymentCollection(BaseUUIDModel):
     # BANK / UPI payments: which bank ledger (a BANK-subtype Chart of Accounts row) the money
     # went to or came from. Blank = the generic Bank / UPI role mapping (see financial/banks.py).
     bank_account = models.ForeignKey('financial.ChartOfAccount', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    # P1 Task 5: the branch this document belongs to (NULL = Unassigned: legacy rows without
+    # reliable evidence; only unrestricted users see those). Stamped by the server, never trusted
+    # from the client (BranchScopedViewSetMixin).
+    branch = models.ForeignKey('company.Branch', on_delete=models.SET_NULL, null=True, blank=True,
+                               db_index=True, related_name='+')
 
     class Meta:
         constraints = [
@@ -730,6 +763,11 @@ class WholesaleReturn(BaseUUIDModel):
     reason = models.CharField(max_length=200)
     return_amount = models.DecimalField(max_digits=12, decimal_places=2)
     action_taken = models.CharField(max_length=50, default='Credit Note Issued')
+    # P1 Task 5: the branch this document belongs to (NULL = Unassigned: legacy rows without
+    # reliable evidence; only unrestricted users see those). Stamped by the server, never trusted
+    # from the client (BranchScopedViewSetMixin).
+    branch = models.ForeignKey('company.Branch', on_delete=models.SET_NULL, null=True, blank=True,
+                               db_index=True, related_name='+')
 
     class Meta:
         constraints = [

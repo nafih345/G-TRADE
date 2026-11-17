@@ -39,9 +39,11 @@ from django.db.migrations.recorder import MigrationRecorder
 from django.utils import timezone
 from django.utils.duration import duration_iso_string
 
+from apps.common.edition import product_name
+
 FORMAT = 'greensol-erp-backup'
 FORMAT_VERSION = 1
-APP_NAME = 'Greensol Optical ERP'
+APP_NAME = 'Greensol Optical ERP'  # cloud default; manifests record edition.product_name()
 EXCLUDED_APPS = frozenset({'security', 'sessions'})
 MANIFEST = 'manifest.json'
 ENTRY_RE = re.compile(r'^data/([a-z][a-z0-9_]{0,99})\.([a-z][a-z0-9_]{0,99})\.jsonl$')
@@ -163,7 +165,7 @@ def write_archive(fileobj, *, backup_identifier, using=DEFAULT_DB_ALIAS, heartbe
         manifest = {
             'format': FORMAT,
             'format_version': FORMAT_VERSION,
-            'application': APP_NAME,
+            'application': product_name(),
             'backup_identifier': backup_identifier,
             'created_at': timezone.now().isoformat(),
             'database_engine': connection.vendor,
@@ -221,7 +223,7 @@ def _check_structure(zf):
     for info in zf.infolist():
         name = info.filename
         if info.is_dir() or (name != MANIFEST and not ENTRY_RE.match(name)):
-            raise BackupError('The archive contains unexpected files — it is not a Greensol ERP backup.')
+            raise BackupError(f'The archive contains unexpected files — it is not a {product_name()} backup.')
         if name in names:
             raise BackupError('The archive contains duplicate entries.')
         if info.flag_bits & 0x1:
@@ -231,7 +233,7 @@ def _check_structure(zf):
         if info.compress_size and info.file_size / info.compress_size > MAX_COMPRESSION_RATIO:
             raise BackupError('The archive is malformed (abnormal compression ratio).')
     if MANIFEST not in names:
-        raise BackupError('The archive has no manifest — it is not a Greensol ERP backup.')
+        raise BackupError(f'The archive has no manifest — it is not a {product_name()} backup.')
     if total > _limits():
         raise BackupError('The backup is larger than this server accepts (BACKUP_MAX_UNCOMPRESSED_MB).')
     return names
@@ -246,7 +248,7 @@ def read_manifest(zf):
     except (ValueError, UnicodeDecodeError, zipfile.BadZipFile):
         raise BackupError('The backup manifest is unreadable.')
     if not isinstance(manifest, dict) or manifest.get('format') != FORMAT:
-        raise BackupError('This file is not a Greensol ERP database backup.')
+        raise BackupError(f'This file is not a {product_name()} database backup.')
     version = manifest.get('format_version')
     if not isinstance(version, int) or version < 1:
         raise BackupError('The backup manifest is malformed.')
@@ -359,6 +361,10 @@ def restore_archive(path, *, using=DEFAULT_DB_ALIAS, heartbeat=None):
         if is_scoped(manifest):
             raise BackupError('This is a per-client backup (an export of one business). It cannot be restored '
                               'over the whole database.')
+        # P1 Task 3: the central guard — whichever code path calls this, a whole-database restore
+        # runs only on a single-tenant server and only with this customer's own archive.
+        from .policy import assert_archive_restorable
+        assert_archive_restorable(zf)
         with transaction.atomic(using=using):
             # FKs are DEFERRABLE INITIALLY DEFERRED on both engines, so delete-all-then-insert in
             # any order is consistent by commit time; check_constraints() below verifies early.

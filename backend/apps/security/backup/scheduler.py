@@ -100,6 +100,14 @@ def run_due(now=None):
     schedule = ensure_current(BackupSchedule.load())
     if not schedule.enabled or schedule.next_run_at is None or schedule.next_run_at > now:
         return None
+    from . import policy
+    if not policy.whole_db_allowed():
+        # P1 Task 3: a schedule switched on while the server had one tenant must not keep
+        # producing all-customer archives once a second tenant exists. Switch it off, say why.
+        policy.disable_whole_db_schedule_if_multi_tenant('The scheduled backup came due on a multi-business server.')
+        log_event('BACKUP_SCHEDULE_SKIPPED', 'BACKUP', 'Scheduled whole-database backup skipped: this server hosts '
+                  'more than one business', actor_name='Scheduler', severity='WARNING')
+        return None
     _, tz = business_timezone()
     following = compute_next_run(schedule, after=now, tz=tz)
     claimed = BackupSchedule.objects.filter(pk=schedule.pk, enabled=True, next_run_at=schedule.next_run_at).update(
@@ -108,6 +116,9 @@ def run_due(now=None):
         return None
     try:
         record = service.start_backup('SCHEDULED', actor_name='Scheduler', run_async=False)
+    except service.policy.WholeDatabaseBlocked:
+        BackupSchedule.objects.filter(pk=schedule.pk).update(last_run_status='BLOCKED')
+        return None
     except service.BackupBusy:
         BackupSchedule.objects.filter(pk=schedule.pk).update(last_run_status='SKIPPED')
         log_event('BACKUP_SCHEDULE_SKIPPED', 'BACKUP', 'Scheduled backup skipped — another backup or restore was '

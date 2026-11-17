@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand, CommandError
 
-from apps.security.backup import service
+from apps.security.backup import archive, service
 
 
 class Command(BaseCommand):
@@ -9,7 +9,7 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         try:
             record = service.start_backup('MANUAL', actor_name='Command line', run_async=False)
-        except service.BackupBusy as exc:
+        except archive.BackupError as exc:  # busy, or refused by the multi-tenant rule (P1 Task 3)
             raise CommandError(str(exc))
         if record.status != 'SUCCESS':
             raise CommandError(f'Backup {record.backup_identifier} failed: {record.error_summary}')

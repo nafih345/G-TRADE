@@ -163,7 +163,7 @@ def build_eye_test_fee(exam, previous=None):
     who = exam.patient_name or 'patient'
     return {
         # EyeExamination.branch is a free-text label, not a Branch row.
-        'date': _date(exam.examination_date), 'branch': None, 'voucher_type_code': 'RV',
+        'date': _date(exam.examination_date), 'branch': getattr(exam, 'branch_ref', None), 'voucher_type_code': 'RV',
         'source_number': f"EYE-{exam.test_no}" if exam.test_no else '', 'reference_type': 'EYE_TEST',
         'narration': f"Eye test fee — Test No {exam.test_no or '—'} — {who}",
         'lines': [
@@ -199,7 +199,7 @@ def build_wholesale_invoice(inv, previous=None):
     tax = min(_wholesale_tax(inv), total)
     dealer = getattr(inv.dealer, 'business_name', '') if inv.dealer_id else ''
     return {
-        'date': _date(inv.invoice_date), 'branch': None, 'voucher_type_code': 'SV',
+        'date': _date(inv.invoice_date), 'branch': inv.branch, 'voucher_type_code': 'SV',
         'source_number': inv.invoice_number, 'reference_type': 'WHOLESALE',
         'narration': f"Wholesale Invoice {inv.invoice_number} — {dealer}".strip(' —'),
         'lines': [
@@ -216,7 +216,7 @@ def build_wholesale_collection(col, previous=None):
         return None
     dealer = getattr(col.dealer, 'business_name', '') if col.dealer_id else ''
     return {
-        'date': _date(col.payment_date), 'branch': None, 'voucher_type_code': 'RV',
+        'date': _date(col.payment_date), 'branch': col.branch, 'voucher_type_code': 'RV',
         'source_number': col.receipt_number, 'reference_type': 'WHOLESALE_COLLECTION',
         'narration': f"Wholesale collection {col.receipt_number} — {dealer}".strip(' —'),
         'lines': [
@@ -239,7 +239,7 @@ def build_wholesale_return(ret, previous=None):
     if original and money(original.grand_total) > 0:
         tax_share = min(money(_wholesale_tax(original) * min(amount, money(original.grand_total)) / money(original.grand_total)), amount)
     return {
-        'date': _date(ret.return_date), 'branch': None, 'voucher_type_code': 'JV',
+        'date': _date(ret.return_date), 'branch': ret.branch, 'voucher_type_code': 'JV',
         'source_number': ret.return_number, 'reference_type': 'WHOLESALE_RETURN',
         'narration': f"Wholesale {ret.action_taken or 'return'} {ret.return_number} against {ret.invoice_number}",
         'lines': [
@@ -495,6 +495,29 @@ def build_opening_stock_batch(batch, previous=None):
 
 
 WHOLESALE_SALE_PREFIX = 'wholesale pos sale'
+
+
+def build_branch_transfer_event(event, previous=None):
+    """P1 Task 7. Goods in Transit works as the inter-branch clearing account: dispatch moves the
+    value out of the sender's Inventory, receive (or a cancel's return) moves it into Inventory
+    of the branch the goods arrive at. Company-wide it nets to zero once nothing is in transit."""
+    value = money(event.value or 0)
+    if event.is_deleted or value <= 0:
+        return None
+    number = event.reference_number or ''
+    if event.kind == 'DISPATCH':
+        lines = [_line('GOODS_IN_TRANSIT', debit=value, memo=f"Transfer {number} dispatched"),
+                 _line('INVENTORY', credit=value, memo=f"Transfer {number} out")]
+    else:
+        lines = [_line('INVENTORY', debit=value, memo=f"Transfer {number} {'received' if event.kind == 'RECEIVE' else 'returned'}"),
+                 _line('GOODS_IN_TRANSIT', credit=value, memo=f"Transfer {number} {event.kind.lower()}")]
+    return {
+        'date': _date(event.performed_at), 'branch': event.branch, 'voucher_type_code': 'IA',
+        'source_number': number[:80], 'reference_type': 'BRANCH_TRANSFER',
+        'narration': f"Branch transfer {number}: {event.get_kind_display()}"[:500],
+        'metadata': {'transfer': str(event.transfer_id), 'kind': event.kind, 'valuation': 'DISPATCH_COST'},
+        'lines': lines,
+    }
 
 
 def build_stock_adjustment(adj, previous=None):

@@ -83,8 +83,9 @@ class ImportCase(TransactionTestCase):
         return self.run_sheets({'Stock': sheet_rows(rows, headers)}, strategy)
 
     def assertAccounted(self, b):
-        """total = created + updated + duplicates + failed, and the table agrees."""
-        self.assertEqual(b.total_rows, b.imported_rows + b.updated_rows + b.duplicate_rows + b.failed_rows,
+        """total = created + updated + merged + duplicates + failed, and the table agrees."""
+        self.assertEqual(b.total_rows,
+                         b.imported_rows + b.updated_rows + b.merged_rows + b.duplicate_rows + b.failed_rows,
                          (b.status, b.remarks))
         self.assertEqual(Product.objects.filter(import_batch=b).count(), b.imported_rows + b.updated_rows,
                          (b.status, b.remarks))
@@ -169,14 +170,18 @@ class DuplicateTests(ImportCase):
         self.assertEqual(Product.objects.count(), 4)
         self.assertAccounted(b)
 
-    def test_repeated_row_is_a_duplicate_and_neighbours_survive(self):
+    def test_repeated_row_is_merged_into_its_item_and_neighbours_survive(self):
         rows = [row(i) for i in range(600)]
-        rows[100] = dict(rows[99])
-        rows[550] = dict(rows[98])
+        rows[100] = dict(rows[99], Stock=3)          # same item listed again, another lot
+        rows[550] = dict(rows[98])                   # across chunks
         b = self.run_rows(rows)
-        self.assertEqual((b.imported_rows, b.duplicate_rows, b.failed_rows), (598, 2, 0), b.remarks)
+        self.assertEqual((b.imported_rows, b.merged_rows, b.duplicate_rows, b.failed_rows), (598, 2, 0, 0), b.remarks)
         self.assertEqual(Product.objects.count(), 598)
         self.assertEqual(b.total_rows, 600)
+        self.assertEqual(Product.objects.get(sku='SKU00099').stock, 8)
+        self.assertEqual(Product.objects.get(sku='SKU00098').stock, 10)
+        self.assertEqual(Product.objects.get(sku='SKU00098').opening_stock, 10)
+        self.assertAccounted(b)
 
     def test_reimport_updates_every_row_without_new_products(self):
         rows = [row(i, Code='RB3025', Color=f'C{i}', Barcode=None) for i in range(6)] + [row(i) for i in range(10, 16)]
@@ -194,10 +199,18 @@ class DuplicateTests(ImportCase):
         self.assertEqual((b.imported_rows, b.duplicate_rows, b.failed_rows), (10, 20, 0), b.remarks)
         self.assertEqual(Product.objects.count(), 30)
 
-    def test_barcode_on_another_code_fails_only_that_row(self):
+    def test_barcode_on_another_code_in_the_file_imports_both_items(self):
         rows = [row(i) for i in range(600)]
         rows[10]['Barcode'] = rows[9]['Barcode']
         b = self.run_rows(rows)
+        self.assertEqual((b.imported_rows, b.merged_rows, b.failed_rows), (600, 0, 0), b.remarks)
+        self.assertEqual(Product.objects.get(sku='SKU00009').barcode, 'BC00009')
+        self.assertIsNone(Product.objects.get(sku='SKU00010').barcode)     # the barcode stays with the first
+        self.assertAccounted(b)
+
+    def test_barcode_held_by_a_product_outside_the_file_fails_only_that_row(self):
+        Product.objects.create(name='Shop item', sku='OLD-1', barcode='BC00009', retail_price=1, cost_price=1)
+        b = self.run_rows([row(i) for i in range(600)])
         self.assertEqual((b.imported_rows, b.failed_rows), (599, 1), b.remarks)
         self.assertEqual(ImportErrorLog.objects.get(batch=b).error_type, 'DUPLICATE_BARCODE')
         self.assertAccounted(b)
@@ -208,11 +221,12 @@ class DuplicateTests(ImportCase):
         self.assertEqual((b.imported_rows, b.updated_rows, b.failed_rows), (0, 1, 0), b.remarks)
         self.assertEqual(Product.objects.get().retail_price, 777)
 
-    def test_duplicate_strategy_creates_copies(self):
+    def test_duplicate_strategy_creates_one_copy_per_item(self):
         self.run_rows([row(1)])
-        b = self.run_rows([row(1), row(1)], strategy='DUPLICATE')
-        self.assertEqual((b.imported_rows, b.failed_rows), (2, 0), b.remarks)
-        self.assertEqual(Product.objects.count(), 3)
+        b = self.run_rows([row(1), row(1, Stock=2)], strategy='DUPLICATE')
+        self.assertEqual((b.imported_rows, b.merged_rows, b.failed_rows), (1, 1, 0), b.remarks)
+        self.assertEqual(Product.objects.count(), 2)
+        self.assertEqual(Product.objects.exclude(sku='SKU00001').get().stock, 7)
 
 
 class ResilienceTests(ImportCase):
@@ -248,8 +262,10 @@ class ResilienceTests(ImportCase):
         rows[650] = dict(rows[3])                                               # true repeat across the crash
         rows[651] = row(651, Code=rows[4]['Code'], Color='Gold', Barcode=None)  # variant across the crash
         b = self.interrupted(rows)
-        self.assertEqual((b.imported_rows, b.duplicate_rows, b.failed_rows), (699, 1, 0), b.remarks)
+        self.assertEqual((b.imported_rows, b.merged_rows, b.duplicate_rows, b.failed_rows), (699, 1, 0, 0),
+                         b.remarks)
         self.assertEqual(Product.objects.count(), 699)
+        self.assertEqual(Product.objects.get(sku='SKU00003').stock, 10)       # both listings' quantity
         self.assertAccounted(b)
 
     def test_database_blip_retries_the_chunk(self):
@@ -289,8 +305,8 @@ class ResilienceTests(ImportCase):
 
         with mock.patch.object(Product.objects, 'bulk_create', reject_bad):
             b = self.run_rows(rows + [dict(rows[3])])       # the later copy of the rejected row
-        self.assertEqual(b.failed_rows, 1, b.remarks)
-        self.assertEqual(b.duplicate_rows, 1, b.remarks)    # a repeat is skipped, never a second attempt
+        # The later listing of the rejected item fails with it: never a second attempt.
+        self.assertEqual((b.failed_rows, b.merged_rows, b.duplicate_rows), (2, 0, 0), b.remarks)
         self.assertEqual(b.imported_rows, 9, b.remarks)
         self.assertAccounted(b)
 
@@ -303,7 +319,7 @@ class ApiTests(ImportCase):
         rows = [row(i) for i in range(2400)]
         for i in range(0, 300):                     # 300 colours of one model code, no barcodes
             rows[i].update({'Code': 'RB-3025', 'Color': f'Colour {i}', 'Barcode': None})
-        rows[2000] = dict(rows[1999])               # true repeat
+        rows[2000] = dict(rows[1999])               # the same item listed again
         rows[2100]['Stock'] = -3                    # invalid
         rows[2200].update({'Code': None, 'Barcode': None, 'Item Name': None})   # nothing to identify it
         path = os.path.join(self.tmp, 'stock.xlsx')
@@ -320,8 +336,8 @@ class ApiTests(ImportCase):
 
         hist = APIClient().get('/api/import/history/').data[0]
         self.assertEqual(hist['status'], 'PARTIAL', hist['remarks'])
-        self.assertEqual((hist['total_rows'], hist['imported_rows'], hist['updated_rows'], hist['duplicate_rows'],
-                          hist['failed_rows']), (2400, 2397, 0, 1, 2), hist['remarks'])
+        self.assertEqual((hist['total_rows'], hist['imported_rows'], hist['updated_rows'], hist['merged_rows'],
+                          hist['duplicate_rows'], hist['failed_rows']), (2400, 2397, 0, 1, 0, 2), hist['remarks'])
         self.assertEqual(Product.objects.count(), 2397)
         grid = APIClient().get(f"/api/import/{hist['id']}/rows/").data
         self.assertEqual(grid['count'], 2397)

@@ -1,232 +1,197 @@
 // Client Management (/superadmin/tenants) — the platform owner's console for client businesses.
 //
-// Onboards a client (POST /api/superadmin/tenants/: tenant + its Super Admin + Head Office branch,
-// with its package / modules and seat limit, one transaction) whose admin can sign in on the main
-// login page straight away; lists clients by status (active / scheduled / deactivated) and opens
-// a client's workspace (components/superadmin/ClientWorkspaceDialog: modules & role permissions,
-// users, branches, deactivation with reason and history). Only user.is_platform_admin reaches
-// this page (route guard in App.jsx, sidebar link); the API refuses everyone else with 403. Writes
-// may ask for the password again first — sessionGuard / ReauthDialogHost handle that and retry.
+// Top: platform summary (clients by status, subscriptions ending within 30 days, users, branches).
+// Below: the client list with server-side search, status / plan / country filters and pagination
+// (GET /api/superadmin/tenants/?page=…). "New client" opens the Create Client wizard
+// (components/superadmin/OnboardClientWizard); a row opens the client's workspace dialog
+// (overview & subscription, modules & role permissions, users, branches, data, backups, history).
+// Only user.is_platform_admin reaches this page (route guard in App.jsx, sidebar link); the API
+// refuses everyone else with 403. Writes may ask for the password again first — sessionGuard /
+// ReauthDialogHost handle that and retry.
 //
-// Keyboard: Enter moves to the next form field and submits from the last one (App.jsx's global
-// Enter chain) · "/" focuses search, Esc clears it · Esc closes dialogs.
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+// Keyboard: "/" focuses search, Esc clears it · Alt+N opens New client · Esc closes dialogs.
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-  Box, Typography, Card, Stack, TextField, Button, IconButton, InputAdornment, Alert, AlertTitle,
+  Box, Typography, Card, Stack, TextField, Button, IconButton, InputAdornment, Alert, AlertTitle, MenuItem,
   Table, TableHead, TableRow, TableCell, TableBody, TableContainer, Chip, Tooltip, LinearProgress,
-  CircularProgress, Grid, Divider, Tabs, Tab, Collapse,
+  TablePagination, Grid,
 } from '@mui/material';
 import {
-  Visibility, VisibilityOff, ContentCopy as CopyIcon, Refresh as RefreshIcon, Search as SearchIcon,
-  PersonAddAlt1 as OnboardIcon, Tune as ManageIcon, PowerSettingsNew as PowerIcon,
-  AutoAwesome as GenerateIcon, ExpandMore as ExpandIcon, ExpandLess as CollapseIcon, Storage as DataIcon,
-  Login as EnterIcon,
+  ContentCopy as CopyIcon, Refresh as RefreshIcon, Search as SearchIcon, PersonAddAlt1 as OnboardIcon,
+  Tune as ManageIcon, PowerSettingsNew as PowerIcon, Storage as DataIcon, Login as EnterIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../context/AuthContext';
 import { apiErrorMessage } from '../utils/apiError';
 import { notify } from '../utils/notify';
-import ModuleAccessEditor from '../components/superadmin/ModuleAccessEditor';
+import OnboardClientWizard from '../components/superadmin/OnboardClientWizard';
 import ClientWorkspaceDialog, { WORKSPACE_TABS } from '../components/superadmin/ClientWorkspaceDialog';
 import { DeactivateDialog, ReactivateDialog } from '../components/superadmin/LifecycleDialogs';
 import {
-  API, STATUS_META, copy, fmtDate, generatePassword, isReauth, packageLabel, splitErrors,
+  API, STATUS_META, copy, countryName, fmtDate, isReauth, lifecycleOf, packageLabel, planLabel,
 } from '../components/superadmin/clientApi';
 
-const EMPTY_FORM = {
-  tenant_name: '', admin_username: '', password: '', admin_email: '', contact_phone: '', branch_name: '',
-  max_users: '5',
-};
-const FORM_FIELDS = [...Object.keys(EMPTY_FORM), 'modules', 'settings_features'];
-const REQUIRED = { tenant_name: 'Shop / client name', admin_username: 'Admin username', password: 'Password' };
-const fullSuite = (catalog) => ({
-  package: 'FULL_SUITE', modules: [...catalog.packages.find((p) => p.key === 'FULL_SUITE').modules],
-  settings_features: null,
-});
-
-function OnboardForm({ catalog, onCreated }) {
-  const [form, setForm] = useState(EMPTY_FORM);
-  const [subscription, setSubscription] = useState(() => fullSuite(catalog));
-  const [errors, setErrors] = useState({});
-  const [general, setGeneral] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const firstRef = useRef(null);
-
-  const set = (key) => (e) => {
-    setForm((f) => ({ ...f, [key]: e.target.value }));
-    if (errors[key]) setErrors((x) => ({ ...x, [key]: undefined }));
-  };
-
-  const reset = () => {
-    setForm(EMPTY_FORM);
-    setSubscription(fullSuite(catalog));
-    setErrors({});
-    setGeneral('');
-  };
-
-  const submit = async (e) => {
-    e.preventDefault();
-    if (saving) return;
-    const missing = {};
-    Object.entries(REQUIRED).forEach(([key, label]) => {
-      if (!String(form[key]).trim()) missing[key] = `${label} cannot be empty.`;
-    });
-    const seats = Number(form.max_users);
-    if (!Number.isInteger(seats) || seats < 1) missing.max_users = 'Allow at least one user (the client’s admin).';
-    setGeneral('');
-    if (Object.keys(missing).length) {
-      setErrors(missing);
-      return;
-    }
-    setSaving(true);
-    try {
-      const { data } = await axios.post(API, {
-        ...form, tenant_name: form.tenant_name.trim(), admin_username: form.admin_username.trim(),
-        max_users: seats, package: subscription.package, modules: subscription.modules,
-        ...(subscription.modules.includes('settings') ? { settings_features: subscription.settings_features } : {}),
-      });
-      onCreated({ tenant: data, password: form.password });
-      reset();
-      setShowPassword(false);
-      firstRef.current?.focus();
-    } catch (err) {
-      if (isReauth(err)) return; // dialog took over
-      const { fields, general: msg } = splitErrors(err, FORM_FIELDS, 'The client could not be created.');
-      setErrors(fields);
-      setGeneral(msg);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const field = (key, label, props = {}) => (
-    <TextField
-      fullWidth size="small" label={label} value={form[key]} onChange={set(key)}
-      required={key in REQUIRED} error={Boolean(errors[key])} helperText={errors[key] || props.helperText || ' '}
-      disabled={saving} {...props}
-    />
-  );
-
+// Windows edition: the installation licence bounds how many clients the Local Super Admin may add.
+function LocalLicenseNotice({ summary }) {
+  const lic = summary?.license;
+  if (summary?.edition !== 'local' || !lic || !lic.status) return null;
+  const limit = lic.clients_limit;
+  const full = limit != null && lic.clients_used >= limit;
+  const severity = lic.read_only ? 'error' : (full ? 'warning' : 'info');
   return (
-    <Card variant="outlined" sx={{ p: { xs: 2, md: 3 } }}>
-      <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
-        <OnboardIcon color="primary" />
-        <Typography variant="h6" fontWeight={700}>Onboard New Optical Client</Typography>
-      </Stack>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Creates the client’s separate account, its Super Admin login and a first branch. The admin can sign in
-        on the main login page immediately.
-      </Typography>
-      {general && <Alert severity="error" sx={{ mb: 2 }}>{general}</Alert>}
-      <Box component="form" noValidate onSubmit={submit} aria-label="Onboard new optical client">
-        <Grid container columnSpacing={2}>
-          <Grid item xs={12} md={6}>
-            {field('tenant_name', 'Shop / Client Name', { inputRef: firstRef, autoFocus: true, placeholder: 'City Opticals UAE', inputProps: { maxLength: 150 } })}
-          </Grid>
-          <Grid item xs={12} md={6}>
-            {field('branch_name', 'First Branch Name', { placeholder: 'Head Office', helperText: 'Optional — defaults to “Head Office”.', inputProps: { maxLength: 100 } })}
-          </Grid>
-          <Grid item xs={12} md={6}>
-            {field('admin_username', 'Admin Username', { autoComplete: 'off', inputProps: { maxLength: 150, spellCheck: false } })}
-          </Grid>
-          <Grid item xs={12} md={6}>
-            {field('password', 'Password', {
-              type: showPassword ? 'text' : 'password',
-              autoComplete: 'new-password',
-              InputProps: {
-                endAdornment: (
-                  <InputAdornment position="end">
-                    <Tooltip title="Generate a strong password">
-                      <IconButton size="small" aria-label="Generate a strong password" disabled={saving}
-                        onClick={() => { setForm((f) => ({ ...f, password: generatePassword() })); setShowPassword(true); setErrors((x) => ({ ...x, password: undefined })); }}>
-                        <GenerateIcon fontSize="small" />
-                      </IconButton>
-                    </Tooltip>
-                    <IconButton size="small" aria-label={showPassword ? 'Hide password' : 'Show password'}
-                      onClick={() => setShowPassword((v) => !v)} edge="end">
-                      {showPassword ? <VisibilityOff fontSize="small" /> : <Visibility fontSize="small" />}
-                    </IconButton>
-                  </InputAdornment>
-                ),
-              },
-            })}
-          </Grid>
-          <Grid item xs={12} md={4}>
-            {field('admin_email', 'Email', { type: 'email', helperText: 'Optional' })}
-          </Grid>
-          <Grid item xs={12} md={4}>
-            {field('contact_phone', 'Phone', { type: 'tel', helperText: 'Optional', inputProps: { maxLength: 20 } })}
-          </Grid>
-          <Grid item xs={12} md={4}>
-            {field('max_users', 'User Limit (seats)', {
-              type: 'number', required: true, inputProps: { min: 1, max: 10000 },
-              helperText: 'Active accounts allowed, admin included.',
-            })}
-          </Grid>
-        </Grid>
-        <Divider sx={{ my: 2 }} />
-        <Typography variant="subtitle1" fontWeight={700}>Module Access</Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-          Pick a package or switch modules one by one. Role permissions, more users and more branches are set
-          from the client’s workspace (Manage) after creating it.
-        </Typography>
-        {(errors.modules || errors.settings_features) && <Alert severity="error" sx={{ mb: 1.5 }}>{errors.modules || errors.settings_features}</Alert>}
-        <ModuleAccessEditor catalog={catalog} value={subscription} disabled={saving}
-          onChange={(v) => { setSubscription(v); setErrors((x) => ({ ...x, modules: undefined })); }} />
-        <Stack direction="row" spacing={1.5} justifyContent="flex-end" sx={{ mt: 2 }}>
-          <Button type="button" onClick={reset} disabled={saving}>
-            Clear
-          </Button>
-          <Button type="submit" variant="contained" disabled={saving}
-            startIcon={saving ? <CircularProgress size={16} color="inherit" /> : <OnboardIcon />}>
-            {saving ? 'Creating…' : 'Create Client'}
-          </Button>
-        </Stack>
-      </Box>
-    </Card>
-  );
-}
-
-function SuccessBanner({ created, onClose }) {
-  const { tenant, password } = created;
-  const loginUrl = `${window.location.origin}${window.location.pathname}#/`;
-  const credentials = `Login: ${loginUrl}\nUsername: ${tenant.admin_username}\nPassword: ${password}`;
-  return (
-    <Alert severity="success" onClose={onClose} sx={{ '& .MuiAlert-message': { width: '100%' } }}>
-      <AlertTitle>“{tenant.name}” is ready — Tenant ID #{tenant.id}</AlertTitle>
-      <Typography variant="body2" sx={{ mb: 1 }}>
-        Share these credentials with the client. The password is shown only now.
-      </Typography>
-      <Box component="dl" sx={{ display: 'grid', gridTemplateColumns: 'max-content 1fr', columnGap: 2, rowGap: 0.5, m: 0, fontSize: 14 }}>
-        <dt>Login page</dt><dd style={{ margin: 0, wordBreak: 'break-all' }}>{loginUrl}</dd>
-        <dt>Username</dt><dd style={{ margin: 0, fontFamily: 'monospace' }}>{tenant.admin_username}</dd>
-        <dt>Password</dt><dd style={{ margin: 0, fontFamily: 'monospace' }}>{password}</dd>
-      </Box>
-      <Button size="small" startIcon={<CopyIcon />} sx={{ mt: 1 }} onClick={() => copy(credentials)}>
-        Copy credentials
-      </Button>
+    <Alert severity={severity} action={<Button size="small" color="inherit" href="#/license">Licence</Button>}>
+      <b>Local licence: {lic.status}</b>
+      {' · '}Clients {lic.clients_used}{limit != null ? ` of ${limit}` : ' (no limit)'}
+      {lic.valid_until ? ` · valid until ${String(lic.valid_until).slice(0, 10)}` : ''}
+      {lic.read_only && ` — ${lic.message || 'read-only: new clients cannot be added'}`}
+      {!lic.read_only && full && ' — the licence allows no more clients; upgrade it to add more.'}
     </Alert>
   );
 }
 
-// [key, tab label, row test]. "Active" includes clients with a deactivation still to come.
-const FILTERS = [
-  ['ACTIVE', 'Active Clients & Shops', (t) => t.status !== 'INACTIVE'],
-  ['SCHEDULED', 'Scheduled', (t) => t.status === 'SCHEDULED'],
-  ['INACTIVE', 'Deactivated', (t) => t.status === 'INACTIVE'],
-  ['ALL', 'All', () => true],
+const STATUS_FILTERS = [
+  ['', 'All statuses'], ['ACTIVE', 'Usable today'], ['TRIAL', 'Trial'], ['SCHEDULED', 'Deactivation scheduled'],
+  ['EXPIRED', 'Subscription expired'], ['INACTIVE', 'Deactivated'], ['SUSPENDED', 'Blocked (expired or deactivated)'],
 ];
+
+function SuccessBanner({ created, onClose }) {
+  const { tenant, password, invitation } = created;
+  const loginUrl = `${window.location.origin}${window.location.pathname}#/`;
+  const credentials = `Login: ${loginUrl}\nUsername: ${tenant.admin_username}\nPassword: ${password}`;
+  return (
+    <Alert severity="success" onClose={onClose} sx={{ '& .MuiAlert-message': { width: '100%', minWidth: 0 } }}>
+      <AlertTitle>“{tenant.name}” is ready — Tenant ID #{tenant.id} ({tenant.code})</AlertTitle>
+      {invitation && !invitation.error && (
+        <>
+          <Typography variant="body2" sx={{ mb: 0.5 }}>
+            Send this one-time setup link to <b>{tenant.admin_username}</b>. It works once and expires in
+            {' '}{invitation.hours} hours; it is shown only now (a new one can be made from the client’s Users tab).
+          </Typography>
+          <Box component="code" sx={{ display: 'block', wordBreak: 'break-all', fontSize: 12, mb: 0.5 }}>{invitation.link}</Box>
+          <Button size="small" startIcon={<CopyIcon />} onClick={() => copy(invitation.link)}>Copy setup link</Button>
+        </>
+      )}
+      {invitation?.error && (
+        <Typography variant="body2">
+          The client was created, but the setup link could not be made. Open the client → Users → “Setup link”.
+        </Typography>
+      )}
+      {!invitation && (
+        <>
+          <Typography variant="body2" sx={{ mb: 0.5 }}>Share these credentials with the client. The password is shown only now.</Typography>
+          <Box component="dl" sx={{ display: 'grid', gridTemplateColumns: 'max-content 1fr', columnGap: 2, rowGap: 0.5, m: 0, fontSize: 14 }}>
+            <dt>Login page</dt><dd style={{ margin: 0, wordBreak: 'break-all' }}>{loginUrl}</dd>
+            <dt>Username</dt><dd style={{ margin: 0, fontFamily: 'monospace' }}>{tenant.admin_username}</dd>
+            <dt>Password</dt><dd style={{ margin: 0, fontFamily: 'monospace' }}>{password}</dd>
+          </Box>
+          <Button size="small" startIcon={<CopyIcon />} sx={{ mt: 1 }} onClick={() => copy(credentials)}>Copy credentials</Button>
+        </>
+      )}
+    </Alert>
+  );
+}
+
+function Stat({ label, value, tone, onClick, active }) {
+  return (
+    <Card variant="outlined" onClick={onClick} role={onClick ? 'button' : undefined} tabIndex={onClick ? 0 : undefined}
+      onKeyDown={(e) => { if (onClick && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onClick(); } }}
+      sx={{
+        px: 2, py: 1.5, height: '100%', cursor: onClick ? 'pointer' : 'default',
+        borderColor: active ? 'primary.main' : 'divider', bgcolor: active ? 'action.selected' : 'background.paper',
+      }}>
+      <Typography variant="caption" color="text.secondary" noWrap component="div">{label}</Typography>
+      <Typography variant="h6" fontWeight={800} color={tone || 'text.primary'} sx={{ lineHeight: 1.3 }}>{value ?? '—'}</Typography>
+    </Card>
+  );
+}
 
 export default function TenantManagement() {
   const { openWorkspace: openClientWorkspace } = useAuth();
+  const [catalog, setCatalog] = useState(null);
+  const [summary, setSummary] = useState(null);
+  const [rows, setRows] = useState([]);
+  const [count, setCount] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+  const [created, setCreated] = useState(null);
+  const [search, setSearch] = useState('');
+  const [query, setQuery] = useState('');
+  const [status, setStatus] = useState('');
+  const [plan, setPlan] = useState('');
+  const [country, setCountry] = useState('');
+  const [expiring, setExpiring] = useState(false);
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(25);
+  const [wizard, setWizard] = useState(false);
+  const [workspaceId, setWorkspaceId] = useState(null);
+  const [workspaceTab, setWorkspaceTab] = useState(WORKSPACE_TABS.overview);
+  const [lifecycle, setLifecycle] = useState(null);
   const [enteringId, setEnteringId] = useState(null);
-  // Switch this browser into the client's own workspace (separate audited session; see AuthContext).
-  const enterWorkspace = async (t) => {
-    if (!window.confirm(`Open ${t.name}'s workspace?
+  const searchRef = useRef(null);
+  const requestRef = useRef(0);
 
-Everything you create or change there belongs to ${t.name}. `
-      + 'Use "Return to platform" in the yellow bar to come back.')) return;
+  const openWorkspace = (id, tab = WORKSPACE_TABS.overview) => { setWorkspaceTab(tab); setWorkspaceId(id); };
+
+  // Debounced search text → query.
+  useEffect(() => {
+    const t = setTimeout(() => { setQuery(search.trim()); setPage(0); }, 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  const loadSummary = useCallback(() => axios.get(`${API}summary/`)
+    .then(({ data }) => setSummary(data)).catch(() => {}), []);
+
+  const loadRows = useCallback(async () => {
+    const ticket = ++requestRef.current;
+    setLoading(true);
+    try {
+      const params = { page: page + 1, page_size: pageSize };
+      if (query) params.search = query;
+      if (status) params.status = status;
+      if (plan) params.plan = plan;
+      if (country) params.country = country;
+      if (expiring) params.expiring = 1;
+      const { data } = await axios.get(API, { params });
+      if (ticket !== requestRef.current) return;
+      setRows(data.results || []);
+      setCount(data.count || 0);
+      setLoadError('');
+    } catch (err) {
+      if (ticket === requestRef.current) setLoadError(apiErrorMessage(err, 'Could not load the client list.'));
+    } finally {
+      if (ticket === requestRef.current) setLoading(false);
+    }
+  }, [page, pageSize, query, status, plan, country, expiring]);
+
+  useEffect(() => {
+    axios.get(`${API}catalog/`).then(({ data }) => setCatalog(data))
+      .catch((err) => setLoadError(apiErrorMessage(err, 'Could not load the module catalog.')));
+    loadSummary();
+  }, [loadSummary]);
+
+  useEffect(() => { loadRows(); }, [loadRows]);
+
+  const refresh = () => { loadRows(); loadSummary(); };
+
+  useEffect(() => {
+    const onKey = (e) => {
+      const tag = (e.target?.tagName || '').toLowerCase();
+      const typing = tag === 'input' || tag === 'textarea' || e.target?.isContentEditable;
+      if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && !typing) {
+        e.preventDefault();
+        searchRef.current?.focus();
+      } else if (e.altKey && (e.key === 'n' || e.key === 'N')) {
+        e.preventDefault();
+        setWizard(true);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const enterWorkspace = async (t) => {
+    if (!window.confirm(`Open ${t.name}'s workspace?\n\nEverything you create or change there belongs to ${t.name}. `
+      + 'The opening is recorded in the client’s history. Use "Return to platform" in the yellow bar to come back.')) return;
     setEnteringId(t.id);
     try {
       await openClientWorkspace(t.id);
@@ -235,210 +200,171 @@ Everything you create or change there belongs to ${t.name}. `
       setEnteringId(null);
     }
   };
-  const [catalog, setCatalog] = useState(null);
-  const [tenants, setTenants] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState('');
-  const [created, setCreated] = useState(null);
-  const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState('ACTIVE');
-  const [workspaceId, setWorkspaceId] = useState(null);
-  const [workspaceTab, setWorkspaceTab] = useState(WORKSPACE_TABS.overview);
-  const openWorkspace = (id, tab = WORKSPACE_TABS.overview) => { setWorkspaceTab(tab); setWorkspaceId(id); };
-  const [lifecycle, setLifecycle] = useState(null); // tenant row being (de)activated
-  const [showOnboard, setShowOnboard] = useState(true);
-  const searchRef = useRef(null);
-  const catalogRef = useRef(null);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [{ data }, cat] = await Promise.all([
-        axios.get(API),
-        catalogRef.current ? Promise.resolve(catalogRef.current) : axios.get(`${API}catalog/`).then((r) => r.data),
-      ]);
-      catalogRef.current = cat;
-      setCatalog(cat);
-      setTenants(Array.isArray(data) ? data : data.results || []);
-      setLoadError('');
-    } catch (err) {
-      setLoadError(apiErrorMessage(err, 'Could not load the client list.'));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
-
-  useEffect(() => {
-    const onKey = (e) => {
-      if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return;
-      const tag = (e.target?.tagName || '').toLowerCase();
-      if (tag === 'input' || tag === 'textarea' || e.target?.isContentEditable) return;
-      e.preventDefault();
-      searchRef.current?.focus();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
 
   const onCreated = (result) => {
+    setWizard(false);
     setCreated(result);
-    setFilter('ACTIVE');
-    load();
+    setStatus(''); setPlan(''); setCountry(''); setExpiring(false); setSearch(''); setPage(0);
+    refresh();
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  // A row (or a full client detail, a superset of it) came back from a save: replace it in place.
-  const updateRow = (row) => setTenants((rows) => rows.map((r) => (r.id === row.id ? { ...r, ...row } : r)));
+  const updateRow = (row) => {
+    setRows((list) => list.map((r) => (r.id === row.id ? { ...r, ...row } : r)));
+    loadSummary();
+  };
 
   const lifecycleDone = (row) => {
     setLifecycle(null);
     updateRow(row);
-    notify(`${row.name}: ${STATUS_META[row.status].label.toLowerCase()}.`, 'success');
+    notify(`${row.name}: ${(STATUS_META[row.status] || STATUS_META.ACTIVE).label.toLowerCase()}.`, 'success');
   };
 
-  const counts = useMemo(
-    () => Object.fromEntries(FILTERS.map(([key, , test]) => [key, tenants.filter(test).length])),
-    [tenants],
-  );
-
-  const shown = useMemo(() => {
-    const test = FILTERS.find(([key]) => key === filter)[2];
-    const q = search.trim().toLowerCase();
-    return tenants.filter(test).filter((t) => !q
-      || [t.name, t.code, t.primary_admin, String(t.id), t.contact_email, t.contact_phone]
-        .some((v) => String(v || '').toLowerCase().includes(q)));
-  }, [tenants, search, filter]);
-
-  const lifecycleView = filter === 'INACTIVE' || filter === 'SCHEDULED';
+  const by = summary?.by_status || {};
+  const quickFilter = (next) => { setExpiring(false); setStatus((s) => (s === next ? '' : next)); setPage(0); };
   const moduleNames = (t) => (t.modules || []).map((m) => catalog?.modules.find((x) => x.key === m)?.label || m).join(', ');
+  const filtered = Boolean(query || status || plan || country || expiring);
 
   return (
-    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1360, mx: 'auto' }}>
-      <Box sx={{ mb: 3 }}>
-        <Typography variant="h5" fontWeight={800}>Tenant &amp; Client Management</Typography>
-        <Typography variant="body2" color="text.secondary">
-          Each client is a separate business with its own data, modules, users and branches.
-        </Typography>
-      </Box>
+    <Box sx={{ p: { xs: 2, md: 3 }, maxWidth: 1440, mx: 'auto' }}>
+      <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={2} sx={{ mb: 3 }}>
+        <Box sx={{ minWidth: 0 }}>
+          <Typography variant="h5" fontWeight={800}>
+            Client Management
+            {summary?.edition === 'local' && <Chip size="small" label="Local edition" variant="outlined" sx={{ ml: 1, verticalAlign: 'middle' }} />}
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            Each client is a separate business with its own data, modules, users and branches.
+            {summary?.edition === 'local' && ' Stored on this installation’s own database.'}
+          </Typography>
+        </Box>
+        <Stack direction="row" spacing={1} sx={{ flexShrink: 0 }}>
+          <Tooltip title="Refresh">
+            <span><IconButton onClick={refresh} disabled={loading} aria-label="Refresh"><RefreshIcon /></IconButton></span>
+          </Tooltip>
+          <Button variant="contained" startIcon={<OnboardIcon />} onClick={() => setWizard(true)} disabled={!catalog}>
+            New client
+          </Button>
+        </Stack>
+      </Stack>
 
       <Stack spacing={3}>
         {created && <SuccessBanner created={created} onClose={() => setCreated(null)} />}
-
-        {!catalog && loading && <LinearProgress />}
         {!catalog && loadError && <Alert severity="error">{loadError}</Alert>}
+        <LocalLicenseNotice summary={summary} />
 
-        {catalog && (
-          <Box>
-            <Button size="small" onClick={() => setShowOnboard((v) => !v)} endIcon={showOnboard ? <CollapseIcon /> : <ExpandIcon />} sx={{ mb: 1 }}>
-              {showOnboard ? 'Hide onboarding form' : 'Onboard a new client'}
-            </Button>
-            <Collapse in={showOnboard}>
-              <OnboardForm catalog={catalog} onCreated={onCreated} />
-            </Collapse>
-          </Box>
-        )}
+        <Grid container spacing={2} aria-label="Platform summary">
+          <Grid item xs={6} sm={4} md><Stat label="Clients" value={summary?.clients} onClick={() => quickFilter('')} active={!filtered} /></Grid>
+          <Grid item xs={6} sm={4} md><Stat label="Active" value={(by.ACTIVE || 0) + (by.SCHEDULED || 0)} tone="success.main" onClick={() => quickFilter('ACTIVE')} active={status === 'ACTIVE'} /></Grid>
+          <Grid item xs={6} sm={4} md><Stat label="Trial" value={by.TRIAL || 0} tone="info.main" onClick={() => quickFilter('TRIAL')} active={status === 'TRIAL'} /></Grid>
+          <Grid item xs={6} sm={4} md>
+            <Stat label={`Expiring ≤ ${summary?.expiring_days ?? 30} days`} value={summary?.expiring_soon?.length ?? 0} tone="warning.main"
+              onClick={() => { setStatus(''); setExpiring((v) => !v); setPage(0); }} active={expiring} />
+          </Grid>
+          <Grid item xs={6} sm={4} md><Stat label="Expired / Deactivated" value={(by.EXPIRED || 0) + (by.INACTIVE || 0)} tone="error.main" onClick={() => quickFilter('SUSPENDED')} active={status === 'SUSPENDED'} /></Grid>
+          <Grid item xs={6} sm={4} md><Stat label="Active users" value={summary?.active_users} /></Grid>
+          <Grid item xs={6} sm={4} md><Stat label="Active branches" value={summary?.active_branches} /></Grid>
+        </Grid>
 
         <Card variant="outlined">
-          <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems={{ md: 'center' }}
-            justifyContent="space-between" sx={{ px: 2, pt: 2 }}>
-            <Box>
-              <Typography variant="h6" fontWeight={700}>Clients &amp; Shops</Typography>
-              <Typography variant="body2" color="text.secondary">
-                {tenants.length} clients · {counts.ACTIVE - counts.SCHEDULED} active · {counts.SCHEDULED} scheduled to deactivate · {counts.INACTIVE} deactivated
-              </Typography>
-            </Box>
-            <Stack direction="row" spacing={1} alignItems="center">
-              <TextField
-                size="small" placeholder="Search  ( / )" value={search} onChange={(e) => setSearch(e.target.value)}
-                inputRef={searchRef} inputProps={{ 'aria-label': 'Search clients' }}
-                onKeyDown={(e) => { if (e.key === 'Escape') { setSearch(''); e.currentTarget.blur(); } }}
-                InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon fontSize="small" /></InputAdornment> }}
-              />
-              <Tooltip title="Refresh">
-                <span>
-                  <IconButton onClick={load} disabled={loading} aria-label="Refresh client list"><RefreshIcon /></IconButton>
-                </span>
-              </Tooltip>
+          <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} sx={{ px: 2, pt: 2, pb: 1.5 }} alignItems={{ md: 'center' }}>
+            <TextField
+              size="small" placeholder="Search name, ID, owner, email, admin  ( / )" value={search}
+              onChange={(e) => setSearch(e.target.value)} inputRef={searchRef} sx={{ flex: 1, minWidth: 0 }}
+              inputProps={{ 'aria-label': 'Search clients' }}
+              onKeyDown={(e) => { if (e.key === 'Escape') { setSearch(''); e.currentTarget.blur(); } }}
+              InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon fontSize="small" /></InputAdornment> }}
+            />
+            <Stack direction="row" spacing={1} sx={{ flexWrap: { xs: 'wrap', sm: 'nowrap' }, rowGap: 1 }}>
+              <TextField select size="small" label="Status" value={status} sx={{ minWidth: 150 }}
+                onChange={(e) => { setStatus(e.target.value); setExpiring(false); setPage(0); }}>
+                {STATUS_FILTERS.map(([k, l]) => <MenuItem key={k || 'all'} value={k}>{l}</MenuItem>)}
+              </TextField>
+              <TextField select size="small" label="Plan" value={plan} sx={{ minWidth: 130 }}
+                onChange={(e) => { setPlan(e.target.value); setPage(0); }}>
+                <MenuItem value="">All plans</MenuItem>
+                {(catalog?.subscription_plans || []).map((p) => <MenuItem key={p.key} value={p.key}>{p.label}</MenuItem>)}
+              </TextField>
+              <TextField select size="small" label="Country" value={country} sx={{ minWidth: 130 }}
+                onChange={(e) => { setCountry(e.target.value); setPage(0); }}>
+                <MenuItem value="">All countries</MenuItem>
+                {(catalog?.localization?.countries || []).map((c) => <MenuItem key={c.code} value={c.code}>{c.name}</MenuItem>)}
+              </TextField>
             </Stack>
           </Stack>
-          <Tabs value={filter} onChange={(_, v) => setFilter(v)} variant="scrollable"
-            sx={{ px: 1, borderBottom: 1, borderColor: 'divider' }} aria-label="Client status filter">
-            {FILTERS.map(([key, label]) => <Tab key={key} value={key} label={`${label} (${counts[key] ?? 0})`} />)}
-          </Tabs>
-          {loading && <LinearProgress />}
+          {loading ? <LinearProgress /> : <Box sx={{ height: 4 }} />}
           {catalog && loadError && <Alert severity="error" sx={{ m: 2 }}>{loadError}</Alert>}
-          <TableContainer>
-            <Table size="small" aria-label="Clients">
+          <TableContainer sx={{ maxHeight: { md: 'calc(100vh - 330px)' } }}>
+            <Table size="small" stickyHeader aria-label="Clients">
               <TableHead>
                 <TableRow sx={{ '& th': { fontWeight: 700, whiteSpace: 'nowrap' } }}>
-                  <TableCell>ID</TableCell>
-                  <TableCell>Client / Shop</TableCell>
-                  <TableCell>Admin Username</TableCell>
-                  <TableCell>Package</TableCell>
-                  <TableCell align="right">Seats</TableCell>
+                  <TableCell>Tenant ID</TableCell>
+                  <TableCell>Client</TableCell>
+                  <TableCell sx={{ display: { xs: 'none', xl: 'table-cell' } }}>Company</TableCell>
+                  <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>Country</TableCell>
+                  <TableCell>Plan</TableCell>
+                  <TableCell sx={{ display: { xs: 'none', xl: 'table-cell' } }}>Modules</TableCell>
+                  <TableCell align="right">Users</TableCell>
                   <TableCell align="right">Branches</TableCell>
-                  {lifecycleView ? (
-                    <>
-                      <TableCell>Effective</TableCell>
-                      <TableCell>Reason</TableCell>
-                    </>
-                  ) : <TableCell>Created</TableCell>}
                   <TableCell>Status</TableCell>
+                  <TableCell>Expiry</TableCell>
                   <TableCell align="right">Actions</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
-                {shown.map((t) => {
-                  const status = STATUS_META[t.status] || STATUS_META.ACTIVE;
-                  const category = catalog?.deactivation_categories.find((c) => c.key === t.deactivation_category)?.label;
+                {rows.map((t) => {
+                  const meta = STATUS_META[t.status] || STATUS_META.ACTIVE;
+                  const life = lifecycleOf(t.status);
+                  const soon = t.days_to_expiry != null && t.days_to_expiry >= 0 && t.days_to_expiry <= 30;
                   return (
-                    <TableRow key={t.id} hover sx={{ opacity: t.status === 'INACTIVE' ? 0.75 : 1, cursor: 'pointer' }}
+                    <TableRow key={t.id} hover sx={{ opacity: t.status === 'INACTIVE' ? 0.7 : 1, cursor: 'pointer' }}
                       onClick={() => openWorkspace(t.id)}>
-                      <TableCell>#{t.id}</TableCell>
-                      <TableCell>
-                        <Typography variant="body2" fontWeight={600}>{t.name}</Typography>
-                        <Typography variant="caption" color="text.secondary">
-                          {t.code}{t.is_platform ? ' · platform account' : ''}
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                        #{t.id}
+                        <Typography variant="caption" color="text.secondary" component="div" noWrap sx={{ maxWidth: 120 }}>{t.code}</Typography>
+                      </TableCell>
+                      <TableCell sx={{ maxWidth: 220 }}>
+                        <Typography variant="body2" fontWeight={600} noWrap title={t.name}>{t.name}</Typography>
+                        <Typography variant="caption" color="text.secondary" component="div" noWrap>
+                          {t.is_platform ? 'Platform account' : (t.owner_name || t.primary_admin || '—')}
+                          <Box component="span" sx={{ display: { xs: 'inline', xl: 'none' } }}>
+                            {t.company_name && t.company_name !== t.name ? ` · ${t.company_name}` : ''}
+                          </Box>
                         </Typography>
                       </TableCell>
-                      <TableCell sx={{ fontFamily: 'monospace' }}>{t.primary_admin || '—'}</TableCell>
-                      <TableCell>
+                      <TableCell sx={{ display: { xs: 'none', xl: 'table-cell' }, maxWidth: 180 }}>
+                        <Typography variant="body2" noWrap title={t.company_name}>{t.company_name}</Typography>
+                      </TableCell>
+                      <TableCell sx={{ display: { xs: 'none', md: 'table-cell' }, whiteSpace: 'nowrap' }}>{t.country ? countryName(catalog, t.country) : '—'}</TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                        {t.is_platform ? '—' : planLabel(catalog, t.subscription_plan)}
                         <Tooltip title={moduleNames(t)}>
-                          <Chip size="small" variant="outlined" label={`${packageLabel(catalog, t.package)} · ${(t.modules || []).length} modules`} />
+                          <Typography variant="caption" color="text.secondary" component="div" noWrap>
+                            {packageLabel(catalog, t.package)}
+                            <Box component="span" sx={{ display: { xs: 'inline', xl: 'none' } }}> · {(t.modules || []).length} modules</Box>
+                          </Typography>
                         </Tooltip>
                       </TableCell>
-                      <TableCell align="right" sx={{ whiteSpace: 'nowrap', color: t.active_user_count >= t.max_users ? 'warning.main' : 'inherit' }}>
-                        {t.active_user_count} / {t.max_users}
+                      <TableCell sx={{ display: { xs: 'none', xl: 'table-cell' } }}>
+                        <Tooltip title={moduleNames(t)}><Chip size="small" variant="outlined" label={`${(t.modules || []).length} modules`} /></Tooltip>
                       </TableCell>
-                      <TableCell align="right">{t.branch_count}</TableCell>
-                      {lifecycleView ? (
-                        <>
-                          <TableCell sx={{ whiteSpace: 'nowrap' }}>
-                            {fmtDate(t.deactivation_effective_date)}
-                            {t.deactivation_until && (
-                              <Typography variant="caption" color="text.secondary" component="div">until {fmtDate(t.deactivation_until)}</Typography>
-                            )}
-                          </TableCell>
-                          <TableCell sx={{ maxWidth: 280 }}>
-                            <Typography variant="caption" fontWeight={700} component="div">{category || '—'}</Typography>
-                            <Typography variant="caption" color="text.secondary" component="div" noWrap title={t.deactivation_reason}>
-                              {t.deactivation_reason}
-                            </Typography>
-                            <Typography variant="caption" color="text.secondary" component="div">by {t.deactivated_by || '—'}</Typography>
-                          </TableCell>
-                        </>
-                      ) : <TableCell sx={{ whiteSpace: 'nowrap' }}>{fmtDate(t.created_at)}</TableCell>}
-                      <TableCell>
-                        <Chip size="small" label={status.label} color={status.color}
-                          variant={t.status === 'INACTIVE' ? 'outlined' : 'filled'} />
+                      <TableCell align="right" sx={{ whiteSpace: 'nowrap', color: t.active_user_count >= t.max_users ? 'warning.main' : 'inherit' }}>
+                        {t.active_user_count}/{t.max_users}
+                      </TableCell>
+                      <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>
+                        {t.active_branch_count ?? t.branch_count}{t.max_branches ? `/${t.max_branches}` : ''}
+                      </TableCell>
+                      <TableCell><Chip size="small" label={meta.label} color={meta.color} variant={t.status === 'INACTIVE' ? 'outlined' : 'filled'} /></TableCell>
+                      <TableCell sx={{ whiteSpace: 'nowrap', color: soon ? 'warning.main' : (t.status === 'EXPIRED' ? 'error.main' : 'inherit') }}>
+                        {t.subscription_expires_on ? fmtDate(t.subscription_expires_on) : '—'}
                       </TableCell>
                       <TableCell align="right" sx={{ whiteSpace: 'nowrap' }} onClick={(e) => e.stopPropagation()}>
-                        <Button size="small" startIcon={<ManageIcon />} onClick={() => openWorkspace(t.id)}
-                          aria-label={`Manage ${t.name}`}>
-                          Manage
-                        </Button>
+                        <Tooltip title="Profile, subscription, modules, users and branches">
+                          <Button size="small" startIcon={<ManageIcon />} onClick={() => openWorkspace(t.id)}
+                            aria-label={`Manage ${t.name}`}>
+                            Manage
+                          </Button>
+                        </Tooltip>
                         <Tooltip title="Records, audit and backups">
                           <Button size="small" startIcon={<DataIcon />} onClick={() => openWorkspace(t.id, WORKSPACE_TABS.data)}
                             aria-label={`View data of ${t.name}`}>
@@ -446,11 +372,11 @@ Everything you create or change there belongs to ${t.name}. `
                           </Button>
                         </Tooltip>
                         {!t.is_platform && (
-                          <Tooltip title={t.status === 'INACTIVE'
-                            ? 'Reactivate the client to work in its workspace'
+                          <Tooltip title={['INACTIVE', 'EXPIRED'].includes(t.status)
+                            ? 'Reactivate or renew the client to work in its workspace'
                             : 'Create and manage records as this client (audited)'}>
                             <span>
-                              <Button size="small" startIcon={<EnterIcon />} disabled={t.status === 'INACTIVE' || enteringId === t.id}
+                              <Button size="small" startIcon={<EnterIcon />} disabled={['INACTIVE', 'EXPIRED'].includes(t.status) || enteringId === t.id}
                                 onClick={() => enterWorkspace(t)} aria-label={`Open the workspace of ${t.name}`}>
                                 {enteringId === t.id ? 'Opening…' : 'Open workspace'}
                               </Button>
@@ -459,10 +385,9 @@ Everything you create or change there belongs to ${t.name}. `
                         )}
                         <Tooltip title={t.is_platform ? 'The platform account cannot be deactivated' : ''}>
                           <span>
-                            <Button size="small" color={t.status === 'ACTIVE' ? 'error' : 'success'} startIcon={<PowerIcon />}
-                              disabled={t.is_platform || !catalog} onClick={() => setLifecycle(t)}
-                              aria-label={`${t.status === 'ACTIVE' ? 'Deactivate' : 'Reactivate'} ${t.name}`}>
-                              {t.status === 'ACTIVE' ? 'Deactivate' : t.status === 'SCHEDULED' ? 'Cancel deactivation' : 'Reactivate'}
+                            <Button size="small" color={life.color} startIcon={<PowerIcon />} disabled={t.is_platform || !catalog}
+                              onClick={() => setLifecycle(t)} aria-label={`${life.label} ${t.name}`}>
+                              {life.label}
                             </Button>
                           </span>
                         </Tooltip>
@@ -470,26 +395,29 @@ Everything you create or change there belongs to ${t.name}. `
                     </TableRow>
                   );
                 })}
-                {!loading && !shown.length && (
+                {!loading && !rows.length && (
                   <TableRow>
-                    <TableCell colSpan={lifecycleView ? 10 : 9} align="center" sx={{ py: 4, color: 'text.secondary' }}>
-                      {search ? 'No client matches the search.'
-                        : filter === 'INACTIVE' ? 'No deactivated clients.'
-                          : filter === 'SCHEDULED' ? 'No deactivations scheduled.' : 'No clients yet.'}
+                    <TableCell colSpan={11} align="center" sx={{ py: 4, color: 'text.secondary' }}>
+                      {filtered ? 'No client matches these filters.' : 'No clients yet — use “New client”.'}
                     </TableCell>
                   </TableRow>
                 )}
               </TableBody>
             </Table>
           </TableContainer>
+          <TablePagination component="div" count={count} page={page} rowsPerPage={pageSize}
+            rowsPerPageOptions={[10, 25, 50, 100]}
+            onPageChange={(_, p) => setPage(p)}
+            onRowsPerPageChange={(e) => { setPageSize(Number(e.target.value)); setPage(0); }} />
         </Card>
       </Stack>
 
+      {wizard && catalog && <OnboardClientWizard catalog={catalog} onClose={() => setWizard(false)} onCreated={onCreated} />}
       {workspaceId && catalog && (
         <ClientWorkspaceDialog catalog={catalog} tenantId={workspaceId} initialTab={workspaceTab}
           onClose={() => setWorkspaceId(null)} onUpdated={updateRow} />
       )}
-      {lifecycle && catalog && (lifecycle.status === 'ACTIVE'
+      {lifecycle && catalog && (lifecycleOf(lifecycle.status).kind === 'deactivate'
         ? <DeactivateDialog catalog={catalog} tenant={lifecycle} onClose={() => setLifecycle(null)} onDone={lifecycleDone} />
         : <ReactivateDialog tenant={lifecycle} onClose={() => setLifecycle(null)} onDone={lifecycleDone} />)}
     </Box>

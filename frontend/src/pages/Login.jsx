@@ -18,6 +18,12 @@ import { Link as RouterLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import TwoFactorLoginStep from '../components/security/TwoFactorLoginStep';
 import { AUTH_NOTICE_KEY } from '../utils/sessionGuard';
+import BRAND from '../utils/brand';
+import { IS_LOCAL_EDITION } from '../utils/edition';
+
+// The Windows edition's platform owner is the Local Super Admin: it signs in against this
+// installation's own database (no cloud, no internet).
+const SUPER_ADMIN_LABEL = IS_LOCAL_EDITION ? 'Local Super Admin' : 'Super Admin';
 
 const DEMO_ROLES = ['admin', 'manager', 'accountant', 'cashier'];
 
@@ -59,8 +65,9 @@ const ERRORS = {
   },
   superAdmin: {
     invalid_credentials: 'Invalid username or password.',
-    role_not_enabled: 'This account is not a Super Admin. Access denied.',
-    not_super_admin: 'This account is not a Super Admin. Access denied.',
+    role_not_enabled: `This account is not the ${IS_LOCAL_EDITION ? 'Local Super Admin' : 'platform administrator'}. Access denied.`,
+    not_platform_admin: `This page is for the ${IS_LOCAL_EDITION ? 'Local Super Admin of this installation' : 'platform administrator'}. `
+      + 'Business accounts (including a client’s own Super Admin) sign in on the main login page.',
     network: 'Cannot reach the server. Check your connection and try again.',
     server: SERVER_ERROR,
   },
@@ -110,7 +117,8 @@ export default function Login({ variant = 'staff' }) {
     try {
       const result = await login(username.trim(), password, { portal });
       if (result.success) {
-        navigate('/', { replace: true });
+        // The platform portal opens straight on Client Management.
+        navigate(isSuperAdminPage ? '/superadmin/tenants' : '/', { replace: true });
       } else if (result.reason === 'two_factor') {
         setTwoFactor({ challenge: result.challenge, setup: result.setup });
         setPassword('');
@@ -118,7 +126,7 @@ export default function Login({ variant = 'staff' }) {
         setError(result.message);
         setPassword('');
       } else {
-        setError(ERRORS[variant][result.reason] || 'Sign-in failed. Please try again.');
+        setError(ERRORS[variant][result.reason] || result.message || 'Sign-in failed. Please try again.');
         setPassword('');
       }
     } catch (err) {
@@ -188,9 +196,9 @@ export default function Login({ variant = 'staff' }) {
           </Box>
           <Box>
             <Typography sx={{ fontWeight: 800, fontSize: '1.25rem', letterSpacing: '0.04em', lineHeight: 1.1 }}>
-              GREENSOL
+              {BRAND.wordmarkCaps}
             </Typography>
-            <Typography sx={{ fontSize: '0.75rem', opacity: 0.7 }}>Optical ERP</Typography>
+            <Typography sx={{ fontSize: '0.75rem', opacity: 0.7 }}>{BRAND.tagline}</Typography>
           </Box>
         </Stack>
 
@@ -221,7 +229,7 @@ export default function Login({ variant = 'staff' }) {
         </Box>
 
         <Typography sx={{ position: 'relative', fontSize: '0.78rem', opacity: 0.6 }}>
-          © {new Date().getFullYear()} Greensol · Enterprise Resource Planning Core System
+          © {new Date().getFullYear()} {BRAND.copyrightHolder} · Enterprise Resource Planning Core System
         </Typography>
       </Box>
 
@@ -241,23 +249,27 @@ export default function Login({ variant = 'staff' }) {
               <BrandMark size={40} />
               <Box>
                 <Typography className="gradient-text" sx={{ fontWeight: 900, fontSize: '1.35rem', lineHeight: 1.1 }}>
-                  GREENSOL
+                  {BRAND.wordmarkCaps}
                 </Typography>
-                <Typography variant="caption" color="text.secondary">Optical ERP</Typography>
+                <Typography variant="caption" color="text.secondary">{BRAND.tagline}</Typography>
               </Box>
             </Stack>
 
             {isSuperAdminPage && (
               <Stack direction="row" spacing={0.75} alignItems="center" sx={{ mb: 1.5, color: 'primary.main' }}>
                 <AdminPanelSettingsOutlinedIcon sx={{ fontSize: 20 }} />
-                <Typography sx={{ fontSize: '0.78rem', fontWeight: 700, letterSpacing: '0.08em' }}>SUPER ADMIN</Typography>
+                <Typography sx={{ fontSize: '0.78rem', fontWeight: 700, letterSpacing: '0.08em' }}>{SUPER_ADMIN_LABEL.toUpperCase()}</Typography>
               </Stack>
             )}
             <Typography sx={{ fontWeight: 800, fontSize: { xs: '1.6rem', sm: '1.85rem' }, color: 'text.primary', mb: 0.75 }}>
               Welcome back
             </Typography>
             <Typography color="text.secondary" sx={{ mb: 4, fontSize: '0.95rem' }}>
-              {isSuperAdminPage ? 'Sign in with your Super Admin account.' : 'Sign in to continue to your workspace.'}
+              {isSuperAdminPage
+                ? (IS_LOCAL_EDITION
+                  ? 'Sign in with the Local Super Admin account of this installation (works offline).'
+                  : 'Sign in with your Super Admin account.')
+                : 'Sign in to continue to your workspace.'}
             </Typography>
 
             {error && (
@@ -276,7 +288,7 @@ export default function Login({ variant = 'staff' }) {
                 setup={twoFactor.setup}
                 onVerify={async (code) => {
                   const result = await verifyTwoFactor(twoFactor.challenge, code, { portal });
-                  if (result.success) navigate('/', { replace: true });
+                  if (result.success) navigate(isSuperAdminPage ? '/superadmin/tenants' : '/', { replace: true });
                   return result;
                 }}
                 onCancel={() => { setTwoFactor(null); setError(''); }}
@@ -429,7 +441,7 @@ export default function Login({ variant = 'staff' }) {
             </Box>}
 
             <Typography sx={{ mt: 4, textAlign: 'center', fontSize: '0.85rem', color: 'text.secondary' }}>
-              {isSuperAdminPage ? 'Not a Super Admin? ' : 'Super Admin? '}
+              {isSuperAdminPage ? `Not the ${SUPER_ADMIN_LABEL}? ` : `${SUPER_ADMIN_LABEL}? `}
               <Box component={RouterLink} to={isSuperAdminPage ? '/' : '/super-admin/login'}
                 sx={{ color: 'primary.main', fontWeight: 700, textDecoration: 'none', '&:hover': { textDecoration: 'underline' } }}>
                 {isSuperAdminPage ? 'Back to staff sign in' : 'Sign in here'}
@@ -437,7 +449,7 @@ export default function Login({ variant = 'staff' }) {
             </Typography>
 
             <Typography sx={{ display: { xs: 'block', md: 'none' }, mt: 5, textAlign: 'center', fontSize: '0.75rem', color: 'text.secondary' }}>
-              © {new Date().getFullYear()} Greensol · Enterprise Resource Planning Core System
+              © {new Date().getFullYear()} {BRAND.copyrightHolder} · Enterprise Resource Planning Core System
             </Typography>
           </Box>
         </Fade>

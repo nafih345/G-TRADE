@@ -7,6 +7,7 @@
 // installBackendHealthWatch() makes a dead target visible.
 import axios from 'axios';
 import { clearLocalDataIfReset, clearLocalDataIfScopeChanged } from './localDataReset';
+import { IS_LOCAL_EDITION } from './edition';
 
 export const API_BASE_OVERRIDE_KEY = 'api_base_url';
 
@@ -38,6 +39,10 @@ const isLocalhost = () =>
  * timeout, whereas the browser will happily wait out a direct request.
  */
 export function resolveApiBaseUrl() {
+  // Windows local edition: the SPA is served by the installation's own nginx, so the API is
+  // always same-origin. The localStorage override is ignored there on purpose: a stored value
+  // could otherwise send a shop's traffic (and tokens) to another host.
+  if (IS_LOCAL_EDITION) return '';
   let override = null;
   try {
     override = localStorage.getItem(API_BASE_OVERRIDE_KEY);

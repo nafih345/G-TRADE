@@ -73,11 +73,33 @@ class FinanceViewSetMixin:
     pagination_class = OptionalPagination
 
 
+class CompanyWideAccountingMixin:
+    """Company-wide accounting configuration and tools (P1 Task 1).
+
+    These rows are not tied to one branch: the chart of accounts, voucher types, posting
+    mappings, fiscal periods, the accounting policy, the posting-failure queue and the
+    financial audit log. Changing them changes every branch's books, and several expose
+    company-wide amounts (audit before/after, failure payloads). In Multi-Branch mode a
+    branch-restricted user may not write them (403); with company_wide_reads they may not read
+    them either. Unrestricted users and single-branch installs are unaffected."""
+    company_wide_reads = False
+    # Actions a branch-restricted user may still call (e.g. Record Expense's category quick-add).
+    branch_user_actions = ()
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        from rest_framework.permissions import SAFE_METHODS
+        if getattr(self, 'action', None) in self.branch_user_actions:
+            return
+        if self.company_wide_reads or request.method not in SAFE_METHODS:
+            require_all_branches(request)
+
+
 # ---------------------------------------------------------------------------
 # Chart of Accounts
 # ---------------------------------------------------------------------------
 
-class AccountGroupViewSet(FinanceViewSetMixin, viewsets.ModelViewSet):
+class AccountGroupViewSet(CompanyWideAccountingMixin, FinanceViewSetMixin, viewsets.ModelViewSet):
     queryset = AccountGroup.objects.all().order_by('name')
     serializer_class = AccountGroupSerializer
 
@@ -89,8 +111,9 @@ class AccountGroupViewSet(FinanceViewSetMixin, viewsets.ModelViewSet):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class ChartOfAccountViewSet(FinanceViewSetMixin, viewsets.ModelViewSet):
+class ChartOfAccountViewSet(CompanyWideAccountingMixin, FinanceViewSetMixin, viewsets.ModelViewSet):
     serializer_class = ChartOfAccountSerializer
+    branch_user_actions = ('expense_category',)
 
     def get_queryset(self):
         qs = ChartOfAccount.objects.select_related('account_group', 'parent_account').order_by('code')
@@ -109,15 +132,39 @@ class ChartOfAccountViewSet(FinanceViewSetMixin, viewsets.ModelViewSet):
 
     def list(self, request, *args, **kwargs):
         response = super().list(request, *args, **kwargs)
+        rows = response.data['results'] if isinstance(response.data, dict) else response.data
+        balances = None
         if request.query_params.get('with_balances'):
-            balances = {r['id']: r for r in reports.account_balances()}
-            rows = response.data['results'] if isinstance(response.data, dict) else response.data
+            branches, _label = viewset_branches(request)
+            balances = {r['id']: r for r in reports.account_balances(branch=branches)}
             for row in rows:
                 b = balances.get(str(row['id']))
                 row['ledger_balance'] = b['balance'] if b else '0.00'
                 row['total_debit'] = b['total_debit'] if b else '0.00'
                 row['total_credit'] = b['total_credit'] if b else '0.00'
+        self._scope_cached_balance(request, rows, balances)
         return response
+
+    def retrieve(self, request, *args, **kwargs):
+        response = super().retrieve(request, *args, **kwargs)
+        self._scope_cached_balance(request, [response.data])
+        return response
+
+    @staticmethod
+    def _scope_cached_balance(request, rows, balances=None):
+        """`current_balance` is the company-wide balance cache. A branch-restricted user gets the
+        balance of their permitted branches instead (P1 Task 1: no other-branch amounts)."""
+        from apps.common.branch_context import is_branch_restricted
+        if not rows or not is_branch_restricted(request):
+            return
+        if balances is None:
+            branches, _label = viewset_branches(request)
+            balances = {r['id']: r for r in reports.account_balances(branch=branches)}
+        for row in rows:
+            if isinstance(row, dict) and 'current_balance' in row:
+                b = balances.get(str(row.get('id')))
+                row['current_balance'] = b['balance'] if b else '0.00'
+                row['balance_scope'] = 'permitted_branches'
 
     def perform_create(self, serializer):
         acc = serializer.save(created_by=self.request.user)
@@ -166,14 +213,15 @@ class ChartOfAccountViewSet(FinanceViewSetMixin, viewsets.ModelViewSet):
     def ledger(self, request, pk=None):
         acc = self.get_object()
         try:
-            data = reports.general_ledger(acc, _date_param(request, 'date_from'), _date_param(request, 'date_to'),
-                                          request.query_params.get('branch'))
+            branches, label = report_branches(request)
+            data = _scoped_report(request, reports.general_ledger(
+                acc, _date_param(request, 'date_from'), _date_param(request, 'date_to'), branches), label)
         except AccountingError as exc:
             return _error(exc)
         return Response(data)
 
 
-class VoucherTypeViewSet(FinanceViewSetMixin, viewsets.ModelViewSet):
+class VoucherTypeViewSet(CompanyWideAccountingMixin, FinanceViewSetMixin, viewsets.ModelViewSet):
     queryset = VoucherType.objects.all().order_by('code')
     serializer_class = VoucherTypeSerializer
 
@@ -221,7 +269,17 @@ class JournalEntryViewSet(EditApprovalMixin, FinanceViewSetMixin, viewsets.Model
             s = p['search'].strip()
             qs = qs.filter(Q(entry_number__icontains=s) | Q(narration__icontains=s) | Q(source_number__icontains=s)
                            | Q(metadata__reference__icontains=s))
-        return qs
+        # Branch scope (P1 / N3). Every detail route — retrieve, update, delete, post, reverse,
+        # correction, correct — resolves its row through get_object() on this queryset, so another
+        # branch's journal answers 404 exactly like one that does not exist. A branch-restricted user
+        # never sees journals without a branch (head-office / legacy entries).
+        branches, _label = viewset_branches(self.request)
+        return reports.by_branch(qs, branches)
+
+    def edit_row_visible(self, pk):
+        """EditApprovalMixin looks the row up before the view runs (to ask for an approval); a
+        journal outside the caller's branches must not reach that prompt (it names the entry)."""
+        return self.get_queryset().filter(pk=pk).exists()
 
     def _voucher_payload(self, request):
         ser = VoucherInputSerializer(data=request.data)
@@ -236,6 +294,15 @@ class JournalEntryViewSet(EditApprovalMixin, FinanceViewSetMixin, viewsets.Model
     def create(self, request, *args, **kwargs):
         try:
             data = self._voucher_payload(request)
+            # B-4: the branch is authorised before anything is read or written (journal, cheques,
+            # idempotency key) — the same check as a correction. No branch given → the caller's
+            # working branch in Multi-Branch mode (unassigned in single-branch mode, as before).
+            branch = authorized_write_branch(request, data.get('branch')) or _request_branch(request)
+            if branch is None and getattr(request, 'multi_branch_enabled', False):
+                from apps.common.branch_context import is_branch_restricted
+                if is_branch_restricted(request):
+                    from rest_framework.exceptions import PermissionDenied
+                    raise PermissionDenied('No branch is assigned to your account, so you cannot post vouchers.')
             code = data['voucher_type_code']
             cheque_lines = [l for l in data['lines'] if l.get('cheque')]
             if cheque_lines:
@@ -254,11 +321,12 @@ class JournalEntryViewSet(EditApprovalMixin, FinanceViewSetMixin, viewsets.Model
                     narration=data['narration'], status=data['status'], voucher_type_code=code,
                     source_module='financial', source_event='voucher', source_number=data['reference_no'],
                     reference_type={'RV': 'RECEIPT_VOUCHER', 'PV': 'PAYMENT_VOUCHER', 'CV': 'CONTRA_ENTRY', 'JV': 'JOURNAL_VOUCHER'}[code],
-                    branch=_branch(data.get('branch')), user=request.user, idempotency_key=key,
+                    branch=branch, user=request.user, idempotency_key=key,
                     metadata={'reference': data['reference'].strip()} if data['reference'].strip() else None,
                 )
                 if cheque_lines and not repeated:
-                    book = cheques.ChequeBook(code, user=request.user, branch=_request_branch(request))
+                    # The cheque is filed under the voucher's own (authorised) branch.
+                    book = cheques.ChequeBook(code, user=request.user, branch=branch)
                     for l in cheque_lines:
                         book.add(l['cheque'], l['debit'] or l['credit'], voucher_number=entry.entry_number, journal=entry,
                                  bank_account=resolve_account(l['account']), party_name=data['reference_no'])
@@ -356,10 +424,12 @@ class JournalEntryViewSet(EditApprovalMixin, FinanceViewSetMixin, viewsets.Model
             data = self._voucher_payload(request)
             if data['status'] != 'POSTED':
                 return _error('A correction posts the corrected voucher; status must be POSTED.')
+            # Checked before anything is written: a correction must not re-post the voucher into a
+            # branch the caller may not use (no branch given → the original voucher's branch).
+            branch = authorized_write_branch(request, data.get('branch'))
             with transaction.atomic():
                 reversal, corrected = transactions.correct_entry(
-                    entry, data, request.data.get('reason') or '', user=request.user,
-                    branch=_branch(data.get('branch')) if data.get('branch') else None)
+                    entry, data, request.data.get('reason') or '', user=request.user, branch=branch)
         except AccountingError as exc:
             return _error(exc)
         return Response({'message': f"{entry.entry_number} corrected: reversed by {reversal.entry_number}, "
@@ -387,7 +457,9 @@ class LedgerEntryViewSet(FinanceViewSetMixin, viewsets.ReadOnlyModelViewSet):
     serializer_class = LedgerEntrySerializer
 
     def get_queryset(self):
-        qs = reports.posted_lines().select_related('account', 'journal_entry').order_by('-journal_entry__date')
+        branches, _label = viewset_branches(self.request)
+        qs = (reports.posted_lines(branch=branches).select_related('account', 'journal_entry')
+              .order_by('-journal_entry__date'))
         if self.request.query_params.get('account'):
             qs = qs.filter(account_id=self.request.query_params['account'])
         return qs
@@ -411,13 +483,15 @@ def _report(fn):
 
 @_report
 def trial_balance_view(request):
-    return reports.trial_balance(_date_param(request, 'as_of'), request.query_params.get('branch'))
+    branches, label = report_branches(request)
+    return _scoped_report(request, reports.trial_balance(_date_param(request, 'as_of'), branches), label)
 
 
 @_report
 def profit_loss_view(request):
-    return reports.profit_and_loss(_date_param(request, 'date_from'), _date_param(request, 'date_to'),
-                                   request.query_params.get('branch'))
+    branches, label = report_branches(request)
+    return _scoped_report(request, reports.profit_and_loss(_date_param(request, 'date_from'),
+                                                           _date_param(request, 'date_to'), branches), label)
 
 
 @_report
@@ -436,23 +510,99 @@ def profit_loss_statement_view(request):
 
 @_report
 def balance_sheet_view(request):
-    return reports.balance_sheet(_date_param(request, 'as_of'), request.query_params.get('branch'))
+    branches, label = report_branches(request)
+    return _scoped_report(request, reports.balance_sheet(_date_param(request, 'as_of'), branches), label)
 
 
 @_report
 def general_ledger_view(request):
     acc = get_object_or_404(ChartOfAccount.all_objects, pk=request.query_params.get('account'))
-    return reports.general_ledger(acc, _date_param(request, 'date_from'), _date_param(request, 'date_to'),
-                                  request.query_params.get('branch'))
+    branches, label = report_branches(request)
+    return _scoped_report(request, reports.general_ledger(acc, _date_param(request, 'date_from'),
+                                                          _date_param(request, 'date_to'), branches), label)
 
 
 @_report
 def ledger_register_view(request):
     p = request.query_params
     sources = [s for s in (p.get('source') or '').split(',') if s.strip()]
-    return reports.ledger_register(_date_param(request, 'date_from'), _date_param(request, 'date_to'),
-                                   p.get('branch'), sources=sources,
-                                   services_only=p.get('services') in ('1', 'true'), search=p.get('search') or '')
+    branches, label = report_branches(request)
+    return _scoped_report(request, reports.ledger_register(
+        _date_param(request, 'date_from'), _date_param(request, 'date_to'), branches, sources=sources,
+        services_only=p.get('services') in ('1', 'true'), search=p.get('search') or ''), label)
+
+
+def report_branches(request):
+    """(branch scope, label) for every financial read: reports, ledger lines, the journal register.
+
+    The scope is what reports.by_branch takes: None = every branch, else a list of branch ids.
+    Multi-Branch ON → the Cashbook rules (_cashbook_branches): no ?branch= or ?branch=all means
+    *the caller's permitted branches* (every branch only for unrestricted users), a branch the
+    caller may not use is 403 and an unknown one 400 — so leaving the parameter out can never
+    widen what a branch-restricted user sees. Multi-Branch OFF → no restriction applies (single-
+    branch install); an explicit ?branch= still filters, as these reports always did."""
+    if getattr(request, 'multi_branch_enabled', False):
+        return _cashbook_branches(request)
+    wanted = (request.query_params.get('branch') or 'all').strip()
+    if wanted == 'all':
+        return None, 'All branches'
+    from apps.company.models import Branch
+    try:
+        branch = Branch.objects.filter(pk=wanted).first()
+    except (DjangoValidationError, ValueError):
+        branch = None
+    if branch is None:
+        raise AccountingError('Unknown branch.')
+    return [str(branch.pk)], branch.name
+
+
+def _report_branch_label(request, label):
+    return {'id': (request.query_params.get('branch') or 'all').strip(), 'label': label}
+
+
+def _scoped_report(request, data, label):
+    """Attach the branch scope a report was computed for (dict reports only)."""
+    if isinstance(data, dict):
+        data['branch'] = _report_branch_label(request, label)
+    return data
+
+
+def viewset_branches(request):
+    """report_branches for a DRF viewset: an unknown branch answers 400 instead of 500."""
+    from rest_framework.exceptions import ValidationError
+    try:
+        return report_branches(request)
+    except AccountingError as exc:
+        raise ValidationError({'error': error_text(exc)})
+
+
+def require_all_branches(request):
+    """Company-wide accounting tools (integration monitoring, reconciliation) total every branch's
+    ledger; a branch-restricted user may not read them."""
+    from apps.common.branch_context import get_allowed_branch_ids
+    from rest_framework.exceptions import PermissionDenied
+    if getattr(request, 'multi_branch_enabled', False) and get_allowed_branch_ids(request) is not None:
+        raise PermissionDenied('This company-wide accounting view needs access to every branch.')
+
+
+def authorized_write_branch(request, branch_id):
+    """The branch a manual voucher may be posted into: None when none was given (callers keep their
+    own default), else the branch — 400 if unknown, 403 if the caller may not use it."""
+    if not branch_id:
+        return None
+    from apps.common.branch_context import get_allowed_branch_ids
+    from apps.company.models import Branch
+    from rest_framework.exceptions import PermissionDenied
+    try:
+        branch = Branch.objects.filter(pk=branch_id).first()
+    except (DjangoValidationError, ValueError):
+        branch = None
+    if branch is None:
+        raise AccountingError('Unknown branch.')
+    allowed = get_allowed_branch_ids(request) if getattr(request, 'multi_branch_enabled', False) else None
+    if allowed is not None and str(branch.pk) not in allowed:
+        raise PermissionDenied('You do not have access to the selected branch.')
+    return branch
 
 
 def _cashbook_branches(request):
@@ -694,13 +844,14 @@ def _int(value, default):
 
 @_report
 def account_balances_view(request):
-    return reports.account_balances(_date_param(request, 'as_of'), request.query_params.get('branch'))
+    branches, _label = report_branches(request)
+    return reports.account_balances(_date_param(request, 'as_of'), branches)
 
 
 @_report
 def source_breakdown_view(request):
-    return reports.source_breakdown(_date_param(request, 'date_from'), _date_param(request, 'date_to'),
-                                    request.query_params.get('branch'))
+    branches, _label = report_branches(request)
+    return reports.source_breakdown(_date_param(request, 'date_from'), _date_param(request, 'date_to'), branches)
 
 
 # ---------------------------------------------------------------------------
@@ -743,6 +894,7 @@ def statement_view(request):
 
 @_report
 def integration_status_view(request):
+    require_all_branches(request)  # company-wide ledger totals
     return integration.integration_status()
 
 
@@ -753,12 +905,16 @@ def catalog_view(request):
                       for k, v in ROLES.items()]}
 
 
-class AccountMappingViewSet(FinanceViewSetMixin, viewsets.ModelViewSet):
+class AccountMappingViewSet(CompanyWideAccountingMixin, FinanceViewSetMixin, viewsets.ModelViewSet):
     serializer_class = AccountMappingSerializer
     http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
 
     def get_queryset(self):
         qs = AccountMapping.objects.select_related('account', 'branch').order_by('role', '-effective_from')
+        from apps.common.branch_context import get_allowed_branch_ids, is_branch_restricted
+        if is_branch_restricted(self.request):
+            # Company-wide mappings plus those of the caller's own branches.
+            qs = qs.filter(Q(branch__isnull=True) | Q(branch_id__in=list(get_allowed_branch_ids(self.request))))
         if self.request.query_params.get('role'):
             qs = qs.filter(role=self.request.query_params['role'])
         if not self.request.query_params.get('include_inactive'):
@@ -767,7 +923,11 @@ class AccountMappingViewSet(FinanceViewSetMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def roles(self, request):
-        return Response(role_status(_branch(request.query_params.get('branch'))))
+        wanted = request.query_params.get('branch')
+        if wanted:
+            from apps.common.branch_context import resolve_requested_branch
+            resolve_requested_branch(request, wanted)  # 400 unknown / 403 not permitted
+        return Response(role_status(_branch(wanted)))
 
     @action(detail=False, methods=['post'])
     def validate(self, request):
@@ -803,8 +963,11 @@ class AccountMappingViewSet(FinanceViewSetMixin, viewsets.ModelViewSet):
         return Response(AccountMappingSerializer(m).data)
 
 
-class PostingFailureViewSet(FinanceViewSetMixin, viewsets.ReadOnlyModelViewSet):
+class PostingFailureViewSet(CompanyWideAccountingMixin, FinanceViewSetMixin, viewsets.ReadOnlyModelViewSet):
+    """The posting-failure queue is company-wide (its rows name every branch's documents and
+    amounts) and retrying books journals: unrestricted users only (P1 Task 1)."""
     serializer_class = PostingFailureSerializer
+    company_wide_reads = True
 
     def get_queryset(self):
         qs = PostingFailure.objects.select_related('resolved_by')
@@ -846,6 +1009,7 @@ def _source_key(request):
 @api_view(['GET'])
 @permission_classes([FinancePermission])
 def preview_view(request):
+    require_all_branches(request)  # dry-runs any document's posting, whatever its branch
     try:
         return Response(integration.preview(_source_key(request), request.query_params.get('id')))
     except (AccountingError, ValueError) as exc:
@@ -855,6 +1019,7 @@ def preview_view(request):
 @api_view(['GET'])
 @permission_classes([FinancePermission])
 def reconciliation_view(request):
+    require_all_branches(request)  # company-wide trial balance and sub-ledgers
     try:
         df, dt = _date_param(request, 'date_from'), _date_param(request, 'date_to')
         keys = [_source_key(request)] if request.query_params.get('source_key') else list(SOURCES)
@@ -870,6 +1035,7 @@ def reconciliation_view(request):
 @api_view(['POST'])
 @permission_classes([FinancePermission])
 def backfill_view(request):
+    require_all_branches(request)  # posts every branch's historic documents
     try:
         key = _source_key(request)
         df = reports.parse_date(request.data.get('date_from'))
@@ -884,6 +1050,7 @@ def backfill_view(request):
 @api_view(['POST'])
 @permission_classes([FinancePermission])
 def opening_balances_view(request):
+    require_all_branches(request)  # company-wide opening journal
     try:
         return Response({'results': post_opening_balances(user=request.user, as_of=reports.parse_date(request.data.get('as_of')),
                                                           account_ids=request.data.get('account_ids') or None)})
@@ -894,6 +1061,7 @@ def opening_balances_view(request):
 @api_view(['POST'])
 @permission_classes([FinancePermission])
 def recompute_balances_view(request):
+    require_all_branches(request)  # rewrites the company-wide balance cache
     changed = recompute_balance_cache()
     audit('BALANCES_RECOMPUTED', 'account', '', f"{changed} cached balance(s) corrected", user=request.user)
     return Response({'corrected': changed})
@@ -905,6 +1073,7 @@ def policy_view(request):
     policy = AccountingPolicy.get()
     if request.method == 'GET':
         return Response(AccountingPolicySerializer(policy).data)
+    require_all_branches(request)  # one policy for every branch
     before = AccountingPolicySerializer(policy).data
     ser = AccountingPolicySerializer(policy, data=request.data, partial=True)
     ser.is_valid(raise_exception=True)
@@ -913,7 +1082,7 @@ def policy_view(request):
     return Response(ser.data)
 
 
-class FiscalPeriodViewSet(FinanceViewSetMixin, viewsets.ModelViewSet):
+class FiscalPeriodViewSet(CompanyWideAccountingMixin, FinanceViewSetMixin, viewsets.ModelViewSet):
     queryset = FiscalPeriod.objects.select_related('closed_by').all()
     serializer_class = FiscalPeriodSerializer
 
@@ -953,8 +1122,10 @@ class FiscalPeriodViewSet(FinanceViewSetMixin, viewsets.ModelViewSet):
         return Response(FiscalPeriodSerializer(p).data)
 
 
-class FinancialAuditLogViewSet(FinanceViewSetMixin, viewsets.ReadOnlyModelViewSet):
+class FinancialAuditLogViewSet(CompanyWideAccountingMixin, FinanceViewSetMixin, viewsets.ReadOnlyModelViewSet):
+    """Company-wide trail with before/after amounts of every branch: unrestricted users only."""
     serializer_class = FinancialAuditLogSerializer
+    company_wide_reads = True
 
     def get_queryset(self):
         qs = FinancialAuditLog.objects.all()
@@ -982,7 +1153,8 @@ def settlement_parties_view(request):
         raise AccountingError('limit must be a number.')
     return settlements.search_parties(voucher, p.get('search') or '', kind=kind,
                                       only_due=p.get('only_due') in ('1', 'true'), limit=limit,
-                                      date_from=_date_param(request, 'date_from'), date_to=_date_param(request, 'date_to'))
+                                      date_from=_date_param(request, 'date_from'), date_to=_date_param(request, 'date_to'),
+                                      branch_ids=settlement_branches(request))
 
 
 @_report
@@ -997,11 +1169,20 @@ def settlement_due_bills_view(request):
     except (ValueError, TypeError):
         raise AccountingError('party must be a valid id.')
     bills = settlements.open_bills(kind, party_ids=[party], date_from=_date_param(request, 'date_from'),
-                                   date_to=_date_param(request, 'date_to')).get(party, [])
+                                   date_to=_date_param(request, 'date_to'),
+                                   branch_ids=settlement_branches(request)).get(party, [])
     money_fields = ('total', 'paid', 'due')
     bills = [{k: (str(v) if k in money_fields else v) for k, v in b.items()} for b in bills]
     return {'party_kind': kind, 'party': str(party), 'bills': bills,
             'total_due': str(sum((settlements.money(b['due']) for b in bills), settlements.ZERO))}
+
+
+def settlement_branches(request):
+    """Bills a settlement may list or settle: None (every branch) for unrestricted callers and
+    single-branch installs, else the caller's permitted branch ids. Bills without a branch are
+    left out for a restricted user, like every other branch-scoped read (P1-Q2)."""
+    from apps.common.branch_context import get_allowed_branch_ids, is_branch_restricted
+    return sorted(get_allowed_branch_ids(request)) if is_branch_restricted(request) else None
 
 
 def _settlement_input(request, voucher):
@@ -1019,7 +1200,8 @@ def _settlement_input(request, voucher):
 def settlement_receipt_view(request):
     try:
         result, created = settlements.post_bill_receipt(_settlement_input(request, 'RV'), user=request.user,
-                                                       branch=_request_branch(request))
+                                                       branch=_request_branch(request),
+                                                       branch_ids=settlement_branches(request))
     except AccountingError as exc:
         return _error(exc)
     return Response(dict(result, duplicate=not created), status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
@@ -1030,7 +1212,8 @@ def settlement_receipt_view(request):
 def settlement_payment_view(request):
     try:
         entry, created = settlements.post_bill_payment(_settlement_input(request, 'PV'), user=request.user,
-                                                      branch=_request_branch(request))
+                                                      branch=_request_branch(request),
+                                                      branch_ids=settlement_branches(request))
     except AccountingError as exc:
         return _error(exc)
     return Response(dict(JournalEntrySerializer(entry).data, duplicate=not created),
@@ -1053,7 +1236,8 @@ def settlement_batch_view(request, voucher):
                 raise AccountingError(f"A {'Receipt' if voucher == 'RV' else 'Payment'} Voucher cannot settle {data['party_kind']} bills.")
             _check_voucher_date(data['date'], request.user)
         results, duplicate = settlements.post_bill_batch(voucher, items, user=request.user,
-                                                         branch=_request_branch(request))
+                                                         branch=_request_branch(request),
+                                                         branch_ids=settlement_branches(request))
     except AccountingError as exc:
         return _error(exc)
     if voucher == 'PV':

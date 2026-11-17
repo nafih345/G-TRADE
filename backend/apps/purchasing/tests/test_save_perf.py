@@ -32,13 +32,18 @@ class PurchaseEntrySaveTests(APITestCase):
         return res
 
     def test_query_count_does_not_grow_with_lines(self):
+        captured = {}
+
         def queries_for(n, number):
             prods = [make_product(name=f'{number}-{i}') for i in range(n)]
             with CaptureQueriesContext(connection) as ctx:
                 self.post(self.body([self.line(p, 2) for p in prods], invoice_number=number))
+            captured[number] = [q['sql'] for q in ctx.captured_queries]
             return len(ctx.captured_queries)
         queries_for(1, 'PE-WARM')  # first posting creates voucher types / sequences once
-        self.assertEqual(queries_for(2, 'PE-A'), queries_for(12, 'PE-B'))
+        two, twelve = queries_for(2, 'PE-A'), queries_for(12, 'PE-B')
+        self.assertEqual(two, twelve, _query_diff(captured['PE-A'], captured['PE-B']))
+
 
     def test_stock_prices_and_ledger(self):
         a, b = make_product(name='A', stock=10), make_product(name='B', stock=0)
@@ -68,3 +73,11 @@ class PurchaseEntrySaveTests(APITestCase):
         self.assertEqual(res.status_code, 400)
         self.assertIn('items', res.data)
         self.assertFalse(Product.objects.filter(pk=bad['product']).exists())
+
+
+def _query_diff(a, b):
+    """Which statements differ between two captures (literals masked), so a failure names the query."""
+    import difflib
+    import re
+    norm = lambda qs: [re.sub(r"'[^']*'|\b\d+\b", '?', q)[:200] for q in qs]  # noqa: E731
+    return '\n'.join(difflib.unified_diff(norm(a), norm(b), 'PE-A (2 lines)', 'PE-B (12 lines)', lineterm='', n=0))

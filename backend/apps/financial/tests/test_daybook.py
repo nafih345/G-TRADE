@@ -3,6 +3,7 @@ receipts), with each pay mode of a split payment listed under its bill and the u
 Credit; totals that balance (debit = credit) whatever the filters."""
 import datetime
 
+from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from apps.company.models import Branch, BusinessSettings, UserBranchAccess
@@ -37,7 +38,7 @@ class DayBookBase(APITestCase):
     def book(self, status=200, **params):
         params.setdefault('date_from', JAN5)
         params.setdefault('date_to', JAN10)
-        res = self.client.get(URL, params)
+        res = self.client.get(URL, params, **getattr(self, 'caller_headers', {}))
         self.assertEqual(res.status_code, status, res.content)
         return res.data
 
@@ -134,7 +135,8 @@ class DayBookFilterTests(DayBookBase):
         self.assertEqual(len(self.book(date_from=JAN5, date_to=JAN5)['rows']), 2)
         self.book(status=400, date_from=JAN10, date_to=JAN5)
         self.book(status=400, date_from='2024-01-01', date_to=JAN10)
-        self.assertEqual(self.book(date_from='', date_to='')['date_from'], datetime.date.today().isoformat())
+        # The server defaults to its own local date (TIME_ZONE), not the test machine's clock.
+        self.assertEqual(self.book(date_from='', date_to='')['date_from'], timezone.localdate().isoformat())
 
     def test_pagination_and_export(self):
         page = self.book(page_size=2, page=2)
@@ -149,6 +151,9 @@ class DayBookBranchTests(DayBookBase):
         settings_obj = BusinessSettings.load()
         settings_obj.multi_branch_enabled = True
         settings_obj.save()
+        # Decision 1 (fail-closed): the 'sees every branch' caller must be explicitly unrestricted.
+        UserBranchAccess.objects.create(username='boss', access_all_branches=True)
+        self.caller_headers = {'HTTP_X_USER_NAME': 'boss', 'HTTP_X_USER_ROLE': 'ACCOUNTANT'}
         post('RV', acc('1001'), acc('1004'), D('100'), JAN5, branch=main)
         post('RV', acc('1001'), acc('1004'), D('70'), JAN5, branch=north)
         self.assertEqual(len(self.book()['rows']), 2)

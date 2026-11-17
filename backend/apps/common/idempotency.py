@@ -116,8 +116,11 @@ class IdempotencyMiddleware:
     def _finish(record_id, response):
         from apps.common.models import IdempotencyRecord
         try:
+            # A response carrying a secret (a one-time invitation link) is never kept for replay:
+            # the view sets `idempotency_no_store`, and a resend simply issues a fresh one.
             ok = (response is not None and 200 <= response.status_code < 300
-                  and not getattr(response, 'streaming', False))
+                  and not getattr(response, 'streaming', False)
+                  and not getattr(response, 'idempotency_no_store', False))
             body = response.content if ok else None
             if ok and len(body) <= MAX_BODY:
                 IdempotencyRecord.objects.filter(pk=record_id).update(

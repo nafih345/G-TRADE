@@ -6,6 +6,7 @@ import axios from 'axios';
 import {
   Box, Dialog, DialogTitle, DialogContent, DialogActions, Button, Tabs, Tab, LinearProgress, Alert, Stack,
   Typography, TextField, Grid, Chip, Divider, CircularProgress, Table, TableHead, TableRow, TableCell, TableBody,
+  MenuItem,
 } from '@mui/material';
 import { Save as SaveIcon, PowerSettingsNew as PowerIcon } from '@mui/icons-material';
 import { notify } from '../../utils/notify';
@@ -18,7 +19,7 @@ import ClientDataPanel from './ClientDataPanel';
 import ClientBackupsPanel from './ClientBackupsPanel';
 import { DeactivateDialog, ReactivateDialog } from './LifecycleDialogs';
 import {
-  API, STATUS_META, fmtDate, fmtDateTime, isReauth, packageLabel, splitErrors,
+  API, STATUS_META, fmtDate, fmtDateTime, isReauth, lifecycleOf, packageLabel, planLabel, splitErrors,
 } from './clientApi';
 
 const ACTION_LABELS = {
@@ -31,6 +32,12 @@ const ACTION_LABELS = {
   MODULES_CHANGED: 'Modules changed',
   PERMISSIONS_CHANGED: 'Role permissions changed',
   SEATS_CHANGED: 'Seat limit changed',
+  SUBSCRIPTION_CHANGED: 'Subscription changed',
+  INVITATION_ISSUED: 'Setup link issued',
+  INVITATION_ACCEPTED: 'Setup link used (password set)',
+  WORKSPACE_OPENED: 'Workspace opened by platform admin',
+  COMPANY_LIMIT_CHANGED: 'Company limit changed',
+  DEFAULTS_PROVISIONED: 'Default masters provisioned',
   PROFILE_UPDATED: 'Profile updated',
   USER_ADDED: 'User added',
   USER_UPDATED: 'User updated',
@@ -73,25 +80,42 @@ const describe = (row, catalog) => {
   return '';
 };
 
-function Overview({ tenant, onSave, saving, onLifecycle }) {
+// Overview form fields: [key, kind]. Numbers and dates are compared / sent in their API shape.
+const OVERVIEW_FIELDS = [
+  ['name', 'text'], ['owner_name', 'text'], ['contact_email', 'text'], ['contact_phone', 'text'],
+  ['country', 'text'], ['address', 'text'], ['max_users', 'int'], ['max_branches', 'intOrNull'],
+  ['subscription_plan', 'text'], ['subscription_starts_on', 'date'], ['subscription_expires_on', 'date'],
+];
+const toApi = (kind, value) => {
+  if (kind === 'int') return Number(value);
+  if (kind === 'intOrNull' || kind === 'date') return value === '' || value == null ? null : (kind === 'date' ? value : Number(value));
+  return value ?? '';
+};
+
+function Overview({ catalog, tenant, onSave, saving, onLifecycle }) {
   const [form, setForm] = useState({});
   const [errors, setErrors] = useState({});
   useEffect(() => {
-    setForm({ name: tenant.name, contact_email: tenant.contact_email, contact_phone: tenant.contact_phone, max_users: tenant.max_users });
+    setForm(Object.fromEntries(OVERVIEW_FIELDS.map(([k]) => [k, tenant[k] ?? ''])));
     setErrors({});
   }, [tenant]);
   const set = (key) => (e) => { setForm((f) => ({ ...f, [key]: e.target.value })); setErrors((x) => ({ ...x, [key]: undefined })); };
-  const dirty = ['name', 'contact_email', 'contact_phone'].some((k) => form[k] !== tenant[k]) || Number(form.max_users) !== tenant.max_users;
-  const status = STATUS_META[tenant.status];
+  const changed = OVERVIEW_FIELDS.filter(([k, kind]) => toApi(kind, form[k]) !== toApi(kind, tenant[k] ?? ''));
+  const dirty = changed.length > 0;
+  const status = STATUS_META[tenant.status] || STATUS_META.ACTIVE;
+  const perpetual = form.subscription_plan === 'PERPETUAL';
 
   const submit = async (e) => {
     e.preventDefault();
-    const body = {};
-    ['name', 'contact_email', 'contact_phone'].forEach((k) => { if (form[k] !== tenant[k]) body[k] = form[k]; });
-    if (Number(form.max_users) !== tenant.max_users) body.max_users = Number(form.max_users);
-    const fieldErrors = await onSave(body, ['name', 'contact_email', 'contact_phone', 'max_users']);
+    const body = Object.fromEntries(changed.map(([k, kind]) => [k, toApi(kind, form[k])]));
+    if (perpetual && 'subscription_plan' in body) delete body.subscription_expires_on;
+    const fieldErrors = await onSave(body, OVERVIEW_FIELDS.map(([k]) => k));
     if (fieldErrors) setErrors(fieldErrors);
   };
+  const field = (key, label, props = {}) => (
+    <TextField fullWidth size="small" label={label} value={form[key] ?? ''} onChange={set(key)}
+      error={Boolean(errors[key])} helperText={errors[key] || props.helperText || ' '} {...props} />
+  );
 
   return (
     <Grid container spacing={3}>
@@ -99,24 +123,47 @@ function Overview({ tenant, onSave, saving, onLifecycle }) {
         <Box component="form" noValidate onSubmit={submit}>
           <Typography variant="subtitle2" fontWeight={700} gutterBottom>Client profile</Typography>
           <Grid container columnSpacing={2}>
-            <Grid item xs={12}>
-              <TextField fullWidth size="small" label="Shop / Client Name" value={form.name ?? ''} onChange={set('name')}
-                error={Boolean(errors.name)} helperText={errors.name || ' '} inputProps={{ maxLength: 150 }} />
-            </Grid>
+            <Grid item xs={12} sm={6}>{field('name', 'Client / Organization Name', { inputProps: { maxLength: 150 } })}</Grid>
+            <Grid item xs={12} sm={6}>{field('owner_name', 'Owner Name', { inputProps: { maxLength: 150 } })}</Grid>
+            <Grid item xs={12} sm={6}>{field('contact_email', 'Contact email', { type: 'email' })}</Grid>
+            <Grid item xs={12} sm={6}>{field('contact_phone', 'Contact phone', { type: 'tel', inputProps: { maxLength: 20 } })}</Grid>
             <Grid item xs={12} sm={6}>
-              <TextField fullWidth size="small" label="Contact email" type="email" value={form.contact_email ?? ''} onChange={set('contact_email')}
-                error={Boolean(errors.contact_email)} helperText={errors.contact_email || ' '} />
+              {field('country', 'Country', {
+                select: true,
+                children: [<MenuItem key="" value="">—</MenuItem>,
+                  ...(catalog.localization?.countries || []).map((c) => <MenuItem key={c.code} value={c.code}>{c.name}</MenuItem>)],
+              })}
             </Grid>
-            <Grid item xs={12} sm={6}>
-              <TextField fullWidth size="small" label="Contact phone" type="tel" value={form.contact_phone ?? ''} onChange={set('contact_phone')}
-                error={Boolean(errors.contact_phone)} helperText={errors.contact_phone || ' '} inputProps={{ maxLength: 20 }} />
-            </Grid>
-            <Grid item xs={12} sm={6}>
-              <TextField fullWidth size="small" label="User limit (seats)" type="number" value={form.max_users ?? ''} onChange={set('max_users')}
-                error={Boolean(errors.max_users)} helperText={errors.max_users || `${tenant.active_user_count} active users now`}
-                inputProps={{ min: 1, max: 10000 }} />
-            </Grid>
+            <Grid item xs={12} sm={6}>{field('address', 'Address', { inputProps: { maxLength: 1000 } })}</Grid>
           </Grid>
+          {!tenant.is_platform && (
+            <>
+              <Typography variant="subtitle2" fontWeight={700} gutterBottom>Subscription &amp; limits</Typography>
+              <Grid container columnSpacing={2}>
+                <Grid item xs={12} sm={4}>
+                  {field('subscription_plan', 'Plan', {
+                    select: true,
+                    children: (catalog.subscription_plans || []).map((p) => <MenuItem key={p.key} value={p.key}>{p.label}</MenuItem>),
+                  })}
+                </Grid>
+                <Grid item xs={6} sm={4}>{field('subscription_starts_on', 'Start date', { type: 'date', InputLabelProps: { shrink: true } })}</Grid>
+                <Grid item xs={6} sm={4}>
+                  {field('subscription_expires_on', form.subscription_plan === 'TRIAL' ? 'Trial ends' : 'Expiry date', {
+                    type: 'date', InputLabelProps: { shrink: true }, disabled: perpetual,
+                    helperText: perpetual ? 'No expiry' : 'Last day the client can work',
+                  })}
+                </Grid>
+                <Grid item xs={6} sm={4}>
+                  {field('max_users', 'Max users (seats)', { type: 'number', inputProps: { min: 1, max: 10000 },
+                    helperText: `${tenant.active_user_count} active now` })}
+                </Grid>
+                <Grid item xs={6} sm={4}>
+                  {field('max_branches', 'Max branches', { type: 'number', inputProps: { min: 1, max: 1000 },
+                    helperText: `${tenant.active_branch_count ?? tenant.branch_count} active · blank = no limit` })}
+                </Grid>
+              </Grid>
+            </>
+          )}
           <Stack direction="row" justifyContent="flex-end">
             <Button type="submit" variant="contained" disabled={!dirty || saving}
               startIcon={saving ? <CircularProgress size={16} color="inherit" /> : <SaveIcon />}>Save</Button>
@@ -128,9 +175,19 @@ function Overview({ tenant, onSave, saving, onLifecycle }) {
         <Box component="dl" sx={{ display: 'grid', gridTemplateColumns: 'max-content 1fr', columnGap: 2, rowGap: 0.75, m: 0, fontSize: 14 }}>
           <dt>Status</dt><dd style={{ margin: 0 }}><Chip size="small" label={status.label} color={status.color} /></dd>
           <dt>Tenant ID</dt><dd style={{ margin: 0 }}>#{tenant.id} · {tenant.code}</dd>
+          <dt>Company</dt><dd style={{ margin: 0 }}>{tenant.company_name || '—'}</dd>
           <dt>Created</dt><dd style={{ margin: 0 }}>{fmtDate(tenant.created_at)}</dd>
           <dt>Owner login</dt><dd style={{ margin: 0, fontFamily: 'monospace' }}>{tenant.primary_admin || '—'}</dd>
-          <dt>Branches</dt><dd style={{ margin: 0 }}>{tenant.branch_count}</dd>
+          <dt>Branches</dt><dd style={{ margin: 0 }}>{tenant.active_branch_count ?? tenant.branch_count} active{tenant.max_branches ? ` of ${tenant.max_branches}` : ''}</dd>
+          {!tenant.is_platform && (
+            <>
+              <dt>Plan</dt><dd style={{ margin: 0 }}>{planLabel(catalog, tenant.subscription_plan)}</dd>
+              <dt>Expires</dt>
+              <dd style={{ margin: 0 }}>
+                {tenant.subscription_expires_on ? `${fmtDate(tenant.subscription_expires_on)} (${tenant.days_to_expiry >= 0 ? `${tenant.days_to_expiry} days left` : 'ended'})` : 'Never'}
+              </dd>
+            </>
+          )}
           {tenant.status !== 'ACTIVE' && (
             <>
               <dt>{tenant.status === 'SCHEDULED' ? 'Deactivates on' : 'Deactivated from'}</dt>
@@ -141,9 +198,9 @@ function Overview({ tenant, onSave, saving, onLifecycle }) {
           )}
         </Box>
         {!tenant.is_platform && (
-          <Button sx={{ mt: 2 }} variant="outlined" color={tenant.status === 'ACTIVE' ? 'error' : 'success'} startIcon={<PowerIcon />}
+          <Button sx={{ mt: 2 }} variant="outlined" color={lifecycleOf(tenant.status).color} startIcon={<PowerIcon />}
             onClick={onLifecycle}>
-            {tenant.status === 'ACTIVE' ? 'Deactivate client…' : tenant.status === 'SCHEDULED' ? 'Cancel scheduled deactivation…' : 'Reactivate client…'}
+            {`${lifecycleOf(tenant.status).label} client…`}
           </Button>
         )}
       </Grid>
@@ -277,7 +334,7 @@ export default function ClientWorkspaceDialog({ catalog, tenantId, initialTab = 
 
   const lifecycleDone = async (row) => {
     setLifecycle(false);
-    notify(`${row.name}: ${STATUS_META[row.status].label.toLowerCase()}.`, 'success');
+    notify(`${row.name}: ${(STATUS_META[row.status] || STATUS_META.ACTIVE).label.toLowerCase()}.`, 'success');
     onUpdated(row);
     await load();
     setVersion((v) => v + 1);
@@ -289,7 +346,7 @@ export default function ClientWorkspaceDialog({ catalog, tenantId, initialTab = 
       <DialogTitle id="client-workspace-title" sx={{ pb: 0 }}>
         <Stack direction="row" spacing={1.5} alignItems="center">
           <span>{data ? data.name : 'Client'}</span>
-          {data && <Chip size="small" label={STATUS_META[data.status].label} color={STATUS_META[data.status].color} />}
+          {data && <Chip size="small" label={(STATUS_META[data.status] || STATUS_META.ACTIVE).label} color={(STATUS_META[data.status] || STATUS_META.ACTIVE).color} />}
           {data && <Chip size="small" variant="outlined" label={packageLabel(catalog, data.package)} />}
         </Stack>
         <Tabs value={tab} onChange={(_, v) => setTab(v)} variant="scrollable" sx={{ mt: 1 }}>
@@ -305,7 +362,7 @@ export default function ClientWorkspaceDialog({ catalog, tenantId, initialTab = 
       <DialogContent dividers>
         {error && <Alert severity="error">{error}</Alert>}
         {!data && !error && <LinearProgress />}
-        {data && tab === 0 && <Overview tenant={data} onSave={save} saving={saving} onLifecycle={() => setLifecycle(true)} />}
+        {data && tab === 0 && <Overview catalog={catalog} tenant={data} onSave={save} saving={saving} onLifecycle={() => setLifecycle(true)} />}
         {data && tab === 1 && <ModulesTab catalog={catalog} tenant={data} onSave={save} saving={saving} />}
         {data && tab === 2 && <ClientUsersPanel catalog={catalog} tenant={data} onChanged={changed} />}
         {data && tab === 3 && <ClientBranchesPanel tenant={data} onChanged={changed} />}
@@ -315,7 +372,7 @@ export default function ClientWorkspaceDialog({ catalog, tenantId, initialTab = 
       </DialogContent>
       <DialogActions><Button onClick={onClose}>Close</Button></DialogActions>
 
-      {lifecycle && data && (data.status === 'ACTIVE'
+      {lifecycle && data && (lifecycleOf(data.status).kind === 'deactivate'
         ? <DeactivateDialog catalog={catalog} tenant={data} onClose={() => setLifecycle(false)} onDone={lifecycleDone} />
         : <ReactivateDialog tenant={data} onClose={() => setLifecycle(false)} onDone={lifecycleDone} />)}
     </Dialog>

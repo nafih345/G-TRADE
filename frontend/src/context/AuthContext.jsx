@@ -3,6 +3,10 @@ import axios from 'axios';
 import { SESSION_ENDED_EVENT, TOKEN_REFRESHED_EVENT, refreshAccessToken, UNAVAILABLE } from '../utils/sessionGuard';
 import { prefetchMasters } from '../utils/masterDataCache';
 import { clearLocalDataIfScopeChanged } from '../utils/localDataReset';
+import {
+  COMPANIES_KEY, COMPANY_PICK_KEY, afterLoginCompanyStep, companyPickPending, readStoredCompanies,
+  storeCompanySession,
+} from '../utils/companies';
 
 const AuthContext = createContext(null);
 
@@ -65,6 +69,8 @@ function clearSession() {
   localStorage.removeItem('access_token');
   localStorage.removeItem('refresh_token');
   localStorage.removeItem('user_profile');
+  localStorage.removeItem(COMPANIES_KEY);
+  localStorage.removeItem(COMPANY_PICK_KEY);
 }
 
 function readPlatformSession() {
@@ -81,6 +87,10 @@ function reloadAt(hash) {
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  // Phase 2: the companies this user may work in (from the server at sign-in / switch) and
+  // whether the post-login company picker is still open.
+  const [companies, setCompanies] = useState(() => readStoredCompanies(localStorage));
+  const [pickCompany, setPickCompany] = useState(() => companyPickPending(localStorage));
   // The Authorization header is set the moment a token exists — here and in finishLogin — not in
   // the effect below: React runs child effects before parent ones, so the Sidebar, branch context
   // and session monitor sent their first requests without it (401/403) and, in production where
@@ -174,6 +184,10 @@ export const AuthProvider = ({ children }) => {
     if (!res) return { success: false, reason: 'network' };
     const code = res.data?.code;
     if (code === 'role_not_enabled') return { success: false, reason: 'role_not_enabled' };
+    // The server's own wording for these is the message to show (it names dates / next steps).
+    if (['not_platform_admin', 'subscription_expired', 'tenant_inactive', 'no_tenant'].includes(code)) {
+      return { success: false, reason: code, message: res.data?.detail };
+    }
     if (res.status === 429) {
       return { success: false, reason: 'account_locked', message: res.data?.detail || 'Too many attempts. Try again later.' };
     }
@@ -186,8 +200,9 @@ export const AuthProvider = ({ children }) => {
 
   const finishLogin = (data, portal) => {
     const profile = withRoleLabel(data.user || {});
-    const isSuperAdmin = profile.role === 'SUPER_ADMIN';
-    if (portal === 'super_admin' && !isSuperAdmin) return { success: false, reason: 'not_super_admin' };
+    // The platform portal is for the platform owner only (the server refuses others before any
+    // token is issued; this is the same rule for a 2FA sign-in finishing here).
+    if (portal === 'super_admin' && !profile.is_platform_admin) return { success: false, reason: 'not_platform_admin' };
 
     // Another client signing in on this browser must not see the last one's cached records.
     clearLocalDataIfScopeChanged('tenant', tokenTenantId(data.access));
@@ -197,16 +212,54 @@ export const AuthProvider = ({ children }) => {
     localStorage.setItem('access_token', data.access);
     if (data.refresh) localStorage.setItem('refresh_token', data.refresh);
     localStorage.setItem('user_profile', JSON.stringify(profile));
+    // Phase 2: with more than one company the picker opens before the app (home company until then).
+    const next = afterLoginCompanyStep(localStorage, data.companies);
+    setCompanies(readStoredCompanies(localStorage));
+    setPickCompany(next === 'pick');
     axios.defaults.headers.common['Authorization'] = `Bearer ${data.access}`;
     setUser(profile);
     setToken(data.access);
     return { success: true };
   };
 
+  /**
+   * Phase 2: work in another company. The server checks the membership, ends this session and
+   * returns a new token pair signed for that company; nothing here chooses the company on its
+   * own. Every cached record of the previous company is dropped and the app reloads.
+   * Returns { success } or { success: false, message }.
+   */
+  const switchCompany = async (tenantId) => {
+    const current = tokenTenantId(localStorage.getItem('access_token'));
+    if (current !== null && Number(current) === Number(tenantId)) {
+      localStorage.removeItem(COMPANY_PICK_KEY);
+      setPickCompany(false);
+      return { success: true, unchanged: true };
+    }
+    let data;
+    try {
+      ({ data } = await axios.post('/api/auth/switch-company/', { tenant_id: tenantId }));
+    } catch (error) {
+      return { success: false, message: error?.response?.data?.detail || 'Could not switch company. Try again.' };
+    }
+    clearLocalDataIfScopeChanged('tenant', tokenTenantId(data.access));
+    storeCompanySession(localStorage, data, withRoleLabel);
+    reloadAt('#/');
+    return { success: true };
+  };
+
+  /** Close the post-login picker and stay in the company the session already has. */
+  const continueInCurrentCompany = () => {
+    localStorage.removeItem(COMPANY_PICK_KEY);
+    setPickCompany(false);
+  };
+
   const login = async (username, password, { portal = 'staff' } = {}) => {
     let data;
     try {
-      ({ data } = await axios.post('/api/auth/login/', { username, password }));
+      // The sign-in page shows every failure inline; no second, global notice.
+      ({ data } = await axios.post('/api/auth/login/', {
+        username, password, ...(portal === 'super_admin' ? { portal: 'platform' } : {}),
+      }, { __silentError: true }));
     } catch (error) {
       return failure(error);
     }
@@ -224,7 +277,7 @@ export const AuthProvider = ({ children }) => {
   /** Second sign-in step: the 6-digit authenticator code for a challenge from login(). */
   const verifyTwoFactor = async (challenge, code, { portal = 'staff' } = {}) => {
     try {
-      const { data } = await axios.post('/api/auth/two-factor/verify/', { challenge, code });
+      const { data } = await axios.post('/api/auth/two-factor/verify/', { challenge, code }, { __silentError: true });
       return finishLogin(data, portal);
     } catch (error) {
       return failure(error);
@@ -284,6 +337,8 @@ export const AuthProvider = ({ children }) => {
     }
     localStorage.removeItem(PLATFORM_SESSION_KEY);
     clearSession();
+    setCompanies([]);
+    setPickCompany(false);
     setToken(null);
     setUser(null);
   };
@@ -308,7 +363,10 @@ export const AuthProvider = ({ children }) => {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, token, loading, login, verifyTwoFactor, logout, openWorkspace, exitWorkspace }}>
+    <AuthContext.Provider value={{
+      user, token, loading, login, verifyTwoFactor, logout, openWorkspace, exitWorkspace,
+      companies, pickCompany, switchCompany, continueInCurrentCompany,
+    }}>
       {children}
     </AuthContext.Provider>
   );

@@ -16,6 +16,8 @@ DEFAULT_ACCOUNTS = [
     ('1004', 'Customer Accounts Receivable', 'Accounts Receivable', 'Asset', 'RECEIVABLE', True),
     ('1005', 'Wholesale Dealer Receivables', 'Accounts Receivable', 'Asset', 'RECEIVABLE', True),
     ('1020', 'GST Input Tax Credit', 'Tax Assets', 'Asset', 'TAX_ASSET', True),
+    # P1 Task 7: stock between branches. Not INVENTORY-subtype: Product.stock excludes it too.
+    ('1030', 'Goods in Transit', 'Inventory Assets', 'Asset', '', True),
     ('1500', 'Furniture & Fixtures', 'Fixed Assets', 'Asset', 'FIXED_ASSET', False),
     ('1510', 'Optical Equipment', 'Fixed Assets', 'Asset', 'FIXED_ASSET', False),
     ('2001', 'Supplier Accounts Payable', 'Accounts Payable', 'Liability', 'PAYABLE', True),
@@ -44,6 +46,8 @@ ROLES = {
     'PAYMENT_CARD': ('Card settlements', '1002', ('Asset',), 'Card payments taken at the counter.'),
     'PAYMENT_UPI': ('UPI settlements', '1002', ('Asset',), 'UPI / wallet payments.'),
     'INVENTORY': ('Inventory', '1003', ('Asset',), 'Stock on hand, valued at cost.'),
+    'GOODS_IN_TRANSIT': ('Goods in transit', '1030', ('Asset',),
+                         'Stock dispatched by one branch and not yet received by another (branch transfers).'),
     'RETAIL_RECEIVABLE': ('Retail receivables', '1004', ('Asset',), 'Amounts retail / optical customers owe.'),
     'WHOLESALE_RECEIVABLE': ('Wholesale receivables', '1005', ('Asset',), 'Amounts wholesale dealers owe.'),
     'GST_INPUT': ('GST input credit', '1020', ('Asset',), 'GST / VAT / cess paid on purchases.'),
@@ -81,6 +85,8 @@ SOURCES = {
     'purchasing.purchase_order': ('Purchase order received directly', 'Dr Inventory + GST input; Cr Supplier payable (only when the PO itself moved stock)'),
     'inventory.stock_adjustment': ('Stock adjustment', 'ADD: Dr Inventory / Cr Stock gain. SUB: Dr Stock loss (or COGS for a wholesale POS sale) / Cr Inventory'),
     'products.opening_stock': ('New product opening stock', 'Dr Inventory / Cr Opening balance equity at cost (Add New Product / Add Multiple Items)'),
+    'inventory.branch_transfer': ('Branch stock transfer', 'Dispatch: Dr Goods in transit / Cr Inventory (sending branch). '
+                                  'Receive: Dr Inventory / Cr Goods in transit (receiving branch). Cancel: back to the sender. At dispatch cost.'),
     'inventory.opening_stock': ('Opening stock load', 'Dr Inventory / Cr Opening balance equity: one entry per Inventory → Opening Stock save, at the cost typed for each item'),
 }
 

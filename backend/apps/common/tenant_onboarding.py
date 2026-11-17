@@ -71,22 +71,86 @@ def log_event(tenant, action, actor='', *, reason='', effective_date=None, **det
 
 
 def active_user_count(tenant):
-    return get_user_model().objects.filter(tenant=tenant, is_active=True).count()
+    """Seats in use: the company's own active users plus (Phase 2) active members whose home is
+    another company of the organization."""
+    from apps.common.organizations import active_membership_count
+    own = get_user_model().objects.filter(tenant=tenant, is_active=True)
+    if tenant.pk == tenancy.DEFAULT_TENANT_ID:
+        # The platform owner / Local Super Admin runs the platform; it is not a company seat.
+        own = own.exclude(is_superuser=True)
+    return own.count() + active_membership_count(tenant)
 
 
 def check_seat_available(tenant, adding=1):
     """Refuse a new / reactivated account once the client's seat limit is used up."""
+    from apps.common.edition import license_check
+    try:
+        license_check('users', tenant=tenant, adding=adding)  # Windows edition: the licence's named users
+    except Exception as exc:
+        if exc.__class__.__name__ == 'LicenseLimitError':
+            raise OnboardingError('max_users', exc.message)
+        raise
     used = active_user_count(tenant)
     if used + adding > tenant.max_users:
         raise OnboardingError('max_users', f'All {tenant.max_users} user seats of {tenant.name} are in use '
                                            f'({used} active). Raise the seat limit or deactivate a user first.')
 
 
+def active_branch_count(tenant):
+    from apps.company.models import Branch
+    with tenancy.unscoped():
+        return Branch.objects.filter(tenant_id=tenant.pk, is_active=True).count()
+
+
+def check_branch_available(tenant, adding=1):
+    """Refuse a new / reactivated branch once the client's branch limit (Tenant.max_branches,
+    set in Client Management) is used up. Null = no limit. The Windows licence has its own check
+    (edition.license_check('branches')), applied by the callers as before."""
+    if tenant is None or not tenant.max_branches:
+        return
+    used = active_branch_count(tenant)
+    if used + adding > tenant.max_branches:
+        raise OnboardingError('max_branches', f'The subscription of {tenant.name} allows {tenant.max_branches} '
+                                              f'active branch{"es" if tenant.max_branches != 1 else ""} '
+                                              f'({used} in use). Ask the platform administrator to raise the limit.')
+
+
+def apply_company_profile(tenant, company_profile, preferences):
+    """Fill the new client's store profile (Company) and Business & Localization preferences from
+    the onboarding form. Runs inside onboard_tenant's transaction, scoped to the tenant."""
+    from apps.company.models import BusinessSettings, Company
+    with tenancy.use_tenant(tenant.pk):
+        company = Company.objects.order_by('created_at').first()
+        fields = []
+        for attr, value in (company_profile or {}).items():
+            if value in (None, ''):
+                continue
+            setattr(company, attr, value)
+            fields.append(attr)
+        if fields:
+            company.save(update_fields=fields + ['updated_at'])
+        if preferences:
+            settings_row = BusinessSettings.load()
+            stored = dict(settings_row.preferences or {})
+            stored.update(preferences)
+            settings_row.preferences = stored
+            settings_row.save(update_fields=['preferences', 'updated_at'])
+            from apps.common import hot_cache
+            hot_cache.clear()  # localization.get_preferences() is hot-cached
+
+
 def onboard_tenant(*, name, admin_username, password, admin_email='', contact_phone='',
                    branch_name='', code=None, package=module_access.FULL_SUITE, modules=None,
-                   settings_features=None, max_users=5, actor=''):
+                   settings_features=None, max_users=5, actor='', profile=None, subscription=None,
+                   company_profile=None, preferences=None, branch_details=None, admin_name=''):
     """Create the tenant, its Super Admin and its default masters in one transaction; returns
-    (tenant, admin)."""
+    (tenant, admin).
+
+    `password` None = invitation: the admin gets no usable password and sets one through the
+    one-time link (apps.common.invitations). `profile` = Tenant owner_name/country/address;
+    `subscription` = subscription_plan/starts_on/expires_on/max_branches; `company_profile` =
+    Company fields; `preferences` = validated localization preferences; `branch_details` = the
+    first branch's address / phone / email."""
     User = get_user_model()
     name = (name or '').strip()
     admin_username = (admin_username or '').strip()
@@ -97,8 +161,8 @@ def onboard_tenant(*, name, admin_username, password, admin_email='', contact_ph
         raise OnboardingError('tenant_name', 'Give the client a name.')
     if not admin_username:
         raise OnboardingError('admin_username', 'Give the admin a username.')
-    if not password:
-        raise OnboardingError('password', 'Give the admin a password.')
+    if password is not None and not password:
+        raise OnboardingError('password', 'Give the admin a password, or send an invitation instead.')
     try:
         package, modules = module_access.normalize_modules(package, modules)
     except ValueError as e:
@@ -110,21 +174,54 @@ def onboard_tenant(*, name, admin_username, password, admin_email='', contact_ph
     if not isinstance(max_users, int) or max_users < 1:
         raise OnboardingError('max_users', 'Allow at least one user (the client’s admin).')
     check_available(name, admin_username, code)
+    from apps.common import edition
+    if edition.is_local():
+        # Windows edition: every client is another organization on this installation, bounded by
+        # the licence (limit `clients`); refused while the licence is read-only.
+        try:
+            edition.license_check('clients')
+        except Exception as exc:
+            if exc.__class__.__name__ == 'LicenseLimitError':
+                raise OnboardingError('license', exc.message)
+            raise
 
-    with transaction.atomic():
-        tenant = Tenant.objects.create(name=name, code=code or _free_code(name),
+    with transaction.atomic(), edition.client_onboarding():
+        # Phase 2: every onboarded client is its own organization (customer) holding this one
+        # company; its admin administers that organization (organizations.grant_default_org_admins).
+        from apps.common.models import Organization
+        from apps.common.organizations import _free_org_code
+        tenant_code = code or _free_code(name)
+        organization = Organization.objects.create(name=name, code=_free_org_code(tenant_code))
+        tenant = Tenant.objects.create(name=name, code=tenant_code, organization=organization,
                                        contact_email=admin_email, contact_phone=contact_phone,
                                        package=package, modules=modules, settings_features=settings_features,
-                                       max_users=max_users)
+                                       max_users=max_users, **(profile or {}), **(subscription or {}))
         # role SUPER_ADMIN is the tenant's own top role; never is_superuser / is_staff — those
         # open Django admin, which is not tenant-scoped, and is_superuser also marks the
         # platform owner (see apps.common.permissions.IsPlatformAdmin).
+        first, _, last = (admin_name or '').strip().partition(' ')
         admin = User.objects.create_user(username=admin_username, email=admin_email or None,
                                          password=password, role='SUPER_ADMIN', tenant=tenant,
-                                         phone=contact_phone or None)
+                                         phone=contact_phone or None, first_name=first[:150],
+                                         last_name=last.strip()[:150])
         ensure_tenant_defaults(tenant, branch_name=branch_name, fresh=True)
+        if branch_details:
+            from apps.company.models import Branch
+            with tenancy.use_tenant(tenant.pk):
+                branch = Branch.objects.filter(is_default=True).first()
+                changed = [k for k, v in branch_details.items() if v not in (None, '')]
+                for key in changed:
+                    setattr(branch, key, branch_details[key])
+                if changed:
+                    branch.save(update_fields=changed + ['updated_at'])
+        apply_company_profile(tenant, company_profile, preferences)
+        from apps.common.organizations import grant_default_org_admins
+        grant_default_org_admins(tenant, organization)
         log_event(tenant, 'ONBOARDED', actor, admin=admin.username, package=package, modules=modules,
-                  max_users=max_users)
+                  max_users=max_users, organization=organization.pk,
+                  admin_setup='invitation' if password is None else 'password',
+                  subscription={k: (v.isoformat() if hasattr(v, 'isoformat') else v)
+                                for k, v in (subscription or {}).items()})
     return tenant, admin
 
 
@@ -213,10 +310,12 @@ def ensure_tenant_defaults(tenant, *, branch_name='', fresh=False):
 
         # Owners sign in to the default branch through an explicit binding, so the header, the
         # branch switcher and new documents never fall back to a guessed or generic branch.
-        for username in User.objects.filter(tenant=tenant, role='SUPER_ADMIN').values_list('username', flat=True):
-            access = UserBranchAccess.objects.filter(username__iexact=username).first()
+        for owner in User.objects.filter(tenant=tenant, role='SUPER_ADMIN'):
+            username = owner.username
+            access = UserBranchAccess.for_user(owner)  # by user id (P1 Task 4)
             if access is None:
-                UserBranchAccess.objects.create(username=username, access_all_branches=True, default_branch=default)
+                UserBranchAccess.objects.create(username=username, user=owner, access_all_branches=True,
+                                                default_branch=default)
                 created.append(f'branch access {username}')
             elif access.default_branch_id is None:
                 access.default_branch = default

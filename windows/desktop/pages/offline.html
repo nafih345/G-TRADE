@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'">
+  <title>G OPTICALS - server unavailable</title>
+  <link rel="stylesheet" href="pages.css">
+</head>
+<body class="dark">
+  <main>
+    <h1>G OPTICALS server is not available</h1>
+    <p id="detail" class="muted"></p>
+    <ul class="muted">
+      <li>On a LAN workstation: check that the server PC is switched on and on the same network.</li>
+      <li>On the server or a single PC: open <b>Services</b> and check that GTrade-DB, GTrade-App and GTrade-Web are running.</li>
+      <li>Your work is saved on the server; nothing is lost while it is unavailable.</li>
+    </ul>
+    <button id="retry" type="button" class="primary">Retry</button>
+    <button id="settings" type="button">Server connection…</button>
+    <p id="status" class="muted"></p>
+  </main>
+  <script src="offline.js"></script>
+</body>
+</html>

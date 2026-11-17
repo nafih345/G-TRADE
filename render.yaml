@@ -69,10 +69,11 @@ services:
       # sslmode=require).
       - key: DATABASE_URL
         sync: false
-      # The database name DATABASE_URL must point at — `neondb` for this deployment. If the
-      # URL is ever swapped to another database (it was, to `Uae client`, on 2026-10-30, and
-      # every screen went empty), /api/health/ turns degraded and the app shows a red banner
-      # naming both databases. Optional; the service runs normally either way.
+      # The database name DATABASE_URL must point at — exactly `Uae client` (one space, no
+      # quotes; URL-encoded in DATABASE_URL as `/Uae%20client`). Owner decision 2026-11-12 (P1
+      # N1): `Uae client` is the production database; `neondb` on the same Neon host is NOT
+      # production and must not be migrated or modified. If the URL is ever swapped to another
+      # database, /api/health/ turns degraded and the app shows a red banner naming both.
       - key: EXPECTED_DATABASE_NAME
         sync: false
       # build.sh's `bootstrap_admin` creates this login on the fresh, empty database —
@@ -94,10 +95,18 @@ services:
         value: "False"
       - key: PYTHON_VERSION
         value: "3.12.5"
-      # Load-bearing, not a nicety. build.sh runs `migrate` on release but no longer fails
-      # the build when the database is unreachable — a dead database must not be able to pin
-      # the service to an older release, which is precisely what happened here. This hook
-      # (apps/common/startup.py) is what then catches the schema up once the database comes
-      # back, so turning it off leaves that gap open.
+      # P1 policy decision 5: production never migrates on its own. The boot hook
+      # (apps/common/startup.py) stays off, and build.sh applies migrations only on a deploy
+      # where an administrator has set RUN_MIGRATIONS=True after the release procedure in
+      # DEPLOYMENT.md ("Database migrations": backup → Neon-branch rehearsal → approval →
+      # migrate → reset to False). Until then /api/health/ reports "migrations": "pending" and
+      # the red banner names them — code that needs the new schema must not be deployed before
+      # its migrations are applied.
       - key: AUTO_MIGRATE
-        value: "True"
+        value: "False"
+      - key: RUN_MIGRATIONS
+        value: "False"
+      # Platform-owner recovery without a shell: True for ONE deploy runs
+      # `bootstrap_admin --reset-password` (never promotes a client's account). Back to False after.
+      - key: BOOTSTRAP_ADMIN_RESET
+        value: "False"

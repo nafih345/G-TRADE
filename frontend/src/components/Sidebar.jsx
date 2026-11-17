@@ -88,7 +88,7 @@ const menuItems = [
       { text: 'Lens Catalog Matrix', path: '/inventory/lenses' },
       { text: 'Stock Overview', path: '/inventory/stock-overview' },
       { text: 'Opening Stock', path: '/inventory/opening-stock' },
-      { text: 'Stock Transfer', path: '/inventory/stock-transfer', multiBranchOnly: true }
+      { text: 'Branch Transfers', path: '/inventory/stock-transfer', multiBranchOnly: true }
     ]
   },
   {
@@ -207,6 +207,18 @@ const menuItems = [
 
   { text: 'Settings', icon: <SettingsIcon />, path: '/settings', roles: ['*'], module: 'settings' },
 
+  // Phase 2 — organization administrators (user.is_org_admin): companies and the group summary.
+  {
+    text: 'Organization',
+    icon: <ClientsIcon />,
+    roles: ['*'],
+    orgAdminOnly: true,
+    subItems: [
+      { text: 'Companies', path: '/organization/companies' },
+      { text: 'Group Summary', path: '/organization/summary' }
+    ]
+  },
+
   // Platform owner only (user.is_platform_admin) — onboarding client businesses (tenants).
   { text: 'Client Management', icon: <ClientsIcon />, path: '/superadmin/tenants', roles: ['*'], platformOnly: true }
 ];
@@ -277,6 +289,7 @@ export default function Sidebar({ open, toggleSidebar, isMobile = false }) {
     })
     .filter(item => {
     if (item.platformOnly && !user?.is_platform_admin) return false;
+    if (item.orgAdminOnly && (!user?.is_org_admin || user?.workspace)) return false;
     // The client's subscribed modules and this role's level (user.module_access, server-side).
     if (item.module && !canOpenModule(user, item.module)) return false;
     return item.roles.includes('*') || item.roles.includes(userRole);

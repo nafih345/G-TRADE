@@ -245,6 +245,9 @@ def _bill_branches(kind, bill_ids):
     if kind == 'supplier':
         from apps.purchasing.models import PurchaseInvoice
         return dict(PurchaseInvoice.all_objects.filter(pk__in=bill_ids).values_list('pk', 'branch_id'))
+    if kind == 'dealer':  # wholesale bills carry a branch since P1 Task 5
+        from apps.sales.models import WholesaleInvoice
+        return dict(WholesaleInvoice.all_objects.filter(pk__in=bill_ids).values_list('pk', 'branch_id'))
     return {}
 
 
@@ -321,7 +324,7 @@ def outstanding_report(side, date_from=None, date_to=None, branch_ids=None, sear
     """Customer (side='receivable': retail customers + wholesale dealers) or Supplier
     (side='payable') dues as on today, one row per party with its open bills. date_from /
     date_to narrow by bill date. Bills are aged from their due date when they have one, else
-    from the bill date. Wholesale bills carry no branch, so a branch filter leaves dealers out."""
+    from the bill date. A branch filter keeps only bills of those branches (wholesale too, P1 Task 5)."""
     from .settlements import _party_models, _party_row, open_bills
 
     if side not in SIDES:
@@ -332,8 +335,6 @@ def outstanding_report(side, date_from=None, date_to=None, branch_ids=None, sear
         raise AccountsReportError(f"Unknown aging bucket '{aging}'.")
     today = today or timezone.localdate()
     kinds = [k for k in SIDES[side] if not kind or k == kind]
-    if branch_ids is not None:
-        kinds = [k for k in kinds if k != 'dealer']
 
     parties = []
     for k in kinds:
@@ -372,7 +373,7 @@ def outstanding_report(side, date_from=None, date_to=None, branch_ids=None, sear
         'search': (search or '').strip(), 'kind': kind, 'aging_filter': aging, 'overdue_only': overdue_only,
         'kind_options': [{'key': k, 'label': KIND_LABELS[k]} for k in SIDES[side]],
         'aging_buckets': [{'key': key, 'label': label} for key, label, _lo, _hi in AGING],
-        'dealers_hidden': side == 'receivable' and branch_ids is not None and (not kind or kind == 'dealer'),
+        'dealers_hidden': False,  # wholesale bills are branch-scoped since P1 Task 5
         'summary': summary,
         # Ledger cross-check over every open bill (before search / aging filters). A difference is
         # money on the control accounts that no bill explains: on-account vouchers, opening balances.

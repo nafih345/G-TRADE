@@ -24,6 +24,20 @@ def parse_date(value, default=None):
     return datetime.date.fromisoformat(str(value)[:10])
 
 
+def by_branch(qs, branch, field='branch_id'):
+    """Limit `qs` to a branch scope.
+
+    `branch` is None / '' (every branch), one branch id, or a list/tuple/set of branch ids — the
+    permitted branches of a branch-restricted user (views.report_branches). A collection is
+    applied even when empty, so a user permitted no branches gets no rows (fail closed), and
+    journals without a branch never match a collection."""
+    if isinstance(branch, (list, tuple, set, frozenset)):
+        return qs.filter(**{f'{field}__in': [str(b) for b in branch]})
+    if branch:
+        return qs.filter(**{field: branch})
+    return qs
+
+
 def posted_lines(date_from=None, date_to=None, branch=None):
     qs = LedgerEntry.objects.filter(journal_entry__status__in=JournalEntry.LEDGER_STATUSES,
                                     journal_entry__is_deleted=False)
@@ -31,9 +45,7 @@ def posted_lines(date_from=None, date_to=None, branch=None):
         qs = qs.filter(journal_entry__date__gte=date_from)
     if date_to:
         qs = qs.filter(journal_entry__date__lte=date_to)
-    if branch:
-        qs = qs.filter(journal_entry__branch_id=branch)
-    return qs
+    return by_branch(qs, branch, 'journal_entry__branch_id')
 
 
 def _totals(date_from=None, date_to=None, branch=None):
@@ -189,8 +201,7 @@ def ledger_register(date_from=None, date_to=None, branch=None, sources=None, ser
         qs = qs.filter(date__gte=date_from)
     if date_to:
         qs = qs.filter(date__lte=date_to)
-    if branch:
-        qs = qs.filter(branch_id=branch)
+    qs = by_branch(qs, branch)
     if sources:
         cond = Q()
         for key in sources:
@@ -238,8 +249,7 @@ def source_breakdown(date_from=None, date_to=None, branch=None):
         qs = qs.filter(date__gte=date_from)
     if date_to:
         qs = qs.filter(date__lte=date_to)
-    if branch:
-        qs = qs.filter(branch_id=branch)
+    qs = by_branch(qs, branch)
     rows = []
     for r in qs.values('source_module', 'source_event').annotate(
             entries=Count('id'), posted=Sum('total_amount', filter=Q(is_reversal=False)),

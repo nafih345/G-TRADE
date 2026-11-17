@@ -35,7 +35,7 @@ from rest_framework import mixins, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from apps.common import module_access, tenancy
+from apps.common import edition, module_access, tenancy
 from apps.common.models import Tenant
 from apps.common.permissions import IsPlatformAdmin
 from apps.common.superadmin_data_views import TenantDataBackupMixin
@@ -44,8 +44,9 @@ from apps.common.superadmin_serializers import (
     DeactivateSerializer, PasswordResetSerializer, ReactivateSerializer, TenantOnboardSerializer,
     TenantSerializer, TenantUpdateSerializer, _password_errors,
 )
+from apps.common.invitations import INVITATION_TIMEOUT_HOURS
 from apps.common.tenant_onboarding import (
-    OnboardingError, active_user_count, check_seat_available, log_event, onboard_tenant,
+    OnboardingError, active_user_count, check_branch_available, check_seat_available, log_event, onboard_tenant,
 )
 
 USER_FIELDS = ('id', 'username', 'first_name', 'last_name', 'email', 'phone', 'role', 'is_active',
@@ -66,11 +67,44 @@ def _admin_usernames(tenant_ids):
     return admins
 
 
-def _branch_counts(tenant_ids):
+def _branch_counts(tenant_ids, active=False):
     from apps.company.models import Branch
     with tenancy.unscoped():
-        return dict(Branch.objects.filter(tenant_id__in=tenant_ids).order_by()
-                    .values('tenant_id').annotate(n=Count('id')).values_list('tenant_id', 'n'))
+        rows = Branch.objects.filter(tenant_id__in=tenant_ids)
+        if active:
+            rows = rows.filter(is_active=True)
+        return dict(rows.order_by().values('tenant_id').annotate(n=Count('id')).values_list('tenant_id', 'n'))
+
+
+def _company_names(tenant_ids):
+    """Tenant id -> its store profile's company name (the first Company row)."""
+    from apps.company.models import Company
+    names = {}
+    with tenancy.unscoped():
+        for tenant_id, name in (Company.objects.filter(tenant_id__in=tenant_ids)
+                                .order_by('tenant_id', 'created_at').values_list('tenant_id', 'name')):
+            names.setdefault(tenant_id, name)
+    return names
+
+
+# Client list filters (?status=): the status values tenant_status() produces, plus groupings.
+STATUS_FILTERS = {
+    'ACTIVE': {'ACTIVE', 'TRIAL', 'SCHEDULED'},  # can be used today
+    'TRIAL': {'TRIAL'},
+    'SCHEDULED': {'SCHEDULED'},
+    'EXPIRED': {'EXPIRED'},
+    'INACTIVE': {'INACTIVE'},
+    'SUSPENDED': {'INACTIVE', 'EXPIRED'},  # cannot be used today
+}
+EXPIRING_DAYS = 30
+
+
+def _jsonable(changes):
+    """Audit details are JSON: dates as ISO strings."""
+    def conv(value):
+        return value.isoformat() if hasattr(value, 'isoformat') else value
+    return {k: ({'from': conv(v['from']), 'to': conv(v['to'])} if isinstance(v, dict) and 'from' in v else conv(v))
+            for k, v in changes.items()}
 
 
 def _bad(field, message):
@@ -104,8 +138,10 @@ def _apply_due_deactivations():
 def _branch_access_map(tenant):
     from apps.company.models import UserBranchAccess
     with tenancy.use_tenant(tenant.pk):
-        rows = UserBranchAccess.objects.prefetch_related('branches')
-        return {a.username: {'access_all_branches': a.access_all_branches,
+        # Rows linked to a user, keyed by that user's current name (P1 Task 4). Unlinked rows
+        # (deleted users' leftovers) apply to nobody, so they are not shown against anyone.
+        rows = UserBranchAccess.objects.filter(user__isnull=False).select_related('user').prefetch_related('branches')
+        return {a.user.username: {'access_all_branches': a.access_all_branches,
                              'branch_ids': [str(b.pk) for b in a.branches.all()],
                              'default_branch_id': str(a.default_branch_id) if a.default_branch_id else None}
                 for a in rows}
@@ -118,7 +154,8 @@ def _save_branch_access(tenant, username, data):
         return
     from apps.company.models import Branch, UserBranchAccess
     with tenancy.use_tenant(tenant.pk):
-        access = UserBranchAccess.objects.filter(username=username).first() or UserBranchAccess(username=username)
+        user = UserBranchAccess.match_user(username, tenant.pk)
+        access = UserBranchAccess.for_user(user) or UserBranchAccess(username=username, user=user)
         if 'access_all_branches' in data:
             access.access_all_branches = data['access_all_branches']
         branch_ids = [str(b) for b in data.get('branch_ids', [])]
@@ -149,7 +186,7 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
     pagination_class = None  # a handful of clients; the page shows them all
 
     def get_queryset(self):
-        return Tenant.objects.annotate(
+        return Tenant.objects.select_related('organization').annotate(
             user_count=Count('users', distinct=True),
             active_user_count=Count('users', filter=Q(users__is_active=True), distinct=True),
         ).order_by('id')
@@ -157,7 +194,8 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
     def _context_for(self, tenants):
         ids = [t.pk for t in tenants]
         return {**self.get_serializer_context(), 'admins': _admin_usernames(ids),
-                'branch_counts': _branch_counts(ids)}
+                'branch_counts': _branch_counts(ids), 'active_branch_counts': _branch_counts(ids, active=True),
+                'company_names': _company_names(ids)}
 
     def _row(self, tenant_id):
         tenant = self.get_queryset().get(pk=tenant_id)
@@ -167,8 +205,11 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
         from apps.company.models import Branch, BusinessSettings
         data = self._row(tenant.pk)
         access = _branch_access_map(tenant)
-        users = list(get_user_model().objects.filter(tenant=tenant).order_by('date_joined').values(*USER_FIELDS))
+        users = list(get_user_model().objects.filter(tenant=tenant).order_by('date_joined')
+                     .values(*USER_FIELDS, 'password'))
         for u in users:
+            # An unusable password (Django prefixes it with '!') = invited, setup link not used yet.
+            u['setup_pending'] = str(u.pop('password') or '!').startswith('!')
             u['branch_access'] = access.get(u['username'])
             u['is_platform_admin'] = bool(u.pop('is_superuser')) and tenant.pk == tenancy.DEFAULT_TENANT_ID
         data['users'] = users
@@ -182,10 +223,84 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
 
     # ---- list / detail / catalog --------------------------------------------------------
 
+    def _filtered(self, request):
+        """Tenants matching ?search= (name, code, id, contact, owner, admin username), ?status=
+        (STATUS_FILTERS), ?plan=, ?package=, ?country= and ?expiring=1 (ends within 30 days)."""
+        from apps.common.superadmin_serializers import tenant_status
+        qs = self.get_queryset()
+        params = request.query_params
+        q = (params.get('search') or '').strip()
+        if q:
+            User = get_user_model()
+            admin_tenants = (User.objects.filter(username__icontains=q).filter(Q(role='SUPER_ADMIN') | Q(is_superuser=True))
+                             .values('tenant_id'))
+            match = (Q(name__icontains=q) | Q(code__icontains=q) | Q(contact_email__icontains=q)
+                     | Q(contact_phone__icontains=q) | Q(owner_name__icontains=q) | Q(pk__in=admin_tenants))
+            if q.lstrip('#').isdigit():
+                match |= Q(pk=int(q.lstrip('#')))
+            qs = qs.filter(match)
+        for param, field in (('plan', 'subscription_plan'), ('package', 'package'), ('country', 'country')):
+            value = (params.get(param) or '').strip().upper()
+            if value:
+                qs = qs.filter(**{field: value})
+        tenants = list(qs)
+        status_filter = (params.get('status') or '').strip().upper()
+        if status_filter in STATUS_FILTERS:
+            allowed = STATUS_FILTERS[status_filter]
+            tenants = [t for t in tenants if tenant_status(t) in allowed]
+        if params.get('expiring') in ('1', 'true'):
+            today = timezone.localdate()
+            tenants = [t for t in tenants if t.subscription_expires_on
+                       and 0 <= (t.subscription_expires_on - today).days <= EXPIRING_DAYS]
+        return tenants
+
     def list(self, request, *args, **kwargs):
+        """Every client (a plain list, as before), or one page of them when ?page= is given:
+        {count, page, page_size, results}."""
+        _apply_due_deactivations()
+        tenants = self._filtered(request)
+        if 'page' not in request.query_params:
+            return Response(TenantSerializer(tenants, many=True, context=self._context_for(tenants)).data)
+        try:
+            page = max(1, int(request.query_params.get('page') or 1))
+            size = min(100, max(1, int(request.query_params.get('page_size') or 25)))
+        except ValueError:
+            return _bad(None, 'page and page_size must be whole numbers.')
+        chunk = tenants[(page - 1) * size: page * size]
+        return Response({'count': len(tenants), 'page': page, 'page_size': size,
+                         'results': TenantSerializer(chunk, many=True, context=self._context_for(chunk)).data})
+
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        """Platform dashboard figures over every client."""
+        from apps.common.superadmin_serializers import tenant_status
         _apply_due_deactivations()
         tenants = list(self.get_queryset())
-        return Response(TenantSerializer(tenants, many=True, context=self._context_for(tenants)).data)
+        today = timezone.localdate()
+        # Client figures leave out the platform's own account (tenant #1).
+        clients = [t for t in tenants if t.pk != tenancy.DEFAULT_TENANT_ID]
+        by_status = {}
+        for t in clients:
+            s = tenant_status(t)
+            by_status[s] = by_status.get(s, 0) + 1
+        expiring = sorted((t for t in clients if t.subscription_expires_on and t.is_active
+                           and 0 <= (t.subscription_expires_on - today).days <= EXPIRING_DAYS),
+                          key=lambda t: t.subscription_expires_on)
+        with tenancy.unscoped():
+            from apps.company.models import Branch
+            branches = Branch.objects.filter(is_active=True, tenant_id__in=[t.pk for t in clients]).count()
+        return Response({
+            'edition': 'local' if edition.is_local() else 'cloud',
+            'license': edition.license_summary(),
+            'clients': len(clients),
+            'by_status': by_status,
+            'active_users': sum(t.active_user_count for t in clients),
+            'active_branches': branches,
+            'expiring_soon': [{'id': t.id, 'name': t.name, 'subscription_plan': t.subscription_plan,
+                               'subscription_expires_on': t.subscription_expires_on,
+                               'days_to_expiry': (t.subscription_expires_on - today).days} for t in expiring[:10]],
+            'expiring_days': EXPIRING_DAYS,
+        })
 
     def retrieve(self, request, *args, **kwargs):
         _apply_due_deactivations()
@@ -193,8 +308,17 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
 
     @action(detail=False, methods=['get'])
     def catalog(self, request):
+        from apps.company import localization
         data = module_access.catalog()
         data['deactivation_categories'] = [{'key': k, 'label': l} for k, l in DEACTIVATION_CATEGORIES]
+        data['subscription_plans'] = [{'key': k, 'label': l} for k, l in Tenant.SUBSCRIPTION_PLANS]
+        data['invitation_hours'] = INVITATION_TIMEOUT_HOURS
+        # Windows edition: the console shows the installation's licence (clients used / allowed).
+        data['edition'] = 'local' if edition.is_local() else 'cloud'
+        data['license'] = edition.license_summary()
+        # The onboarding form's pick lists (country → suggested currency / time zone / language).
+        loc = localization.catalog()
+        data['localization'] = {key: loc[key] for key in ('countries', 'currencies', 'languages', 'time_zones')}
         return Response(data)
 
     @action(detail=True, methods=['get'])
@@ -211,11 +335,20 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
         serializer.is_valid(raise_exception=True)
         v = serializer.validated_data
         try:
-            tenant, admin = onboard_tenant(
-                name=v['tenant_name'], admin_username=v['admin_username'], password=v['password'],
-                admin_email=v['admin_email'], contact_phone=v['contact_phone'], branch_name=v['branch_name'],
-                package=v['package'], modules=v['modules'], settings_features=v['settings_features'],
-                max_users=v['max_users'], actor=request.user)
+            with transaction.atomic():
+                tenant, admin = onboard_tenant(
+                    name=v['tenant_name'], admin_username=v['admin_username'], password=v['password'],
+                    admin_email=v['admin_email'], contact_phone=v['contact_phone'], branch_name=v['branch_name'],
+                    package=v['package'], modules=v['modules'], settings_features=v['settings_features'],
+                    max_users=v['max_users'], actor=request.user, profile=v['tenant_profile'],
+                    subscription=v['subscription'], company_profile=v['company_profile'],
+                    preferences=v['preferences'], branch_details=v['branch_details'], admin_name=v['admin_name'])
+                if v['logo']:
+                    from apps.billing.models import BillingSettings
+                    with tenancy.use_tenant(tenant.pk):
+                        branding = BillingSettings.objects.first() or BillingSettings()
+                        branding.logo_data_url = v['logo']
+                        branding.save()
         except OnboardingError as e:
             return _bad(e.field, e.message)
         except IntegrityError:
@@ -223,6 +356,10 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
             return _bad(None, 'That client name or username was just taken. Try another.')
         data = self._row(tenant.pk)
         data['admin_username'] = admin.username
+        data['admin_user_id'] = str(admin.pk)
+        # The setup link itself is never in this response (it would be kept for idempotent
+        # replays); the console asks users/<id>/invitation/ for it next.
+        data['invitation_pending'] = v['password'] is None
         return Response(data, status=status.HTTP_201_CREATED)
 
     def partial_update(self, request, *args, **kwargs):
@@ -232,6 +369,7 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
         serializer.is_valid(raise_exception=True)
         v = dict(serializer.validated_data)
         multi_branch = v.pop('multi_branch_enabled', None)
+        max_companies = v.pop('max_companies', None)
         changes = {}
         for field, value in v.items():
             if getattr(tenant, field) != value:
@@ -248,11 +386,34 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
                                                            'to': multi_branch}
                         settings_row.multi_branch_enabled = multi_branch
                         settings_row.save()
+            if max_companies is not None:
+                from apps.common.models import Organization
+                from apps.common.organizations import ensure_organization
+                org = ensure_organization(tenant)
+                held = Tenant.objects.filter(organization=org).count()
+                if max_companies < held:
+                    transaction.set_rollback(True)
+                    return _bad('max_companies', f'This organization already holds {held} companies.')
+                if org.max_companies != max_companies:
+                    changes['max_companies'] = {'from': org.max_companies, 'to': max_companies}
+                    Organization.objects.filter(pk=org.pk).update(max_companies=max_companies)
             if changes:
-                action_name = ('MODULES_CHANGED' if {'package', 'modules', 'settings_features'} & set(changes)
-                               else 'PERMISSIONS_CHANGED' if 'role_permissions' in changes
-                               else 'SEATS_CHANGED' if 'max_users' in changes else 'PROFILE_UPDATED')
-                log_event(tenant, action_name, request.user, changes=changes)
+                # One audit row per kind of change, so the history can be filtered by event type.
+                groups = (
+                    ('MODULES_CHANGED', {'package', 'modules', 'settings_features'}),
+                    ('PERMISSIONS_CHANGED', {'role_permissions'}),
+                    ('SUBSCRIPTION_CHANGED', {'subscription_plan', 'subscription_starts_on',
+                                              'subscription_expires_on', 'max_branches'}),
+                    ('SEATS_CHANGED', {'max_users'}),
+                    ('COMPANY_LIMIT_CHANGED', {'max_companies'}),
+                )
+                remaining = dict(changes)
+                for action_name, keys in groups:
+                    part = {k: remaining.pop(k) for k in list(remaining) if k in keys}
+                    if part:
+                        log_event(tenant, action_name, request.user, changes=_jsonable(part))
+                if remaining:
+                    log_event(tenant, 'PROFILE_UPDATED', request.user, changes=_jsonable(remaining))
         return Response(self._detail(tenant))
 
     # ---- lifecycle ----------------------------------------------------------------------
@@ -323,7 +484,8 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
         if tenant.pk == request.user.tenant_id:
             return _bad(None, 'This is the platform account itself — use the normal sign-in.')
         if not tenant.is_effectively_active:
-            return _bad(None, f'{tenant.name} is deactivated. Reactivate it before opening its workspace.')
+            return _bad(None, f'{tenant.name} cannot be used right now (deactivated or subscription expired). '
+                              'Reactivate or renew it before opening its workspace.')
         tokens = issue_tokens(request.user, request, workspace_tenant_id=tenant.pk)
         log_event(tenant, 'WORKSPACE_OPENED', request.user, session_id=tokens['session_id'])
         user = login_user_payload(request.user, tenant_id=tenant.pk)
@@ -351,12 +513,16 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
                     email=v['email'], first_name=v['first_name'], last_name=v['last_name'],
                     phone=v['phone'] or None)
                 _save_branch_access(tenant, user.username, v)
-                log_event(tenant, 'USER_ADDED', request.user, username=user.username, role=user.role)
+                log_event(tenant, 'USER_ADDED', request.user, username=user.username, role=user.role,
+                          setup='invitation' if v['password'] is None else 'password')
         except OnboardingError as e:
             return _bad(e.field, e.message)
         except IntegrityError:
             return _bad('username', 'That username was just taken. Try another.')
-        return Response(self._detail(tenant), status=status.HTTP_201_CREATED)
+        data = self._detail(tenant)
+        data['created_user_id'] = str(user.pk)
+        data['invitation_pending'] = v['password'] is None
+        return Response(data, status=status.HTTP_201_CREATED)
 
     def _client_user(self, tenant, user_id):
         user = get_object_or_404(get_user_model(), pk=user_id, tenant=tenant)
@@ -429,6 +595,26 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
         log_event(tenant, 'PASSWORD_RESET', request.user, username=user.username)
         return Response({'detail': f'Password for {user.username} changed. Their open sessions were ended.'})
 
+    @action(detail=True, methods=['post'], url_path=r'users/(?P<user_id>[0-9a-fA-F-]{36})/invitation')
+    def invitation(self, request, pk=None, user_id=None):
+        """A one-time account-setup link for one of the client's users (apps.common.invitations):
+        {uid, token, expires_in_hours}. The browser turns it into a link on its own origin. Issuing
+        a new one does not cancel older ones; any of them stops working once a password is set."""
+        from apps.common import invitations
+        tenant = self.get_object()
+        user = self._client_user(tenant, user_id)
+        if user is None:
+            return _bad(None, 'The platform administrator account cannot be edited here.')
+        if not user.is_active:
+            return _bad(None, f'{user.username} is deactivated. Reactivate the account first.')
+        if not tenant.is_effectively_active:
+            return _bad(None, f'{tenant.name} cannot be used right now (deactivated or expired).')
+        log_event(tenant, 'INVITATION_ISSUED', request.user, username=user.username)
+        response = Response({**invitations.issue(user), 'username': user.username})
+        response.idempotency_no_store = True  # the link is a secret: never kept for replays
+        response['Cache-Control'] = 'no-store'
+        return response
+
     # ---- branches -----------------------------------------------------------------------
 
     def _write_branch(self, request, tenant, branch=None):
@@ -446,6 +632,18 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
             if branch is not None and branch.is_default and make_default is False:
                 return _bad('is_default', 'Pick another branch as default instead.')
             created = branch is None
+            activating = (created and v.get('is_active', True) is not False) or (
+                not created and not branch.is_active and (v.get('is_active') is True or make_default))
+            if activating:
+                try:
+                    check_branch_available(tenant)
+                    edition.license_check('branches', tenant=tenant)  # Windows edition licence; no-op on cloud
+                except OnboardingError as e:
+                    return _bad(e.field, e.message)
+                except Exception as e:
+                    if e.__class__.__name__ != 'LicenseLimitError':
+                        raise
+                    return _bad('max_branches', e.message)
             if created:
                 company = Company.objects.first()
                 if company is None:

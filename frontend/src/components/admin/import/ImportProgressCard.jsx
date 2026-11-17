@@ -84,7 +84,7 @@ export default function ImportProgressCard({ batchId, onDone, onMissing, onAwait
         </Stack>
         <LinearProgress sx={{ height: 10, borderRadius: 5, mb: 1.5 }} />
         <Typography variant="body2" color="text.secondary">
-          {(batch.processed_rows || 0).toLocaleString()} rows checked so far. Duplicates and invalid rows are being marked; nothing is imported yet.
+          {(batch.processed_rows || 0).toLocaleString()} rows checked so far. Repeated items and invalid rows are being marked; nothing is imported yet.
         </Typography>
         {error && error.response?.status !== 404 && (
           <Alert severity="warning" sx={{ mt: 2 }}>Lost contact with the server. The preview keeps being prepared there.</Alert>
@@ -126,6 +126,10 @@ export default function ImportProgressCard({ batchId, onDone, onMissing, onAwait
         <Grid item xs={6} sm={4} md={2}>
           <Typography variant="caption" color="text.secondary">Updated</Typography>
           <Typography variant="h6" fontWeight={800} color="info.main">{(batch.updated_rows || 0).toLocaleString()}</Typography>
+        </Grid>
+        <Grid item xs={6} sm={4} md={2}>
+          <Typography variant="caption" color="text.secondary">Merged</Typography>
+          <Typography variant="h6" fontWeight={800} color="secondary.main">{(batch.merged_rows || 0).toLocaleString()}</Typography>
         </Grid>
         <Grid item xs={6} sm={4} md={2}>
           <Typography variant="caption" color="text.secondary">Duplicates</Typography>

@@ -518,7 +518,7 @@ export default function SalesInvoice() {
   const [rxSphOS, setRxSphOS] = useState('');
   const [rxCylOS, setRxCylOS] = useState('');
   const [rxAxisOS, setRxAxisOS] = useState('');
-  const [presDoctor, setPresDoctor] = useState('Dr. Sarah Connor');
+  const [presDoctor, setPresDoctor] = useState('');
 
   // Filter States
   const [frameFilter, setFrameFilter] = useState('All');
@@ -591,7 +591,7 @@ export default function SalesInvoice() {
       setRxSphOS(selected.sphLeft || '');
       setRxCylOS(selected.cylLeft || '');
       setRxAxisOS(selected.axisLeft || '');
-      setPresDoctor(selected.doctor || 'Dr. Sarah Connor');
+      setPresDoctor(selected.doctor || '');
     }
   };
 

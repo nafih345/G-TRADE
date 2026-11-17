@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { readCachedProfile } from '../utils/storeProfile';
+
 import { useNavigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
 import { fetchAllPages } from '../utils/fetchAllPages';
@@ -28,6 +30,14 @@ import {
   CheckCircle as ActiveIcon,
   DeleteSweep as ClearIcon
 } from '@mui/icons-material';
+
+// The customer's own store name (Store & Clinic Profile), with the branch when the booking has one.
+const storeNameForMessages = (branch) => {
+  const p = readCachedProfile();
+  const name = (p.display_name || p.name || '').trim();
+  if (name && branch) return `${name} (${branch})`;
+  return name || branch || 'our store';
+};
 
 const examTypesList = [
   'Comprehensive Eye Exam',
@@ -191,7 +201,7 @@ export default function Appointments() {
     date: new Date().toISOString().split('T')[0],
     time: '10:00 AM',
     type: 'Comprehensive Eye Exam',
-    branch: 'Main Branch',
+    branch: '', // the server stamps the working branch (P1 Task 6)
     room: 'Room 1 - Primary Refraction Suite',
     priority: 'Standard Booking',
     sendWhatsapp: true,
@@ -290,7 +300,7 @@ export default function Appointments() {
       date: new Date().toISOString().split('T')[0],
       time: '10:00 AM',
       type: 'Comprehensive Eye Exam',
-      branch: 'Main Branch',
+      branch: '',
       room: 'Room 1 - Primary Refraction Suite',
       priority: 'Standard Booking',
       sendWhatsapp: true,
@@ -399,7 +409,7 @@ export default function Appointments() {
       return;
     }
     const formattedPhone = rawPhone.length === 10 ? `91${rawPhone}` : rawPhone;
-    const storeName = apt.branch ? `Greensol Optical (${apt.branch})` : 'Greensol Optical ERP';
+    const storeName = storeNameForMessages(apt.branch);
     
     let reachingTimeStr = "10–15 minutes early";
     if (apt.time) {
@@ -568,7 +578,7 @@ Thank you for choosing *${storeName}*. We look forward to seeing you!`;
       return;
     }
     const formattedPhone = rawPhone.length === 10 ? `91${rawPhone}` : rawPhone;
-    const storeName = apt.branch ? `Greensol Optical (${apt.branch})` : 'Greensol Optical ERP';
+    const storeName = storeNameForMessages(apt.branch);
 
     const message = `*Appointment Cancelled ❌*
 

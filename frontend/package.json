@@ -27,8 +27,13 @@
     "test:product-modes": "node --test src/utils/__tests__/productModes.test.js",
     "test:local-data-reset": "node --test src/utils/__tests__/localDataReset.test.js",
     "test:module-access": "node --test src/utils/__tests__/moduleAccess.test.js",
+    "test:companies": "node --test src/utils/__tests__/companies.test.js",
     "test:write-guard": "node --import ./src/utils/__tests__/viteResolve.mjs --test src/utils/__tests__/apiWriteGuard.test.js",
-    "test:network": "node --import ./src/utils/__tests__/viteResolve.mjs --test src/utils/__tests__/networkResilience.test.js"
+    "test:network": "node --import ./src/utils/__tests__/viteResolve.mjs --test src/utils/__tests__/networkResilience.test.js",
+    "test:brand": "node --import ./src/utils/__tests__/viteResolve.mjs --test src/utils/__tests__/brand.test.js",
+    "test:inventory-cache": "node --test src/utils/__tests__/inventoryCache.test.js",
+    "test:customer-branding": "node --test src/utils/__tests__/customerBranding.test.js",
+    "test:ui-scale": "node --import ./src/utils/__tests__/viteResolve.mjs --test src/utils/__tests__/uiScale.test.js"
   },
   "dependencies": {
     "@emotion/react": "^11.11.4",

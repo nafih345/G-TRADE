@@ -46,6 +46,8 @@ REGISTRY = {
     'inventory.stock_adjustment': ('inventory.StockAdjustment', rules.build_stock_adjustment, 'created_at', 'reason'),
     'products.opening_stock': ('products.Product', rules.build_product_opening_stock, 'created_at', 'sku'),
     'inventory.opening_stock': ('inventory.OpeningStockBatch', rules.build_opening_stock_batch, 'created_at', 'batch_number'),
+    'inventory.branch_transfer': ('company.StockTransferEvent', rules.build_branch_transfer_event, 'performed_at',
+                                  'reference_number'),
 }
 assert set(REGISTRY) == set(SOURCES)
 

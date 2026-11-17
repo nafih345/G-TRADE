@@ -10,7 +10,8 @@ from apps.security import login_protection, policy, totp
 from apps.security.audit import log_event
 from apps.security.models import UserTwoFactor
 
-from .serializers import UserSerializer, SessionTokenRefreshSerializer, ensure_login_role, login_user_payload
+from .serializers import (ProfileSerializer, UserSerializer, SessionTokenRefreshSerializer, ensure_login_role,
+                          login_user_payload)
 
 User = get_user_model()
 
@@ -24,8 +25,12 @@ def _invalid_credentials():
 
 
 def _signed_in(user, request, two_factor=False):
+    from apps.common.organizations import accessible_companies
     tokens = policy.issue_tokens(user, request, two_factor=two_factor)
+    # Phase 2: the session starts in the user's home company. With more than one company the
+    # frontend shows the company picker next; picking another one calls /api/auth/switch-company/.
     return Response({'access': tokens['access'], 'refresh': tokens['refresh'], 'user': login_user_payload(user),
+                     'companies': accessible_companies(user),
                      'session': {'inactivity_timeout_minutes': policy.get_settings().inactivity_timeout_minutes}})
 
 
@@ -54,6 +59,15 @@ class CustomTokenObtainPairView(APIView):
         except exceptions.AuthenticationFailed as exc:
             # Returned, not raised: with no authentication classes DRF would turn a raised 401 into 403.
             return Response(exc.detail, status=status.HTTP_401_UNAUTHORIZED)
+        # The platform console's own sign-in page (/#/super-admin/login) is for the platform owner
+        # only. A client's owner also has role SUPER_ADMIN, but used to be let in there and landed
+        # on a dashboard without Client Management. Refused before any token or 2FA challenge.
+        if str(request.data.get('portal') or '') == 'platform':
+            from apps.common.permissions import is_platform_owner
+            if not is_platform_owner(user):
+                return Response({'detail': 'This sign-in page is for the platform administrator. '
+                                           'Business accounts sign in on the main login page.',
+                                 'code': 'not_platform_admin'}, status=status.HTTP_403_FORBIDDEN)
 
         tf = UserTwoFactor.objects.filter(user_id=user.pk).first()
         if tf is not None and tf.enrolled:
@@ -118,11 +132,25 @@ class SessionTokenRefreshView(TokenRefreshView):
 
 
 class UserProfileView(generics.RetrieveUpdateAPIView):
-    serializer_class = UserSerializer
+    serializer_class = ProfileSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_object(self):
         return self.request.user
+
+    def perform_update(self, serializer):
+        # In another company request.user is a read-only member copy (organizations.company_user):
+        # save the contact details onto the real account, then show them in this company's view.
+        user = self.request.user
+        if getattr(user, '_company_tenant_id', None) is not None:
+            real = User.objects.get(pk=user.pk)
+            for field, value in serializer.validated_data.items():
+                setattr(real, field, value)
+                setattr(user, field, value)
+            real.save()
+            serializer.instance = user
+            return
+        serializer.save()
 
 
 class IsSuperAdmin(permissions.BasePermission):

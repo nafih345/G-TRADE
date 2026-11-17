@@ -7,7 +7,7 @@ import { getCurrencySymbol } from '../utils/localeFormat.js';
 const SAMPLE_LINES = [
   { name: 'Ray-Ban RB5154 Clubmaster Frame', brand: 'Ray-Ban', sku: 'RB5154-2000', hsn: '9003', size: '51', color: 'Black Gold', rate: 8490, taxPercent: 12, power: '' },
   { name: 'Single Vision 1.56 Blue-Cut Lens (pair)', brand: 'Essilor', sku: 'ESS-SV156-BC', hsn: '9001', size: '', color: '', rate: 2400, taxPercent: 12, power: 'RE: SPH -1.25 CYL -0.50 | LE: SPH -1.00 CYL 0' },
-  { name: 'Lens Cleaning Kit', brand: 'Greensol', sku: 'ACC-CLK-01', hsn: '3307', size: '', color: '', rate: 250, taxPercent: 18, power: '' },
+  { name: 'Lens Cleaning Kit', brand: 'Sample Brand', sku: 'ACC-CLK-01', hsn: '3307', size: '', color: '', rate: 250, taxPercent: 18, power: '' },
   { name: 'Contact Lens Solution 360 ml', brand: 'Bausch + Lomb', sku: 'BL-RENU-360', hsn: '3307', size: '360ml', color: '', rate: 540, taxPercent: 18, power: '' },
   { name: 'Titanium Rimless Frame', brand: 'Lindberg', sku: 'LB-TR-2210', hsn: '9003', size: '52', color: 'Gunmetal', rate: 15800, taxPercent: 12, power: '' },
   { name: 'Progressive 1.67 Lens (pair)', brand: 'Zeiss', sku: 'ZS-PRG-167', hsn: '9001', size: '', color: '', rate: 9800, taxPercent: 12, power: 'RE: SPH +1.50 ADD +2.00 | LE: SPH +1.25 ADD +2.00' },

@@ -6,7 +6,7 @@ import { useAuth } from './AuthContext';
 const BranchContext = createContext(null);
 
 export const useBranch = () => useContext(BranchContext) || {
-  multiBranchEnabled: false, activeBranch: null, branches: [], isAdmin: false,
+  multiBranchEnabled: false, activeBranch: null, branches: [], isAdmin: false, noBranchAccess: false,
   setActiveBranch: () => {}, refresh: () => {},
 };
 
@@ -22,6 +22,7 @@ export const BranchProvider = ({ children }) => {
   const [branches, setBranches] = useState([]);
   const [activeBranch, setActiveBranchState] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [noBranchAccess, setNoBranchAccess] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -30,6 +31,15 @@ export const BranchProvider = ({ children }) => {
       setMultiBranchEnabled(!!data.multi_branch_enabled);
       setIsAdmin(!!data.is_admin);
       setBranches(data.branches || []);
+      setNoBranchAccess(!!data.no_branch_access);
+
+      if (data.no_branch_access) {
+        // Multi-Branch is on and no branch is assigned to this user (fail-closed policy):
+        // never fall back to the client's default branch — every request there would be refused.
+        localStorage.removeItem(ACTIVE_BRANCH_KEY);
+        setActiveBranchState(null);
+        return;
+      }
 
       const stored = localStorage.getItem(ACTIVE_BRANCH_KEY);
       const allowed = (data.branches || []).map(b => b.id);
@@ -66,7 +76,7 @@ export const BranchProvider = ({ children }) => {
 
   return (
     <BranchContext.Provider value={{
-      multiBranchEnabled, branches, activeBranch, isAdmin, loaded,
+      multiBranchEnabled, branches, activeBranch, isAdmin, noBranchAccess, loaded,
       setActiveBranch, refresh,
     }}>
       {children}

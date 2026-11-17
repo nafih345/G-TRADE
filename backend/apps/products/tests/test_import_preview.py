@@ -1,5 +1,5 @@
-"""Two-stage Excel import: the whole file is previewed before anything is written, repeats are
-skipped, and an existing product's stock waits for review in Stock Overview."""
+"""Two-stage Excel import: the whole file is previewed before anything is written, a later listing
+of an item is merged into it, and an existing product's stock waits for review in Stock Overview."""
 from unittest import mock
 
 from django.contrib.auth import get_user_model
@@ -44,7 +44,7 @@ class PreviewCase(ImportCase):
 class PreviewTests(PreviewCase):
     def messy(self):
         rows = [row(i) for i in range(6)]
-        rows.append(dict(rows[2]))                 # true repeat of the third row
+        rows.append(dict(rows[2]))                 # the third row's item listed again
         rows.append(row(7, Stock=-1))              # invalid
         rows.append(row(8, Code=None, Barcode=None, Item_Name=None))   # nothing to identify it
         return rows
@@ -55,21 +55,26 @@ class PreviewTests(PreviewCase):
         self.assertEqual(Product.objects.count(), 0)
         data = self.preview(b)
         self.assertEqual(data['column_headers'], HEADERS)
-        self.assertEqual(data['summary'], dict(total=9, valid=6, new=6, update=0, duplicate=1, error=2))
+        self.assertEqual(data['summary'], dict(total=9, valid=7, new=6, update=0, merged=1, duplicate=0, error=2))
         kinds = [r['kind'] for r in data['results']]
-        self.assertEqual(kinds, ['NEW'] * 6 + ['DUPLICATE', 'ERROR', 'ERROR'])
-        self.assertEqual(data['results'][6]['message'], 'Repeats row 4 of Stock')
+        self.assertEqual(kinds, ['NEW'] * 6 + ['MERGED', 'ERROR', 'ERROR'])
+        self.assertEqual(data['results'][6]['message'], 'Same item as row 4 of Stock: quantity 5 added to it')
+        self.assertEqual((data['results'][2]['file_stock'], data['results'][2]['message']),
+                         (10, 'Listed on 2 rows of the file: one product, quantities combined (10 in total)'))
         self.assertEqual(data['results'][0]['cells']['Item Name'], 'Frame 0')
-        self.assertEqual([r['row_number'] for r in self.preview(b, kind='skipped')['results']], [8, 9, 10])
-        self.assertEqual(len(self.preview(b, kind='valid')['results']), 6)
+        self.assertEqual([r['row_number'] for r in self.preview(b, kind='skipped')['results']], [9, 10])
+        self.assertEqual([r['row_number'] for r in self.preview(b, kind='merged')['results']], [8])
+        self.assertEqual(len(self.preview(b, kind='valid')['results']), 7)
 
     def test_confirm_imports_only_valid_rows_and_records_history(self):
         b = self.confirm(self.upload(self.messy()))
-        self.assertEqual((b.imported_rows, b.duplicate_rows, b.failed_rows), (6, 1, 2), b.remarks)
+        self.assertEqual((b.imported_rows, b.merged_rows, b.duplicate_rows, b.failed_rows), (6, 1, 0, 2), b.remarks)
         self.assertEqual(Product.objects.count(), 6)
+        self.assertEqual(Product.objects.get(sku='SKU00002').stock, 10)
         self.assertIsNotNone(b.completed_at)
         hist = APIClient().get('/api/import/history/').data[0]
-        self.assertEqual((hist['batch_number'], hist['imported_rows'], hist['skipped_rows']), (b.batch_number, 6, 3))
+        self.assertEqual((hist['batch_number'], hist['imported_rows'], hist['merged_rows'], hist['skipped_rows']),
+                         (b.batch_number, 6, 1, 2))
         self.assertTrue(hist['completed_at'])
         self.assertFalse(ImportPreviewRow.objects.filter(batch=b).exists())    # only UPDATE rows are kept
 

@@ -44,6 +44,9 @@ def match_step(secret, code, *, now=None, window=1):
     return None
 
 
-def provisioning_uri(secret, account, issuer='Greensol Optical ERP'):
+def provisioning_uri(secret, account, issuer=None):
+    if issuer is None:
+        from apps.common.edition import product_name
+        issuer = product_name()
     label = quote(f'{issuer}:{account}')
     return f'otpauth://totp/{label}?secret={secret}&issuer={quote(issuer)}&digits={DIGITS}&period={STEP_SECONDS}'

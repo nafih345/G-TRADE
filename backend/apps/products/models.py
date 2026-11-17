@@ -1,6 +1,7 @@
 import uuid
 from decimal import Decimal
 from django.db import models
+from apps.common.media_paths import import_batch_path, product_image_path
 from apps.common.models import BaseUUIDModel, TenantOwnedModel
 
 class ImportBatch(TenantOwnedModel):
@@ -32,11 +33,14 @@ class ImportBatch(TenantOwnedModel):
     batch_number = models.CharField(max_length=50)
     file_name = models.CharField(max_length=255)
     original_file_name = models.CharField(max_length=255, blank=True, null=True)
-    file = models.FileField(upload_to='import_batches/', blank=True, null=True)
+    file = models.FileField(upload_to=import_batch_path, blank=True, null=True)
     # Copy of the uploaded bytes, kept only while the import is unfinished. Hosted
     # containers (Render) lose MEDIA_ROOT on every restart/spin-down, so this is what
     # lets a stalled import resume instead of dying with "file not found".
     file_data = models.BinaryField(blank=True, null=True, editable=False)
+    # SHA-256 of the upload: a new upload of the same file replaces its unconfirmed preview,
+    # can't start while that file is still importing, and is told when it was imported before.
+    file_hash = models.CharField(max_length=64, blank=True, default='', db_index=True)
     uploaded_by = models.CharField(max_length=150, default='Administrator')
     uploaded_date = models.DateTimeField(auto_now_add=True)
     status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='PENDING')
@@ -51,6 +55,7 @@ class ImportBatch(TenantOwnedModel):
     processed_rows = models.IntegerField(default=0) # Rows streamed & classified so far (drives live progress)
     imported_rows = models.IntegerField(default=0) # New products created
     updated_rows = models.IntegerField(default=0) # Existing products overwritten
+    merged_rows = models.IntegerField(default=0) # Later listings of an item: quantity added to its product
     failed_rows = models.IntegerField(default=0)
     duplicate_rows = models.IntegerField(default=0)
     processing_time = models.FloatField(default=0.0) # Seconds
@@ -105,6 +110,7 @@ class ImportPreviewRow(TenantOwnedModel):
     KINDS = [
         ('NEW', 'New Product'),
         ('UPDATE', 'Updates Existing Product'),
+        ('MERGED', 'Same Item, Quantity Added'),
         ('DUPLICATE', 'Duplicate, Skipped'),
         ('ERROR', 'Invalid, Skipped'),
     ]
@@ -288,7 +294,7 @@ class Product(BaseUUIDModel):
     # Complete raw row & custom header attributes from uploaded Excel/CSV files
     extra_data = models.JSONField(default=dict, blank=True, null=True)
 
-    image = models.ImageField(upload_to='product_images/', blank=True, null=True)
+    image = models.ImageField(upload_to=product_image_path, blank=True, null=True)
 
     # Variant link (null for stand-alone products). variant_key is the normalised attribute
     # combination ("color=black|size=m") — unique inside a group so the same combination

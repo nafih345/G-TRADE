@@ -14,10 +14,13 @@ import {
 } from '@mui/material';
 import {
   PersonAdd as AddIcon, Edit as EditIcon, LockReset as ResetIcon, AutoAwesome as GenerateIcon,
-  Visibility, VisibilityOff, ContentCopy as CopyIcon,
+  Visibility, VisibilityOff, ContentCopy as CopyIcon, Link as LinkIcon,
 } from '@mui/icons-material';
 import { notify } from '../../utils/notify';
-import { API, copy, fmtDate, generatePassword, isReauth, roleLabel, splitErrors } from './clientApi';
+import { apiErrorMessage } from '../../utils/apiError';
+import {
+  API, copy, fetchInvitationLink, fmtDate, generatePassword, isReauth, roleLabel, splitErrors,
+} from './clientApi';
 
 const FIELDS = ['username', 'password', 'role', 'first_name', 'last_name', 'email', 'phone', 'is_active',
   'branch_ids', 'default_branch_id', 'access_all_branches', 'max_users'];
@@ -72,14 +75,14 @@ function RoleAccessSummary({ catalog, role }) {
   );
 }
 
-function UserDialog({ catalog, tenant, usersUrl, user, onClose, onSaved }) {
+function UserDialog({ catalog, tenant, usersUrl, user, onClose, onSaved, allowInvite }) {
   const isNew = !user;
   const access = user?.branch_access || {};
   const roles = catalog.assignable_roles
     ? catalog.roles.filter((r) => catalog.assignable_roles.includes(r.key))
     : catalog.roles;
   const [form, setForm] = useState({
-    username: '', password: '',
+    username: '', password: '', invite: false,
     role: user?.role || (roles.some((r) => r.key === 'SALES_EXECUTIVE') ? 'SALES_EXECUTIVE' : roles[roles.length - 1]?.key),
     first_name: user?.first_name || '', last_name: user?.last_name || '',
     email: user?.email || '', phone: user?.phone || '', is_active: user ? user.is_active : true,
@@ -110,11 +113,15 @@ function UserDialog({ catalog, tenant, usersUrl, user, onClose, onSaved }) {
     setGeneral('');
     const body = { ...form, default_branch_id: form.default_branch_id ? String(form.default_branch_id) : null };
     if (!isNew) { delete body.username; delete body.password; }
+    if (!allowInvite) delete body.invite;
+    if (body.invite) body.password = '';
     try {
       const { data } = isNew
         ? await axios.post(usersUrl, body)
         : await axios.patch(`${usersUrl}${user.id}/`, body);
-      onSaved(data, isNew ? { username: form.username, password: form.password } : null);
+      onSaved(data, isNew ? {
+        username: form.username, password: form.password, invite: form.invite, userId: data.created_user_id,
+      } : null);
     } catch (err) {
       if (isReauth(err)) return;
       const { fields, general: msg } = splitErrors(err, FIELDS, 'The user could not be saved.');
@@ -140,8 +147,18 @@ function UserDialog({ catalog, tenant, usersUrl, user, onClose, onSaved }) {
                     helperText={errors.username || ' '} inputProps={{ maxLength: 150, spellCheck: false }} autoComplete="off" />
                 </Grid>
                 <Grid item xs={12} sm={6}>
-                  <PasswordField value={form.password} onChange={(v) => set('password', v)} error={errors.password} disabled={saving} />
+                  {form.invite ? (
+                    <Alert severity="info" sx={{ py: 0 }}>A one-time setup link is created after saving.</Alert>
+                  ) : (
+                    <PasswordField value={form.password} onChange={(v) => set('password', v)} error={errors.password} disabled={saving} />
+                  )}
                 </Grid>
+                {allowInvite && (
+                  <Grid item xs={12}>
+                    <FormControlLabel sx={{ mb: 1 }} control={<Switch checked={form.invite} onChange={(e) => set('invite', e.target.checked)} />}
+                      label="Let the user choose their own password (setup link instead of a password)" />
+                  </Grid>
+                )}
               </>
             )}
             <Grid item xs={12} sm={6}>
@@ -254,6 +271,21 @@ export default function ClientUsersPanel({ catalog, tenant, onChanged, usersUrl 
   const [editing, setEditing] = useState(null); // 'new' | user
   const [resetting, setResetting] = useState(null);
   const [created, setCreated] = useState(null);
+  const [linking, setLinking] = useState(null);
+  // Setup links are a platform-console feature (POST .../tenants/<id>/users/<uid>/invitation/).
+  const allowInvite = usersUrl.startsWith(API);
+
+  const showLink = async (userId, username) => {
+    setLinking(userId);
+    try {
+      const result = await fetchInvitationLink(usersUrl, userId);
+      setCreated({ username, link: result.link, hours: result.hours });
+    } catch (err) {
+      if (!isReauth(err)) notify(`Could not create a setup link: ${apiErrorMessage(err)}`, 'error');
+    } finally {
+      setLinking(null);
+    }
+  };
 
   const used = tenant.users.filter((u) => u.is_active).length;
   const full = used >= tenant.max_users;
@@ -264,7 +296,8 @@ export default function ClientUsersPanel({ catalog, tenant, onChanged, usersUrl 
   const saved = (data, credentials) => {
     onChanged(data);
     setEditing(null);
-    if (credentials) setCreated(credentials);
+    if (credentials?.invite && credentials.userId) showLink(credentials.userId, credentials.username);
+    else if (credentials) setCreated(credentials);
     notify(credentials ? `User ${credentials.username} added.` : 'User saved.', 'success');
   };
 
@@ -286,7 +319,15 @@ export default function ClientUsersPanel({ catalog, tenant, onChanged, usersUrl 
         </Tooltip>
       </Stack>
 
-      {created && (
+      {created?.link && (
+        <Alert severity="success" onClose={() => setCreated(null)} sx={{ mb: 1.5, '& .MuiAlert-message': { minWidth: 0 } }}
+          action={<Button size="small" startIcon={<CopyIcon />} onClick={() => copy(created.link)}>Copy link</Button>}>
+          Setup link for <b style={{ fontFamily: 'monospace' }}>{created.username}</b> — valid {created.hours} hours, works once.
+          Send it to the user; it is shown only now.
+          <Box component="code" sx={{ display: 'block', mt: 0.5, wordBreak: 'break-all', fontSize: 12 }}>{created.link}</Box>
+        </Alert>
+      )}
+      {created && !created.link && (
         <Alert severity="success" onClose={() => setCreated(null)} sx={{ mb: 1.5 }}
           action={<Button size="small" startIcon={<CopyIcon />} onClick={() => copy(`Username: ${created.username}\nPassword: ${created.password}`)}>Copy</Button>}>
           Share with the user — shown only now: <b style={{ fontFamily: 'monospace' }}>{created.username}</b> / <b style={{ fontFamily: 'monospace' }}>{created.password}</b>
@@ -330,12 +371,23 @@ export default function ClientUsersPanel({ catalog, tenant, onChanged, usersUrl 
                   <TableCell>
                     <Chip size="small" label={u.is_active ? 'Active' : 'Disabled'} color={u.is_active ? 'success' : 'default'}
                       variant={u.is_active ? 'filled' : 'outlined'} />
+                    {u.setup_pending && u.is_active && (
+                      <Chip size="small" sx={{ ml: 0.5 }} color="warning" variant="outlined" label="Setup pending" />
+                    )}
                   </TableCell>
                   <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>
                     {!u.is_platform_admin && u.can_manage !== false && (
                       <>
                         <Button size="small" startIcon={<EditIcon />} onClick={() => setEditing(u)} aria-label={`Edit ${u.username}`}>Edit</Button>
                         <Button size="small" startIcon={<ResetIcon />} onClick={() => setResetting(u)} aria-label={`Reset password of ${u.username}`}>Password</Button>
+                        {allowInvite && u.is_active && (
+                          <Tooltip title="One-time link for the user to set their own password">
+                            <Button size="small" startIcon={<LinkIcon />} disabled={linking === u.id}
+                              onClick={() => showLink(u.id, u.username)} aria-label={`Setup link for ${u.username}`}>
+                              Setup link
+                            </Button>
+                          </Tooltip>
+                        )}
                       </>
                     )}
                   </TableCell>
@@ -348,7 +400,7 @@ export default function ClientUsersPanel({ catalog, tenant, onChanged, usersUrl 
 
       {editing && (
         <UserDialog catalog={catalog} tenant={tenant} usersUrl={usersUrl} user={editing === 'new' ? null : editing}
-          onClose={() => setEditing(null)} onSaved={saved} />
+          onClose={() => setEditing(null)} onSaved={saved} allowInvite={allowInvite} />
       )}
       {resetting && <ResetPasswordDialog usersUrl={usersUrl} user={resetting} onClose={() => setResetting(null)} />}
     </Box>

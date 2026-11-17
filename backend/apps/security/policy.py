@@ -32,6 +32,8 @@ SENSITIVE_WRITES = [re.compile(p) for p in (
     r'^/api/backups/restore/?$',
     r'^/api/auth/register/?$',
     r'^/api/superadmin(/|$)',
+    r'^/api/organization(/|$)',   # Phase 2: companies, memberships, copy-masters
+
     r'^/api/company/user-branch-access(/|$)',
     r'^/api/company/business-settings/?$',
     r'^/api/company/localization/?$',
@@ -97,18 +99,28 @@ def open_session(user, request=None, two_factor=False):
                                       user_agent=agent)
 
 
-def issue_tokens(user, request=None, two_factor=False, workspace_tenant_id=None):
+def issue_tokens(user, request=None, two_factor=False, workspace_tenant_id=None, company_tenant_id=None):
     """Tokens for a new sign-in session. `workspace_tenant_id` (platform owner only — the caller
-    checks) scopes the session to that client instead of the user's own tenant."""
+    checks) scopes the session to that client instead of the user's own tenant.
+    `company_tenant_id` (Phase 2) scopes it to another company of the user's organization; it is
+    verified here against the user's active memberships, whatever the caller already checked."""
     from rest_framework_simplejwt.tokens import RefreshToken
+    from apps.common.models import Tenant
+    from apps.common.organizations import can_access_company, ensure_organization
     if user.tenant_id is None:
         raise exceptions.AuthenticationFailed('This account is not linked to a business.')
+    if company_tenant_id is not None and int(company_tenant_id) != int(user.tenant_id) \
+            and not can_access_company(user, company_tenant_id):
+        raise exceptions.PermissionDenied('You do not have access to this company.')
+    tenant_id = workspace_tenant_id or company_tenant_id or user.tenant_id
     session = open_session(user, request, two_factor)
     refresh = RefreshToken.for_user(user)
     refresh['sid'] = str(session.id)
     # Copied into every access token minted from this refresh token. TenantContextMiddleware
     # scopes the request by it; LenientJWTAuthentication checks it still matches the user.
-    refresh['tenant_id'] = workspace_tenant_id or user.tenant_id
+    refresh['tenant_id'] = int(tenant_id)
+    # The organization of that company (Phase 2). Checked against the company on every request.
+    refresh['org_id'] = ensure_organization(Tenant.objects.get(pk=tenant_id)).pk
     if workspace_tenant_id and workspace_tenant_id != user.tenant_id:
         refresh['workspace'] = True
     return {'refresh': str(refresh), 'access': str(refresh.access_token), 'session_id': str(session.id)}

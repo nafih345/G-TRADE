@@ -45,3 +45,9 @@ Thumbs.db
 # Database backups written by the desktop / dev server (apps/security)
 backend/backups/
 backups/
+
+# Windows local edition build outputs (windows/tooling/*.py writes here)
+windows/out/
+windows/desktop/node_modules/
+windows/desktop/dist/
+frontend/dist-local/

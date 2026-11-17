@@ -9,12 +9,17 @@ only a handful of test entries). On 2026-10-30 Render's `DATABASE_URL` was chang
 `/Uae%20client` instead of `/neondb`, so every screen came up near-empty. Nothing was deleted
 and tenant filtering hid nothing — the backend was simply reading the wrong database.
 
+> **Superseded 2026-11-12 (owner decision, P1 N1):** the production database is **`Uae client`**
+> (exact name, one space; `/Uae%20client` in the URL). Set `EXPECTED_DATABASE_NAME=Uae client`.
+> `neondb` on the same Neon host is **not** production: do not migrate or modify it. The rest of
+> this paragraph is kept as history.
+
 Check which one is live: `curl https://g-trade-backend.onrender.com/api/health/` →
-`db_target.name` must be `neondb`. Set `EXPECTED_DATABASE_NAME=neondb` on the service
+`db_target.name` must be `Uae client`. Set `EXPECTED_DATABASE_NAME=Uae client` on the service
 (table in §1b) and a future swap turns `/api/health/` degraded and puts a red banner in the
-app instead of failing silently. With row-level multi-tenancy in place, a new client (e.g.
-the UAE shop) is a new **tenant** in `neondb` (Client Management, `/#/superadmin/tenants`),
-never a separate database.
+app instead of failing silently. With row-level multi-tenancy in place, a new client is a new
+**tenant** in the production database (Client Management, `/#/superadmin/tenants`), never a
+separate database.
 
 Browsers also mirror records into localStorage. `/api/health/` now reports `db_instance`
 (an id of the database's contents that survives a region copy), and the app drops those
@@ -73,6 +78,9 @@ release, but a database outage can no longer stop the code from shipping. The sc
 caught up afterwards by `AUTO_MIGRATE` on boot, and `/api/health/` reports
 `"migrations": "pending"` with the names until it is. That trade is deliberate — a visible,
 self-correcting schema lag beats an invisible, self-locking release freeze.
+
+*Superseded on 2026-11-11 (P1 decision 5):* migrations no longer run automatically on release
+or boot; see [Database migrations](#database-migrations-release-procedure).
 
 ---
 
@@ -160,12 +168,14 @@ On the **`g-trade-backend`** service → *Environment*, set:
 | Variable | Value |
 | --- | --- |
 | `DATABASE_URL` | the Neon connection string from 1a |
-| `EXPECTED_DATABASE_NAME` | the database name in that string (`neondb`) |
+| `EXPECTED_DATABASE_NAME` | the database name in that string: exactly `Uae client` (owner decision 2026-11-12) |
 | `DEBUG` | `False` |
 | `FRONTEND_ORIGINS` | `https://g-trade-pi.vercel.app` |
 | `DJANGO_SUPERUSER_USERNAME` | your admin login |
 | `DJANGO_SUPERUSER_PASSWORD` | a strong password |
-| `AUTO_MIGRATE` | `True` |
+| `AUTO_MIGRATE` | `False` (P1 decision 5; see [Database migrations](#database-migrations-release-procedure)) |
+| `RUN_MIGRATIONS` | `False` — set `True` only for an approved migration release, then back to `False` |
+| `BOOTSTRAP_ADMIN_RESET` | `False` — set `True` for one deploy to repair the platform owner (`bootstrap_admin --reset-password`: resets `DJANGO_SUPERUSER_USERNAME`'s password and restores its Client Management rights; refuses any client account), then back to `False`. Every build log also prints `platform_admin_status`. See `G_OPTICALS_FINAL_PRODUCTION_DEPLOYMENT_READINESS.md`. |
 | `SECRET_KEY` | any long random string, if not already set |
 
 `DATABASE_URL` is no longer optional on a managed host. If it is missing, `settings.py`
@@ -175,7 +185,8 @@ looks perfectly healthy (`bootstrap_admin` even recreates a working login) while
 every row on each deploy. A refused start is the loud version of that.
 
 Confirm under *Settings* that **Root Directory** is `backend` and **Build Command** is
-`bash ./build.sh` — that script runs `collectstatic`, `migrate`, then `bootstrap_admin`.
+`bash ./build.sh` — that script runs `collectstatic`, then `migrate` **only when
+`RUN_MIGRATIONS=True`** (otherwise it lists pending migrations), then `bootstrap_admin`.
 **A brand-new Neon database has no users at all, so without those two `DJANGO_SUPERUSER_*`
 variables there is no way to sign in.**
 
@@ -193,7 +204,7 @@ Expect all of:
 
 - `"status": "ok"` — not `"degraded"`
 - `"database": "connected"`
-- `"db_target": { "name": "neondb" }` — the database that holds the data, not `Uae client`
+- `"db_target": { "name": "Uae client" }` — the production database (owner decision 2026-11-12)
 - `"debug": false` — must be false
 - `"migrations": "up_to_date"` with `"pending_migrations": []`
 - `"db_target": { "host": "ep-….neon.tech" }` — the Neon host, not a `dpg-…` one
@@ -486,6 +497,33 @@ on a trans-Pacific hop instead.)
 
 ---
 
+## Database migrations (release procedure)
+
+Production schema changes are applied only by an administrator (P1 decision 5). For any
+release that adds migrations:
+
+1. **Freeze:** list the release's migrations (`python manage.py showmigrations --plan` against
+   a copy) and read each one; note which are data migrations and their reverse.
+2. **Back up:** create a Neon branch (point-in-time copy) of the production database *and* take
+   a `pg_dump -Fc` kept off the host. Record its SHA-256.
+3. **Rehearse on the Neon branch, never on production:** point a local checkout at the branch
+   with `DATABASE_URL` + `EXPECTED_DATABASE_NAME`, print the target, then `migrate --plan`,
+   `migrate`, the release's verification commands (for P1: `verify_branch_access`,
+   `branch_backfill_report`, `relocate_media` dry run), `makemigrations --check`, `check`, and
+   a second `migrate` (must say "No migrations to apply"). Rehearse the reverse too.
+4. **Approve:** the owner signs off the rehearsal results.
+5. **Apply:** set `RUN_MIGRATIONS=True` on the service and deploy (build.sh migrates, then the new
+   code starts) — or run `python manage.py migrate` from the approved checkout against
+   production, then deploy. Never deploy code that needs the schema first.
+6. **Reset:** set `RUN_MIGRATIONS=False` again immediately after.
+7. **Verify:** `/api/health/` → `"migrations": "up_to_date"`, correct `db_target`, `"debug": false`.
+8. **Roll back** (if needed): the per-migration reverse commands in the release's migration
+   report, or restore the Neon branch / dump from step 2 (loses writes made since).
+
+Local development: set `AUTO_MIGRATE=False` in the shell before `runserver` if migrations must
+be reviewed before they touch the local database (the boot hook otherwise applies new
+migration files as soon as the auto-reloader picks them up).
+
 ## Known limitations
 
 - **Never move the database back onto Render's free tier.** It is deleted 30 days after
@@ -499,11 +537,12 @@ on a trans-Pacific hop instead.)
 - **Uploaded files are ephemeral.** `MEDIA_ROOT` is on the container filesystem, so product
   images and the company logo used on printed bills survive only until the next deploy or
   restart. Object storage (S3/Cloudinary) is the durable fix.
-- `AUTO_MIGRATE=True` is now load-bearing rather than a safety net. `build.sh` still runs
-  `migrate` on every release, but no longer fails the build when the database is
-  unreachable, so a release can ship with the schema briefly behind the code; the boot hook
-  in `apps/common/startup.py` is what closes that gap, and `/api/health/` reports
-  `"migrations": "pending"` until it does. Turning it off reopens the gap.
+- **Migrations are never automatic in production (P1 decision 5, 2026-11-11).**
+  `AUTO_MIGRATE=False` and `RUN_MIGRATIONS=False` on the service; the boot hook in
+  `apps/common/startup.py` is also off by default on Render/Vercel when the variable is
+  missing. The trade-off: a release whose code needs a new schema must not go live before an
+  administrator applies its migrations (procedure below). `/api/health/` reports
+  `"migrations": "pending"` and the red banner names them until that is done.
 - **One migration is unsafe to replay on a populated database.**
   `financial/0003_alter_journalentry_reference_id` drops `journalentry.reference_id` and
   re-adds it, because Postgres cannot cast integer to uuid in place. It was written against

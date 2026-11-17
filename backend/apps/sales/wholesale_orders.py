@@ -150,10 +150,13 @@ def sync_reservation(order):
     return want
 
 
-def reserved_by_product(product_ids=None, exclude_order=None):
-    """{product_id (str): units} reserved by CONFIRMED wholesale orders."""
+def reserved_by_product(product_ids=None, exclude_order=None, branch_ids=None):
+    """{product_id (str): units} reserved by CONFIRMED wholesale orders (branch_ids: only orders
+    of those branches; None = every branch)."""
     from .models import WholesaleOrder
     qs = WholesaleOrder.objects.filter(status=ORDER_CONFIRMED)
+    if branch_ids is not None:
+        qs = qs.filter(branch_id__in=list(branch_ids))
     if exclude_order:
         qs = qs.exclude(pk=exclude_order)
     keys = [str(p) for p in product_ids] if product_ids is not None else None
@@ -194,8 +197,10 @@ def _ref_id(details, key):
     return rid if is_uuid(rid) else None
 
 
-def link_invoice_orders(invoice):
-    """Close (or re-open) the wholesale order / quotation a Wholesale POS invoice bills."""
+def link_invoice_orders(invoice, request=None):
+    """Close (or re-open) the wholesale order / quotation a Wholesale POS invoice bills. With a
+    request, a branch-restricted caller may only bill orders / quotations of their branches (P1
+    Task 5): the ids come from the POS and are never trusted."""
     from .models import WholesaleOrder, WholesaleQuotation
     details = invoice.details or {}
     bills = _invoice_bills(invoice)
@@ -222,6 +227,10 @@ def link_invoice_orders(invoice):
             raise ValidationError({'detail': f'Order {order.order_number} is already billed on {billed_no or "another invoice"}.'})
         if order.dealer_id != invoice.dealer_id:
             raise ValidationError({'detail': f'Order {order.order_number} belongs to another dealer.'})
+        if request is not None:
+            from apps.common.branch_context import require_branch_permitted
+            require_branch_permitted(request, order.branch_id,
+                                     f'Order {order.order_number} belongs to a branch you cannot use.')
         if order.status != ORDER_BILLED or order.invoice_id != invoice.pk:
             order.status = ORDER_BILLED
             order.invoice = invoice
@@ -234,6 +243,10 @@ def link_invoice_orders(invoice):
     quote_id = _ref_id(details, 'linkedQuotation') if bills else None
     if quote_id:
         quote = WholesaleQuotation.objects.select_for_update().filter(pk=quote_id).first()
+        if quote is not None and request is not None:
+            from apps.common.branch_context import require_branch_permitted
+            require_branch_permitted(request, quote.branch_id,
+                                     f'Quotation {quote.quotation_number} belongs to a branch you cannot use.')
         if quote and quote.status in (QUOTE_OPEN, QUOTE_BILLED):
             quote.status = QUOTE_BILLED
             quote.converted_invoice_number = invoice.invoice_number
@@ -264,6 +277,7 @@ def convert_quotation_to_order(quote):
         total_amount=quote.grand_total,
         status=ORDER_CONFIRMED,
         details={**details, 'items': items, 'quotationNumber': quote.quotation_number},
+        branch_id=quote.branch_id,  # P1 Task 5: the order stays in the quotation's branch
     )
     sync_reservation(order)
     quote.status = QUOTE_ORDERED

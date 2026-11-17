@@ -64,12 +64,30 @@ def token_identity(request):
     User = get_user_model()
 
     def load():
-        row = User.objects.filter(pk=user_id, is_active=True).values_list('username', 'role', 'is_superuser').first()
+        row = User.objects.filter(pk=user_id, is_active=True).values_list(
+            'username', 'role', 'is_superuser', 'tenant_id').first()
         if row is None:
             return None
         # A superuser counts as Super Admin whatever `role` says (as at sign-in).
-        return row[0], 'SUPER_ADMIN' if row[2] else row[1]
+        if row[2]:
+            return row[0], 'SUPER_ADMIN'
+        # Phase 2: inside another company of the organization the user holds that company's
+        # membership role (none at all without an active membership: branch access fails closed).
+        active = tenancy.current_tenant_id()
+        if active is not None and row[3] is not None and int(active) != int(row[3]):
+            from apps.common.organizations import membership_role
+            return row[0], membership_role(user_id, row[3], active) or ''
+        return row[0], row[1]
     return hot_cache.get_or_load(f'identity:user:{user_id}', load)
+
+
+def token_user_id(request):
+    """The user id claim of the request's valid access token, or None (P1 Task 4)."""
+    token = access_token(request)
+    if token is None:
+        return None
+    from rest_framework_simplejwt.settings import api_settings
+    return token.get(api_settings.USER_ID_CLAIM) or None
 
 
 def tenant_from_request(request):
@@ -107,16 +125,34 @@ def workspace_allowed(user, token):
     return bool(token is not None and token.get('workspace') and is_platform_owner(user))
 
 
+def company_access_allowed(user, tenant_id, token=None):
+    """May a token for `tenant_id` act for `user`? Their home company; a platform workspace the
+    owner opened; or (Phase 2) a company of their organization they hold an ACTIVE membership in."""
+    if user is None or user.tenant_id is None or tenant_id is None:
+        return False
+    if int(tenant_id) == int(user.tenant_id) or workspace_allowed(user, token):
+        return True
+    from apps.common.organizations import membership_role
+    return membership_role(user.pk, user.tenant_id, tenant_id) is not None
+
+
 def check_user_tenant(user, token=None):
     """Called once the token's user is known: the token's tenant must be the user's (or a platform
-    workspace the owner opened), and active."""
+    workspace the owner opened, or a company they are an active member of), and active."""
     tenant_id = tenancy.current_tenant_id()
-    if user.tenant_id is None or tenant_id is None or (
-            tenant_id != user.tenant_id and not workspace_allowed(user, token)):
+    if not company_access_allowed(user, tenant_id, token):
         raise exceptions.AuthenticationFailed('Your sign-in is no longer valid for this business. Sign in again.',
                                               code='tenant_mismatch')
     if not _tenant_active(tenant_id):
         raise exceptions.PermissionDenied('This business account is disabled.')
+    # Phase 2 tokens also name the organization of their company. A mismatch means the token
+    # does not describe this company any more: refuse it rather than guess.
+    org_claim = token.get('org_id') if token is not None and hasattr(token, 'get') else None
+    if org_claim is not None:
+        from apps.common.organizations import tenant_org_id
+        if str(tenant_org_id(tenant_id)) != str(org_claim):
+            raise exceptions.AuthenticationFailed('Your sign-in is no longer valid for this business. Sign in again.',
+                                                  code='tenant_mismatch')
 
 
 def install_drf_hook():

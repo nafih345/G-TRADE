@@ -12,7 +12,7 @@ from apps.authentication.edit_permissions import EditApprovalMixin
 from apps.inventory.models import StockLedger
 from apps.inventory.stock_utils import adjust_branch_stock, adjust_branch_stock_many
 from apps.products.models import Product
-from apps.common.branch_mixins import BranchScopedViewSetMixin
+from apps.common.branch_mixins import BranchScopedViewSetMixin, _is_uuid
 from apps.financial.banks import validate_bank_account
 from apps.common.request_actor import actor_from_request
 
@@ -213,9 +213,24 @@ class PurchaseInvoiceSerializer(ModelSerializer):
     class Meta:
         model = PurchaseInvoice
         fields = '__all__'
+        read_only_fields = ('attachment_name',)
 
     def validate_bank_account(self, value):
         return validate_bank_account(value)
+
+    def validate_attachment(self, value):
+        from .attachments import validate_attachment
+        return validate_attachment(value)
+
+    def to_representation(self, instance):
+        # Never a public /media/ URL (P1 Task 2): the authenticated, branch-checked endpoint.
+        from .attachments import attachment_api_url
+        data = super().to_representation(instance)
+        url = attachment_api_url(instance)
+        data['attachment'] = url
+        data['attachment_url'] = url
+        data['has_attachment'] = bool(url)
+        return data
 
     def to_internal_value(self, data):
         # Fetch every line's product in one query up front (see _PrefetchedProductField).
@@ -243,6 +258,9 @@ class PurchaseInvoiceSerializer(ModelSerializer):
             attrs['payment_status'] = ''
         elif attrs.get('payment_status') == 'UNPAID':
             attrs['paid_amount'] = 0
+        if 'attachment' in attrs:
+            from .attachments import clean_display_name
+            attrs['attachment_name'] = clean_display_name(attrs['attachment']) if attrs['attachment'] else ''
         return attrs
 
     def create(self, validated_data):
@@ -316,6 +334,31 @@ class PurchaseInvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewse
         response.data['accounting'] = _accounting_status(response.data.get('id'))
         return response
 
+    # ---- attachment (P1 Task 2) -----------------------------------------------------------------
+    # get_object() runs the tenant scope and the branch scope (BranchScopedViewSetMixin), so
+    # another client's or another branch's entry is 404, like opening the entry itself.
+
+    def _signed_in(self, request):
+        from rest_framework.exceptions import NotAuthenticated
+        if not (request.user and request.user.is_authenticated):
+            raise NotAuthenticated('Sign in to open attachments.')
+
+    @action(detail=True, methods=['get'], url_path='attachment')
+    def attachment_file(self, request, pk=None):
+        from .attachments import file_response
+        self._signed_in(request)
+        return file_response(self.get_object())
+
+    @action(detail=True, methods=['get'], url_path='attachment-link')
+    def attachment_link(self, request, pk=None):
+        """A 60-second signed URL the browser can open natively (no bearer header)."""
+        from .attachments import make_link
+        self._signed_in(request)
+        invoice = self.get_object()
+        if not invoice.attachment:
+            return Response({'detail': 'This purchase entry has no attachment.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(make_link(invoice, request.user))
+
     def update(self, request, *args, **kwargs):
         response = super().update(request, *args, **kwargs)
         response.data['accounting'] = _accounting_status(response.data.get('id'))
@@ -330,6 +373,21 @@ class PurchaseInvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewse
         if fresh is not None:
             serializer.instance = fresh
 
+    def _check_linked_documents(self, lens_po):
+        """A Purchase Entry converting a Lens PO, or receiving customer orders by Order Number,
+        may only take ones in a branch the caller can use (checked before anything is written)."""
+        from apps.common.branch_context import require_branch_permitted
+        if lens_po is not None:
+            require_branch_permitted(self.request, lens_po.branch_id,
+                                     'That lens purchase order belongs to a branch you cannot use.')
+        orders = self.request.data.get('lens_sales_orders')
+        if isinstance(orders, list) and orders:
+            from apps.sales.models import Invoice
+            wanted = [str(o) for o in orders if o and _is_uuid(o)]
+            for branch_id in Invoice.all_objects.filter(pk__in=wanted).values_list('branch_id', flat=True):
+                require_branch_permitted(self.request, branch_id,
+                                         'A customer order on this entry belongs to a branch you cannot use.')
+
     @transaction.atomic
     def perform_create(self, serializer):
         # Converting a Lens Purchase Order: lock it first so two saves can't both bill it; the
@@ -340,6 +398,7 @@ class PurchaseInvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, viewse
             from .lens_orders import lock_for_conversion
             lens_po = lock_for_conversion(lens_po_id)
         extra = self._branch_stamp_kwargs(serializer)
+        self._check_linked_documents(lens_po)
         number = _sequence_number('PURCHASE_BILL', PurchaseInvoice, 'invoice_number',
                                   serializer.validated_data.get('invoice_number'))
         if number:

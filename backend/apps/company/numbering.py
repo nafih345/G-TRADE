@@ -37,6 +37,7 @@ DOC_TYPES = {
     'WHOLESALE_QUOTATION': ('Wholesale quotation', 'WQ-{YYYY}-', 4, 'Wholesale → Quotations'),
     'SALES_RETURN': ('Sales return', 'SR-{YYYY}-', 4, 'Sales → Sales Return'),
     'PURCHASE_RETURN': ('Purchase return', 'PR-{YYYY}-', 4, 'Purchase → Purchase Return'),
+    'STOCK_TRANSFER': ('Branch stock transfer', 'TRF-{YYYY}-', 4, 'Inventory → Branch Transfers'),
     'SALES_BILL': ('Wholesale sales bill', 'WINV-', 5, None),
     'CREDIT_NOTE': ('Credit note', 'CN-', 4, None),
     'DEBIT_NOTE': ('Debit note', 'DN-', 4, None),

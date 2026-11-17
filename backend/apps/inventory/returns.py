@@ -39,6 +39,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from apps.common.branch_mixins import BranchScopedViewSetMixin
+from apps.common.branch_context import require_branch_permitted, scope_to_permitted
 from apps.common.pagination import PageSizePagination
 from apps.common.request_actor import actor_from_request
 
@@ -126,8 +127,8 @@ class SalesKind:
                 .exclude(status__in=INACTIVE_DOC_STATUSES))
 
     @classmethod
-    def search_originals(cls, term):
-        qs = cls.live_originals()
+    def search_originals(cls, term, request=None):
+        qs = cls.live_originals() if request is None else scope_to_permitted(request, cls.live_originals())
         if term:
             qs = qs.filter(Q(invoice_number__icontains=term) | Q(customer_name__icontains=term)
                            | Q(customer__phone__icontains=term) | Q(customer__patient_code__iexact=term))
@@ -276,8 +277,8 @@ class PurchaseKind(SalesKind):
         return PurchaseInvoice.objects.exclude(status__in=INACTIVE_DOC_STATUSES)
 
     @classmethod
-    def search_originals(cls, term):
-        qs = cls.live_originals()
+    def search_originals(cls, term, request=None):
+        qs = cls.live_originals() if request is None else scope_to_permitted(request, cls.live_originals())
         if term:
             qs = qs.filter(Q(invoice_number__icontains=term) | Q(supplier_invoice_number__icontains=term)
                            | Q(supplier__name__icontains=term))
@@ -530,6 +531,9 @@ def create_return(kind, data, *, request, branch_kwargs=None):
         if original is None:
             raise ReturnError({'detail': 'The original bill was not found, or it is a draft / cancelled — '
                                          'it can no longer take a return.'})
+        # The bill must be in a branch the caller may use (P1 / N4): a return moves that branch's
+        # stock and money, and the return itself is filed under the bill's branch.
+        require_branch_permitted(request, original.branch_id, 'The original bill belongs to a branch you cannot use.')
         if return_date and kind.original_date(original) and return_date < kind.original_date(original):
             errors.append("The return can't be dated before the original bill.")
 
@@ -770,9 +774,9 @@ def report_summary(kind, rows):
     }
 
 
-def return_stock_by_product(product_ids=None):
+def return_stock_by_product(product_ids=None, branch_ids=None):
     """{product_id: {'sales': units, 'purchase': units}} over live returns — Stock Overview's
-    Return Stock figures."""
+    Return Stock figures. branch_ids: only returns of those branches (None = every branch)."""
     out = {}
     for kind in (SalesKind, PurchaseKind):
         _, Item = kind.models()
@@ -780,6 +784,8 @@ def return_stock_by_product(product_ids=None):
             .exclude(**{f'{kind.item_parent}__status': 'CANCELLED'})
         if product_ids is not None:
             qs = qs.filter(product_id__in=list(product_ids))
+        if branch_ids is not None:
+            qs = qs.filter(**{f'{kind.item_parent}__branch_id__in': list(branch_ids)})
         for r in qs.values('product_id').annotate(q=Sum('stock_qty')):
             out.setdefault(r['product_id'], {'sales': 0, 'purchase': 0})[kind.key] = int(r['q'] or 0)
     return out
@@ -866,12 +872,13 @@ class _ReturnViewSet(BranchScopedViewSetMixin, mixins.ListModelMixin, mixins.Ret
 
     @action(detail=False, methods=['get'], url_path='source-documents')
     def source_documents(self, request):
-        return Response(self.kind.search_originals((request.query_params.get('search') or '').strip()))
+        return Response(self.kind.search_originals((request.query_params.get('search') or '').strip(), request))
 
     @action(detail=False, methods=['get'])
     def returnable(self, request):
         doc_id = request.query_params.get('document') or ''
-        doc = self.kind.live_originals().filter(pk=doc_id).first() if _is_uuid(doc_id) else None
+        originals = scope_to_permitted(request, self.kind.live_originals())
+        doc = originals.filter(pk=doc_id).first() if _is_uuid(doc_id) else None
         if doc is None:
             return Response({'detail': 'Bill not found, or it is a draft / cancelled.'}, status=404)
         head = self.kind.search_originals(self.kind.original_number(doc))

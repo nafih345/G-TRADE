@@ -2,8 +2,20 @@ import { currencyPrefix, formatCurrency } from './localeFormat.js';
 // Builds the WhatsApp receipt text + share URL for an invoice/order snapshot. Split out from
 // sendInvoiceWhatsApp so the "Show Bill" preview can display exactly what will be sent before
 // anything opens, and so an Alt+W shortcut can share the same text on demand.
-export const buildInvoiceWhatsAppMessage = (invoice, customPhone = null) => {
+// The customer's own store identity (Store & Clinic Profile cache). Never a vendor or sample name.
+export const storeIdentityForMessages = () => {
+  try {
+    const s = JSON.parse(localStorage.getItem('optical_app_settings') || '{}');
+    return { name: String(s.displayName || s.storeName || '').trim(), phone: String(s.storePhone || '').trim() };
+  } catch {
+    return { name: '', phone: '' };
+  }
+};
+
+export const buildInvoiceWhatsAppMessage = (invoice, customPhone = null, store = storeIdentityForMessages()) => {
   if (!invoice) return null;
+  const storeName = (store && store.name) || '';
+  const storePhone = (store && store.phone) || '';
 
   const invNo = invoice.invoiceNumber || invoice.id || 'INV';
   const invDate = invoice.date || invoice.invoice_date || new Date().toISOString().split('T')[0];
@@ -48,11 +60,11 @@ export const buildInvoiceWhatsAppMessage = (invoice, customPhone = null) => {
     || (balanceDueNum <= 0.009 ? 'PAID' : (amountPaidNum > 0 ? 'PARTIALLY PAID' : 'UNPAID'));
 
   const message =
-`👓 *GREENSOL OPTICALS - TAX INVOICE RECEIPT*
+`👓 *${storeName ? `${storeName.toUpperCase()} - ` : ''}TAX INVOICE RECEIPT*
 -----------------------------------------
 Dear *${patientName}*,
 
-Thank you for choosing Greensol Super Speciality Eye Care! Here are your optical invoice details:
+Thank you for choosing ${storeName || 'us'}! Here are your optical invoice details:
 
 📄 *Invoice No:* ${invNo}
 📅 *Date:* ${invDate}
@@ -62,9 +74,9 @@ Thank you for choosing Greensol Super Speciality Eye Care! Here are your optical
 ✅ *Amount Paid:* ${formatCurrency(amountPaidNum)}
 🧾 *Balance Due:* ${formatCurrency(balanceDueNum)} (${payStatus})
 
-We hope you enjoy your new eyewear! For frame alignment or warranty support, visit our branch or call +91 98470 12345.
------------------------------------------
-*Greensol Opticals & Eye Hospital*`;
+We hope you enjoy your new eyewear! For frame alignment or warranty support, visit our store${storePhone ? ` or call ${storePhone}` : ''}.
+-----------------------------------------${storeName ? `
+*${storeName}*` : ''}`;
 
   const encodedMessage = encodeURIComponent(message);
 

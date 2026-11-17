@@ -1,0 +1,56 @@
+{
+  "name": "gtrade-erp-desktop",
+  "productName": "G OPTICALS",
+  "version": "1.0.0",
+  "description": "G OPTICALS for Windows",
+  "author": "G OPTICALS",
+  "license": "UNLICENSED",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/*.test.js",
+    "dist": "electron-builder --win nsis --publish never"
+  },
+  "devDependencies": {
+    "electron": "44.9.3",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "com.gtrade.erp",
+    "productName": "G OPTICALS",
+    "copyright": "Copyright (c) 2026 G OPTICALS",
+    "directories": { "output": "../out/installer", "buildResources": "build" },
+    "files": ["main.js", "preload.js", "lib/**/*", "pages/**/*", "package.json"],
+    "asar": true,
+    "electronLanguages": ["en-US"],
+    "extraResources": [
+      { "from": "../out/stage", "to": "server", "filter": ["**/*"] },
+      { "from": "../docs", "to": "docs", "filter": ["*.md", "!LICENSE_AGREEMENT_DRAFT.md", "!RELEASE_NOTES_*.md"] }
+    ],
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "executableName": "G-TRADE",
+      "requestedExecutionLevel": "asInvoker",
+      "signAndEditExecutable": true,
+      "verifyUpdateCodeSignature": true
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "G OPTICALS",
+      "uninstallDisplayName": "G OPTICALS",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": false,
+      "include": "../installer/installer.nsh",
+      "license": "../installer/EULA.txt",
+      "artifactName": "G-OPTICALS-Setup-${version}.${ext}",
+      "guid": "7d0f5a52-6a0e-4c63-9b3e-0b8f6b4e2c11",
+      "warningsAsErrors": false
+    }
+  }
+}

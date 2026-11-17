@@ -453,9 +453,9 @@ export default function PaymentsManagerView({
           </Avatar>
           <Typography variant="h6" fontWeight={800}>Scan with GPay / PhonePe / Paytm</Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, mb: 2 }}>
-            Main Branch Greensol Optical Merchant VPA
+            Show the customer your store's own UPI QR code or UPI ID. No UPI ID is configured in the software,
+            so none is displayed here; confirm the payment in your UPI app before recording it.
           </Typography>
-          <Chip label="UPI ID: greensol@bank" color="primary" variant="outlined" sx={{ fontWeight: 800 }} />
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
           <Button fullWidth onClick={() => setQrModalOpen(false)} variant="contained">

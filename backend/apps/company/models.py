@@ -1,10 +1,12 @@
+from django.conf import settings
 from django.db import models
+from apps.common.media_paths import company_logo_path
 from django.db import transaction
 from apps.common.models import BaseUUIDModel, TenantOwnedModel
 
 class Company(BaseUUIDModel):
     name = models.CharField(max_length=150)
-    logo = models.ImageField(upload_to='company_logos/', blank=True, null=True)
+    logo = models.ImageField(upload_to=company_logo_path, blank=True, null=True)
     gstin = models.CharField(max_length=15, blank=True, null=True)
     currency = models.CharField(max_length=10, default='USD')
     fiscal_year_start = models.DateField()
@@ -162,10 +164,21 @@ class BusinessSettings(BaseUUIDModel):
 
 
 class UserBranchAccess(BaseUUIDModel):
-    """Which branches a user may access. Keyed by username (CharField) rather than a User FK
-    because the app's users currently live in frontend localStorage, not the auth_user table
-    (see apps.common.authentication.LenientJWTAuthentication)."""
+    """Which branches a user may access.
+
+    P1 Task 4: keyed by the stable user id (`user`). Signed-in requests resolve access by the
+    token's user id only, so renaming a user, or a username that differs only in case, can no
+    longer pick up another account's row, and deleting a user deletes their access (CASCADE) —
+    a new account created later with the same name starts unconfigured instead of inheriting it.
+
+    `username` is kept, in step with the linked user's current name, for display and for the
+    token-less header path. A row saved without `user` links itself to the tenant's user with
+    exactly that username (else the single case-insensitive match); a row that matches no user
+    stays unlinked and applies to no signed-in user."""
     username = models.CharField(max_length=150, db_index=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, null=True, blank=True, related_name='branch_access_rows',
+    )
     access_all_branches = models.BooleanField(default=False)
     branches = models.ManyToManyField(Branch, blank=True, related_name='user_access')
     default_branch = models.ForeignKey(
@@ -174,9 +187,50 @@ class UserBranchAccess(BaseUUIDModel):
 
     class Meta:
         verbose_name_plural = 'User branch access'
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'user'], condition=models.Q(user__isnull=False, is_deleted=False),
+                                    name='company_userbranchaccess_tenant_user_uniq'),
+        ]
 
     def __str__(self):
         return f"{self.username} ({'ALL' if self.access_all_branches else self.branches.count()})"
+
+    @staticmethod
+    def match_user(username, tenant_id):
+        """The user `username` names in this tenant: the exact match, else the single
+        case-insensitive one; None when there is none or the name is ambiguous."""
+        from django.contrib.auth import get_user_model
+        if not username or tenant_id is None:
+            return None
+        users = get_user_model().objects.filter(tenant_id=tenant_id)
+        exact = users.filter(username=username).first()
+        if exact is not None:
+            return exact
+        loose = list(users.filter(username__iexact=username)[:2])
+        return loose[0] if len(loose) == 1 else None
+
+    @classmethod
+    def for_user(cls, user):
+        """This user's row (by id), else None."""
+        if user is None or getattr(user, 'pk', None) is None:
+            return None
+        return cls.objects.filter(user_id=user.pk).first()
+
+    def save(self, *args, **kwargs):
+        if self.user_id is None and self.username:
+            match = self.match_user(self.username, self.tenant_id)
+            # Link only when that user has no row yet (one row per user and tenant).
+            if match is not None and not type(self).objects.filter(user_id=match.pk) \
+                    .exclude(pk=self.pk).exists():
+                self.user = match
+        if self.user_id is not None:
+            current = type(self)._meta.get_field('user').related_model.objects.filter(pk=self.user_id) \
+                .values_list('username', flat=True).first()
+            if current and current != self.username:
+                self.username = current
+                if kwargs.get('update_fields') is not None:
+                    kwargs['update_fields'] = list(set(kwargs['update_fields']) | {'username'})
+        super().save(*args, **kwargs)
 
 
 class BranchStock(BaseUUIDModel):
@@ -196,18 +250,50 @@ class BranchStock(BaseUUIDModel):
 
 
 class StockTransfer(BaseUUIDModel):
-    """Branch-to-branch stock movement (spec section 10). Apply logic lands in Phase 2."""
+    """Branch-to-branch stock movement, two steps (P1 Task 7; apps/inventory/branch_transfer.py):
+
+        DRAFT --dispatch--> DISPATCHED --receive (all)--> RECEIVED
+        DISPATCHED --receive (part)--> PARTIALLY_RECEIVED --receive (rest)--> RECEIVED
+        DISPATCHED / PARTIALLY_RECEIVED --cancel--> CANCELLED (nothing received) or
+                                                    CLOSED (part received, rest returned)
+
+    Dispatch takes the stock out of the sending branch into Goods in Transit; receive puts it
+    into the receiving branch. Every movement is a StockTransferEvent (its id is the stock
+    ledger / journal reference), so a step can never be applied twice. Only DRAFT transfers can
+    be edited or deleted. Legacy PENDING = a draft; legacy COMPLETED rows never moved stock and
+    are kept as history (they can no longer change)."""
     STATUS_CHOICES = [
-        ('PENDING', 'Pending'),
-        ('COMPLETED', 'Completed'),
+        ('DRAFT', 'Draft'),
+        ('DISPATCHED', 'Dispatched (in transit)'),
+        ('PARTIALLY_RECEIVED', 'Partially received'),
+        ('RECEIVED', 'Received'),
         ('CANCELLED', 'Cancelled'),
+        ('CLOSED', 'Closed (rest returned)'),
+        ('PENDING', 'Pending (legacy draft)'),
+        ('COMPLETED', 'Completed (legacy, no stock moved)'),
     ]
+    EDITABLE_STATUSES = ('DRAFT', 'PENDING')
+    IN_TRANSIT_STATUSES = ('DISPATCHED', 'PARTIALLY_RECEIVED')
+
     transfer_number = models.CharField(max_length=50, blank=True)
     from_branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name='transfers_out')
     to_branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name='transfers_in')
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
+    from_warehouse = models.ForeignKey('company.Warehouse', on_delete=models.PROTECT, null=True, blank=True,
+                                       related_name='+')
+    to_warehouse = models.ForeignKey('company.Warehouse', on_delete=models.PROTECT, null=True, blank=True,
+                                     related_name='+')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='DRAFT')
     notes = models.TextField(blank=True, null=True)
     transferred_at = models.DateTimeField(null=True, blank=True)
+    # db_default (P1 N2): the column keeps its DEFAULT in PostgreSQL, so code that predates these
+    # columns (a rollback, or the old release during a deploy) can still INSERT transfers.
+    dispatched_at = models.DateTimeField(null=True, blank=True)
+    dispatched_by = models.CharField(max_length=150, blank=True, default='', db_default='')
+    received_at = models.DateTimeField(null=True, blank=True)
+    received_by = models.CharField(max_length=150, blank=True, default='', db_default='')
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    cancelled_by = models.CharField(max_length=150, blank=True, default='', db_default='')
+    cancel_reason = models.CharField(max_length=255, blank=True, default='', db_default='')
 
     class Meta:
         ordering = ['-created_at']
@@ -223,9 +309,40 @@ class StockTransferItem(BaseUUIDModel):
     transfer = models.ForeignKey(StockTransfer, on_delete=models.CASCADE, related_name='items')
     product = models.ForeignKey('products.Product', on_delete=models.CASCADE)
     quantity = models.IntegerField(default=0)
+    # P1 Task 7: filled by the workflow, never by the client.
+    received_quantity = models.IntegerField(default=0, db_default=0)
+    returned_quantity = models.IntegerField(default=0, db_default=0)   # sent back to the sender on cancel
+    unit_cost = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)  # at dispatch
+
+    @property
+    def in_transit_quantity(self):
+        return max(int(self.quantity or 0) - int(self.received_quantity or 0) - int(self.returned_quantity or 0), 0)
 
     def __str__(self):
         return f"{self.product_id} x{self.quantity}"
+
+
+class StockTransferEvent(BaseUUIDModel):
+    """One applied step of a stock transfer (P1 Task 7). Its id is the reference of the stock
+    ledger rows and of the accounting journal (source inventory.branch_transfer), which is what
+    makes each step exactly-once."""
+    KINDS = [('DISPATCH', 'Dispatch'), ('RECEIVE', 'Receive'), ('RETURN', 'Return to sender')]
+    transfer = models.ForeignKey(StockTransfer, on_delete=models.PROTECT, related_name='events')
+    kind = models.CharField(max_length=10, choices=KINDS)
+    branch = models.ForeignKey(Branch, on_delete=models.PROTECT, related_name='+')
+    warehouse = models.ForeignKey('company.Warehouse', on_delete=models.PROTECT, null=True, blank=True, related_name='+')
+    # {product_id: units} moved by this step, and their value at the dispatch unit cost.
+    quantities = models.JSONField(default=dict)
+    value = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    reference_number = models.CharField(max_length=80, blank=True, default='')
+    performed_by = models.CharField(max_length=150, blank=True, default='')
+    performed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['performed_at']
+
+    def __str__(self):
+        return f"{self.reference_number} {self.kind}"
 
 
 

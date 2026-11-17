@@ -1,7 +1,9 @@
 from django.urls import path
 from .views import (CustomTokenObtainPairView, SessionTokenRefreshView, TwoFactorVerifyView, UserProfileView,
                     RegisterUserView, LogoutView)
+from apps.common.invitations import InvitationAcceptView, InvitationCheckView
 from . import edit_permissions as ep
+from .company_views import CompaniesView, SwitchCompanyView
 from .user_admin import StaffUserDetailView, StaffUserPasswordView, StaffUsersView
 
 urlpatterns = [
@@ -11,6 +13,12 @@ urlpatterns = [
     path('profile/', UserProfileView.as_view(), name='user_profile'),
     path('register/', RegisterUserView.as_view(), name='user_register'),
     path('logout/', LogoutView.as_view(), name='user_logout'),
+    # One-time account-setup links issued from Client Management (apps/common/invitations.py)
+    path('invitation/check/', InvitationCheckView.as_view(), name='invitation_check'),
+    path('invitation/accept/', InvitationAcceptView.as_view(), name='invitation_accept'),
+    # Phase 2: companies of the signed-in user and server-verified company switching
+    path('companies/', CompaniesView.as_view(), name='user_companies'),
+    path('switch-company/', SwitchCompanyView.as_view(), name='switch_company'),
     # Administration → Users (admin staff of the business)
     path('users/', StaffUsersView.as_view(), name='staff_users'),
     path('users/<uuid:user_id>/', StaffUserDetailView.as_view(), name='staff_user_detail'),

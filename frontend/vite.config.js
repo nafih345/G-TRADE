@@ -24,10 +24,31 @@ export default defineConfig(({ mode, command }) => {
     )
   }
 
+  // Windows local edition (windows/tooling/build_frontend.py sets VITE_EDITION=local): the app
+  // is served by the shop's own server and must not reach out to the internet on load, so the
+  // cloud preconnect and the Google Fonts stylesheet are dropped (system fonts are used).
+  const isLocalEdition = (env.VITE_EDITION || process.env.VITE_EDITION) === 'local'
+  const localEditionHtml = {
+    name: 'gtrade-local-edition-html',
+    transformIndexHtml(html) {
+      if (!isLocalEdition) return html
+      // Browser-tab / app name of the Windows product (must match src/utils/brand.js LOCAL.productName).
+      const LOCAL_PRODUCT_NAME = 'G OPTICALS'
+      return html
+        .replace(/<title>[^<]*<\/title>/, `<title>${LOCAL_PRODUCT_NAME}</title>`)
+        .replace(/(name="(?:application-name|apple-mobile-web-app-title)" content=")[^"]*"/g, `$1${LOCAL_PRODUCT_NAME}"`)
+        .split('\n')
+        .filter((line) => !/onrender\.com|fonts\.googleapis\.com|fonts\.gstatic\.com/.test(line))
+        .join('\n')
+    },
+  }
+
   return {
     base: './',
-    plugins: [react()],
+    plugins: [react(), localEditionHtml],
+    define: { __GTRADE_EDITION__: JSON.stringify(isLocalEdition ? 'local' : 'cloud') },
     build: {
+      outDir: isLocalEdition ? 'dist-local' : 'dist',
       chunkSizeWarningLimit: 2000,
       rollupOptions: {
         output: {

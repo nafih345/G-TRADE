@@ -1,4 +1,5 @@
 // Shared bits of the platform console (pages/TenantManagement.jsx + components/superadmin/*).
+import axios from 'axios';
 import { apiErrorMessage } from '../../utils/apiError';
 import { notify } from '../../utils/notify';
 
@@ -48,8 +49,35 @@ export const copy = (text) => {
 
 export const STATUS_META = {
   ACTIVE: { label: 'Active', color: 'success' },
+  TRIAL: { label: 'Trial', color: 'info' },
   SCHEDULED: { label: 'Deactivation scheduled', color: 'warning' },
+  EXPIRED: { label: 'Subscription expired', color: 'error' },
   INACTIVE: { label: 'Deactivated', color: 'default' },
+};
+
+// Which lifecycle action a client's status offers: deactivate (active, trial or expired — an
+// expired client is renewed by editing its subscription, not "reactivated"), cancel a scheduled
+// deactivation, or reactivate a deactivated client.
+export const lifecycleOf = (status) => {
+  if (status === 'SCHEDULED') return { kind: 'cancel', label: 'Cancel deactivation', color: 'warning' };
+  if (status === 'INACTIVE') return { kind: 'reactivate', label: 'Reactivate', color: 'success' };
+  return { kind: 'deactivate', label: 'Deactivate', color: 'error' };
+};
+
+export const planLabel =(catalog, key) => catalog?.subscription_plans?.find((p) => p.key === key)?.label || key || '—';
+
+export const countryName = (catalog, code) => catalog?.localization?.countries?.find((c) => c.code === code)?.name
+  || code || '—';
+
+/**
+ * A one-time account-setup link for a client user (POST …/users/<id>/invitation/). The server
+ * returns only uid + token; the link is built on this browser's own origin. Never stored.
+ */
+export const fetchInvitationLink = async (usersUrl, userId) => {
+  const { data } = await axios.post(`${usersUrl}${userId}/invitation/`, {});
+  const base = `${window.location.origin}${window.location.pathname}`;
+  const query = new URLSearchParams({ uid: data.uid, token: data.token }).toString();
+  return { link: `${base}#/accept-invite?${query}`, username: data.username, hours: data.expires_in_hours };
 };
 
 export const roleLabel = (catalog, key) => catalog?.roles.find((r) => r.key === key)?.label

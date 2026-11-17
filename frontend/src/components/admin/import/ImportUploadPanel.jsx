@@ -43,7 +43,8 @@ export default function ImportUploadPanel({ onImportStarted }) {
       <Typography variant="h6" fontWeight={800} sx={{ mb: 0.5 }}>Import Products from Excel / CSV</Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
         Two steps: the file is uploaded and read into a Data Preview first, where every row shows whether it
-        will be imported, skipped as a duplicate or rejected as invalid. Nothing is written until you press
+        will be imported as a new product, update an existing one, be merged into an item an earlier row already lists
+        (its quantity is added, no duplicate is made) or be rejected as invalid. Nothing is written until you press
         Start Import there. Columns can be in any order and are matched by their headings; every visible
         sheet with product columns is read.
       </Typography>

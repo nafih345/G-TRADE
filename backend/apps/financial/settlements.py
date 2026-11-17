@@ -72,7 +72,8 @@ _SEARCH_FIELDS = {
 _ORDER = {'customer': 'name', 'dealer': 'business_name', 'supplier': 'name'}
 
 
-def search_parties(voucher, search='', kind=None, only_due=False, limit=50, date_from=None, date_to=None):
+def search_parties(voucher, search='', kind=None, only_due=False, limit=50, date_from=None, date_to=None,
+                   branch_ids=None):
     """Parties for the F1 picker with their outstanding (from open_bills, so the figure always
     equals the sum of the bills Load Due Bills will show). At most `limit` per party kind.
     A bill-date range keeps only parties with open bills dated in it, and counts only those bills."""
@@ -89,12 +90,13 @@ def search_parties(voucher, search='', kind=None, only_due=False, limit=50, date
                 q |= Q(**{f'{f}__icontains': text})
             qs = qs.filter(q)
         if only_due or date_from is not None or date_to is not None:
-            due_ids = list(open_bills(k, date_from=date_from, date_to=date_to).keys())
+            due_ids = list(open_bills(k, date_from=date_from, date_to=date_to, branch_ids=branch_ids).keys())
             qs = qs.filter(pk__in=due_ids)
         parties = list(qs.order_by(_ORDER[k])[:limit + 1])
         has_more = has_more or len(parties) > limit
         parties = parties[:limit]
-        bills = open_bills(k, party_ids=[p.pk for p in parties], date_from=date_from, date_to=date_to) if parties else {}
+        bills = open_bills(k, party_ids=[p.pk for p in parties], date_from=date_from, date_to=date_to,
+                           branch_ids=branch_ids) if parties else {}
         for p in parties:
             row = _party_row(k, p)
             mine = bills.get(p.pk, [])
@@ -148,10 +150,12 @@ def supplier_settled_by_vouchers(bill_ids=None):
     return settled
 
 
-def open_bills(kind, party_ids=None, bill_ids=None, lock=False, date_from=None, date_to=None):
+def open_bills(kind, party_ids=None, bill_ids=None, lock=False, date_from=None, date_to=None, branch_ids=None):
     """{party_id: [bill, ...]} of bills with something still due, oldest first. Party ids are
     the model's pk values. `lock` row-locks the bills (call inside a transaction). date_from /
-    date_to narrow by bill date (invoice / purchase date), inclusive."""
+    date_to narrow by bill date (invoice / purchase date), inclusive. `branch_ids` (a list) keeps
+    only bills of those branches — a branch-restricted caller's permitted branches (P1 Task 1);
+    bills with no branch never match it. None = every branch."""
     accounts = _Accounts()
     out = {}
 
@@ -165,6 +169,7 @@ def open_bills(kind, party_ids=None, bill_ids=None, lock=False, date_from=None, 
             qs = qs.filter(customer_id__in=party_ids)
         if bill_ids is not None:
             qs = qs.filter(pk__in=bill_ids)
+        qs = _branch_filtered(qs, branch_ids)
         qs = _dated(qs, 'invoice_date', date_from, date_to)
         if lock:
             qs = qs.select_for_update(of=('self',))
@@ -185,6 +190,7 @@ def open_bills(kind, party_ids=None, bill_ids=None, lock=False, date_from=None, 
             qs = qs.filter(dealer_id__in=party_ids)
         if bill_ids is not None:
             qs = qs.filter(pk__in=bill_ids)
+        qs = _branch_filtered(qs, branch_ids)
         qs = _dated(qs, 'invoice_date', date_from, date_to)
         if lock:
             qs = qs.select_for_update(of=('self',))
@@ -215,6 +221,7 @@ def open_bills(kind, party_ids=None, bill_ids=None, lock=False, date_from=None, 
             qs = qs.filter(supplier_id__in=party_ids)
         if bill_ids is not None:
             qs = qs.filter(pk__in=bill_ids)
+        qs = _branch_filtered(qs, branch_ids)
         qs = _dated(qs, 'purchase_date', date_from, date_to)
         if lock:
             qs = qs.select_for_update(of=('self',))
@@ -238,6 +245,12 @@ def open_bills(kind, party_ids=None, bill_ids=None, lock=False, date_from=None, 
         return out
 
     raise AccountingError(f"Unknown party type '{kind}'.")
+
+
+def _branch_filtered(qs, branch_ids):
+    if branch_ids is None:
+        return qs
+    return qs.filter(branch_id__in=[str(b) for b in branch_ids])
 
 
 def _dated(qs, field, date_from, date_to):
@@ -329,10 +342,11 @@ def _pay_note(pay):
     return ' '.join(p for p in parts if p)
 
 
-def _checked_bills(kind, party_id, data):
-    """Lock the bills, recompute their dues and refuse any allocation above what is due."""
+def _checked_bills(kind, party_id, data, branch_ids=None):
+    """Lock the bills, recompute their dues and refuse any allocation above what is due. With
+    `branch_ids`, a bill outside those branches counts as not outstanding (never settled)."""
     ids = [a['bill'] for a in data['allocations']]
-    bills = {b['id']: b for b in open_bills(kind, bill_ids=ids, lock=True).get(party_id, [])}
+    bills = {b['id']: b for b in open_bills(kind, bill_ids=ids, lock=True, branch_ids=branch_ids).get(party_id, [])}
     for a in data['allocations']:
         bill = bills.get(str(a['bill']))
         if bill is None:
@@ -394,14 +408,14 @@ def _receipt_result(number):
             'total': str(sum((Decimal(r['amount']) for r in rows), ZERO))}
 
 
-def post_bill_receipt(data, user=None, branch=None):
+def post_bill_receipt(data, user=None, branch=None, branch_ids=None):
     """Settle customer / dealer bills. Returns (result, created)."""
-    number, created = _settle_receipt(data, user, branch=branch)
+    number, created = _settle_receipt(data, user, branch=branch, branch_ids=branch_ids)
     # The receipts are booked on commit; read back what the books did.
     return _receipt_result(number), created
 
 
-def _settle_receipt(data, user=None, book=None, branch=None):
+def _settle_receipt(data, user=None, book=None, branch=None, branch_ids=None):
     """The receipt settlement itself -> (settlement number, created). Books on commit. A batch
     passes its own `book` so a cheque split over several parties is saved once, at the end."""
     from apps.company.models import DocumentNumberClaim
@@ -427,7 +441,7 @@ def _settle_receipt(data, user=None, book=None, branch=None):
             claimed = DocumentNumberClaim.objects.get(doc_type=CLAIM_DOC_TYPE, client_token=key)
             return claimed.number, False
 
-        bills = _checked_bills(kind, party.pk, data)
+        bills = _checked_bills(kind, party.pk, data, branch_ids)
         banks = [_bank(p) for p in data['payments']]
         bank_of = {id(p): b for p, b in zip(data['payments'], banks)}
         narration = data['narration'].strip()
@@ -460,6 +474,8 @@ def _settle_receipt(data, user=None, book=None, branch=None):
                     payment_date=data['date'], payment_method=pay['method'], amount_paid=amount,
                     bank_account=bank_of[id(pay)],
                     reference_note=' · '.join(x for x in (f"RV {number}", _pay_note(pay), a['narration'], narration) if x)[:200],
+                    # P1 Task 5: a collection belongs to the branch of the bill it settles.
+                    branch_id=WholesaleInvoice.all_objects.filter(pk=a['bill']).values_list('branch_id', flat=True).first(),
                 )
             for a in data['allocations']:
                 inv = WholesaleInvoice.objects.get(pk=a['bill'])
@@ -488,7 +504,7 @@ def _settle_receipt(data, user=None, book=None, branch=None):
 # Payment (supplier)
 # ---------------------------------------------------------------------------
 
-def post_bill_payment(data, user=None, book=None, branch=None):
+def post_bill_payment(data, user=None, book=None, branch=None, branch_ids=None):
     """Settle supplier bills with one Payment Voucher. Returns (journal, created)."""
     from apps.purchasing.models import Supplier
     if data['party_kind'] != 'supplier':
@@ -503,7 +519,7 @@ def post_bill_payment(data, user=None, book=None, branch=None):
 
     with transaction.atomic():
         Supplier.objects.select_for_update().filter(pk=supplier.pk).first()
-        bills = _checked_bills('supplier', supplier.pk, data)
+        bills = _checked_bills('supplier', supplier.pk, data, branch_ids)
         accounts = _Accounts()
         lines, allocations, cheque_pays = [], [], []
         for a in data['allocations']:
@@ -557,15 +573,15 @@ def on_voucher_reversed(entry):
     Supplier.objects.filter(pk=party.get('id')).update(outstanding_balance=F('outstanding_balance') + total)
 
 
-def post_bill_batch(voucher, items, user=None, branch=None):
+def post_bill_batch(voucher, items, user=None, branch=None, branch_ids=None):
     """Several parties' settlements (each its own number / voucher) in ONE transaction: if any
     of them is refused, none is saved. Returns ([result, ...], all_were_duplicates)."""
     book = ChequeBook(voucher, user=user, branch=branch)
     with transaction.atomic():
         if voucher == 'RV':
-            done = [_settle_receipt(d, user, book=book) for d in items]
+            done = [_settle_receipt(d, user, book=book, branch_ids=branch_ids) for d in items]
         else:
-            done = [post_bill_payment(d, user, book=book) for d in items]
+            done = [post_bill_payment(d, user, book=book, branch_ids=branch_ids) for d in items]
         book.save()
     duplicate = not any(created for _, created in done)
     # After commit: the receipts' journals now exist.

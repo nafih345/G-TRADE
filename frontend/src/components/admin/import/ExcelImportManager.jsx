@@ -86,7 +86,7 @@ export default function ExcelImportManager() {
     setPreviewBatch(batch);
     setAlertMsg({
       severity: batch.status === 'FAILED' ? 'error' : (batch.status === 'PARTIAL' ? 'warning' : 'success'),
-      text: `Import ${batch.batch_number} finished: ${batch.imported_rows} imported, ${batch.updated_rows || 0} updated, ${batch.duplicate_rows} duplicates, ${batch.failed_rows} failed, of ${batch.total_rows} rows.`
+      text: `Import ${batch.batch_number} finished: ${batch.imported_rows} imported, ${batch.updated_rows || 0} updated, ${batch.merged_rows || 0} merged into the same item, ${batch.duplicate_rows} duplicates, ${batch.failed_rows} failed, of ${batch.total_rows} rows.`
         + ((batch.updated_rows || 0) > 0 ? ' Existing products kept their stock; review the file quantities in Stock Overview → Excel Imports.' : '')
     });
   };
@@ -244,6 +244,7 @@ export default function ExcelImportManager() {
                   <TableCell align="right" sx={{ color: '#fff', fontWeight: 800 }}>Total Rows</TableCell>
                   <TableCell align="right" sx={{ color: '#fff', fontWeight: 800 }}>Imported</TableCell>
                   <TableCell align="right" sx={{ color: '#fff', fontWeight: 800 }}>Updated</TableCell>
+                  <TableCell align="right" sx={{ color: '#fff', fontWeight: 800 }} title="Rows listing an item again: their quantity was added to it">Merged</TableCell>
                   <TableCell align="right" sx={{ color: '#fff', fontWeight: 800 }}>Duplicates</TableCell>
                   <TableCell align="right" sx={{ color: '#fff', fontWeight: 800 }}>Failed</TableCell>
                   <TableCell align="right" sx={{ color: '#fff', fontWeight: 800 }}>Skipped</TableCell>
@@ -252,7 +253,7 @@ export default function ExcelImportManager() {
               </TableHead>
               <TableBody>
                 {batches.length === 0 ? (
-                  <TableRow><TableCell colSpan={13} align="center" sx={{ py: 5 }}>
+                  <TableRow><TableCell colSpan={14} align="center" sx={{ py: 5 }}>
                     <Typography variant="body2" color="text.secondary">No import batches yet.</Typography>
                   </TableCell></TableRow>
                 ) : batches.map(b => (
@@ -271,6 +272,7 @@ export default function ExcelImportManager() {
                     <TableCell align="right" sx={{ fontWeight: 700 }}>{b.total_rows}</TableCell>
                     <TableCell align="right" sx={{ fontWeight: 800, color: 'success.main' }}>{b.imported_rows}</TableCell>
                     <TableCell align="right" sx={{ fontWeight: 700, color: 'info.main' }}>{b.updated_rows || 0}</TableCell>
+                    <TableCell align="right" sx={{ fontWeight: 700, color: 'secondary.main' }}>{b.merged_rows || 0}</TableCell>
                     <TableCell align="right" sx={{ fontWeight: 700, color: 'warning.main' }}>{b.duplicate_rows}</TableCell>
                     <TableCell align="right" sx={{ fontWeight: 700, color: 'error.main' }}>{b.failed_rows}</TableCell>
                     <TableCell align="right" sx={{ fontWeight: 700 }} title="Duplicates + failed rows, never imported">{b.skipped_rows ?? (b.duplicate_rows + b.failed_rows)}</TableCell>

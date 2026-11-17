@@ -32,6 +32,8 @@ class CommonConfig(AppConfig):
         hot_cache.connect_invalidation(
             'company.BusinessSettings', 'company.Branch', 'company.UserBranchAccess',
             'authentication.User', 'common.Tenant',
+            # Phase 2: membership / organization admin checks run on every request too.
+            'common.Organization', 'common.OrganizationAdmin', 'common.UserCompanyMembership',
         )
         from django.db.models.signals import post_migrate
         post_migrate.connect(ensure_default_tenant, sender=self, dispatch_uid='common:default_tenant')
@@ -41,3 +43,6 @@ class CommonConfig(AppConfig):
         tenant_context.install_drf_hook()
         from . import module_access
         module_access.install_api_gate()
+        # Windows local edition only (no-op on the cloud): one organization per installation.
+        from .edition import install_local_guards
+        install_local_guards()

@@ -98,6 +98,11 @@ export const getTheme = (mode) => {
           },
         },
       },
+      // Not a style: a tab bar wider than the window scrolls (with arrows) instead of clipping
+      // tabs that could then never be clicked. Bars that fit look exactly as before.
+      MuiTabs: {
+        defaultProps: { variant: 'scrollable', scrollButtons: 'auto' },
+      },
     },
   });
 };

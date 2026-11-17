@@ -28,6 +28,7 @@ import { needsBank } from '../utils/paymentModes';
 import { apiError, finGet } from '../components/financial/financialApi';
 import { notify } from '../utils/notify';
 import { formatCurrency, getCurrencySymbol, getCurrencyCode } from '../utils/localeFormat.js';
+import { XLSX_SCRIPT_URL } from '../utils/edition';
 
 const initialReceipts = [];
 const initialPayments = [];
@@ -349,7 +350,7 @@ export default function AccountsCOA() {
         return;
       }
       const script = document.createElement('script');
-      script.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+      script.src = XLSX_SCRIPT_URL;
       script.onload = () => resolve(window.XLSX);
       script.onerror = () => reject(new Error('Failed to load SheetJS XLSX library'));
       document.body.appendChild(script);
@@ -440,7 +441,7 @@ export default function AccountsCOA() {
   // Download Sample Excel Template for Payments
   const handleDownloadPaymentTemplate = () => {
     const csvContent = `Payment ID,Supplier Vendor Name,Payment Date,Payment Method,Payment Amount (${getCurrencyCode()}),Status\n` +
-      "PAY-GRN-5738,Greensol Optical,2026-07-29,Bank Transfer,50000.00,Completed\n" +
+      "PAY-GRN-5738,Sample Supplier,2026-07-29,Bank Transfer,50000.00,Completed\n" +
       "PAY-EX-1002,Luxottica India,2026-07-28,UPI,15500.00,Completed\n" +
       "PAY-EX-1003,Essilor Care,2026-07-27,Cheque,22000.00,Completed";
 

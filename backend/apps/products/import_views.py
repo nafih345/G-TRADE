@@ -1,6 +1,7 @@
 import bisect
 import csv
 import datetime
+import hashlib
 import threading
 import uuid
 
@@ -90,6 +91,7 @@ def _batch_summary(b):
         'processed_rows': b.processed_rows,
         'imported_rows': b.imported_rows,
         'updated_rows': b.updated_rows,
+        'merged_rows': b.merged_rows,
         'failed_rows': b.failed_rows,
         'duplicate_rows': b.duplicate_rows,
         'skipped_rows': (b.duplicate_rows or 0) + (b.failed_rows or 0),
@@ -100,6 +102,20 @@ def _batch_summary(b):
         'logs': b.logs or [],
         'column_headers': b.column_headers or [],
     }
+
+
+def _discard_unconfirmed(batch):
+    """Drops a preview nobody confirmed. Nothing of it reached Products, so nothing else changes."""
+    stored, storage = (batch.file.name, batch.file.storage) if batch.file else (None, None)
+    batch.delete()    # its preview, barcode and error rows go with it
+
+    def remove_upload():
+        try:
+            storage.delete(stored)
+        except Exception as e:
+            print("Import upload cleanup notice:", e)
+    if stored:
+        transaction.on_commit(remove_upload)
 
 
 @api_view(['POST'])
@@ -133,13 +149,33 @@ def start_import(request):
     file_obj.seek(0)
     if not file_bytes:
         return Response({'error': 'The selected file is empty.'}, status=status.HTTP_400_BAD_REQUEST)
+    file_hash = hashlib.sha256(file_bytes).hexdigest()
+
+    # One file, one import at a time: while it is being written, a second copy would only
+    # race it. An earlier upload of it still waiting for review is replaced by this one, so
+    # there is never a second, stale preview of the same file to confirm by mistake.
+    running = (ImportBatch.objects.filter(file_hash=file_hash, status__in=('PENDING', 'PROCESSING'), is_deleted=False)
+               .values_list('batch_number', flat=True).first())
+    if running:
+        return Response({'error': f'This file is already being imported ({running}). '
+                                  f'Wait for it to finish; its rows will then show as updates.'},
+                        status=status.HTTP_409_CONFLICT)
+
+    unconfirmed = ImportBatch.objects.filter(status__in=('ANALYZING', 'AWAITING_CONFIRMATION'))
+    stale = list(unconfirmed.filter(file_hash=file_hash).defer('file_data'))
+    # Previews uploaded before file_hash existed: compare their stored bytes instead.
+    stale += [b for b in unconfirmed.filter(file_hash='')
+              if b.file_data and hashlib.sha256(bytes(b.file_data)).hexdigest() == file_hash]
 
     try:
         with transaction.atomic():
+            for old in stale:
+                _discard_unconfirmed(old)
             batch = ImportBatch.objects.create(
                 batch_number=batch_num,
                 file=file_obj,
                 file_data=file_bytes,
+                file_hash=file_hash,
                 file_name=file_obj.name,
                 original_file_name=file_obj.name,
                 uploaded_by=uploaded_by,
@@ -228,7 +264,7 @@ def get_import_rows(request, pk):
 
 
 PREVIEW_KIND_FILTERS = {
-    'valid': ('NEW', 'UPDATE'), 'new': ('NEW',), 'update': ('UPDATE',),
+    'valid': ('NEW', 'UPDATE', 'MERGED'), 'new': ('NEW',), 'update': ('UPDATE',), 'merged': ('MERGED',),
     'duplicate': ('DUPLICATE',), 'error': ('ERROR',), 'skipped': ('DUPLICATE', 'ERROR'),
 }
 

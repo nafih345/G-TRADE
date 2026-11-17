@@ -12,6 +12,33 @@ def _all_modules():
     return list(PACKAGE_MODULES[FULL_SUITE])
 
 
+class Organization(models.Model):
+    """The paying customer / licence holder (Phase 2, decision D1: Company = Tenant + Organization).
+
+    An organization owns one or more companies. Each company is a `Tenant`: its own books,
+    masters, numbering, settings and isolation (apps/common/tenancy.py). The organization holds
+    no business data. It groups companies so that one user can be granted several of them
+    (UserCompanyMembership) and an organization admin can create companies and read the
+    consolidated summaries (apps/common/organizations.py).
+
+    Global (not tenant-owned): it is read before, and across, tenant scopes. Every query on it
+    filters explicitly by the caller's own organization."""
+    name = models.CharField(max_length=150)
+    code = models.SlugField(max_length=40, unique=True)
+    is_active = models.BooleanField(default=True)
+    # How many companies the organization may hold. Existing customers are migrated with 1, so
+    # nothing changes until the platform admin (or, later, the licence) raises it.
+    max_companies = models.PositiveSmallIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['id']
+
+    def __str__(self):
+        return f"{self.name} (org #{self.pk})"
+
+
 class Tenant(models.Model):
     """A client business. Every TenantOwnedModel row belongs to exactly one, and API requests
     only ever see their own tenant's rows (see apps/common/tenancy.py). Users are tied to a
@@ -52,6 +79,35 @@ class Tenant(models.Model):
     deactivated_at = models.DateTimeField(null=True, blank=True)
     deactivated_by = models.CharField(max_length=150, blank=True, default='')
 
+    # Phase 2: the organization (customer) this company belongs to. Nullable so code that predates
+    # Phase 2 can still create tenants; organizations.ensure_organization() gives such a tenant
+    # its own one-company organization the first time it is needed.
+    organization = models.ForeignKey(Organization, on_delete=models.PROTECT, null=True, blank=True,
+                                     related_name='companies')
+
+    # Client profile kept by the platform (who the customer is). The business's own identity —
+    # company name, registration and tax numbers, logo, currency — lives on company.Company.
+    owner_name = models.CharField(max_length=150, blank=True, default='')
+    country = models.CharField(max_length=2, blank=True, default='')  # ISO code (localization.COUNTRIES)
+    address = models.TextField(blank=True, default='')
+
+    # Subscription terms (no payment integration: the platform admin records what was agreed).
+    # Access ends after `subscription_expires_on` (the last usable day; a trial's end date for
+    # TRIAL). Null = no end date, which is how every client created before these fields behaves.
+    SUBSCRIPTION_PLANS = (
+        ('TRIAL', 'Trial'),
+        ('MONTHLY', 'Monthly'),
+        ('QUARTERLY', 'Quarterly'),
+        ('HALF_YEARLY', 'Half-yearly'),
+        ('ANNUAL', 'Annual'),
+        ('PERPETUAL', 'Perpetual (no expiry)'),
+    )
+    subscription_plan = models.CharField(max_length=20, choices=SUBSCRIPTION_PLANS, default='PERPETUAL')
+    subscription_starts_on = models.DateField(null=True, blank=True)
+    subscription_expires_on = models.DateField(null=True, blank=True)
+    # Branch limit: active branches the client may run. Null = no limit (clients created earlier).
+    max_branches = models.PositiveIntegerField(null=True, blank=True)
+
     class Meta:
         ordering = ['id']
 
@@ -60,18 +116,26 @@ class Tenant(models.Model):
 
     @staticmethod
     def active_q(today=None):
-        """Filter for tenants that may be used today: active and no deactivation already due."""
+        """Filter for tenants that may be used today: active, no deactivation already due and the
+        subscription not expired (the expiry date itself is still a usable day)."""
         from django.utils import timezone
         today = today or timezone.localdate()
         return (models.Q(is_active=True)
                 & (models.Q(deactivation_effective_date__isnull=True)
-                   | models.Q(deactivation_effective_date__gt=today)))
+                   | models.Q(deactivation_effective_date__gt=today))
+                & (models.Q(subscription_expires_on__isnull=True)
+                   | models.Q(subscription_expires_on__gte=today)))
+
+    @property
+    def is_subscription_expired(self):
+        from django.utils import timezone
+        return bool(self.subscription_expires_on and self.subscription_expires_on < timezone.localdate())
 
     @property
     def is_effectively_active(self):
         from django.utils import timezone
         due = self.deactivation_effective_date and self.deactivation_effective_date <= timezone.localdate()
-        return bool(self.is_active and not due)
+        return bool(self.is_active and not due and not self.is_subscription_expired)
 
 
 class TenantAuditLog(models.Model):
@@ -91,6 +155,69 @@ class TenantAuditLog(models.Model):
 
     def __str__(self):
         return f"{self.tenant_id} {self.action} @ {self.created_at:%Y-%m-%d}"
+
+
+class OrganizationAdmin(models.Model):
+    """A user who administers their organization: creates companies, grants company memberships,
+    copies master data between companies and reads the consolidated summaries.
+
+    Only a user whose home company (User.tenant) belongs to `organization` counts
+    (organizations.is_org_admin re-checks that on every use). Backfilled from each company's
+    existing owners (role SUPER_ADMIN) by migration common 0010."""
+    organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name='admins')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='organization_admin_rows')
+    granted_by = models.CharField(max_length=150, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['organization', 'user'], name='common_orgadmin_org_user_uniq')]
+
+    def __str__(self):
+        return f"{self.user_id} admin of org {self.organization_id}"
+
+
+class UserCompanyMembership(models.Model):
+    """Access for a user to a company (tenant) OTHER than their home company (User.tenant).
+
+    The home company needs no row: the user's own `role` applies there, as before Phase 2.
+    Here `role` is the user's role inside `company`, and branch access inside that company is
+    the company's own UserBranchAccess row (fail-closed when missing).
+
+    Rules (enforced in save(), the service layer and re-checked on every request):
+      * `company` belongs to the same organization as the user's home company;
+      * `company` is not the user's home company.
+    Global (not tenant-owned) for the same reason as Organization."""
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='company_memberships')
+    company = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name='memberships')
+    role = models.CharField(max_length=30)
+    is_active = models.BooleanField(default=True)
+    # Direct Edit switches for THIS company (Administration → Edit Permissions of `company`).
+    # The User.can_edit_* fields apply in the user's home company only, so one company's admin
+    # never decides whether a member may change saved records of another company.
+    # db_default keeps inserts from older code valid.
+    can_edit_eye_test = models.BooleanField(default=True, db_default=True)
+    can_edit_sales = models.BooleanField(default=True, db_default=True)
+    can_edit_wholesale = models.BooleanField(default=True, db_default=True)
+    can_edit_inventory = models.BooleanField(default=True, db_default=True)
+    can_edit_purchase = models.BooleanField(default=True, db_default=True)
+    can_edit_accounts = models.BooleanField(default=True, db_default=True)
+    created_by = models.CharField(max_length=150, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['company_id', 'user_id']
+        constraints = [models.UniqueConstraint(fields=['user', 'company'], name='common_membership_user_company_uniq')]
+
+    def __str__(self):
+        return f"{self.user_id} in {self.company_id} as {self.role}"
+
+    def save(self, *args, **kwargs):
+        from apps.common.organizations import MembershipError, membership_problem
+        problem = membership_problem(self.user, self.company)
+        if problem:
+            raise MembershipError(problem)
+        super().save(*args, **kwargs)
 
 
 class TenantOwnedModel(models.Model):

@@ -16,10 +16,12 @@ effective_access(user) folds both into {module: level}; the profile API sends it
 (sidebar + route guard) and check_api_access() enforces it on every API write: a POST / PUT /
 PATCH / DELETE under a module's endpoints needs 'full' on one of the modules that write there
 (WRITE_RULES — several modules share some endpoints, e.g. Purchase Entry creates products).
-Reads stay open so one screen can still show another module's data it depends on (New Sale
-reads products, vouchers read bills); the UI hides modules the user cannot open. The books are
-the exception (READ_RULES): Accounts and Financial share one ledger engine under /api/financial/,
-so the endpoints behind each tier's screens refuse reads too for a client without that tier.
+Reads are checked against the tenant's subscription only (READ_RULES): a module the client does
+not have refuses reads of the endpoints it owns (appointments and eye tests, wholesale, purchase,
+each accounting tier's screens), unless another module the client has reads there too (New Sale
+reads eye tests, vouchers read purchase bills). A role whose level is 'none' on every module that
+reads an endpoint is refused too ('view' reads), so a cashier cannot pull the ledger or purchase
+costs through the API; the UI hides modules the user cannot open.
 
 The catalog (modules, packages, roles, defaults) is served to the console from here, so the
 browser never keeps its own copy of these rules.
@@ -190,9 +192,29 @@ WRITE_RULES = sorted((
     ('/api/backups/', ('settings',)),
 ), key=lambda r: -len(r[0]))
 
-# Reads the tenant's subscription must cover (the role's level is not checked on reads). Bank
-# accounts / Bank Master stay readable by every screen that takes bank payments (None = open).
+# Reads the tenant's subscription AND the user's role must cover (a role at 'none' on every
+# reader module is refused; 'view' reads): a module
+# switched off in Client Management can't be read through a typed URL or a direct API call
+# either. Each entry lists every module whose screens legitimately read there — a client with
+# none of them gets 403 `module_disabled`. The books (Accounts / Financial) read other modules'
+# bills and parties for vouchers, settlement and "show bill". Shared masters (products,
+# categories, brands, stock, customers, sales invoices) are not listed: every package's core
+# modules (Reports, Settings → barcode labels / bill designer, Administration → import) read them.
+# Bank accounts / Bank Master stay readable by every screen that takes bank payments (None = open).
 READ_RULES = sorted((
+    # Shared sales records: every module whose screens show them (New Sale / Orders, patient
+    # history, reports, bill-designer previews, vouchers / outstanding / show-bill).
+    ('/api/sales/customers/', ('sales', 'optical', 'wholesale', 'reports') + BOOKS),
+    ('/api/sales/invoices/', ('sales', 'optical', 'reports', 'settings') + BOOKS),
+    ('/api/sales/payments/', ('sales', 'optical', 'reports', 'settings') + BOOKS),
+    ('/api/sales/returns/', ('sales', 'reports', 'settings') + BOOKS),
+    ('/api/sales/services/', ('sales', 'wholesale', 'admin')),
+    ('/api/sales/appointments/', ('optical',)),
+    ('/api/sales/eye-examinations/', ('optical', 'sales', 'reports')),
+    ('/api/sales/wholesale/', ('wholesale',) + BOOKS),
+    ('/api/purchase/suppliers/', ('purchase', 'inventory', 'sales') + BOOKS),
+    ('/api/purchase/lens-orders/', ('purchase', 'sales')),
+    ('/api/purchase/', ('purchase',) + BOOKS),
     ('/api/financial/banks/', None),
     ('/api/financial/bank-accounts/', None),
     *((prefix, ('financial',)) for prefix in FINANCIAL_ONLY_PREFIXES),
@@ -331,9 +353,10 @@ def subscribed_modules(tenant):
     """A tenant row's modules. The platform account has every module — both accounting tiers —
     whatever is stored, so the Super Admin can cross-check Accounts and Financial side by side."""
     from apps.common import tenancy
+    from apps.common.edition import licensed_modules
     if tenant.pk == tenancy.DEFAULT_TENANT_ID:
-        return list(MODULE_KEYS)
-    return list(tenant.modules or [])
+        return licensed_modules(list(MODULE_KEYS))
+    return licensed_modules(list(tenant.modules or []))
 
 
 def tenant_access_config(tenant_id):
@@ -346,7 +369,13 @@ def tenant_access_config(tenant_id):
         if row is None:
             return {'modules': [], 'role_permissions': {}, 'settings_features': []}
         platform = tenant_id == tenancy.DEFAULT_TENANT_ID
-        return {'modules': list(MODULE_KEYS) if platform else list(row['modules'] or []),
+        from apps.common.edition import is_local, licensed_modules
+        modules = list(MODULE_KEYS) if platform else list(row['modules'] or [])
+        if is_local():
+            # Windows edition: tenant #1 is the customer's own company, not a platform account, and
+            # the licence's module list wins (licence AND company modules).
+            modules = licensed_modules(modules)
+        return {'modules': modules,
                 'role_permissions': dict(row['role_permissions'] or {}),
                 'settings_features': None if platform else row['settings_features']}
 
@@ -357,7 +386,10 @@ def effective_access(user, config=None):
     """{module: 'full'|'view'|'none'} for a signed-in user."""
     from apps.common.permissions import is_platform_admin
     if is_platform_admin(user):
-        return {m: FULL for m in MODULE_KEYS}
+        # Windows edition: even the Local Super Admin only gets the modules the licence covers.
+        from apps.common.edition import licensed_modules
+        allowed = set(licensed_modules(list(MODULE_KEYS)))
+        return {m: (FULL if m in allowed else NONE) for m in MODULE_KEYS}
     if config is None:
         from apps.common.permissions import request_tenant_id
         tenant_id = request_tenant_id(user)
@@ -385,21 +417,31 @@ def _read_rule_for(path):
 
 
 def _check_read(request):
-    """Refuse a read of an accounting tier's endpoints the tenant isn't subscribed to."""
+    """Refuse a read of a module-owned endpoint (READ_RULES) when the tenant has none of the
+    modules that read there (403 module_disabled), or when the signed-in user's role has level
+    'none' on every one of them (403 module_forbidden). 'view' is enough to read."""
     readers = _read_rule_for(request.path)
     if not readers:
         return
     from apps.common import tenancy
     from apps.common.permissions import is_platform_admin
     tenant_id = tenancy.current_tenant_id()
-    if tenant_id is None or is_platform_admin(getattr(request, 'user', None)):
+    user = getattr(request, 'user', None)
+    if tenant_id is None or is_platform_admin(user):
         return
-    if any(m in tenant_access_config(tenant_id)['modules'] for m in readers):
-        return
+    config = tenant_access_config(tenant_id)
     names = ' / '.join(MODULE_LABELS[m] for m in readers)
+    if not any(m in config['modules'] for m in readers):
+        raise exceptions.PermissionDenied({
+            'detail': f'{names} is not part of this business’s plan. Ask the platform administrator to enable it.',
+            'code': 'module_disabled'})
+    if user is None or not user.is_authenticated:
+        return  # no identity: the subscription alone (token-less requests see no rows anyway)
+    access = effective_access(user, config)
+    if any(access.get(m, NONE) != NONE for m in readers):
+        return
     raise exceptions.PermissionDenied({
-        'detail': f'{names} is not part of this business’s plan. Ask the platform administrator to enable it.',
-        'code': 'module_disabled'})
+        'detail': f'Your role has no access to {names}.', 'code': 'module_forbidden'})
 
 
 def check_api_access(request):

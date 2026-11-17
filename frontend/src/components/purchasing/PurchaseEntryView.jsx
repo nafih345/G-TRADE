@@ -269,6 +269,8 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
   const [poRef, setPoRef] = useState('');
   const [returnRef, setReturnRef] = useState('');
   const [attachment, setAttachment] = useState(null);
+  // The saved entry's attachment (P1 Task 2): opened through a 60-second signed link, never /media/.
+  const [savedAttachment, setSavedAttachment] = useState(null);
   const [duplicateWarning, setDuplicateWarning] = useState(null);
 
   const [warehouses, setWarehouses] = useState([]);
@@ -649,6 +651,7 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
       if (cancelled) return;
       const inv = res.data || {};
       setEditingId(inv.id || editInvoiceId);
+      setSavedAttachment(inv.has_attachment ? { id: inv.id, name: inv.attachment_name || 'Attachment' } : null);
       setLabelInvoiceId(inv.id || editInvoiceId);
       setEditingLabel(inv.invoice_number || '');
       setInvoiceNumber(inv.invoice_number || genInvoiceNumber());
@@ -862,6 +865,7 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
   // --- Reset form ---
   const resetForm = () => {
     setEditingId('');
+    setSavedAttachment(null);
     setEditingLabel('');
     setInvoiceNumber(genInvoiceNumber());
     setSupplierInvoiceNumber('');
@@ -1309,12 +1313,12 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
           </Grid>
 
           <Grid item xs={6} sm={3} md={1.5}>
-            <TextField select fullWidth size="small" label="Warehouse" value={warehouses.some(w => String(w.id) === effectiveWarehouseId) ? effectiveWarehouseId : ''} onChange={(e) => setWarehouseId(e.target.value)} SelectProps={{ ...enterOpensSelectProps }}>
+            <TextField select fullWidth size="small" label="Warehouse" InputLabelProps={{ shrink: true }} value={warehouses.some(w => String(w.id) === effectiveWarehouseId) ? effectiveWarehouseId : ''} onChange={(e) => setWarehouseId(e.target.value)} SelectProps={{ ...enterOpensSelectProps }}>
               {warehouses.map(w => <MenuItem key={w.id} value={String(w.id)}>{w.name}</MenuItem>)}
             </TextField>
           </Grid>
           <Grid item xs={6} sm={3} md={1.5}>
-            <TextField select fullWidth size="small" label="Branch" value={branches.some(b => String(b.id) === effectiveBranchId) ? effectiveBranchId : ''} onChange={(e) => { setBranchId(e.target.value); setWarehouseId(''); }} SelectProps={{ ...enterOpensSelectProps }}>
+            <TextField select fullWidth size="small" label="Branch" InputLabelProps={{ shrink: true }} value={branches.some(b => String(b.id) === effectiveBranchId) ? effectiveBranchId : ''} onChange={(e) => { setBranchId(e.target.value); setWarehouseId(''); }} SelectProps={{ ...enterOpensSelectProps }}>
               {branches.map(b => <MenuItem key={b.id} value={String(b.id)}>{b.name}{b.is_default ? ' (Main)' : ''}</MenuItem>)}
             </TextField>
           </Grid>
@@ -1370,8 +1374,22 @@ export default function PurchaseEntryView({ suppliers = [], suppliersLoading = f
           <Grid item xs={12} sm={6} md={3}>
             <Button component="label" variant="outlined" size="small" startIcon={<AttachFileIcon />} sx={{ height: 40, textTransform: 'none' }}>
               {attachment ? attachment.name.slice(0, 22) : 'Attach Invoice (PDF/Image)'}
-              <input type="file" hidden accept=".pdf,image/*" onChange={(e) => setAttachment(e.target.files?.[0] || null)} />
+              <input type="file" hidden accept=".pdf,.png,.jpg,.jpeg,.webp" onChange={(e) => setAttachment(e.target.files?.[0] || null)} />
             </Button>
+            {savedAttachment && !attachment && (
+              <Button size="small" sx={{ ml: 1, height: 40, textTransform: 'none' }}
+                onClick={async () => {
+                  try {
+                    const { data } = await axios.get(`/api/purchase/invoices/${savedAttachment.id}/attachment-link/`);
+                    const base = (axios.defaults.baseURL || '').replace(/\/$/, '');
+                    window.open(`${base}${data.url}`, '_blank', 'noopener');
+                  } catch (e) {
+                    notify('The attachment could not be opened.', 'error');
+                  }
+                }}>
+                View {savedAttachment.name.slice(0, 18)}
+              </Button>
+            )}
           </Grid>
         </Grid>
       </Card>

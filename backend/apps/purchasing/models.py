@@ -1,5 +1,6 @@
 from decimal import Decimal
 from django.db import models
+from apps.common.media_paths import purchase_attachment_path
 from django.db.models.functions import Lower
 from apps.common.models import BaseUUIDModel, TenantOwnedModel
 
@@ -176,7 +177,12 @@ class PurchaseInvoice(BaseUUIDModel):
     PAYMENT_STATUS_CHOICES = [('PAID', 'Paid'), ('UNPAID', 'Unpaid')]
     payment_status = models.CharField(max_length=10, choices=PAYMENT_STATUS_CHOICES, blank=True, default='')
 
-    attachment = models.FileField(upload_to='purchase_attachments/', blank=True, null=True)
+    # Supplier bill scan. Stored privately (P1 Task 2): private/t<tenant>/purchase_attachments/<uuid><ext>,
+    # downloaded only via /api/purchase/invoices/<id>/attachment/ (+ signed link). The user's file
+    # name is kept in attachment_name, never in the path.
+    attachment = models.FileField(upload_to=purchase_attachment_path, blank=True, null=True)
+    # db_default (P1 N2): keeps a DEFAULT in PostgreSQL so pre-P1 code can still INSERT.
+    attachment_name = models.CharField(max_length=255, blank=True, default='', db_default='')
 
     class Meta:
         constraints = [

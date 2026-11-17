@@ -32,9 +32,11 @@ WATCHED = [
     ('products.Product', ('products.opening_stock',), None,
      lambda p: (p.opening_stock or 0) > 0 and p.stock_source != 'OPENING_STOCK'),
     ('inventory.OpeningStockBatch', ('inventory.opening_stock',), None),
+    # P1 Task 7: each applied transfer step (dispatch / receive / return) books once.
+    ('company.StockTransferEvent', ('inventory.branch_transfer',), None),
 ]
 
-SAVE_ONLY = {'products.Product', 'inventory.OpeningStockBatch'}
+SAVE_ONLY = {'products.Product', 'inventory.OpeningStockBatch', 'company.StockTransferEvent'}
 
 
 def _make_receiver(source_keys, parent_attr, wanted=None):

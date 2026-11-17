@@ -31,8 +31,13 @@ def request_tenant_id(user):
     sign-in payload."""
     own = getattr(user, 'tenant_id', None)
     current = tenancy.current_tenant_id()
-    if current is not None and current != own and is_platform_owner(user):
-        return current
+    if current is not None and current != own:
+        if is_platform_owner(user):
+            return current
+        # Phase 2: the authenticated company-member copy of the user (organizations.company_user),
+        # made only after the membership was verified for this very company.
+        if getattr(user, '_company_tenant_id', None) == current:
+            return current
     return own
 
 

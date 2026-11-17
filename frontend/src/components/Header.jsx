@@ -20,19 +20,30 @@ import {
   CheckCircle as SuccessIcon,
   DoneAll as MarkReadIcon,
   DeleteSweep as ClearIcon,
-  ChevronRight as ChevronRightIcon
+  ChevronRight as ChevronRightIcon,
+  FormatSize as InterfaceSizeIcon,
+  Check as CheckIcon,
+  RestartAlt as ResetIcon
 } from '@mui/icons-material';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
 import { useBranch } from '../context/BranchContext';
+import CompanySwitcher from './CompanySwitcher';
+import useUiScale from '../hooks/useUiScale';
+import { formatScale, scaleMenuItems } from '../utils/uiScale';
 
 export default function Header({ toggleTheme, mode, onMenuClick }) {
   const { user, logout } = useAuth();
-  const { multiBranchEnabled, branches, activeBranch, setActiveBranch } = useBranch();
+  const { multiBranchEnabled, branches, activeBranch, setActiveBranch, noBranchAccess } = useBranch();
   const navigate = useNavigate();
 
   // User Profile Menu Anchor
   const [profileAnchorEl, setProfileAnchorEl] = useState(null);
+
+  // Interface size (desktop app only): 75 / 80 / 90 / 100 %, applied and remembered by the shell
+  const uiScale = useUiScale();
+  const [scaleAnchorEl, setScaleAnchorEl] = useState(null);
+  const chooseScale = (scale) => { setScaleAnchorEl(null); uiScale.setScale(scale); };
 
   // Notifications Menu Popover Anchor
   const [notifAnchorEl, setNotifAnchorEl] = useState(null);
@@ -150,10 +161,24 @@ export default function Header({ toggleTheme, mode, onMenuClick }) {
 
         {/* Right side controls */}
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-          
+
+          {/* 🏢 COMPANY (Phase 2) — the company this session acts in; a switcher when the user
+              works in several companies. Branches below belong to this company. */}
+          <CompanySwitcher mode={mode} />
+
           {/* 📌 BRANCH — the branch this session is bound to. A switcher only when Multi-Branch
               Mode is ON and the user has more than one branch (spec section 4); otherwise a
               fixed label, so staff see their assigned branch without selecting it. */}
+          {multiBranchEnabled && noBranchAccess && (
+            <Tooltip title="Multi-Branch Mode is on and no branch is assigned to your account. Ask an administrator to assign one.">
+              <Box data-testid="header-no-branch" sx={{ display: 'flex', alignItems: 'center', gap: 1, bgcolor: mode === 'dark' ? 'rgba(239,68,68,0.15)' : '#fee2e2', px: 1.5, py: 0.75, borderRadius: 2.5 }}>
+                <BranchIcon sx={{ color: 'error.main', fontSize: 18 }} />
+                <Typography sx={{ fontSize: '0.875rem', fontWeight: 800, color: 'error.main' }} noWrap>
+                  No branch assigned
+                </Typography>
+              </Box>
+            </Tooltip>
+          )}
           {!(multiBranchEnabled && branches.length > 1) && activeBranch && (
             <Tooltip title="Your branch for this session">
               <Box data-testid="header-branch" sx={{ display: { xs: 'none', md: 'flex' }, alignItems: 'center', gap: 1, bgcolor: mode === 'dark' ? 'rgba(255,255,255,0.04)' : '#f1f5f9', px: 1.5, py: 0.75, borderRadius: 2.5 }}>
@@ -194,9 +219,39 @@ export default function Header({ toggleTheme, mode, onMenuClick }) {
             </Box>
           )}
 
+          {/* Interface size: desktop app only (the shell zooms the whole window; prints unaffected) */}
+          {uiScale.supported && (
+            <>
+              <Tooltip title={`Interface size: ${formatScale(uiScale.scale)}`}>
+                <IconButton onClick={(e) => setScaleAnchorEl(e.currentTarget)} color="inherit"
+                  aria-label="Interface size" aria-haspopup="menu" data-testid="header-ui-scale">
+                  <InterfaceSizeIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+              <Menu anchorEl={scaleAnchorEl} open={Boolean(scaleAnchorEl)} onClose={() => setScaleAnchorEl(null)}
+                anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }} transformOrigin={{ vertical: 'top', horizontal: 'right' }}>
+                <Typography variant="caption" sx={{ px: 2, py: 0.5, display: 'block', color: 'text.secondary', fontWeight: 700 }}>
+                  Interface size
+                </Typography>
+                {scaleMenuItems(uiScale.scale, uiScale.options, uiScale.defaultScale).map((row) => (
+                  <MenuItem key={row.scale} selected={row.selected} onClick={() => chooseScale(row.scale)}
+                    data-testid={`ui-scale-${Math.round(row.scale * 100)}`}>
+                    <ListItemIcon>{row.selected ? <CheckIcon fontSize="small" /> : null}</ListItemIcon>
+                    <ListItemText>{row.label}</ListItemText>
+                  </MenuItem>
+                ))}
+                <Divider />
+                <MenuItem onClick={() => chooseScale(uiScale.defaultScale)} data-testid="ui-scale-reset">
+                  <ListItemIcon><ResetIcon fontSize="small" /></ListItemIcon>
+                  <ListItemText>Reset to default ({formatScale(uiScale.defaultScale)})</ListItemText>
+                </MenuItem>
+              </Menu>
+            </>
+          )}
+
           {/* Theme Toggle Button */}
           <Tooltip title={mode === 'dark' ? "Switch to Light Mode" : "Switch to Dark Mode"}>
-            <IconButton onClick={toggleTheme} color="inherit">
+            <IconButton onClick={toggleTheme} color="inherit" aria-label={mode === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}>
               {mode === 'dark' ? <LightModeIcon sx={{ fontSize: 22 }} /> : <DarkModeIcon sx={{ fontSize: 22 }} />}
             </IconButton>
           </Tooltip>
