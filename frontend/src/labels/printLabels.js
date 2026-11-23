@@ -1,11 +1,15 @@
 // Barcode label designer — print job assembly. Turns (template + products + quantities)
 // into a print document that preserves physical size:
-//   Thermal roll: every label is its own @page of exactly W × (H + gap) mm.
-//   A4 sheet:     210 × 297 mm pages with the template's grid (margins / gaps / start cell).
+// The template's Print Layout Mode (labelModel.printMode) picks the path:
+//   'roll'  Single Sticker / Thermal Roll: every label is its own @page of exactly
+//           W × (H + gap) mm, page break after each sticker.
+//   'sheet' Multi-Label Sheet (A4 Grid): A4 portrait pages, labels chunked by sheet
+//           capacity into a CSS grid (rows × cols, margins / gaps, part-used start cells);
+//           page break only after each full sheet container — never per label.
 // Printer calibration (offset, scale) moves / scales the print, never the design.
 import axios from 'axios';
 import { renderLabelHtml, labelCss, hasUsableLogo, escapeHtml } from './renderLabel.js';
-import { num, r2, sheetUsage } from './labelModel.js';
+import { num, r2, printsAsSheet, sheetFor, sheetGrid, withPrintMode } from './labelModel.js';
 import { UUID_RE } from './labelApi.js';
 
 const mm = (n) => `${r2(n)}mm`;
@@ -31,7 +35,8 @@ export function openPrintWindow(title, css, bodyHtml, { autoPrint = true } = {})
   const shownTitle = autoPrint ? BLANK_TITLE : title;
   w.document.open();
   w.document.write(
-    `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(shownTitle)}</title>` +
+    // gtrade-print-kind: lets the desktop app's print preview start on the label printer.
+    `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="gtrade-print-kind" content="label"><title>${escapeHtml(shownTitle)}</title>` +
     `<style>${css}</style></head><body>${bodyHtml}</body></html>`
   );
   w.document.close();
@@ -65,7 +70,7 @@ function thermalCss(template, cal) {
 }
 
 function a4Css(template, cal) {
-  const s = template.layout?.sheet || {};
+  const s = sheetFor(template);
   return `
     @page { size: A4 portrait; margin: 0 !important; }
     html, body { margin: 0 !important; padding: 0 !important; background: #fff; }
@@ -84,23 +89,30 @@ function a4Css(template, cal) {
   `;
 }
 
+// Splits cells into pages of `per`.
+function paginate(cells, per) {
+  const pages = [];
+  for (let i = 0; i < cells.length; i += per) pages.push(cells.slice(i, i + per).join(''));
+  return pages;
+}
+
 export function buildPrintDocument(template, labelHtmls, { settings, logo = '', startSkip = 0 } = {}) {
   const cal = resolveCalibration(settings);
   const css = labelCss({ logo });
-  if (template.printer_type !== 'a4') {
-    const body = labelHtmls.map((h) => `<div class="gl-page"><div class="gl-shift">${h}</div></div>`).join('');
+  if (!printsAsSheet(template)) {
+    // Part used roll / strip: blank pages feed past the labels that are already used.
+    const blanks = Array(Math.max(0, startSkip)).fill('<div class="gl-page"></div>');
+    const body = blanks.concat(labelHtmls.map((h) => `<div class="gl-page"><div class="gl-shift">${h}</div></div>`)).join('');
     return { css: css + thermalCss(template, cal), body };
   }
-  const per = sheetUsage(template).perSheet || 1;
+  // A4 grid: used cells of a part-used sheet stay blank, then labels fill cell by cell.
+  const per = sheetGrid(template)?.perSheet || 1;
   const cells = [
     ...Array(Math.max(0, startSkip)).fill('<div class="gl-cell"></div>'),
     ...labelHtmls.map((h) => `<div class="gl-cell">${h}</div>`),
   ];
-  const sheets = [];
-  for (let i = 0; i < cells.length; i += per) {
-    sheets.push(`<div class="gl-sheet"><div class="gl-grid">${cells.slice(i, i + per).join('')}</div></div>`);
-  }
-  return { css: css + a4Css(template, cal), body: sheets.join('') };
+  const body = paginate(cells, per).map((p) => `<div class="gl-sheet"><div class="gl-grid">${p}</div></div>`).join('');
+  return { css: css + a4Css(template, cal), body };
 }
 
 // A typed override must still scan back to this product at billing — register it first
@@ -118,9 +130,11 @@ async function registerOverride(product, code) {
 
 // rows: [{ product, qty, data: { fields }, job: { batch_no, expiry_date } }]
 // -> { printed, failed: [{ name, reason }], error? }
-export async function printLabelJob({ template, rows, settings = {}, store = {}, logo = '', job = {}, manualBarcode = '', startSkip = 0 }) {
+export async function printLabelJob({ template, rows, settings = {}, store = {}, logo = '', job = {}, manualBarcode = '', startSkip = 0, printMode }) {
+  template = withPrintMode(template, printMode);
   const cal = resolveCalibration(settings);
-  const ctx = { dpi: template.printer_type === 'a4' ? 0 : cal.dpi, hasLogo: hasUsableLogo(logo) };
+  // Bars snap to thermal printer dots only when printing to the label printer.
+  const ctx = { dpi: printsAsSheet(template) ? 0 : cal.dpi, hasLogo: hasUsableLogo(logo) };
   const active = rows.filter((r) => !r.skipReason && (parseInt(r.qty, 10) || 0) > 0);
   const failed = [];
   const html = [];
@@ -154,7 +168,7 @@ export async function printLabelJob({ template, rows, settings = {}, store = {},
   }
 
   if (!html.length) return { printed: 0, failed, error: failed[0]?.reason || 'Nothing to print.' };
-  const doc = buildPrintDocument(template, html, { settings, logo, startSkip: template.printer_type === 'a4' ? startSkip : 0 });
+  const doc = buildPrintDocument(template, html, { settings, logo, startSkip });
   if (!openPrintWindow(`Barcode Labels — ${template.name || ''}`, doc.css, doc.body)) {
     return { printed: 0, failed, error: 'Pop-up blocked — allow pop-ups for this site to print labels.' };
   }
@@ -176,12 +190,12 @@ export function printCalibration(template, settings = {}) {
     `<div style="position:absolute;left:${mm(W / 2 - 3)};top:${mm(H / 2)};width:6mm;height:0.2mm;background:#000"></div>` +
     `<div style="position:absolute;top:${mm(H / 2 - 3)};left:${mm(W / 2)};height:6mm;width:0.2mm;background:#000"></div>` +
     `<div style="position:absolute;left:0;right:0;bottom:${mm(Math.min(2, H * 0.08))};text-align:center;font:600 ${Math.max(4, Math.min(7, H / 4))}pt Arial">${r2(W)} × ${r2(H)} mm</div></div>`;
-  if (template.printer_type !== 'a4') {
+  if (!printsAsSheet(template)) {
     const doc = buildPrintDocument(template, [label], { settings });
     return openPrintWindow('Label calibration', doc.css, doc.body);
   }
-  const per = sheetUsage(template).perSheet;
-  const s = template.layout?.sheet || {};
+  const per = sheetGrid(template).perSheet;
+  const s = sheetFor(template);
   const cells = Array.from({ length: per }, (_, i) => `<div class="gl-cell gl-cell--outline"><div class="gl-cellno">R${Math.floor(i / s.cols) + 1} C${(i % s.cols) + 1}</div></div>`);
   const css = labelCss() + a4Css(template, cal);
   return openPrintWindow('A4 sheet calibration', css, `<div class="gl-sheet"><div class="gl-grid">${cells.join('')}</div></div>`);

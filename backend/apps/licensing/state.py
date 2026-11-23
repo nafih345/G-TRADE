@@ -9,8 +9,14 @@ Statuses (``read_only`` decides whether writes are refused):
 | EVALUATION        | no licence yet, within 30 days of installation                  | no        |
 | EVALUATION_ENDED  | no licence, evaluation over                                     | yes       |
 | EXPIRED           | past valid_until + grace_days                                   | yes       |
-| REVOKED           | vendor revoked it (after a 7-day notice)                        | yes (after notice) |
+| REVOKED           | vendor revoked it (CRL: after a 7-day notice; signed licence    | yes (after notice) |
+|                   | with status REVOKED: immediately)                               |           |
+| SUSPENDED         | vendor suspended it (signed licence with status SUSPENDED)      | yes       |
 | INVALID           | bad signature, unknown key, other installation, replayed        | yes       |
+
+Licence payload v2 (issued by the vendor console, apps/vendor_licensing/tokens.py) adds the plan,
+the client identity, start / expiry dates, lifetime, an explicit `unlimited` list and a vendor
+`status`; v1 licences (licensing_service) keep working exactly as before.
 
 Read-only never hides data: reads, reports, exports, backups and licence activation keep working.
 The clock-rollback guard evaluates every date against max(now, highest time ever seen).
@@ -58,6 +64,21 @@ class Verdict:
     development: bool = False
     clock_tamper: bool = False
     warnings: list = field(default_factory=list)
+    # v2 licences (vendor console)
+    v2: bool = False
+    licence_status: str = ''
+    plan: dict | None = None
+    client: dict | None = None
+    lifetime: bool = False
+    starts_on: str | None = None
+    expires_on: str | None = None
+    binding: str = ''
+    revision: int = 0
+    unlimited: list = field(default_factory=list)
+    settings_features: list | None = None
+    tier: str = ''
+    # The vendor's own installation (signed PLATFORM_OWNER licence): permanent, unlimited, all modules.
+    platform_owner: bool = False
 
     def as_dict(self):
         return asdict(self)
@@ -74,14 +95,32 @@ def install_id() -> str:
     return getattr(settings, 'GTRADE_INSTALL_ID', '') or ''
 
 
-def verify_blob(blob: str) -> dict:
-    """Signature + binding checks that do not depend on time. Raises LicenseFormatError."""
-    payload = licfmt.verify(blob, licfmt.LICENSE_PREFIX, keys.trusted_keys())
-    if payload.get('install_id') != install_id():
-        raise licfmt.LicenseFormatError('this licence was issued for another installation')
+CLOUD_EDITION = 'CLOUD'
+PRODUCT = 'G-OPTICALS'
+
+
+def verify_signature(blob: str) -> dict:
+    """Signature, product and edition checks only (no installation binding). Raises LicenseFormatError."""
+    payload = licfmt.verify(licfmt.normalize_key(blob), licfmt.LICENSE_PREFIX, keys.trusted_keys())
     for required in ('lic_id', 'edition', 'limits', 'issued_at'):
         if required not in payload:
             raise licfmt.LicenseFormatError(f'licence is missing {required!r}')
+    if int(payload.get('v') or 1) >= 2 and payload.get('product') != PRODUCT:
+        raise licfmt.LicenseFormatError('this licence is for another product')
+    if payload.get('edition') == CLOUD_EDITION:
+        raise licfmt.LicenseFormatError('this is a Cloud Edition licence; it cannot activate a Windows installation')
+    return payload
+
+
+def verify_blob(blob: str) -> dict:
+    """Signature + binding checks that do not depend on time. Raises LicenseFormatError."""
+    payload = verify_signature(blob)
+    if payload.get('install_id') != install_id():
+        if not payload.get('install_id'):
+            raise licfmt.LicenseFormatError('this licence key is not bound to an installation yet; it must be '
+                                            'activated online once')
+        raise licfmt.LicenseFormatError(f'this licence is bound to another installation '
+                                        f'({str(payload.get("install_id"))[:8]}...), not this one ({install_id()[:8]}...)')
     return payload
 
 
@@ -117,6 +156,22 @@ def evaluate(now: dt.datetime | None = None, *, persist: bool = True) -> Verdict
                 modules=list(p['modules']) if p.get('modules') is not None else None,
                 valid_until=p.get('valid_until'), updates_until=p.get('updates_until'),
                 development=keys.is_dev_key(p.get('key_id')), clock_tamper=clock_tamper)
+    v.v2 = int(p.get('v') or 1) >= 2
+    if v.v2:
+        v.licence_status = str(p.get('status') or 'ACTIVE')
+        v.plan = dict(p.get('plan') or {}) or None
+        v.client = dict(p.get('client') or {}) or None
+        v.lifetime = bool(p.get('lifetime'))
+        v.starts_on, v.expires_on = p.get('starts_on'), p.get('expires_on')
+        v.binding, v.revision = str(p.get('binding') or ''), int(p.get('rev') or 0)
+        v.unlimited = [str(x) for x in (p.get('unlimited') or [])]
+        v.settings_features = list(p['settings_features']) if p.get('settings_features') is not None else None
+        v.tier = str(p.get('tier') or '')
+        v.platform_owner = (p.get('role') == 'PLATFORM_OWNER' and v.binding == 'INSTALLATION' and v.lifetime
+                            and not p.get('valid_until'))
+        if p.get('role') and not v.platform_owner:
+            v.status, v.read_only, v.message = 'INVALID', True, 'The installed licence has an unknown role.'
+            return v
     if v.development:
         v.warnings.append('Development licence: not valid for commercial use.')
     if clock_tamper:
@@ -126,6 +181,23 @@ def evaluate(now: dt.datetime | None = None, *, persist: bool = True) -> Verdict
     if state.max_issued_at and issued and issued < state.max_issued_at - dt.timedelta(seconds=1):
         v.status, v.read_only, v.message = 'INVALID', True, 'An older licence was installed after a newer one; import the latest licence.'
         return v
+
+    # Vendor status (signed into the licence itself, so it applies at once, offline included).
+    if v.v2 and v.licence_status in ('SUSPENDED', 'REVOKED'):
+        reason = str(p.get('status_reason') or '').strip()
+        what = 'suspended' if v.licence_status == 'SUSPENDED' else 'revoked'
+        v.status, v.read_only = v.licence_status, True
+        v.message = (f'Licence {v.lic_id} was {what} by your vendor' + (f': {reason}' if reason else '') + '. '
+                     'Your data is safe and can be viewed, printed and backed up; contact your vendor.')
+        return v
+    if v.v2 and v.starts_on:
+        try:
+            if dt.date.fromisoformat(v.starts_on) > (eff_now + dt.timedelta(days=1)).date():
+                v.status, v.read_only = 'INVALID', True
+                v.message = f'Licence {v.lic_id} starts on {v.starts_on}. Check the computer date.'
+                return v
+        except ValueError:
+            pass
 
     grace_days = int(p.get('grace_days') or 0)
     problems = []  # (deadline, message)
@@ -166,6 +238,8 @@ def evaluate(now: dt.datetime | None = None, *, persist: bool = True) -> Verdict
                              'The licence has not been confirmed online for too long. Connect to the internet and '
                              'use "Check now", or import a renewal file.'))
 
+    if v.platform_owner and not problems:
+        v.message = 'Permanent platform-owner licence: unlimited, every module, never expires.'
     if problems:
         deadline, message = min(problems, key=lambda x: x[0])
         v.grace_until = deadline.isoformat()
@@ -186,6 +260,13 @@ def current(force=False) -> Verdict:
         if not force and _cached and time.monotonic() - _cached[0] < CACHE_SECONDS:
             return _cached[1]
     verdict = evaluate()
+    # The vendor's own installation (holds the trusted vendor signing key) is always the permanent
+    # platform owner: issue / refresh its signed owner licence instead of reporting an evaluation.
+    # A customer installation has no such key, so its verdict is never changed here (owner.py).
+    from . import owner
+    issued = owner.ensure(verdict)
+    if issued is not None:
+        return issued  # install_blob already cached the fresh verdict
     with _lock:
         _cached = (time.monotonic(), verdict)
     return verdict
@@ -195,6 +276,11 @@ def invalidate():
     global _cached
     with _lock:
         _cached = None
+    try:
+        from apps.common import hot_cache
+        hot_cache.clear()  # tenant:access holds licensed modules / settings sections
+    except Exception:  # pragma: no cover - cache is an optimisation only
+        pass
 
 
 def health_summary() -> dict:

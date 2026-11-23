@@ -16,6 +16,7 @@ import {
   AssessmentOutlined as ReportsIcon,
   AdminPanelSettingsOutlined as AdminIcon,
   BusinessOutlined as ClientsIcon,
+  VpnKeyOutlined as LicenceIcon,
   SettingsOutlined as SettingsIcon,
   ChevronLeft as ChevronLeftIcon,
   Menu as MenuIcon,
@@ -30,6 +31,7 @@ import GreensolLogo from './GreensolLogo';
 import { confirmLeave } from '../utils/navigationGuard';
 import { canOpenModule } from '../utils/moduleAccess';
 import { fetchPendingEditCount } from '../utils/editPermissions';
+import { IS_LOCAL_EDITION } from '../utils/edition';
 
 const DRAWER_WIDTH = 280;
 
@@ -220,7 +222,11 @@ const menuItems = [
   },
 
   // Platform owner only (user.is_platform_admin) — onboarding client businesses (tenants).
-  { text: 'Client Management', icon: <ClientsIcon />, path: '/superadmin/tenants', roles: ['*'], platformOnly: true }
+  { text: 'Client Management', icon: <ClientsIcon />, path: '/superadmin/tenants', roles: ['*'], platformOnly: true },
+  // Vendor licence console (customers' subscriptions, plans, signed keys): cloud console only. On
+  // the Windows edition customer subscriptions live inside Client Management.
+  ...(IS_LOCAL_EDITION ? [] : [{ text: 'Licences & Plans', icon: <LicenceIcon />, path: '/superadmin/licences',
+    roles: ['*'], platformOnly: true }]),
 ];
 
 

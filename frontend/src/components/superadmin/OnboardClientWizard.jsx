@@ -6,7 +6,12 @@
 //
 // Steps only organise the form: nothing is saved until "Create client". A server error jumps back
 // to the first step holding a field it names.
-import React, { useMemo, useRef, useState } from 'react';
+//
+// Cloud console (vendor): the dialog starts with the edition. Cloud Edition = this wizard, whose
+// last step is "Plan & Licence" (a plan fixes modules, seats, branches and dates, and the signed
+// licence is issued in the same transaction); Windows Local Edition = NewLicenceDialog (no cloud
+// workspace). The Windows build's Local Super Admin keeps the plain wizard (IS_LOCAL_EDITION).
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
   Alert, Autocomplete, Box, Button, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle,
@@ -16,6 +21,14 @@ import {
 import { AutoAwesome as GenerateIcon, Visibility, VisibilityOff, Upload as UploadIcon } from '@mui/icons-material';
 import ModuleAccessEditor from './ModuleAccessEditor';
 import { API, fetchInvitationLink, generatePassword, isReauth, splitErrors, todayIso } from './clientApi';
+import { IS_LOCAL_EDITION } from '../../utils/edition';
+import { LIC_API } from './licensing/licenceApi';
+import PlanLicenceStep from './licensing/PlanLicenceStep';
+import HostedSubscriptionFields, { emptySubscription } from './licensing/HostedSubscriptionFields';
+import { EditionSwitch } from './licensing/NewLicenceDialog';
+
+const VENDOR = !IS_LOCAL_EDITION;
+const LOCAL = IS_LOCAL_EDITION;
 
 const STEPS = [
   { label: 'Client', fields: ['tenant_name', 'owner_name', 'admin_email', 'contact_phone', 'country', 'address',
@@ -24,8 +37,9 @@ const STEPS = [
     'time_zone', 'tax_enabled'] },
   { label: 'Main Branch', fields: ['branch_name', 'branch_address', 'branch_phone', 'branch_email'] },
   { label: 'Administrator', fields: ['admin_name', 'admin_username', 'password', 'invite_admin'] },
-  { label: 'Modules & Subscription', fields: ['modules', 'settings_features', 'subscription_plan',
-    'subscription_starts_on', 'subscription_expires_on', 'max_users', 'max_branches'] },
+  { label: VENDOR ? 'Plan & Licence' : 'Subscription', fields: ['modules', 'settings_features', 'subscription_plan',
+    'subscription_starts_on', 'subscription_expires_on', 'max_users', 'max_branches', 'licence_plan_id', 'licence_starts_on',
+    'installation'] },
 ];
 const ALL_FIELDS = STEPS.flatMap((s) => s.fields);
 const REQUIRED = { tenant_name: 'Client / organization name', admin_username: 'Admin username' };
@@ -59,10 +73,23 @@ const emptyForm = () => ({
   subscription_expires_on: suggestedExpiry('ANNUAL', todayIso()), max_users: '5', max_branches: '1',
 });
 
-export default function OnboardClientWizard({ catalog, onClose, onCreated }) {
+export default function OnboardClientWizard({ catalog, onClose, onCreated, onSwitchEdition, initialClient }) {
   const fullScreen = useMediaQuery('(max-width:700px)');
   const [step, setStep] = useState(0);
-  const [form, setForm] = useState(emptyForm);
+  const [form, setForm] = useState(() => ({ ...emptyForm(), ...(initialClient || {}) }));
+  // Vendor console: the licence plan (or the legacy "custom terms" without a licence key).
+  const [licCatalog, setLicCatalog] = useState(null);
+  const [licence, setLicence] = useState({ cycle: '', plan_id: '', starts_on: todayIso() });
+  const planned = VENDOR && licence.plan_id && licence.plan_id !== 'CUSTOM';
+  useEffect(() => {
+    axios.get(`${LIC_API}catalog/`).then(({ data }) => setLicCatalog(data)).catch(() => setLicCatalog({ plans: [] }));
+  }, []);
+  // Windows Local Super Admin: step 5 creates the workspace's subscription (Subscription ID + signed
+  // licence) with the client. Without a vendor signing key (any other installation) the plain
+  // workspace subscription fields stay.
+  const [hostedSub, setHostedSub] = useState(emptySubscription);
+  const localSubs = LOCAL && Boolean(licCatalog?.signing?.configured)
+    && (licCatalog?.plans || []).some((p) => p.edition === 'WINDOWS_LOCAL');
   const [subscription, setSubscription] = useState(() => ({
     package: 'FULL_SUITE', settings_features: null,
     modules: [...(catalog.packages.find((p) => p.key === 'FULL_SUITE')?.modules || [])],
@@ -125,13 +152,19 @@ export default function OnboardClientWizard({ catalog, onClose, onCreated }) {
       if (REQUIRED[key] && !String(form[key] || '').trim()) out[key] = `${REQUIRED[key]} cannot be empty.`;
     });
     if (index === 3 && !form.invite_admin && !form.password) out.password = 'Enter a password or send a setup link.';
+    if (index === 4 && VENDOR && !licence.plan_id) {
+      out.licence_plan_id = 'Choose a plan (or “Custom terms”).';
+      return out;
+    }
+    if (index === 4 && planned) return out;
+    if (index === 4 && localSubs && !hostedSub.plan_id) out.licence_plan_id = 'Choose the subscription plan.';
     if (index === 4) {
       const seats = Number(form.max_users);
       if (!Number.isInteger(seats) || seats < 1) out.max_users = 'Allow at least one user (the admin).';
       if (form.max_branches !== '' && (!Number.isInteger(Number(form.max_branches)) || Number(form.max_branches) < 1)) {
         out.max_branches = 'At least 1, or leave blank for no limit.';
       }
-      if (form.subscription_plan !== 'PERPETUAL' && !form.subscription_expires_on) {
+      if (!localSubs && form.subscription_plan !== 'PERPETUAL' && !form.subscription_expires_on) {
         out.subscription_expires_on = 'Enter the end date.';
       }
     }
@@ -165,6 +198,10 @@ export default function OnboardClientWizard({ catalog, onClose, onCreated }) {
       subscription_starts_on: form.subscription_starts_on || null,
       package: subscription.package, modules: subscription.modules,
       ...(subscription.modules.includes('settings') ? { settings_features: subscription.settings_features } : {}),
+      ...(planned ? { licence_plan_id: licence.plan_id, licence_starts_on: licence.starts_on || null } : {}),
+      // The server sets the workspace plan / start / expiry from the chosen subscription.
+      ...(localSubs ? { licence_plan_id: hostedSub.plan_id, licence_starts_on: hostedSub.starts_on || null,
+        installation: hostedSub.installation || '' } : {}),
     };
     try {
       const { data } = await axios.post(API, body);
@@ -200,7 +237,15 @@ export default function OnboardClientWizard({ catalog, onClose, onCreated }) {
     <Dialog open onClose={saving ? undefined : onClose} maxWidth="md" fullWidth fullScreen={fullScreen}
       aria-labelledby="new-client-title" PaperProps={{ sx: { maxHeight: { sm: 'calc(100vh - 48px)' } } }}>
       <DialogTitle id="new-client-title" sx={{ pb: 1 }}>
-        New Client
+        {VENDOR ? 'New Client — Cloud Edition' : 'New Client'}
+        {VENDOR && onSwitchEdition && (
+          <Box>
+            <EditionSwitch value="CLOUD" disabled={saving} onChange={(v) => v === 'WINDOWS_LOCAL' && onSwitchEdition('WINDOWS_LOCAL', {
+              name: form.tenant_name, owner_name: form.owner_name, email: form.admin_email, phone: form.contact_phone,
+              country: form.country, address: form.address,
+            })} />
+          </Box>
+        )}
         <Stepper nonLinear activeStep={step} sx={{ mt: 1.5, ...(fullScreen ? { overflowX: 'auto', pb: 0.5 } : {}) }}
           alternativeLabel={!fullScreen}>
           {STEPS.map((s, i) => (
@@ -350,7 +395,37 @@ export default function OnboardClientWizard({ catalog, onClose, onCreated }) {
           </Grid>
         )}
 
-        {step === 4 && (
+        {step === 4 && VENDOR && (
+          <Box sx={{ mb: planned ? 0 : 2 }}>
+            {licCatalog ? (
+              <PlanLicenceStep catalog={licCatalog} edition="CLOUD" value={licence} disabled={saving} allowCustom
+                errors={errors} onChange={(v) => { setLicence(v); setErrors((x) => ({ ...x, licence_plan_id: undefined })); }} />
+            ) : <CircularProgress size={20} />}
+          </Box>
+        )}
+
+        {step === 4 && localSubs && (
+          <Box>
+            <HostedSubscriptionFields licCatalog={licCatalog} value={hostedSub} disabled={saving} errors={errors}
+              onChange={(v) => { setHostedSub(v); setErrors((x) => ({ ...x, licence_plan_id: undefined, licence_starts_on: undefined, installation: undefined })); }} />
+            <Grid container columnSpacing={2} sx={{ mt: 1 }}>
+              <Grid item xs={6} sm={4}>
+                {tf('max_users', 'Maximum Users', { type: 'number', inputProps: { min: 1, max: 10000 }, helperText: 'Active accounts, admin included' })}
+              </Grid>
+              <Grid item xs={6} sm={4}>
+                {tf('max_branches', 'Maximum Branches', { type: 'number', inputProps: { min: 1, max: 1000 }, helperText: 'Blank = no limit' })}
+              </Grid>
+            </Grid>
+            <Typography variant="subtitle2" fontWeight={700} sx={{ mt: 0.5, mb: 1 }}>Enabled Modules</Typography>
+            {(errors.modules || errors.settings_features) && (
+              <Alert severity="error" sx={{ mb: 1.5 }}>{errors.modules || errors.settings_features}</Alert>
+            )}
+            <ModuleAccessEditor catalog={catalog} value={subscription} disabled={saving} hidePackages
+              onChange={(v) => { setSubscription(v); setErrors((x) => ({ ...x, modules: undefined })); }} />
+          </Box>
+        )}
+
+        {step === 4 && !planned && !localSubs && (
           <Box>
             <Grid container columnSpacing={2}>
               <Grid item xs={12} sm={4}>
@@ -394,7 +469,8 @@ export default function OnboardClientWizard({ catalog, onClose, onCreated }) {
           ) : (
             <Button variant="contained" onClick={submit} disabled={saving}
               startIcon={saving ? <CircularProgress size={16} color="inherit" /> : null}>
-              {saving ? 'Creating…' : 'Create client'}
+              {saving ? 'Creating…' : (planned ? 'Create client & generate licence'
+                : (localSubs ? 'Create client & subscription' : 'Create client'))}
             </Button>
           )}
         </Box>

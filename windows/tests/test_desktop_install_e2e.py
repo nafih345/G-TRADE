@@ -121,6 +121,20 @@ class DesktopInstallE2E(unittest.TestCase):
         self.assertAlmostEqual(res['uiScale']['zoomFactor'], 1.0, places=3)
         self.assertEqual(page['uiScale'], {'scale': 1, 'defaultScale': 1, 'options': [0.75, 0.8, 0.9, 1]})
         self.assertIn('uiScale', page['bridgeKeys'])
+        # Print: window.print() on the live server page opens the app's own preview (never the
+        # preview-less Windows dialog), which renders real A4 pages and saves them as a PDF.
+        self.assertIn('printPreview', page['bridgeKeys'])
+        pr = res['print']
+        self.assertTrue(pr.get('opened'), pr)
+        # The SPA's own print CSS (frontend/src/index.css) fixes app screens to A4 portrait, 1 cm.
+        self.assertEqual(pr['kind'], 'sheet')
+        self.assertTrue(pr['frameIsPdfBlob'])
+        self.assertGreaterEqual(pr['pages'], 1)
+        self.assertAlmostEqual(pr['widthMm'], 210, delta=1.5)
+        self.assertAlmostEqual(pr['heightMm'], 297, delta=1.5)
+        self.assertEqual(pr['saved']['pages'], pr['pages'])
+        self.assertEqual(pr['outcome']['outcome'], 'saved')
+        self.evidence['print_preview'] = pr
 
     def test_02b_interface_size_survives_restart_and_bad_files(self):
         # A saved choice is applied on the next start (restart persistence) ...
@@ -138,6 +152,20 @@ class DesktopInstallE2E(unittest.TestCase):
             self.assertAlmostEqual(res['uiScale']['zoomFactor'], 1.0, places=3, msg=body)
         self.evidence['interface_size'] = {'default': 1.0, 'restart_restores': 0.9, 'bad_file_falls_back_to': 1.0}
 
+    def test_02c_upgrade_from_the_80_percent_default_opens_at_100(self):
+        # A PC that ran a build with the old 80% default and never chose a size: Chromium kept
+        # 80% for the server host in its own Preferences (level log1.2(0.8)), and there is no
+        # ui-settings.json. The upgraded app must open at the new 100% default anyway.
+        ud = self.tmp / 'ud-upgrade80'
+        ud.mkdir()
+        (ud / 'Preferences').write_text(json.dumps(
+            {'partition': {'per_host_zoom_levels': {'1371773096561066720': {'localhost': -1.2239010857415447}}}}))
+        res = electron_smoke(self.tmp / 'client' / 'client.json', ud, self.tmp / 'smoke-upgrade80.json', login=False)
+        self.assertTrue(res.get('ok'), res)
+        self.assertAlmostEqual(res['uiScale']['zoomFactor'], 1.0, places=3)
+        self.assertEqual(res['page']['uiScale']['scale'], 1)
+        self.evidence.setdefault('interface_size', {})['upgrade_from_saved_80_opens_at'] = res['uiScale']['zoomFactor']
+
     def test_03_rogue_ca_is_refused(self):
         good = json.loads((self.tmp / 'client' / 'client.json').read_text())
         rogue_pem = (DESKTOP / 'test' / 'fixtures' / 'rogue-ca.crt').read_text()
@@ -152,6 +180,8 @@ class DesktopInstallE2E(unittest.TestCase):
         self.assertTrue(res.get('ok'), res)
         self.assertIn('offline.html', res['url'])
         self.assertEqual(res['status']['state'], 'offline')
+        # The shell's own offline page is never print-tested (its print() is the native one).
+        self.assertEqual(res['print'], {'skipped': 'not the server page'})
 
     def test_04_workstation_pairing(self):
         env = self.stack.env()

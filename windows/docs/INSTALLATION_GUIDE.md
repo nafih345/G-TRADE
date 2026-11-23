@@ -166,10 +166,20 @@ The Troubleshooting Guide covers more cases.
 ## 9. Licence
 
 - A new installation runs a **30-day evaluation** (1 company, 1 branch, 2 users).
-- To activate, sign in as the administrator and open *Licence details* (in the banner, or `/#/license`). Then either:
-  - **Online:** enter the licence key and click *Activate online*; or
-  - **Offline:** ask your provider for a licence file for this installation, then use *Import licence file*.
-- On the server, `gtrade-ctl license request` creates the offline request file. See the Administrator Guide.
+- Your provider sends you a **licence key** (a long text that starts with `GTL1.`). To activate, sign in as the
+  Local Super Admin or the owner's administrator and open *Licence details* (in the banner, or `/#/license`):
+  1. paste the whole key into **Licence key** (line breaks from e-mail are fine);
+  2. click **Activate**.
+  G OPTICALS checks the key on this computer (vendor signature, client, edition, installation, start and
+  expiry). If the key was issued before your provider knew this installation, it is bound to it once
+  online; that needs internet on this server for a moment.
+- **No internet?** Click *Show installation request code* on the same page and send the code (or the
+  Installation ID) to your provider. They send back a key or a `.lic` file bound to this computer: paste it,
+  or use **Import licence file**. Both are checked exactly the same way.
+- Renewals and plan changes arrive as a new key or file, or automatically with **Check with vendor**
+  when the server is online.
+- A key for another installation, another client, a suspended, revoked or expired licence is refused with
+  the reason. You can never change the plan, period, limits or modules yourself.
 - The licence belongs to the **server** (or the Standalone PC). Workstations don't need their own licence.
 
 ## 10. Silent installation (technicians)

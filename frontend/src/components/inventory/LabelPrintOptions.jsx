@@ -4,16 +4,18 @@
 //   LabelTemplateSelect — barcode template / type picker. Lists the visible templates (the
 //                         default + any not hidden in Settings → Barcode Labels) with a
 //                         "Show all templates" entry for the hidden ones.
-//   SheetStartOptions   — "Past Used Sheet": for jewellery labels (and any A4 sheet) pick the
-//                         row and side the job starts at, so a part-used sheet isn't wasted.
+//   SheetStartOptions   — "Fresh Sheet" / "Part Used Sheet" for EVERY template: pick the
+//                         page, row and side the job starts at, so a part-used sheet / roll
+//                         isn't wasted.
 // Pure logic lives in labels/labelModel.js (startSkipFor, visibleTemplates, …).
 import React, { useState } from 'react';
 import {
-  Box, Stack, TextField, MenuItem, ListSubheader, Typography, ToggleButtonGroup, ToggleButton, Alert, Chip,
+  Box, Stack, TextField, MenuItem, ListSubheader, Typography, ToggleButtonGroup, ToggleButton, Chip,
 } from '@mui/material';
 import {
-  LABEL_TYPES, labelTypeOf, isJewelleryTemplate, sheetGrid, startSkipFor, startFromSkip, sheetSideLabels,
+  LABEL_TYPES, labelTypeOf, startGrid, startSkipFor, MAX_START_PAGE, MAX_PAGE_ROWS, MAX_PAGE_COLS, startFromSkip, sheetSideLabels,
   visibleTemplates, hiddenCount, FRESH_START,
+  PRINT_LAYOUT_MODES, applyStartPosition, printsAsSheet, sheetGrid, sheetFor, isJewelleryTemplate,
 } from '../../labels/labelModel';
 
 const SHOW_ALL = '__show_all_templates';
@@ -90,58 +92,113 @@ function StartGrid({ rows, cols, skip, onPick }) {
   );
 }
 
-// value / onChange: { enabled, row, col } (labels/labelModel FRESH_START).
-// Shown for jewellery templates (as "Past Used Sheet" with a side picker) and for any A4
-// sheet (as "Start position"); a jewellery thermal roll just explains why it doesn't apply.
+// Whole-number field with steppers (type="number", min 1). Never disabled / read-only: the
+// typed text is kept as-is while editing (so it can be cleared and retyped), every valid
+// number is committed clamped to [min, max], and on blur it shows the committed value.
+function IntField({ label, value, min = 1, max, onChange, testId, width = 120, helperText }) {
+  const [draft, setDraft] = useState(null);
+  const typed = draft == null ? null : parseInt(draft, 10);
+  const over = typed != null && !Number.isNaN(typed) && max != null && typed > max;
+  return (
+    <TextField
+      size="small" type="number" label={label} value={draft ?? value} sx={{ width }}
+      helperText={over ? `Max ${max}` : helperText} error={over}
+      inputProps={{ min, max, step: 1, 'data-testid': testId }}
+      onChange={(e) => {
+        setDraft(e.target.value);
+        const n = parseInt(e.target.value, 10);
+        if (!Number.isNaN(n)) onChange(Math.min(max ?? n, Math.max(min, n)));
+      }}
+      onBlur={() => setDraft(null)}
+    />
+  );
+}
+
+// Print Layout Mode for this job — Multi-Label Sheet (A4 Grid) or Single Sticker /
+// Thermal Roll. `template` is the template as printed (mode already applied); onChange(mode).
+export function PrintLayoutModeSelect({ template, value, onChange }) {
+  if (!template) return null;
+  const grid = printsAsSheet(template) ? sheetGrid(template) : null;
+  const sheet = grid ? sheetFor(template) : null;
+  const short = grid && isJewelleryTemplate(template) && grid.perSheet < 38;
+  return (
+    <Box data-testid="print-layout-mode">
+      <TextField select size="small" fullWidth label="Print Layout Mode" value={value || ''}
+        onChange={(e) => onChange(e.target.value)} inputProps={{ 'data-testid': 'print-layout-mode-select' }}
+      >
+        {PRINT_LAYOUT_MODES.map((m) => <MenuItem key={m.id} value={m.id}>{m.label}</MenuItem>)}
+      </TextField>
+      <Typography variant="caption" color={short ? 'warning.main' : 'text.secondary'} component="div" sx={{ mt: 0.5 }} data-testid="print-layout-mode-info">
+        {grid
+          ? `${grid.perSheet} labels per A4 page (${grid.cols} across × ${grid.rows} down), printed together — a new page only when the sheet is full.`
+            + (short ? ` 38 labels of ${template.width_mm} × ${template.height_mm} mm don't fit on A4.` : '')
+            + (sheet && !template.layout?.sheet ? ' Grid set automatically; adjust it in Settings → Barcode Labels.' : '')
+          : `Each ${template.width_mm} × ${template.height_mm} mm sticker prints on its own page (thermal roll printer).`}
+      </Typography>
+    </Box>
+  );
+}
+
+// value / onChange: { enabled, page, row, col, pageRows?, pageCols? } (labelModel FRESH_START).
+// Shown for every template — standard, optical and jewellery, A4 sheets and thermal rolls,
+// built-in defaults and saved designs. Start page, row and column are always editable; a
+// thermal template also gets its page layout (rows x columns per page) so row / column mean
+// something on a tag sheet or strip.
 export function SheetStartOptions({ template, value = FRESH_START, onChange }) {
-  const jewellery = isJewelleryTemplate(template);
-  const grid = sheetGrid(template);
-  if (!template || (!jewellery && !grid)) return null;
-  if (!grid) {
-    return (
-      <Alert severity="info" icon={false} sx={{ py: 0.5, fontSize: 13 }} data-testid="sheet-start-roll">
-        <b>Past Used Sheet</b> — “{template.name}” prints on a thermal roll, which always continues from the next tag.
-        Pick a jewellery A4 sheet template to start part-way down a used sheet.
-      </Alert>
-    );
-  }
-  const { rows, cols, perSheet } = grid;
+  const grid = startGrid(template, value);
+  if (!grid) return null;
+  const { rows, cols, perSheet, thermal } = grid;
   const skip = startSkipFor(template, value);
   const sides = sheetSideLabels(cols);
-  const set = (patch) => onChange({ ...value, ...patch });
-  const row = Math.min(value.row, rows);
-  const col = Math.min(value.col, cols);
+  const layoutKeep = thermal ? { pageRows: rows, pageCols: cols } : {};
+  const set = (patch) => onChange({ ...FRESH_START, ...value, ...patch });
+  // Start position typed / clicked: anything past page 1, row 1, column 1 is a Part Used
+  // Sheet; back to 1 / 1 / 1 is a Fresh Sheet again. On a thermal roll / strip a row or
+  // column beyond the current page layout grows the layout instead of being refused.
+  const setPos = (patch) => onChange(applyStartPosition(template, value, patch));
+  const page = Math.min(Math.max(1, parseInt(value.page, 10) || 1), MAX_START_PAGE);
+  const row = Math.min(Math.max(1, parseInt(value.row, 10) || 1), rows);
+  const col = Math.min(Math.max(1, parseInt(value.col, 10) || 1), cols);
+  const inPage = skip % perSheet;
 
   return (
     <Box data-testid="sheet-start-options">
       <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap" useFlexGap>
-        <Typography variant="subtitle2" fontWeight={700}>{jewellery ? 'Past Used Sheet' : 'Start position'}</Typography>
-        <ToggleButtonGroup exclusive size="small" value={value.enabled ? 'on' : 'off'} onChange={(e, v) => v && set({ enabled: v === 'on' })}>
-          <ToggleButton value="off" data-testid="sheet-start-fresh">Fresh sheet</ToggleButton>
-          <ToggleButton value="on" data-testid="sheet-start-used">Past used sheet</ToggleButton>
+        <Typography variant="subtitle2" fontWeight={700}>Sheet</Typography>
+        <ToggleButtonGroup exclusive size="small" value={value.enabled ? 'on' : 'off'}
+          onChange={(e, v) => v && (v === 'on' ? set({ enabled: true, ...layoutKeep }) : onChange({ ...FRESH_START, ...layoutKeep }))}
+        >
+          <ToggleButton value="off" data-testid="sheet-start-fresh">Fresh Sheet</ToggleButton>
+          <ToggleButton value="on" data-testid="sheet-start-used">Part Used Sheet</ToggleButton>
         </ToggleButtonGroup>
       </Stack>
-      {value.enabled && (
-        <>
-          <Stack direction="row" spacing={1.5} sx={{ mt: 1.25 }} flexWrap="wrap" useFlexGap>
-            <TextField select size="small" label="Start row" value={row} onChange={(e) => set({ row: Number(e.target.value) })} sx={{ width: 110 }} inputProps={{ 'data-testid': 'sheet-start-row' }}>
-              {Array.from({ length: rows }, (_, i) => <MenuItem key={i} value={i + 1}>{i + 1}</MenuItem>)}
-            </TextField>
-            <TextField select size="small" label={cols <= 3 ? 'Side' : 'Column'} value={col} onChange={(e) => set({ col: Number(e.target.value) })} sx={{ width: 150 }} inputProps={{ 'data-testid': 'sheet-start-side' }}>
-              {sides.map((s, i) => <MenuItem key={i} value={i + 1}>{s}</MenuItem>)}
-            </TextField>
-            <TextField
-              size="small" type="number" label="Labels already used" value={skip} sx={{ width: 160 }}
-              inputProps={{ min: 0, max: perSheet - 1, 'data-testid': 'sheet-start-used-count' }}
-              onChange={(e) => onChange({ ...startFromSkip(template, e.target.value), enabled: true })}
-            />
-          </Stack>
-          <StartGrid rows={rows} cols={cols} skip={skip} onPick={(i) => onChange({ ...startFromSkip(template, i), enabled: true })} />
-          <Typography variant="caption" color="text.secondary" data-testid="sheet-start-summary">
-            Printing starts at row {row}, {sides[col - 1].toLowerCase()} — {skip} used label{skip === 1 ? '' : 's'} skipped. Click a cell to change.
-          </Typography>
-        </>
+      {thermal && value.enabled && (
+        <Stack direction="row" spacing={1.5} sx={{ mt: 1.25 }} flexWrap="wrap" useFlexGap alignItems="center">
+          <IntField label="Rows per page" value={rows} max={MAX_PAGE_ROWS} testId="sheet-page-rows" onChange={(n) => set({ pageRows: n, pageCols: cols })} />
+          <IntField label="Columns per page" value={cols} max={MAX_PAGE_COLS} testId="sheet-page-cols" width={140} onChange={(n) => set({ pageCols: n, pageRows: rows })} />
+          <Typography variant="caption" color="text.secondary">Layout of your label sheet / strip</Typography>
+        </Stack>
       )}
+      <Stack direction="row" spacing={1.5} sx={{ mt: 1.25 }} flexWrap="wrap" useFlexGap>
+        <IntField label="Start page" value={page} max={MAX_START_PAGE} testId="sheet-start-page" onChange={(n) => setPos({ page: n })} />
+        <IntField label={thermal ? 'Start row' : `Start row (1–${rows})`} value={row} max={thermal ? MAX_PAGE_ROWS : rows} testId="sheet-start-row" onChange={(n) => setPos({ row: n })} />
+        <IntField label={thermal ? 'Start column' : `Start column (1–${cols})`} value={col} max={thermal ? MAX_PAGE_COLS : cols} testId="sheet-start-col" width={150} onChange={(n) => setPos({ col: n })} />
+        <TextField
+          size="small" type="number" label="Labels already used" value={skip} sx={{ width: 160 }}
+          inputProps={{ min: 0, max: MAX_START_PAGE * perSheet - 1, 'data-testid': 'sheet-start-used-count' }}
+          onChange={(e) => onChange(startFromSkip(template, e.target.value, { ...value, ...layoutKeep }))}
+        />
+      </Stack>
+      <StartGrid rows={rows} cols={cols} skip={inPage} onPick={(i) => setPos({ page, row: Math.floor(i / cols) + 1, col: (i % cols) + 1 })} />
+      <Typography variant="caption" color="text.secondary" component="div" data-testid="sheet-start-summary">
+        {!value.enabled
+          ? 'Fresh sheet — printing starts at page 1, row 1, column 1. Type a start row / column (or click a cell) for a part used sheet.'
+          : <>Printing starts on page {page}, row {row}, column {col}{cols > 1 && cols <= 3 ? ` (${sides[col - 1].toLowerCase()})` : ''} — {skip} used label{skip === 1 ? '' : 's'} skipped.</>}
+        {!value.enabled ? '' : thermal
+          ? ` On this thermal printer the ${skip} used label${skip === 1 ? ' is' : 's are'} fed through blank.`
+          : (page > 1 ? ` ${page - 1} blank sheet${page === 2 ? '' : 's'} come out first.` : '')}
+        {value.enabled ? ' Click a cell to change.' : ''}
+      </Typography>
     </Box>
   );
 }

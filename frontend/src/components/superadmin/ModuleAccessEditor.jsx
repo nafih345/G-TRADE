@@ -25,7 +25,9 @@ const GROUPS = [
   ['core', 'Core'],
 ];
 
-export default function ModuleAccessEditor({ catalog, value, onChange, disabled = false, compact = false }) {
+// hidePackages: the Windows Local Hosted Workspaces Subscription step shows only the module switches
+// (no package / "Custom" picker); the package is still derived from the switches for the server.
+export default function ModuleAccessEditor({ catalog, value, onChange, disabled = false, compact = false, hidePackages = false }) {
   const { package: pkg, modules } = value;
   const sections = catalog.settings_features || [];
   const allSections = sections.map((f) => f.key);
@@ -73,8 +75,8 @@ export default function ModuleAccessEditor({ catalog, value, onChange, disabled 
 
   return (
     <Box>
-      <Typography variant="subtitle2" fontWeight={700} gutterBottom>Package</Typography>
-      <Grid container spacing={1.5} sx={{ mb: 2 }} role="radiogroup" aria-label="Subscription package">
+      {!hidePackages && <Typography variant="subtitle2" fontWeight={700} gutterBottom>Package</Typography>}
+      <Grid container spacing={1.5} sx={{ mb: 2, display: hidePackages ? 'none' : 'flex' }} role="radiogroup" aria-label="Subscription package">
         {catalog.packages.map((p) => {
           const selected = p.key === pkg;
           return (

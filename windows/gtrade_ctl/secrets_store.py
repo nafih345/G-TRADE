@@ -143,6 +143,25 @@ def load(path: Path) -> dict:
     return json.loads(raw.decode('utf-8'))
 
 
+def protect_bytes(data: bytes) -> bytes:
+    """Machine-scope DPAPI (or the marked plaintext test format), for files other than secrets.dpapi
+    (the vendor signing key file of the owner's vendor installation)."""
+    if _dpapi_available() and not _insecure_allowed():
+        return protect(data)
+    if _insecure_allowed():
+        return PLAINTEXT_MARKER + data
+    raise SecretsError('No secure secret storage available on this platform')  # pragma: no cover
+
+
+def unprotect_file(path: Path) -> bytes:
+    blob = Path(path).read_bytes()
+    if blob.startswith(PLAINTEXT_MARKER):
+        if not _insecure_allowed():
+            raise SecretsError('Refusing to read an insecure test secrets file outside test mode')
+        return blob[len(PLAINTEXT_MARKER):]
+    return unprotect(blob)
+
+
 def init(path: Path) -> tuple[dict, bool]:
     """Create the secrets file if it does not exist. Never overwrites. Returns (values, created)."""
     if path.exists():

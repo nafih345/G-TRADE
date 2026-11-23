@@ -208,6 +208,18 @@ def health_check_view(request):
         **_edition_health(),
     })
 
+def _vendor_licensing_urls():
+    """Vendor licence console (cloud console, and the owner's Windows Local Super Admin) + the public
+    online activation endpoints (cloud only: a Windows installation is never a licence server)."""
+    from django.apps import apps as _apps
+    if not _apps.is_installed('apps.vendor_licensing'):
+        return []
+    console = [path('api/superadmin/licensing/', include('apps.vendor_licensing.urls'))]
+    if getattr(settings, 'GTRADE_EDITION', '') == 'local':
+        return console
+    return [*console, path('api/licence-authority/', include('apps.vendor_licensing.authority_urls'))]
+
+
 urlpatterns = [
     path('', home_api_status),
     path('favicon.ico', favicon_silent_view),
@@ -216,6 +228,7 @@ urlpatterns = [
     path('api/health/', health_check_view),
     path('api/auth/', include('apps.authentication.urls')),
     path('api/superadmin/', include('apps.common.superadmin_urls')),
+    *_vendor_licensing_urls(),
     path('api/organization/', include('apps.common.organization_urls')),  # Phase 2 multi-company
     path('api/company/', include('apps.company.urls')),
     path('api/billing/', include('apps.billing.urls')),

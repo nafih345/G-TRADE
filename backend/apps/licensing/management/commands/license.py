@@ -32,9 +32,14 @@ class Command(BaseCommand):
                 if not o['file']:
                     raise CommandError('--file is required')
                 with open(o['file'], encoding='utf-8-sig') as fh:
-                    out = service.install_blob(fh.read(), actor='gtrade-ctl', source='import').as_dict()
+                    blob = licfmt.normalize_key(fh.read())
+                if blob.startswith(licfmt.CRL_PREFIX + '.'):
+                    service.apply_crl(blob)
+                    out = state.current(force=True).as_dict()
+                else:  # same rules as a pasted key (signature, client, status, dates, binding)
+                    out = service.activate_key(blob, actor='gtrade-ctl').as_dict()
             elif act == 'activate':
-                out = service.activate(sys.stdin.readline().strip(), actor='gtrade-ctl').as_dict()
+                out = service.activate_key(sys.stdin.readline().strip(), actor='gtrade-ctl').as_dict()
             elif act == 'checkin':
                 out = service.checkin(actor='gtrade-ctl').as_dict()
             elif act == 'request':

@@ -46,7 +46,7 @@ gtrade-ctl <command>
 | `create-superadmin --status` / `create-superadmin --user NAME --reset-password` | Show the Local Super Admin (no passwords) / set a new password for it |
 | `cert info` / `cert ensure` | Certificate status / renewal (also adds new host names) |
 | `connection-sheet` | Re-create the workstation connection sheet |
-| `license status` / `license import --file X.lic` / `license request --out req.gtr` (key on stdin) / `license checkin` | Licence |
+| `license status` / `license import --file X.lic` (same checks as a pasted key) / `license activate` (key on stdin) / `license request --out req.gtr` / `license checkin` | Licence |
 | `update status` | Show an interrupted update, if any, and recent update logs |
 | `repair` | Re-apply configuration, services, certificates and permissions. Never touches data. |
 | `preflight --mode server` | Re-run the installation requirement checks |
@@ -83,7 +83,9 @@ The **licence** sets the maximum number of named users, companies and branches. 
 
 Each company's data is kept separate. A user sees only the companies they are a member of. Additional, unrelated client businesses on the same installation are created only by the **Local Super Admin** in Client Management (section 4a); each is its own organization and never sees another's data.
 
-If the licence expires or is revoked, G OPTICALS becomes **read-only** after the grace period. Data can still be viewed, printed, exported and backed up.
+If the licence expires, G OPTICALS becomes **read-only** after the grace period; if your provider suspends or revokes it, it becomes read-only as soon as this server receives that decision (*Check with vendor* or the next renewal). Data can still be viewed, printed, exported and backed up.
+
+**Licence keys.** The provider (vendor) issues every licence key from its own console; a key is a signed licence (`GTL1.…`) that this server verifies with the vendor's public key. The Local Super Admin and the owner's administrators can *activate* a key or import a licence file on *Licence details*, but cannot create one or change its plan, dates, limits or modules. The Local Super Admin manages only this installation (clients, users, branches within the licence); the vendor manages the licence.
 
 ### Lost administrator password
 
@@ -113,6 +115,16 @@ It is separate from the company owner created during installation; that account 
 **Sign in:** open G OPTICALS (or `https://<server>:<port>/#/super-admin/login` on a workstation), choose **Local Super Admin? Sign in here** under the sign-in form, and sign in. You land on **Client Management** (also in the sidebar).
 
 Lost password: `gtrade-ctl create-superadmin --user <name> --reset-password` on the server PC (ends its open sessions; recorded in the audit log). In-app full-database backups are disabled once the server holds more than one client; the daily server backups (`gtrade-ctl backup`) keep running and cover every client.
+
+## 4b. Printer test
+
+The desktop app can test printing on this PC without the server or any data. It prints built-in sample documents: an A4 invoice, an A5 prescription, an 80 mm receipt, labels and reports. For each one it opens the print preview, checks the page sizes and saves a PDF. Results go to a JSON file, with a screenshot and a PDF per document in `<file>.shots`. From a normal Command Prompt:
+
+```
+"C:\Program Files\G-TRADE\G-TRADE.exe" --print-selftest=%TEMP%\print-test.json
+```
+
+To also send real jobs to a printer, add `--print-selftest-printer="<printer name exactly as in Printers & scanners>"`. This prints the A4 invoice, A5 prescription, 80 mm receipt and 3 labels on that printer, so load paper first. `"ok": true` in the JSON means every check passed. Each printed document has `"print": {"message": "Sent 1 copy to …"}`.
 
 ## 5. Updates
 

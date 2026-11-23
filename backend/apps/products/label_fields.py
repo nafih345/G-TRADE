@@ -230,6 +230,30 @@ def _text(v, name, max_len=200):
     return s
 
 
+PRINT_MODES = ('sheet', 'roll')
+
+
+def _clean_sheet(s, w, h):
+    if not isinstance(s, dict):
+        raise LayoutError('Sheet layout must be an object.')
+    sheet = {
+        'cols': int(_num(s.get('cols'), 1, 20, 'Columns', 3)),
+        'rows': int(_num(s.get('rows'), 1, 60, 'Rows', 8)),
+        'marginTopMm': _num(s.get('marginTopMm'), 0, 290, 'Top margin (mm)', 10),
+        'marginLeftMm': _num(s.get('marginLeftMm'), 0, 200, 'Left margin (mm)', 7),
+        'colGapMm': _num(s.get('colGapMm'), 0, 40, 'Column gap (mm)', 0),
+        'rowGapMm': _num(s.get('rowGapMm'), 0, 40, 'Row gap (mm)', 0),
+    }
+    used_w = sheet['marginLeftMm'] + sheet['cols'] * w + (sheet['cols'] - 1) * sheet['colGapMm']
+    used_h = sheet['marginTopMm'] + sheet['rows'] * h + (sheet['rows'] - 1) * sheet['rowGapMm']
+    if used_w > A4_W + 0.5 or used_h > A4_H + 0.5:
+        raise LayoutError(
+            f"The sheet layout needs {used_w:.1f} × {used_h:.1f} mm but A4 is {A4_W:g} × {A4_H:g} mm. "
+            'Reduce the columns / rows, label size, gaps or margins.'
+        )
+    return sheet
+
+
 def validate_template(printer_type, width_mm, height_mm, layout, allow_restricted):
     """Validates and normalises a template. Returns (width, height, clean_layout); raises
     LayoutError with a human message. Unknown keys are dropped so nothing arbitrary (CSS,
@@ -247,26 +271,28 @@ def validate_template(printer_type, width_mm, height_mm, layout, allow_restricte
         'defaultBarcodeFormat': _choice(layout.get('defaultBarcodeFormat'), BARCODE_FORMATS, 'Barcode format', 'CODE128'),
     }
 
-    if printer_type == 'a4':
-        s = layout.get('sheet') or {}
-        if not isinstance(s, dict):
-            raise LayoutError('Sheet layout must be an object.')
-        sheet = {
-            'cols': int(_num(s.get('cols'), 1, 20, 'Columns', 3)),
-            'rows': int(_num(s.get('rows'), 1, 60, 'Rows', 8)),
-            'marginTopMm': _num(s.get('marginTopMm'), 0, 60, 'Top margin (mm)', 10),
-            'marginLeftMm': _num(s.get('marginLeftMm'), 0, 60, 'Left margin (mm)', 7),
-            'colGapMm': _num(s.get('colGapMm'), 0, 40, 'Column gap (mm)', 0),
-            'rowGapMm': _num(s.get('rowGapMm'), 0, 40, 'Row gap (mm)', 0),
+    # Print Layout Mode: 'sheet' = Multi-Label Sheet (A4 Grid), 'roll' = Single Sticker /
+    # Thermal Roll (one label per page). Absent = default by type (A4 / jewellery -> sheet).
+    # Older designs kept it as pageGrid.mode.
+    g = layout.get('pageGrid')
+    mode = layout.get('printMode')
+    if mode not in PRINT_MODES and isinstance(g, dict):
+        mode = g.get('mode')
+    if mode in PRINT_MODES:
+        clean['printMode'] = mode
+
+    # A4 grid: always for A4 templates; for a thermal-size label printed on A4 sheets only
+    # when one was saved (otherwise the frontend sizes it automatically).
+    s = layout.get('sheet')
+    if printer_type == 'a4' or s is not None:
+        clean['sheet'] = _clean_sheet(s or {}, w, h)
+    if printer_type != 'a4' and isinstance(g, dict):
+        # Rows x columns of the roll / strip so the print dialog's Part Used Sheet can start
+        # at any page, row and column when printing one label per page.
+        clean['pageGrid'] = {
+            'rows': int(_num(g.get('rows'), 1, 60, 'Rows per page', 10)),
+            'cols': int(_num(g.get('cols'), 1, 20, 'Columns per page', 1)),
         }
-        used_w = sheet['marginLeftMm'] + sheet['cols'] * w + (sheet['cols'] - 1) * sheet['colGapMm']
-        used_h = sheet['marginTopMm'] + sheet['rows'] * h + (sheet['rows'] - 1) * sheet['rowGapMm']
-        if used_w > A4_W + 0.5 or used_h > A4_H + 0.5:
-            raise LayoutError(
-                f"The sheet layout needs {used_w:.1f} × {used_h:.1f} mm but A4 is {A4_W:g} × {A4_H:g} mm. "
-                'Reduce the columns / rows, label size, gaps or margins.'
-            )
-        clean['sheet'] = sheet
 
     elements = layout.get('elements') or []
     if not isinstance(elements, list):

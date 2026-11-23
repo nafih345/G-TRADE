@@ -241,6 +241,7 @@ class TenantSerializer(serializers.ModelSerializer):
     company_name = serializers.SerializerMethodField()
     active_branch_count = serializers.SerializerMethodField()
     days_to_expiry = serializers.SerializerMethodField()
+    subscription = serializers.SerializerMethodField()
 
     class Meta:
         model = Tenant
@@ -252,8 +253,12 @@ class TenantSerializer(serializers.ModelSerializer):
                   'package', 'modules', 'settings_features',
                   'subscription_plan', 'subscription_starts_on', 'subscription_expires_on', 'days_to_expiry',
                   'deactivation_category', 'deactivation_reason', 'deactivation_effective_date',
-                  'deactivation_until', 'deactivated_at', 'deactivated_by')
+                  'deactivation_until', 'deactivated_at', 'deactivated_by', 'subscription')
         read_only_fields = fields
+
+    def get_subscription(self, obj):
+        # Windows Local Hosted Workspaces: the current subscription (by dates and status), or None.
+        return self.context.get('subscriptions', {}).get(obj.pk)
 
     def get_primary_admin(self, obj):
         return self.context.get('admins', {}).get(obj.pk)

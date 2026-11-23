@@ -1,0 +1,64 @@
+:root {
+  --panel: #ffffff; --ink: #0f172a; --muted: #64748b; --line: #e2e8f0; --stage: #525659;
+  --primary: #059669; --primary-ink: #ffffff; --warn-bg: #fff7ed; --warn-line: #fdba74; --warn-ink: #9a3412;
+  --err-bg: #fef2f2; --err-line: #fca5a5; --err-ink: #991b1b; --ok-bg: #ecfdf5; --ok-line: #6ee7b7; --ok-ink: #065f46;
+  --focus: #2563eb;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; overflow: hidden; }
+body { font-family: "Segoe UI", system-ui, sans-serif; font-size: 13.5px; color: var(--ink); background: var(--stage); }
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; height: 100%; }
+
+/* pages */
+.stage { position: relative; background: var(--stage); min-width: 0; }
+.stage iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: var(--stage); }
+.stage-msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #f1f5f9;
+  font-size: 15px; background: var(--stage); text-align: center; padding: 24px; }
+body[data-state="ready"] .stage-msg { display: none; }
+body[data-state="rendering"] .stage-msg { background: rgba(82, 86, 89, .78); }
+
+/* settings: header and buttons stay put, only the settings scroll */
+.panel { display: flex; flex-direction: column; min-height: 0; background: var(--panel); border-left: 1px solid #1f2937; }
+.panel header { flex: none; padding: 14px 18px 10px; border-bottom: 1px solid var(--line); }
+.scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-bottom: 12px; }
+h1 { font-size: 16px; margin: 0 0 4px; }
+.doc-title { font-weight: 600; margin: 0 0 2px; word-break: break-word; }
+.muted { color: var(--muted); font-size: 12.5px; margin: 0; }
+.fields { padding: 2px 18px 0; }
+label { display: block; margin: 10px 0 3px; font-weight: 600; font-size: 12.5px; color: #334155; }
+select, input { width: 100%; height: 32px; padding: 0 8px; font: inherit; color: var(--ink); background: #fff;
+  border: 1px solid #cbd5e1; border-radius: 6px; }
+select:disabled, input:disabled { background: #f1f5f9; color: var(--muted); }
+select:focus-visible, input:focus-visible, button:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.row { display: flex; gap: 6px; }
+.row select { flex: 1; min-width: 0; }
+.pair { display: grid; grid-template-columns: 1fr 96px; gap: 10px; }
+.note { margin: 4px 0 0; font-size: 12px; line-height: 1.4; color: var(--muted); }
+.note:empty { display: none; }
+.note.warn { color: var(--warn-ink); }
+
+.notice, .message { margin: 12px 18px 0; padding: 9px 11px; border-radius: 8px; font-size: 12.5px; line-height: 1.45; border: 1px solid; }
+.notice { background: var(--warn-bg); border-color: var(--warn-line); color: var(--warn-ink); }
+.notice strong { display: block; margin-bottom: 2px; }
+.notice .small { display: block; margin-top: 4px; opacity: .85; font-size: 12px; }
+.message.error { background: var(--err-bg); border-color: var(--err-line); color: var(--err-ink); }
+.message.ok { background: var(--ok-bg); border-color: var(--ok-line); color: var(--ok-ink); }
+.message.info { background: #eff6ff; border-color: #93c5fd; color: #1e3a8a; }
+.message .actions { margin-top: 4px; display: flex; gap: 14px; }
+
+footer { flex: none; padding: 12px 18px 10px; border-top: 1px solid var(--line); background: var(--panel); }
+.buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.buttons #print { grid-column: 1 / -1; }
+.buttons #save[hidden] + #cancel { grid-column: 1 / -1; }
+button { height: 34px; padding: 0 12px; font: inherit; font-weight: 600; border-radius: 6px; border: 1px solid #94a3b8;
+  background: #fff; color: var(--ink); cursor: pointer; }
+button:hover:not(:disabled) { background: #f8fafc; }
+button.primary { background: var(--primary); border-color: var(--primary); color: var(--primary-ink); height: 40px; font-size: 15px; }
+button.primary:hover:not(:disabled) { background: #047857; }
+button:disabled { opacity: .55; cursor: default; }
+button.icon { width: 34px; padding: 0; font-size: 16px; flex: none; }
+button.link { height: auto; border: 0; background: none; color: #2563eb; padding: 8px 0 0; font-weight: 500; }
+button.link:hover:not(:disabled) { background: none; text-decoration: underline; }
+.keys { margin-top: 6px; font-size: 11.5px; }
+
+@media (max-width: 860px) { .layout { grid-template-columns: minmax(0, 1fr) 286px; } }

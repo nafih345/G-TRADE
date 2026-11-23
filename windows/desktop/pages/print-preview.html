@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-src blob:; object-src blob:">
+  <title>Print preview</title>
+  <link rel="stylesheet" href="print-preview.css">
+</head>
+<body data-state="loading">
+  <div class="layout">
+    <section class="stage" aria-label="Preview of the printed pages">
+      <iframe id="pdf" title="Preview of the printed pages"></iframe>
+      <div id="stage-msg" class="stage-msg" role="status">Preparing preview…</div>
+    </section>
+
+    <aside class="panel">
+      <header>
+        <h1>Print preview</h1>
+        <p id="doc-title" class="doc-title"></p>
+        <p id="doc-meta" class="muted"></p>
+      </header>
+
+      <div class="scroll">
+        <div class="fields">
+          <label for="destination">Printer</label>
+          <div class="row">
+            <select id="destination" disabled><option>Looking for printers…</option></select>
+            <button id="refresh" class="icon" type="button" title="Refresh the printer list" aria-label="Refresh the printer list">&#x21bb;</button>
+          </div>
+          <p id="dest-note" class="note"></p>
+
+          <label for="paper">Paper size</label>
+          <select id="paper"></select>
+          <p id="paper-note" class="note"></p>
+
+          <div class="pair">
+            <div>
+              <label for="orientation">Orientation</label>
+              <select id="orientation">
+                <option value="portrait">Portrait</option>
+                <option value="landscape">Landscape</option>
+              </select>
+            </div>
+            <div>
+              <label for="copies">Copies</label>
+              <input id="copies" type="number" min="1" max="99" value="1" inputmode="numeric">
+            </div>
+          </div>
+          <p id="orientation-note" class="note"></p>
+
+          <label for="margins">Margins</label>
+          <select id="margins"></select>
+        </div>
+
+        <div id="notice" class="notice" hidden></div>
+        <div id="message" class="message" role="alert" hidden></div>
+      </div>
+
+      <footer>
+        <div class="buttons">
+          <button id="print" class="primary" type="button" disabled>Print</button>
+          <button id="save" type="button" disabled>Save as PDF</button>
+          <button id="cancel" type="button">Cancel</button>
+        </div>
+        <button id="system" class="link" type="button" disabled title="Opens the Windows print dialog for printer-specific options (tray, duplex, quality). That dialog shows no preview; this window is the preview.">Windows print dialog…</button>
+        <p class="muted keys">Ctrl+P print · Ctrl+S save PDF · Esc close</p>
+      </footer>
+    </aside>
+  </div>
+  <script src="print-preview.js"></script>
+</body>
+</html>

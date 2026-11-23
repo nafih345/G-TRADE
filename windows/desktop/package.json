@@ -21,7 +21,7 @@
     "productName": "G OPTICALS",
     "copyright": "Copyright (c) 2026 G OPTICALS",
     "directories": { "output": "../out/installer", "buildResources": "build" },
-    "files": ["main.js", "preload.js", "lib/**/*", "pages/**/*", "package.json"],
+    "files": ["main.js", "preload.js", "preload-preview.js", "lib/**/*", "pages/**/*", "package.json"],
     "asar": true,
     "electronLanguages": ["en-US"],
     "extraResources": [

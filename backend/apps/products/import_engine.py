@@ -35,7 +35,7 @@ import uuid
 import zipfile
 
 from django.db import InterfaceError, OperationalError, transaction, close_old_connections, connections
-from django.db.models import F
+from django.db.models import F, Q
 from django.utils import timezone
 from openpyxl import load_workbook
 
@@ -115,6 +115,10 @@ DETAIL_FIELDS = ('model_no', 'brand', 'category', 'sub_category', 'group')
 # and without it every colour of a model looks like the same product.
 INFER_SAMPLE_ROWS = 200
 COLOUR_CODE_RE = re.compile(r'(?i)^(c|cl|clr|col|colou?r)[\s.#:-]*\d{1,4}[a-z]?$')
+# The name _unique_headers gives an untitled column.
+UNTITLED_HEADER_RE = re.compile(r'^Column \d+$')
+# The tail _file_target / the DUPLICATE strategy add to an item's Code.
+DERIVED_SKU_RE = re.compile(r'-(?:[0-9A-F]{8}|DUP[0-9A-F]{4})$')
 COLOUR_WORDS = {
     'black', 'white', 'red', 'blue', 'green', 'yellow', 'brown', 'grey', 'gray', 'gold', 'golden', 'silver',
     'pink', 'purple', 'violet', 'orange', 'maroon', 'navy', 'beige', 'cream', 'tortoise', 'tortoiseshell',
@@ -543,6 +547,26 @@ class ImportState:
         self.file_first = {}
         # sku written by a row of this file -> (sheet, row_no) of that row.
         self.claimed = {}
+        # (file_path, ext) of the file being read, set by the job; its item Codes are read
+        # from it only if a barcode clash needs them (see lists_item).
+        self.source = None
+        self._file_codes = None
+        # Live product sku -> its colour (casefolded), and for a colourless one an earlier
+        # import made under a derived sku, the untitled cells ("Column 10") of the row it
+        # was made from: it may be a product saved before its colour column could be read.
+        # See _legacy_target.
+        self.colours = {}
+        self.legacy_cells = {}
+        for psku, color in Product.objects.values_list('sku', 'color').iterator(chunk_size=5000):
+            self.colours[psku] = (color or '').strip().casefold()
+        for psku, cells in (Product.objects.filter(sku__contains='-', import_batch__isnull=False)
+                            .filter(Q(color__isnull=True) | Q(color='')).values_list('sku', 'extra_data')
+                            .iterator(chunk_size=5000)):
+            if isinstance(cells, dict):
+                untitled = {k: str(v).strip().casefold() for k, v in cells.items()
+                            if UNTITLED_HEADER_RE.match(str(k)) and v not in (None, '')}
+                if untitled:
+                    self.legacy_cells[psku] = untitled
 
     def seed_resumed(self, batch, resolved, headers):
         """
@@ -569,6 +593,13 @@ class ImportState:
                 or row_index in new_rows)
             self.claimed[sku] = where
 
+    def lists_item(self, sku):
+        """Whether sku is the product of an item this file lists: its Code, or one derived from it."""
+        if self._file_codes is None:
+            self._file_codes = _file_item_codes(*self.source) if self.source else set()
+        base = DERIVED_SKU_RE.sub('', DERIVED_SKU_RE.sub('', sku))
+        return sku in self._file_codes or base in self._file_codes
+
     def forget(self, plan):
         """Undoes a row's claims after its write was rolled back, so later rows aren't misjudged."""
         if plan.get('new_file_row'):
@@ -591,16 +622,49 @@ def _row_signature(name, color, size, barcode, details=()):
     return tuple((v or '').casefold() for v in (name, color, size, barcode, *details))
 
 
-def _file_target(state, base_sku, signature, row_index):
+def _legacy_target(state, base_sku, signature, barcode, colour_key=None):
+    """
+    The product an earlier import made for this row before it could read the row's colour,
+    or None. Imports before 2026-11-17 skipped an untitled colour column (keeping it in the
+    product's cells as "Column N"), so they derived the SKU from name/size/barcode with a
+    blank colour; now that the colour is read, the same row hashes to another SKU, and
+    re-importing the file would make a second product beside the old one (or fail on the
+    barcode the old one holds). It is that row's product only when it has no colour yet and
+    its row had this colour in that same column, or it holds this row's barcode, or it
+    already took this colour from an earlier run of this import.
+    """
+    colour = signature[1]
+    if not colour:
+        return None     # a row without a colour derives the old SKU itself
+    natural = f"{base_sku[:130]}-{_short_hash(*signature[:4])}"
+    if natural in state.products:
+        return None     # the colour-aware product exists: that one is the item
+    legacy = f"{base_sku[:130]}-{_short_hash(signature[0], '', *signature[2:4])}"
+    if state.products.get(legacy) is not False or legacy not in state.colours:
+        return None
+    if state.colours[legacy]:
+        return legacy if state.colours[legacy] == colour else None
+    owner = state.barcodes.get(barcode) if barcode else None
+    old_cells = state.legacy_cells.get(legacy, {})
+    if (colour_key and old_cells.get(colour_key) == colour) or (owner and owner[1] == legacy):
+        return legacy
+    return None
+
+
+def _file_target(state, base_sku, signature, row_index, barcode='', colour_key=None):
     """
     (sku this row writes, whether an earlier row of this file is the same item). Several
     items can share a Code (each colour of a model): the first takes the Code itself, the
     others a SKU derived from the row, so a re-import finds the same ones again. The derived
     SKU hashes name/colour/size/barcode as it always has; a row that matches those but not the
-    other details (brand, group, model...) takes one hashed from those too.
+    other details (brand, group, model...) takes one hashed from those too. A product an
+    earlier import saved without the row's colour is found under its old SKU.
     """
     base = base_sku[:130]
-    for target in (base_sku, f"{base}-{_short_hash(*signature[:4])}", f"{base}-{_short_hash(*signature)}"):
+    legacy = _legacy_target(state, base_sku, signature, barcode, colour_key)
+    candidates = (base_sku, *((legacy,) if legacy else ()),
+                  f"{base}-{_short_hash(*signature[:4])}", f"{base}-{_short_hash(*signature)}")
+    for target in candidates:
         first = state.file_rows.get(target)
         if first is None:
             return target, False
@@ -668,7 +732,11 @@ def _classify(row_index, row_dict, resolved, strategy, state, where=None):
 
     owner = state.barcodes.get(barcode) if barcode else None
     base_sku = sku or (owner[1] if owner else barcode) or f"SKU-{_short_hash(*signature[:3])}"
-    target, repeat = _file_target(state, base_sku, signature, row_index)
+    # Where an import that couldn't read an untitled colour column kept its value: "Column N".
+    colour_header = resolved.get('color_code')
+    colour_key = (f"Column {list(row_dict).index(colour_header) + 1}"
+                  if colour_header and colour_header in row_dict else None)
+    target, repeat = _file_target(state, base_sku, signature, row_index, barcode, colour_key)
     if repeat:
         return _repeat_plan(state, target, name, barcode, file_stock, where)
 
@@ -679,6 +747,12 @@ def _classify(row_index, row_dict, resolved, strategy, state, where=None):
             # Both rows are in this file and they are different items (another model or
             # colour): neither is dropped. The barcode stays with the first.
             note = (f"Barcode {barcode} is already on {_row_ref(earlier)} ({owner[1]}), a different item; "
+                    f"this row is imported without it")
+            barcode = ''
+        elif state.lists_item(owner[1]):
+            # The same clash, where an earlier import gave the barcode to the item this file
+            # lists further down: it keeps it, as a re-import must not take it away.
+            note = (f"Barcode {barcode} is already on {owner[1]}, a different item of this file; "
                     f"this row is imported without it")
             barcode = ''
         elif strategy != 'DUPLICATE':
@@ -729,6 +803,9 @@ def _classify(row_index, row_dict, resolved, strategy, state, where=None):
             plan['payload']['name'] = f"{name} (Duplicate)"[:255]
         else:
             plan.update(kind='update', counter='updated', replace=strategy == 'REPLACE')
+            if color and state.colours.get(target) == '':
+                plan['note'] = '. '.join(t for t in (
+                    note, f"Imported earlier without its colour; colour {color} is now filled in") if t)
 
     state.file_rows[target] = signature
     state.file_first[target] = dict(
@@ -1041,6 +1118,7 @@ def _analyze_file(batch, file_path, ext):
     repeat, so a stalled run just starts again.
     """
     state = ImportState(batch)
+    state.source = (file_path, ext)
     strategy = batch.duplicate_strategy
     row_index = total = with_barcode = keeps_existing = sheets_read = 0
     file_codes = set()
@@ -1182,6 +1260,20 @@ def _run_analysis(batch):
         connections.close_all()
 
 
+def _file_item_codes(file_path, ext):
+    """Every item Code the file lists, as _classify reads it (and as a derived SKU truncates it)."""
+    codes = set()
+    for _sheet, headers, stream in iter_sheet_streams(file_path, ext):
+        if headers:
+            resolved = resolve_field_headers(headers)
+            for _row_no, row_dict in stream:
+                get = field_getter(resolved, row_dict)
+                code = _clean_code(get('sku') or get('model_no'))[:150]
+                if code:
+                    codes.update((code, code[:130]))
+    return codes
+
+
 def _file_barcodes(file_path, ext):
     codes = set()
     for _sheet, headers, stream in iter_sheet_streams(file_path, ext):
@@ -1276,6 +1368,7 @@ def run_import_job(batch_id):
                 last_beat = time.time()
 
         state = ImportState(batch)
+        state.source = (file_path, ext)
         heartbeat()
         if batch.auto_barcode:
             state.assigned = _fix_barcodes(batch, file_path, ext)

@@ -24,8 +24,8 @@ import useLabelBundle, { templateForWorkflow } from '../../labels/useLabelBundle
 import { fetchLabelData } from '../../labels/labelApi';
 import { renderLabelHtml, hasUsableLogo, summarizeWarnings } from '../../labels/renderLabel';
 import { printLabelJob, resolveCalibration } from '../../labels/printLabels';
-import { startSkipFor, FRESH_START } from '../../labels/labelModel';
-import { LabelTemplateSelect, SheetStartOptions } from '../inventory/LabelPrintOptions';
+import { startSkipFor, FRESH_START, withPrintMode, printMode, printsAsSheet } from '../../labels/labelModel';
+import { LabelTemplateSelect, SheetStartOptions, PrintLayoutModeSelect } from '../inventory/LabelPrintOptions';
 import { buildPrintLines, buildReprintLines, countThrough, jobSize, lineSize, positionOf, printRows } from '../../utils/purchaseLabels';
 import { notify } from '../../utils/notify';
 import { formatCurrency } from '../../utils/localeFormat.js';
@@ -48,8 +48,8 @@ const labelsWord = (n) => `${n} label${n === 1 ? '' : 's'}`;
 
 // Before anything goes to the printer: "Do you want to print all N labels?" with what's in the job,
 // plus the shared Print Label options — barcode template / type and, for jewellery labels,
-// the Past Used Sheet start row & side (same components as Inventory → Products).
-function PrePrintDialog({ kind, lines, items, onCancel, onConfirm, templatePicker, template, start, onStart, problems = {} }) {
+// the Fresh / Part Used Sheet start page, row & side (every template) (same components as Inventory → Products).
+function PrePrintDialog({ kind, lines, items, onCancel, onConfirm, templatePicker, template, onMode, start, onStart, problems = {} }) {
   const total = jobSize(lines);
   const reprint = kind === 'REPRINT';
   const nameOf = (l) => items.find((i) => i.id === l.item)?.product_name || 'Item';
@@ -62,6 +62,7 @@ function PrePrintDialog({ kind, lines, items, onCancel, onConfirm, templatePicke
       <DialogContent dividers>
         <Stack spacing={1.5} sx={{ mb: 1.5 }}>
           {templatePicker}
+          {template && <PrintLayoutModeSelect template={template} value={printMode(template)} onChange={onMode} />}
           <SheetStartOptions template={template} value={start} onChange={onStart} />
           {blocked.length > 0 && (
             <Alert severity="error" sx={{ py: 0 }}>
@@ -212,6 +213,7 @@ export default function PurchaseBarcodePrinting({ invoiceId, refreshKey = 0, onI
   const [reprint, setReprint] = useState({}); // printed: { itemId: { from, to } }
   const [templateId, setTemplateId] = useState('');
   const [start, setStart] = useState(FRESH_START); // Past Used Sheet start cell (A4 / jewellery sheets)
+  const [modeOverride, setModeOverride] = useState(''); // '' = the template's own Print Layout Mode
   const [labelData, setLabelData] = useState({ byId: {}, store: {}, logo: '' });
   const [busy, setBusy] = useState(false);
   const [confirmJob, setConfirmJob] = useState(null);
@@ -220,8 +222,11 @@ export default function PurchaseBarcodePrinting({ invoiceId, refreshKey = 0, onI
 
   const templates = bundle?.templates || [];
   const workflowTemplate = templateForWorkflow(bundle, 'purchase');
-  const template = templates.find((t) => t.id === templateId) || workflowTemplate;
-  const chooseTemplate = (id) => { setTemplateId(id); setStart(FRESH_START); };
+  const baseTemplate = templates.find((t) => t.id === templateId) || workflowTemplate;
+  // The template as this job prints it (Print Layout Mode chosen on this screen applied).
+  const template = useMemo(() => withPrintMode(baseTemplate, modeOverride), [baseTemplate, modeOverride]);
+  const chooseTemplate = (id) => { setTemplateId(id); setModeOverride(''); setStart(FRESH_START); };
+  const chooseMode = (m) => { setModeOverride(m === printMode(baseTemplate) ? '' : m); setStart(FRESH_START); };
   const templatePicker = (props) => (
     <LabelTemplateSelect templates={templates} value={template?.id || ''} onChange={chooseTemplate} keepIds={[workflowTemplate?.id]} {...props} />
   );
@@ -293,7 +298,7 @@ export default function PurchaseBarcodePrinting({ invoiceId, refreshKey = 0, onI
   const problems = useMemo(() => {
     const out = {};
     if (!template) return out;
-    const ctx = { dpi: template.printer_type === 'a4' ? 0 : dpi, hasLogo: hasUsableLogo(labelData.logo) };
+    const ctx = { dpi: printsAsSheet(template) ? 0 : dpi, hasLogo: hasUsableLogo(labelData.logo) };
     for (const it of items) {
       const data = labelData.byId[it.product];
       if (!data) continue;
@@ -651,6 +656,7 @@ export default function PurchaseBarcodePrinting({ invoiceId, refreshKey = 0, onI
           items={items}
           templatePicker={templatePicker({ fullWidth: true })}
           template={template}
+          onMode={chooseMode}
           start={start}
           onStart={setStart}
           problems={problems}

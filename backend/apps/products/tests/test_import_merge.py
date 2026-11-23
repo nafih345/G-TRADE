@@ -156,6 +156,61 @@ class ReportedSheetTests(ImportCase):
         self.assertEqual(Product.objects.get(barcode='1094').stock, 4)    # never written by an import
         self.assertEqual(ImportPreviewRow.objects.get(batch=again).file_stock, 5)    # waits for the review
 
+    def test_reimport_after_an_import_that_missed_the_colour_column(self):
+        """
+        The reported sheet was first imported by a version that didn't read the untitled colour
+        column: its products have no colour and SKUs derived without one, and they hold the
+        barcodes. Importing the same sheet now must find each of them (no DUPLICATE_BARCODE, no
+        second product beside it), fill in its colour, and add only the items it missed.
+        """
+        rows, items, _quantity = shop_sheet(seed=11, items=1000)
+        path = self.write(rows)
+        with mock.patch.object(import_engine, '_name_unnamed_columns', lambda headers, *a: headers):
+            old = self.confirm(self.upload(path))
+        self.assertNotIn('Colour', old.column_headers)
+        legacy = old.imported_rows
+        self.assertLess(legacy, items)      # colours of one model looked like one item
+        self.assertEqual(Product.objects.exclude(color=None).count(), 0)
+
+        b = self.upload(path)
+        s = b.preview_summary
+        errors = list(ImportPreviewRow.objects.filter(batch=b, kind='ERROR').values_list('row_number', 'product_code', 'message', 'cells'))
+        self.assertEqual((s['error'], s['duplicate'], s['update'], s['new']), (0, 0, legacy, items - legacy), (s, errors))
+        self.assertEqual(s['valid'], len(rows))
+        notes = ImportPreviewRow.objects.filter(batch=b, kind='UPDATE', message__contains='colour C').count()
+        self.assertGreater(notes, 0)
+
+        b = self.confirm(b)
+        self.assertEqual((b.status, b.failed_rows, b.updated_rows, b.imported_rows), ('SUCCESS', 0, legacy, items - legacy),
+                         b.remarks)
+        self.assertAccounted(b)
+        self.assertEqual(Product.objects.count(), items)        # the same products a fresh import makes
+        self.assertFalse(Product.objects.filter(color=None).exists())
+        codes = list(Product.objects.exclude(barcode=None).values_list('barcode', flat=True))
+        self.assertEqual(len(codes), len(set(codes)))
+        # Each old product took the colour of the very row it was made from.
+        for colour, cells in Product.objects.filter(extra_data__has_key='Column 10').values_list('color', 'extra_data'):
+            self.assertEqual(cells['Column 10'], colour)
+
+        again = self.confirm(self.upload(path))
+        self.assertEqual((again.imported_rows, again.updated_rows, again.failed_rows), (0, items, 0), again.remarks)
+        self.assertEqual(Product.objects.count(), items)
+
+    def test_barcode_already_on_an_item_listed_later_in_the_file(self):
+        # An earlier import gave 9247 to 027A; this file lists 027 with it first, then 027A.
+        Product.objects.create(name='CHARLIE DUKE FRAME', sku='027A', barcode='9247', retail_price=25, cost_price=15)
+        Product.objects.create(name='Shop item', sku='OLD-1', barcode='5555', retail_price=1, cost_price=1)
+        b = self.upload([shop_row(1, 9247, '027', 'C01', 30), shop_row(2, 9247, '027A', 'C01', 12),
+                         shop_row(3, 5555, '031', 'C02', 1)])
+        data = self.preview(b)
+        self.assertEqual([r['kind'] for r in data['results']], ['NEW', 'UPDATE', 'ERROR'])
+        self.assertIn('Barcode 9247 is already on 027A, a different item of this file; this row is imported '
+                      'without it', data['results'][0]['message'])
+        self.assertIn('Existing Product: Shop item (OLD-1)', data['results'][2]['message'])   # not in the file
+        self.confirm(b)
+        self.assertEqual(Product.objects.get(sku='027A').barcode, '9247')
+        self.assertIsNone(Product.objects.get(sku='027').barcode)
+
     def test_uploading_the_same_file_again_replaces_its_unconfirmed_preview(self):
         path = self.write([shop_row(1, 1094, '72050', 'C01', 3)])
         first = self.upload(path)

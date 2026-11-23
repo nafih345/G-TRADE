@@ -907,7 +907,9 @@ export function renderVisualBillHtml(template, model, opts = {}) {
     ? '<script>window.addEventListener("load",function(){setTimeout(function(){try{window.focus();window.print();}catch(e){}},300);});<\/script>'
     : '';
   const title = [model.document?.title && billLabelText(model.document.title), model.document?.number].filter(Boolean).join(' ') || 'Bill';
-  const html = `<!DOCTYPE html><html ${billHtmlAttrs({ flip: false })}><head><meta charset="utf-8"/><title>${esc(title)}</title>
+  // gtrade-print-kind: lets the desktop app's print preview start on the receipt printer.
+  const kindMeta = g.thermal ? '<meta name="gtrade-print-kind" content="receipt"/>' : '';
+  const html = `<!DOCTYPE html><html ${billHtmlAttrs({ flip: false })}><head><meta charset="utf-8"/>${kindMeta}<title>${esc(title)}</title>
 <style>
 @page{size:${r2(g.pageW)}mm ${r2(g.pageH)}mm;margin:0}
 html,body{margin:0;padding:0;background:#ffffff}

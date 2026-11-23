@@ -4,7 +4,7 @@ import axios from 'axios';
 import { IS_LOCAL_EDITION } from '../utils/edition';
 
 // Windows local edition: a one-line banner whenever the licence needs attention. Cloud: nothing.
-const SHOW = ['EVALUATION', 'GRACE', 'REVOKED', 'EXPIRED', 'EVALUATION_ENDED', 'INVALID'];
+const SHOW = ['EVALUATION', 'GRACE', 'REVOKED', 'EXPIRED', 'EVALUATION_ENDED', 'INVALID', 'SUSPENDED'];
 
 export default function LicenseBanner() {
   const [lic, setLic] = useState(null);

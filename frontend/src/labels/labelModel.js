@@ -131,6 +131,9 @@ export function normalizeTemplate(t) {
       gapMm: num(layout.gapMm, 0),
       defaultBarcodeFormat: layout.defaultBarcodeFormat || 'CODE128',
       ...(t.printer_type === 'a4' ? { sheet: { ...DEFAULT_SHEET, ...(layout.sheet || {}) } } : {}),
+      ...(t.printer_type !== 'a4' && layout.pageGrid && typeof layout.pageGrid === 'object' ? { pageGrid: { ...layout.pageGrid } } : {}),
+      ...(t.printer_type !== 'a4' && layout.sheet && typeof layout.sheet === 'object' ? { sheet: { ...DEFAULT_SHEET, ...layout.sheet } } : {}),
+      ...(isMode(layout.printMode) ? { printMode: layout.printMode } : {}),
       elements: Array.isArray(layout.elements) ? layout.elements : [],
     },
   };
@@ -142,7 +145,7 @@ export const templateUsesRestricted = (t) =>
 export const templateFieldIds = (t) => new Set((t?.layout?.elements || []).filter((el) => !el.hidden && el.field).map((el) => el.field));
 
 export function sheetUsage(template) {
-  const s = template?.layout?.sheet || DEFAULT_SHEET;
+  const s = sheetFor(template);
   const w = num(template?.width_mm);
   const h = num(template?.height_mm);
   return {
@@ -449,34 +452,167 @@ export function labelTypeOf(t) {
 export const isJewelleryTemplate = (t) => labelTypeOf(t) === 'jewellery';
 
 // ---------------------------------------------------------------------------
-// Past Used Sheet — where on a part-used A4 sheet the job starts.
-// start = { enabled, row, col } (1-based). Only sheet (A4) templates can skip positions:
-// a thermal roll always continues from the next label.
+// Fresh Sheet / Part Used Sheet — where the job starts. Available for EVERY template
+// (standard, optical, jewellery; A4 sheets and thermal rolls alike).
+// start = { enabled, page, row, col } (1-based).
+//   A4 sheet  — page = which sheet of the stack, row/col = the cell on that sheet.
+//   Thermal   — every label is its own page (one row, one column), so "page N" leaves
+//               N-1 labels of the roll / strip blank before the first printed one.
 // ---------------------------------------------------------------------------
-export const FRESH_START = Object.freeze({ enabled: false, row: 1, col: 1 });
+export const FRESH_START = Object.freeze({ enabled: false, page: 1, row: 1, col: 1 });
+export const MAX_START_PAGE = 999;
 const clampInt = (v, lo, hi) => Math.min(hi, Math.max(lo, parseInt(v, 10) || lo));
 
+// A4 grid geometry, or null when the template prints one label per page (roll).
 export function sheetGrid(template) {
-  if (template?.printer_type !== 'a4') return null;
-  const sheet = template.layout?.sheet || DEFAULT_SHEET;
+  if (!template || !printsAsSheet(template)) return null;
+  const sheet = sheetFor(template);
   const rows = Math.max(1, parseInt(sheet.rows, 10) || 1);
   const cols = Math.max(1, parseInt(sheet.cols, 10) || 1);
   return { rows, cols, perSheet: rows * cols };
 }
 
-// Labels to leave blank before the first printed one.
-export function startSkipFor(template, start) {
-  const g = sheetGrid(template);
-  if (!g || !start?.enabled) return 0;
-  return (clampInt(start.row, 1, g.rows) - 1) * g.cols + (clampInt(start.col, 1, g.cols) - 1);
+// Start-position grid for any template.
+//   A4 sheet — the sheet's own rows x columns.
+//   Thermal  — labels come off one at a time, but the stock is counted in pages of
+//              rows x columns (a jewellery tag sheet / strip). The layout comes from the
+//              print dialog (start.pageRows / pageCols), else the template's saved
+//              layout.pageGrid, else 10 rows x (2 for jewellery, 1 otherwise).
+export const MAX_PAGE_ROWS = 60;
+export const MAX_PAGE_COLS = 20;
+export function thermalPageGrid(template, start = {}) {
+  const saved = template?.layout?.pageGrid || {};
+  const rows = clampInt(start.pageRows ?? saved.rows ?? 10, 1, MAX_PAGE_ROWS);
+  const cols = clampInt(start.pageCols ?? saved.cols ?? (isJewelleryTemplate(template) ? 2 : 1), 1, MAX_PAGE_COLS);
+  return { rows, cols };
 }
 
-// Inverse of startSkipFor: "N labels already used" -> the start cell.
-export function startFromSkip(template, skip) {
-  const g = sheetGrid(template);
+// ---------------------------------------------------------------------------
+// Print Layout Mode — how ANY template is printed (layout.printMode):
+//   'sheet' — Multi-Label Sheet (A4 Grid): A4 portrait pages, labels in a CSS grid of the
+//             sheet's rows x columns, page break only after each full sheet.
+//   'roll'  — Single Sticker / Thermal Roll: @page = the label size, one label per page.
+// Saved mode wins (layout.printMode, or the older layout.pageGrid.mode); otherwise A4
+// templates and jewellery templates default to the A4 grid, everything else to the roll.
+// The print screen can override it per job (withPrintMode).
+// ---------------------------------------------------------------------------
+export const PRINT_LAYOUT_MODES = [
+  { id: 'sheet', label: 'Multi-Label Sheet (A4 Grid)' },
+  { id: 'roll', label: 'Single Sticker / Thermal Roll (1 label per page)' },
+];
+const isMode = (m) => m === 'sheet' || m === 'roll';
+export function defaultPrintMode(template) {
+  if (!template) return null;
+  return template.printer_type === 'a4' || isJewelleryTemplate(template) ? 'sheet' : 'roll';
+}
+export function printMode(template) {
+  if (!template) return null;
+  const saved = template.layout?.printMode ?? template.layout?.pageGrid?.mode;
+  return isMode(saved) ? saved : defaultPrintMode(template);
+}
+export const printsAsSheet = (template) => printMode(template) === 'sheet';
+
+// The template as this print job uses it: the print screen's mode override applied.
+export function withPrintMode(template, mode) {
+  if (!template || !isMode(mode) || mode === printMode(template)) return template;
+  return { ...template, layout: { ...(template.layout || {}), printMode: mode } };
+}
+
+// A4 sheet geometry when the template has none saved (a thermal-size label printed on A4).
+// Jewellery: 2 across x 19 down = 38 per sheet; others: as many as fit. Clamped to what
+// physically fits inside A4 with 5 mm edges, and centred on the sheet.
+export const A4_W = 210;
+export const A4_H = 297;
+const A4_EDGE = 5;
+export function autoA4Sheet(template) {
+  const w = Math.max(1, num(template?.width_mm, 38));
+  const h = Math.max(1, num(template?.height_mm, 25));
+  const jewel = isJewelleryTemplate(template);
+  const colGapMm = jewel ? 6 : 2;
+  const rowGapMm = 0;
+  const fitCols = Math.max(1, Math.floor((A4_W - 2 * A4_EDGE + colGapMm) / (w + colGapMm)));
+  const fitRows = Math.max(1, Math.floor((A4_H - 2 * A4_EDGE + rowGapMm) / (h + rowGapMm)));
+  const cols = Math.min(jewel ? 2 : fitCols, fitCols);
+  const rows = Math.min(jewel ? 19 : fitRows, fitRows);
+  const usedW = cols * w + (cols - 1) * colGapMm;
+  const usedH = rows * h + (rows - 1) * rowGapMm;
+  return {
+    cols, rows, colGapMm, rowGapMm,
+    marginLeftMm: r2(Math.max(0, (A4_W - usedW) / 2)),
+    marginTopMm: r2(Math.max(0, (A4_H - usedH) / 2)),
+  };
+}
+
+// The A4 grid this template prints with: its saved sheet, else the automatic one.
+export function sheetFor(template) {
+  const saved = template?.layout?.sheet;
+  if (saved && typeof saved === 'object') return { ...DEFAULT_SHEET, ...saved };
+  return template?.printer_type === 'a4' ? { ...DEFAULT_SHEET } : autoA4Sheet(template);
+}
+
+// Printed pages for `labels` labels after `skip` used positions.
+export function printedPageCount(template, labels, skip = 0) {
+  const n = Math.max(0, labels) + Math.max(0, skip);
+  if (!n) return 0;
+  return printsAsSheet(template) ? Math.ceil(n / (sheetGrid(template)?.perSheet || 1)) : n;
+}
+
+export function startGrid(template, start) {
+  if (!template) return null;
+  const a4 = sheetGrid(template);
+  if (a4) return a4;
+  const { rows, cols } = thermalPageGrid(template, start || {});
+  return { rows, cols, perSheet: rows * cols, thermal: true };
+}
+
+// Start Row / Start Column (and page) typed or clicked on the print screen. Any custom
+// value is accepted: past page 1 / row 1 / column 1 switches to a Part Used Sheet, back to
+// 1 / 1 / 1 is a Fresh Sheet. A4 grid: clamped to the sheet's rows / columns. Thermal roll /
+// strip: a row or column beyond the page layout grows the layout instead of being refused.
+export function applyStartPosition(template, value = FRESH_START, patch = {}) {
+  const g = startGrid(template, value);
   if (!g) return { ...FRESH_START };
-  const n = clampInt(skip, 0, g.perSheet - 1);
-  return { enabled: n > 0, row: Math.floor(n / g.cols) + 1, col: (n % g.cols) + 1 };
+  const next = { ...FRESH_START, ...value, ...(g.thermal ? { pageRows: g.rows, pageCols: g.cols } : {}), ...patch };
+  next.page = clampInt(next.page, 1, MAX_START_PAGE);
+  if (g.thermal) {
+    next.row = clampInt(next.row, 1, MAX_PAGE_ROWS);
+    next.col = clampInt(next.col, 1, MAX_PAGE_COLS);
+    next.pageRows = Math.max(g.rows, next.row);
+    next.pageCols = Math.max(g.cols, next.col);
+  } else {
+    next.row = clampInt(next.row, 1, g.rows);
+    next.col = clampInt(next.col, 1, g.cols);
+  }
+  next.enabled = next.page > 1 || next.row > 1 || next.col > 1;
+  return next;
+}
+
+// Labels (cells / roll labels) to leave blank before the first printed one.
+export function startSkipFor(template, start) {
+  const g = startGrid(template, start);
+  if (!g || !start?.enabled) return 0;
+  const page = clampInt(start.page, 1, MAX_START_PAGE);
+  return (page - 1) * g.perSheet
+    + (clampInt(start.row, 1, g.rows) - 1) * g.cols
+    + (clampInt(start.col, 1, g.cols) - 1);
+}
+
+// Inverse of startSkipFor: "N labels already used" -> the start page / cell.
+// `start` (optional) carries a thermal page layout, which is kept in the result.
+export function startFromSkip(template, skip, start) {
+  const g = startGrid(template, start);
+  if (!g) return { ...FRESH_START };
+  const keep = g.thermal && start && (start.pageRows != null || start.pageCols != null)
+    ? { pageRows: g.rows, pageCols: g.cols } : {};
+  const n = clampInt(skip, 0, MAX_START_PAGE * g.perSheet - 1);
+  const inPage = n % g.perSheet;
+  return {
+    enabled: n > 0,
+    page: Math.floor(n / g.perSheet) + 1,
+    row: Math.floor(inPage / g.cols) + 1,
+    col: (inPage % g.cols) + 1,
+    ...keep,
+  };
 }
 
 // Names for the sheet's columns: jewellery sheets are two tags across (left / right side).

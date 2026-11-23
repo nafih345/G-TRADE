@@ -55,6 +55,45 @@ BRANCH_FIELDS = ('id', 'name', 'code', 'phone', 'email', 'address', 'city', 'sta
                  'is_active', 'is_default')
 
 
+# A licensed cloud client's terms (apps.vendor_licensing.service.apply_to_tenant).
+LICENCE_MANAGED_FIELDS = ('subscription_plan', 'subscription_starts_on', 'subscription_expires_on', 'max_users',
+                          'max_branches', 'max_companies', 'package', 'modules', 'settings_features')
+
+
+def _vendor_licensing():
+    from django.apps import apps
+    return apps.is_installed('apps.vendor_licensing')
+
+
+def _tenant_licence(tenant):
+    if not _vendor_licensing():
+        return None
+    from apps.vendor_licensing.service import tenant_licence
+    return tenant_licence(tenant)
+
+
+def _licence_managed_fields():
+    """Cloud: the licence drives every term. Windows Local Hosted Workspaces: the subscription drives
+    plan / start / expiry; modules, seats and branches stay editable on the workspace."""
+    if edition.is_local():
+        return ('subscription_plan', 'subscription_starts_on', 'subscription_expires_on')
+    return LICENCE_MANAGED_FIELDS
+
+
+def _subscriptions(tenant_ids):
+    if not _vendor_licensing():
+        return {}
+    from apps.vendor_licensing.service import tenant_subscriptions
+    return tenant_subscriptions(tenant_ids)
+
+
+def _differs(tenant, field, value):
+    if field == 'max_companies':
+        org = getattr(tenant, 'organization', None)
+        return org is None or org.max_companies != value
+    return getattr(tenant, field, None) != value
+
+
 def _admin_usernames(tenant_ids):
     """Tenant id -> username of its first Super Admin."""
     User = get_user_model()
@@ -195,7 +234,7 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
         ids = [t.pk for t in tenants]
         return {**self.get_serializer_context(), 'admins': _admin_usernames(ids),
                 'branch_counts': _branch_counts(ids), 'active_branch_counts': _branch_counts(ids, active=True),
-                'company_names': _company_names(ids)}
+                'company_names': _company_names(ids), 'subscriptions': _subscriptions(ids)}
 
     def _row(self, tenant_id):
         tenant = self.get_queryset().get(pk=tenant_id)
@@ -219,6 +258,11 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
         data['multi_branch_enabled'] = bool(settings_row and settings_row.multi_branch_enabled)
         data['role_permissions'] = tenant.role_permissions
         data['role_levels'] = module_access.all_role_levels(tenant.role_permissions)
+        lic = _tenant_licence(tenant)
+        data['licence'] = None if lic is None else {
+            'id': str(lic.pk), 'lic_id': lic.lic_id, 'plan': (lic.plan_snapshot or {}).get('name', ''),
+            'status': lic.effective_status(), 'expires_on': lic.expires_on, 'lifetime': lic.is_lifetime,
+            'managed_fields': list(_licence_managed_fields())}
         return data
 
     # ---- list / detail / catalog --------------------------------------------------------
@@ -331,9 +375,34 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
     # ---- onboarding / profile -------------------------------------------------------------
 
     def create(self, request, *args, **kwargs):
-        serializer = TenantOnboardSerializer(data=request.data)
+        data, licence_plan, licence_start, install = request.data, None, None, None
+        if request.data.get('licence_plan_id') and edition.is_local():
+            # Windows Local Super Admin: Hosted Workspaces → New client → step 5 Subscription. The
+            # workspace and its subscription (Subscription ID = signed licence record) are created in
+            # the same transaction; the client details are the wizard's own, never asked again.
+            if not _vendor_licensing():
+                return _bad('licence_plan_id', 'Subscriptions are not available on this installation.')
+            from apps.vendor_licensing import onboarding
+            from apps.vendor_licensing.service import LicenceError
+            try:
+                data, licence_plan, licence_start, install = onboarding.prepare_local(request.data)
+            except LicenceError as e:
+                return Response({e.field or 'detail': [e.message], 'code': e.code}, status=e.status)
+        elif request.data.get('licence_plan_id'):
+            # Cloud Edition client sold on a plan: the workspace gets the plan's terms and its
+            # licence is issued in the same transaction (apps.vendor_licensing.onboarding).
+            if not _vendor_licensing():
+                return _bad('licence_plan_id', 'Licence plans are managed in the vendor console, not on this installation.')
+            from apps.vendor_licensing import onboarding
+            from apps.vendor_licensing.service import LicenceError
+            try:
+                data, licence_plan, licence_start = onboarding.prepare(request.data)
+            except LicenceError as e:
+                return Response({e.field or 'detail': [e.message], 'code': e.code}, status=e.status)
+        serializer = TenantOnboardSerializer(data=data)
         serializer.is_valid(raise_exception=True)
         v = serializer.validated_data
+        licence = None
         try:
             with transaction.atomic():
                 tenant, admin = onboard_tenant(
@@ -349,8 +418,19 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
                         branding = BillingSettings.objects.first() or BillingSettings()
                         branding.logo_data_url = v['logo']
                         branding.save()
+                if licence_plan is not None:
+                    from apps.vendor_licensing import onboarding
+                    if install is not None:
+                        licence = onboarding.issue_for_hosted_tenant(tenant, licence_plan, licence_start, install,
+                                                                     request.user)
+                    else:
+                        licence = onboarding.issue_for_new_tenant(tenant, licence_plan, licence_start, request.user)
         except OnboardingError as e:
             return _bad(e.field, e.message)
+        except Exception as e:  # a licence that cannot be issued rolls the whole client back
+            if e.__class__.__name__ != 'LicenceError':
+                raise
+            return Response({e.field or 'detail': [e.message], 'code': e.code}, status=e.status)
         except IntegrityError:
             # Lost a race with a simultaneous onboarding of the same name / username.
             return _bad(None, 'That client name or username was just taken. Try another.')
@@ -360,6 +440,12 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
         # The setup link itself is never in this response (it would be kept for idempotent
         # replays); the console asks users/<id>/invitation/ for it next.
         data['invitation_pending'] = v['password'] is None
+        if licence is not None:
+            from apps.vendor_licensing.serializers import LicenceSerializer, key_available
+            data = self._row(tenant.pk) | {k: data[k] for k in ('admin_username', 'admin_user_id', 'invitation_pending')}
+            data['licence'] = LicenceSerializer(licence).data
+            if key_available(licence):
+                data['licence']['key'] = licence.key_token
         return Response(data, status=status.HTTP_201_CREATED)
 
     def partial_update(self, request, *args, **kwargs):
@@ -368,6 +454,16 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
         serializer = TenantUpdateSerializer(data=request.data, instance=tenant, partial=True)
         serializer.is_valid(raise_exception=True)
         v = dict(serializer.validated_data)
+        lic = _tenant_licence(tenant)
+        if lic is not None:
+            # One source of truth: a licensed client's terms change only through its licence
+            # (renew / change plan), never by editing the workspace's copy of them.
+            managed = sorted(f for f in _licence_managed_fields() if f in v and _differs(tenant, f, v[f]))
+            if managed:
+                where = 'Manage → Subscription Plans' if edition.is_local() else 'Licences'
+                return Response({'detail': f'Managed by subscription {lic.lic_id}: change the plan or renew it '
+                                           f'in {where} instead ({", ".join(managed)}).',
+                                 'code': 'licence_managed', 'fields': managed}, status=400)
         multi_branch = v.pop('multi_branch_enabled', None)
         max_companies = v.pop('max_companies', None)
         changes = {}
@@ -450,6 +546,9 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
         tenant = self.get_object()
         if tenant.is_active and not tenant.deactivation_effective_date:
             return _bad(None, f'{tenant.name} is already active.')
+        if not tenant.is_active and tenant.deactivation_category in ('LICENCE_SUSPENDED', 'LICENCE_REVOKED'):
+            return _bad(None, f'{tenant.name} was blocked by its licence ({tenant.deactivation_reason}). '
+                              'Reactivate the licence in Licences instead.')
         serializer = ReactivateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         was_scheduled = tenant.is_active

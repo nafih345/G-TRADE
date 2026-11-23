@@ -16,8 +16,8 @@ import useLabelBundle, { templateForWorkflow, WORKFLOWS } from '../../labels/use
 import { fetchLabelData, fetchVariantSiblings } from '../../labels/labelApi';
 import { renderLabelHtml, labelCss, hasUsableLogo, summarizeWarnings } from '../../labels/renderLabel';
 import { printLabelJob, resolveCalibration } from '../../labels/printLabels';
-import { templateFieldIds, templateUsesRestricted, jobTotals, a4SheetCount, sheetUsage, startSkipFor, FRESH_START } from '../../labels/labelModel';
-import { LabelTemplateSelect, SheetStartOptions } from './LabelPrintOptions';
+import { templateFieldIds, templateUsesRestricted, jobTotals, startSkipFor, FRESH_START, printsAsSheet, printedPageCount, sheetGrid, withPrintMode, printMode } from '../../labels/labelModel';
+import { LabelTemplateSelect, SheetStartOptions, PrintLayoutModeSelect } from './LabelPrintOptions';
 import { todayIso } from '../../labels/labelFields';
 import { notify } from '../../utils/notify';
 
@@ -56,14 +56,17 @@ export default function BarcodePrintDialog({ open, onClose, products, rows: rows
   const [job, setJob] = useState({ offer_price: '', batch_no: '', expiry_date: '', print_date: todayIso() });
   const [manualBarcode, setManualBarcode] = useState('');
   const [start, setStart] = useState(FRESH_START);
+  const [modeOverride, setModeOverride] = useState(''); // '' = the template's own Print Layout Mode
   const [confirming, setConfirming] = useState(false);
   const [printing, setPrinting] = useState(false);
 
   const settings = bundle?.settings || {};
   const templates = bundle?.templates || [];
-  const template = templateOverride && (!templateId || templateId === '__design')
+  const baseTemplate = templateOverride && (!templateId || templateId === '__design')
     ? templateOverride
     : templates.find((t) => t.id === templateId) || templateForWorkflow(bundle, workflow);
+  // The template as this job prints it (Print Layout Mode chosen on this screen applied).
+  const template = useMemo(() => withPrintMode(baseTemplate, modeOverride), [baseTemplate, modeOverride]);
   const workflowLabel = WORKFLOWS.find((w) => w.id === workflow)?.label;
 
   // ---- load rows + database values ------------------------------------------------
@@ -126,7 +129,7 @@ export default function BarcodePrintDialog({ open, onClose, products, rows: rows
 
   // ---- validation per row against the chosen template ------------------------------
   const cal = resolveCalibration(settings);
-  const ctx = useMemo(() => ({ dpi: template?.printer_type === 'a4' ? 0 : cal.dpi, hasLogo: hasUsableLogo(logo) }), [template, cal.dpi, logo]);
+  const ctx = useMemo(() => ({ dpi: printsAsSheet(template) ? 0 : cal.dpi, hasLogo: hasUsableLogo(logo) }), [template, cal.dpi, logo]);
   const jobValues = useMemo(() => Object.fromEntries(Object.entries(job).filter(([, v]) => v)), [job]);
   const checked = useMemo(() => {
     if (!template) return rows.map((r) => ({ ...r, warnings: [] }));
@@ -145,8 +148,8 @@ export default function BarcodePrintDialog({ open, onClose, products, rows: rows
 
   const totals = jobTotals(checked);
   const fieldIds = template ? templateFieldIds(template) : new Set();
-  const isA4 = template?.printer_type === 'a4';
-  const per = isA4 ? sheetUsage(template).perSheet : 1;
+  const isA4 = printsAsSheet(template); // Multi-Label Sheet (A4 Grid)
+  const per = isA4 ? sheetGrid(template).perSheet : 1;
   const startSkip = startSkipFor(template, start);
   const previewRow = checked.find((r) => r.html && !r.skipReason) || checked.find((r) => r.html);
   const css = useMemo(() => labelCss({ logo }), [logo]);
@@ -219,7 +222,7 @@ export default function BarcodePrintDialog({ open, onClose, products, rows: rows
                 templates={templates} value={templateValue} showVersion
                 keepIds={[templateForWorkflow(bundle, workflow)?.id]}
                 designOption={templateOverride ? { value: '__design', label: `Current design — ${templateOverride.name || 'Untitled'} (as shown in the designer)` } : undefined}
-                onChange={(v) => { setTemplateId(v); setStart(FRESH_START); setConfirming(false); }}
+                onChange={(v) => { setTemplateId(v); setModeOverride(''); setStart(FRESH_START); setConfirming(false); }}
                 inputProps={{ 'data-testid': 'print-template-select' }}
               />
 
@@ -228,7 +231,9 @@ export default function BarcodePrintDialog({ open, onClose, products, rows: rows
                   <Alert severity="info" sx={{ mb: 1.5 }}>
                     Ready to print <b>{totals.labels} label{totals.labels === 1 ? '' : 's'}</b> for <b>{totals.lines} line{totals.lines === 1 ? '' : 's'}</b>
                     {totals.variants ? ` (${totals.variants} variant${totals.variants === 1 ? '' : 's'})` : ''} with “{template.name}”
-                    {isA4 ? ` on ${a4SheetCount(totals.labels, template, startSkip)} A4 sheet(s)` : ` on ${template.width_mm} × ${template.height_mm} mm thermal labels`}.
+                    {isA4
+                      ? ` on ${printedPageCount(template, totals.labels, startSkip)} A4 sheet(s), ${per} labels per sheet`
+                      : ` on ${template.width_mm} × ${template.height_mm} mm stickers, one label per page`}.
                     {totals.skipped ? ` ${totals.skipped} line(s) will be skipped.` : ''}
                     {startSkip ? ` Starting at the first unused position (${startSkip} used label${startSkip === 1 ? '' : 's'} skipped).` : ''}
                   </Alert>
@@ -333,6 +338,10 @@ export default function BarcodePrintDialog({ open, onClose, products, rows: rows
                       helperText={manualBarcode.trim() ? 'This exact value prints on every label and is registered to the product so it scans at billing.' : "Leave blank to use the product's saved barcode."} />
                   )}
 
+                  <PrintLayoutModeSelect
+                    template={template} value={printMode(template)}
+                    onChange={(m) => { setModeOverride(m === printMode(baseTemplate) ? '' : m); setStart(FRESH_START); setConfirming(false); }}
+                  />
                   <SheetStartOptions template={template} value={start} onChange={setStart} />
                 </>
               )}
@@ -362,7 +371,7 @@ export default function BarcodePrintDialog({ open, onClose, products, rows: rows
       <DialogActions>
         <Button startIcon={<TuneIcon />} onClick={openLabelSettings} sx={{ mr: 'auto' }}>Edit label designs</Button>
         <Typography variant="body2" color="text.secondary" sx={{ mr: 1 }} data-testid="print-total">
-          {totals.labels} label{totals.labels === 1 ? '' : 's'}{isA4 && totals.labels ? ` · ${a4SheetCount(totals.labels, template, startSkip)} sheet(s)` : ''}
+          {totals.labels} label{totals.labels === 1 ? '' : 's'}{isA4 && totals.labels ? ` · ${printedPageCount(template, totals.labels, startSkip)} A4 sheet(s)` : ''}
         </Typography>
         {confirming ? <Button onClick={() => setConfirming(false)}>Back</Button> : <Button onClick={onClose}>Cancel</Button>}
         <Button variant="contained" disabled={!template || totals.labels === 0 || printing || dataLoading} onClick={handlePrint} data-testid="print-labels">

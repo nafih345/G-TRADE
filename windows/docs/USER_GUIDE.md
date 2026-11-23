@@ -55,7 +55,15 @@ The desktop app opens at **100 %** interface size. To make the screens smaller (
 ## 4. Printing and sharing
 
 - Bills, receipts and prescriptions print with **your shop's** name, logo and address from the Store & Clinic Profile.
-- Choose the printer in the print dialog. Set paper and label sizes in the printer driver.
+- **Print** opens the app's **print preview**. It shows the real pages exactly as they will print: paper size, margins, logo, tables and customer details. In the preview you choose:
+  - **Printer.** Your paper printers come first, with the Windows default marked. **Save as PDF** saves exactly these pages as a PDF file. Virtual printers such as Microsoft Print to PDF or OneNote are listed separately, because they make files, not paper.
+  - **Paper size.** *As designed* uses the size set in Settings → Bill & Invoice Designer: A4, A5, or an 80 mm receipt roll cut to the length of the receipt. Choosing A4, A5 or Letter fits the page onto that sheet instead.
+  - **Margins**, **Copies**, and **Orientation**. Orientation can only be changed for screens and reports that have no fixed page size.
+- The preview remembers the printer you last used for each kind of document, so bills, receipts and labels can each go to their own printer.
+- If no paper printer is set up on the PC, the preview says so and offers **Save as PDF**. To print on paper, add the printer in Windows **Settings → Bluetooth & devices → Printers & scanners**, then press **↻** in the preview.
+- **Windows print dialog…** in the preview opens the Windows dialog for printer-specific options such as the paper tray or two-sided printing. That dialog shows "This app doesn't support print preview". This is expected: the app's own window is the preview.
+- Receipts and labels are sent to the printer at their exact size. If a receipt or label printer feeds or cuts wrongly, check the paper or label size in that printer's Windows driver.
+- Shortcuts in the preview: **Ctrl + P** prints, **Ctrl + S** saves a PDF, **Esc** closes.
 - **Share on WhatsApp** opens WhatsApp with the bill summary, signed with your shop name and phone number. Nothing is sent until you press Send in WhatsApp.
 
 ## 5. Branches and companies

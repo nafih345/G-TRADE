@@ -57,6 +57,34 @@ class ValidationTests(SimpleTestCase):
         with self.assertRaisesMessage(LayoutError, 'A4 is'):
             validate_template('a4', 70, 30, {'sheet': {'cols': 3, 'rows': 8, 'marginLeftMm': 10}}, True)
 
+    def test_thermal_page_grid_kept_and_bounded(self):
+        # Part Used Sheet layout for thermal designs (start page / row / column).
+        _, _, clean = validate_template('thermal', 19, 30, {'pageGrid': {'rows': 12, 'cols': 2}}, True)
+        self.assertEqual(clean['pageGrid'], {'rows': 12, 'cols': 2})
+        with self.assertRaises(LayoutError):
+            validate_template('thermal', 19, 30, {'pageGrid': {'rows': 0, 'cols': 2}}, True)
+        _, _, a4 = validate_template('a4', 92, 14.5, {'sheet': {'cols': 2, 'rows': 19, 'marginLeftMm': 12, 'colGapMm': 6}, 'pageGrid': {'rows': 3}}, True)
+        self.assertNotIn('pageGrid', a4)
+
+    def test_print_layout_mode_and_a4_grid_on_thermal_labels(self):
+        # Multi-Label Sheet (A4 Grid) vs Single Sticker / Thermal Roll, for any template.
+        _, _, clean = validate_template('thermal', 19, 14, {'printMode': 'sheet', 'sheet': {'cols': 2, 'rows': 19, 'marginTopMm': 10, 'marginLeftMm': 80, 'colGapMm': 6}}, True)
+        self.assertEqual(clean['printMode'], 'sheet')
+        self.assertEqual((clean['sheet']['cols'], clean['sheet']['rows']), (2, 19))
+        _, _, plain = validate_template('thermal', 50, 25, {}, True)
+        self.assertNotIn('sheet', plain)
+        self.assertNotIn('printMode', plain)
+        _, _, a4 = validate_template('a4', 63.5, 33.9, {'printMode': 'roll'}, True)
+        self.assertEqual(a4['printMode'], 'roll')
+        _, _, junk = validate_template('thermal', 19, 30, {'printMode': '<b>'}, True)
+        self.assertNotIn('printMode', junk)
+        # Older designs kept the mode in pageGrid.mode.
+        _, _, legacy = validate_template('thermal', 19, 30, {'pageGrid': {'rows': 10, 'cols': 2, 'mode': 'sheet'}}, True)
+        self.assertEqual(legacy['printMode'], 'sheet')
+        self.assertEqual(legacy['pageGrid'], {'rows': 10, 'cols': 2})
+        with self.assertRaises(LayoutError):  # 19 x 30 mm: 19 rows don't fit on A4
+            validate_template('thermal', 19, 30, {'sheet': {'cols': 2, 'rows': 19}}, True)
+
     def test_unknown_keys_and_markup_are_not_persisted(self):
         _, _, clean = validate_template('thermal', 38, 25, {'elements': [
             dict(field_el('a', 'product_name'), onclick='alert(1)', style={'fontSizePt': 7, 'css': 'x:url(evil)'}),

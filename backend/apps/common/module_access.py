@@ -369,15 +369,17 @@ def tenant_access_config(tenant_id):
         if row is None:
             return {'modules': [], 'role_permissions': {}, 'settings_features': []}
         platform = tenant_id == tenancy.DEFAULT_TENANT_ID
-        from apps.common.edition import is_local, licensed_modules
+        from apps.common.edition import is_local, licensed_modules, licensed_settings_features
         modules = list(MODULE_KEYS) if platform else list(row['modules'] or [])
+        features = None if platform else row['settings_features']
         if is_local():
             # Windows edition: tenant #1 is the customer's own company, not a platform account, and
-            # the licence's module list wins (licence AND company modules).
+            # the licence's module list and Settings sections win (licence AND company).
             modules = licensed_modules(modules)
+            features = licensed_settings_features(features)
         return {'modules': modules,
                 'role_permissions': dict(row['role_permissions'] or {}),
-                'settings_features': None if platform else row['settings_features']}
+                'settings_features': features}
 
     return hot_cache.get_or_load(f'tenant:access:{tenant_id}', load)
 

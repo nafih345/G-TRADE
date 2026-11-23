@@ -10,6 +10,10 @@ class LicenseState(models.Model):
     vendor revoked it, when the evaluation started)."""
     license_blob = models.TextField(blank=True, default='')
     lic_id = models.CharField(max_length=64, blank=True, default='')
+    # Vendor client this installation is licensed to (set by the first vendor licence; a licence
+    # for another client is refused) and the installed licence revision.
+    client_id = models.CharField(max_length=40, blank=True, default='')
+    lic_rev = models.PositiveIntegerField(default=0)
     activation_id = models.CharField(max_length=64, blank=True, default='')
     installed_at = models.DateTimeField(auto_now_add=True)
     activated_at = models.DateTimeField(null=True, blank=True)

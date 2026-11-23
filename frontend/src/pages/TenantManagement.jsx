@@ -15,8 +15,9 @@ import axios from 'axios';
 import {
   Box, Typography, Card, Stack, TextField, Button, IconButton, InputAdornment, Alert, AlertTitle, MenuItem,
   Table, TableHead, TableRow, TableCell, TableBody, TableContainer, Chip, Tooltip, LinearProgress,
-  TablePagination, Grid,
+  TablePagination, Grid, Tab, Tabs,
 } from '@mui/material';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   ContentCopy as CopyIcon, Refresh as RefreshIcon, Search as SearchIcon, PersonAddAlt1 as OnboardIcon,
   Tune as ManageIcon, PowerSettingsNew as PowerIcon, Storage as DataIcon, Login as EnterIcon,
@@ -24,12 +25,26 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { apiErrorMessage } from '../utils/apiError';
 import { notify } from '../utils/notify';
+import { IS_LOCAL_EDITION } from '../utils/edition';
 import OnboardClientWizard from '../components/superadmin/OnboardClientWizard';
+import NewLicenceDialog from '../components/superadmin/licensing/NewLicenceDialog';
+import KeyReveal from '../components/superadmin/licensing/KeyReveal';
+import CustomerClientsPanel from '../components/superadmin/licensing/CustomerClientsPanel';
+import { LIC_API } from '../components/superadmin/licensing/licenceApi';
+import { AuditTab, PlansTab } from './LicenceManagement';
+import { SUBSCRIPTION_STATUS } from '../components/superadmin/licensing/HostedSubscriptionFields';
 import ClientWorkspaceDialog, { WORKSPACE_TABS } from '../components/superadmin/ClientWorkspaceDialog';
 import { DeactivateDialog, ReactivateDialog } from '../components/superadmin/LifecycleDialogs';
 import {
   API, STATUS_META, copy, countryName, fmtDate, isReauth, lifecycleOf, packageLabel, planLabel,
 } from '../components/superadmin/clientApi';
+
+// Windows edition: Client Management has four views. "Customers & Subscriptions" = clients who run
+// G OPTICALS on their own PC (subscription + signed licence key, CustomerClientsPanel); "Hosted
+// workspaces" = clients whose data lives on THIS installation (the table below); "Plans" and
+// "Licence audit" = the subscription plans and every licence action. The cloud console keeps its
+// separate Licences & Plans page.
+const LOCAL_VIEWS = ['customers', 'hosted', 'plans', 'audit'];
 
 // Windows edition: the installation licence bounds how many clients the Local Super Admin may add.
 function LocalLicenseNotice({ summary }) {
@@ -39,9 +54,11 @@ function LocalLicenseNotice({ summary }) {
   const full = limit != null && lic.clients_used >= limit;
   const severity = lic.read_only ? 'error' : (full ? 'warning' : 'info');
   return (
-    <Alert severity={severity} action={<Button size="small" color="inherit" href="#/license">Licence</Button>}>
-      <b>Local licence: {lic.status}</b>
-      {' · '}Clients {lic.clients_used}{limit != null ? ` of ${limit}` : ' (no limit)'}
+    <Alert severity={lic.platform_owner && !lic.read_only ? 'success' : severity} action={(
+      <Button size="small" color="inherit" href="#/license">Licence details</Button>
+    )}>
+      <b>Local licence: {lic.platform_owner && lic.status === 'VALID' ? 'PERMANENT (platform owner)' : lic.status}</b>
+      {' · '}Clients {lic.clients_used}{limit != null ? ` of ${limit}` : ' (unlimited)'}
       {lic.valid_until ? ` · valid until ${String(lic.valid_until).slice(0, 10)}` : ''}
       {lic.read_only && ` — ${lic.message || 'read-only: new clients cannot be added'}`}
       {!lic.read_only && full && ' — the licence allows no more clients; upgrade it to add more.'}
@@ -56,11 +73,41 @@ const STATUS_FILTERS = [
 
 function SuccessBanner({ created, onClose }) {
   const { tenant, password, invitation } = created;
+  const licence = tenant.licence;
   const loginUrl = `${window.location.origin}${window.location.pathname}#/`;
   const credentials = `Login: ${loginUrl}\nUsername: ${tenant.admin_username}\nPassword: ${password}`;
   return (
     <Alert severity="success" onClose={onClose} sx={{ '& .MuiAlert-message': { width: '100%', minWidth: 0 } }}>
       <AlertTitle>“{tenant.name}” is ready — Tenant ID #{tenant.id} ({tenant.code})</AlertTitle>
+      {licence && IS_LOCAL_EDITION && (
+        <Box sx={{ mb: 1.5 }} aria-label="New subscription">
+          <Typography variant="body2" sx={{ mb: 0.5 }}>
+            Subscription ID <b style={{ fontFamily: 'monospace' }}>{licence.lic_id}</b>
+            <Button size="small" startIcon={<CopyIcon />} onClick={() => copy(licence.lic_id)} sx={{ ml: 1 }}>Copy Subscription ID</Button>
+          </Typography>
+          <Typography variant="body2" sx={{ mb: 0.5 }}>
+            {licence.subscription} · starts {fmtDate(licence.starts_on)} · {licence.lifetime ? 'never expires' : `expires ${fmtDate(licence.expires_on)}`}
+            {' '}· modules: {(licence.modules || []).join(', ')}
+          </Typography>
+          {licence.key ? (
+            <KeyReveal licence={licence} note={`Signed licence key for Installation ID ${licence.install_id}. Send it to the customer: Licence Details → Activate (offline).`} />
+          ) : (
+            <Typography variant="body2">
+              No Installation ID yet. When the customer sends it, open the client → <b>Manage</b> → <b>Subscription Plans</b>
+              {' '}→ <b>Bind installation &amp; generate key</b>.
+            </Typography>
+          )}
+        </Box>
+      )}
+      {licence && !IS_LOCAL_EDITION && (
+        <Box sx={{ mb: 1.5 }}>
+          <Typography variant="body2" sx={{ mb: 0.5 }}>
+            Licence <b>{licence.lic_id}</b> · {licence.plan?.name} · {licence.lifetime ? 'lifetime' : `valid until ${licence.expires_on}`}
+            {' '}— enforced by the cloud backend; keep the key with the client's records.
+          </Typography>
+          <KeyReveal licence={licence} note="Signed Cloud Edition licence key:" />
+        </Box>
+      )}
       {invitation && !invitation.error && (
         <>
           <Typography variant="body2" sx={{ mb: 0.5 }}>
@@ -107,6 +154,20 @@ function Stat({ label, value, tone, onClick, active }) {
 
 export default function TenantManagement() {
   const { openWorkspace: openClientWorkspace } = useAuth();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const viewParam = new URLSearchParams(location.search).get('view');
+  const view = IS_LOCAL_EDITION ? (LOCAL_VIEWS.includes(viewParam) ? viewParam : 'customers') : 'hosted';
+  const setView = (v) => navigate({ pathname: location.pathname, search: v === 'customers' ? '' : `?view=${v}` }, { replace: true });
+  const [licCatalog, setLicCatalog] = useState(null);
+  const [licPlans, setLicPlans] = useState([]);
+  const [newCustomer, setNewCustomer] = useState(0);
+  const loadLicensing = useCallback(() => {
+    if (!IS_LOCAL_EDITION) return;
+    axios.get(`${LIC_API}catalog/`).then(({ data }) => setLicCatalog(data)).catch(() => {});
+    axios.get(`${LIC_API}plans/`).then(({ data }) => setLicPlans(data)).catch(() => {});
+  }, []);
+  useEffect(() => { loadLicensing(); }, [loadLicensing]);
   const [catalog, setCatalog] = useState(null);
   const [summary, setSummary] = useState(null);
   const [rows, setRows] = useState([]);
@@ -123,12 +184,18 @@ export default function TenantManagement() {
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(25);
   const [wizard, setWizard] = useState(false);
+  // Vendor console: Create Client starts as Cloud Edition; the edition switch hands the details over
+  // to the Windows Local Edition dialog (client + licence only, no cloud workspace) and back.
+  const [windowsClient, setWindowsClient] = useState(null);
+  const [handoff, setHandoff] = useState(null);
   const [workspaceId, setWorkspaceId] = useState(null);
   const [workspaceTab, setWorkspaceTab] = useState(WORKSPACE_TABS.overview);
   const [lifecycle, setLifecycle] = useState(null);
   const [enteringId, setEnteringId] = useState(null);
   const searchRef = useRef(null);
   const requestRef = useRef(0);
+  const viewRef = useRef(view);
+  viewRef.current = view;
 
   const openWorkspace = (id, tab = WORKSPACE_TABS.overview) => { setWorkspaceTab(tab); setWorkspaceId(id); };
 
@@ -182,7 +249,8 @@ export default function TenantManagement() {
         searchRef.current?.focus();
       } else if (e.altKey && (e.key === 'n' || e.key === 'N')) {
         e.preventDefault();
-        setWizard(true);
+        if (viewRef.current === 'customers') setNewCustomer((n) => n + 1);
+        else setWizard(true);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -234,21 +302,41 @@ export default function TenantManagement() {
             {summary?.edition === 'local' && <Chip size="small" label="Local edition" variant="outlined" sx={{ ml: 1, verticalAlign: 'middle' }} />}
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            Each client is a separate business with its own data, modules, users and branches.
-            {summary?.edition === 'local' && ' Stored on this installation’s own database.'}
+            {IS_LOCAL_EDITION
+              ? 'Your clients, their subscriptions and licence keys; and the client businesses hosted on this installation.'
+              : 'Each client is a separate business with its own data, modules, users and branches.'}
           </Typography>
         </Box>
         <Stack direction="row" spacing={1} sx={{ flexShrink: 0 }}>
           <Tooltip title="Refresh">
             <span><IconButton onClick={refresh} disabled={loading} aria-label="Refresh"><RefreshIcon /></IconButton></span>
           </Tooltip>
-          <Button variant="contained" startIcon={<OnboardIcon />} onClick={() => setWizard(true)} disabled={!catalog}>
-            New client
-          </Button>
+          {(view === 'hosted' || view === 'customers') && (
+            <Button variant="contained" startIcon={<OnboardIcon />} disabled={view === 'hosted' ? !catalog : !licCatalog}
+              onClick={() => (view === 'customers' ? setNewCustomer((n) => n + 1) : setWizard(true))}>
+              {view === 'hosted' && IS_LOCAL_EDITION ? 'New hosted client' : 'New client'}
+            </Button>
+          )}
         </Stack>
       </Stack>
 
-      <Stack spacing={3}>
+      {IS_LOCAL_EDITION && (
+        <Tabs value={view} onChange={(_, v) => setView(v)} sx={{ mb: 2 }} variant="scrollable" allowScrollButtonsMobile>
+          <Tab value="customers" label="Customers & Subscriptions" />
+          <Tab value="hosted" label="Hosted workspaces" />
+          <Tab value="plans" label="Subscription plans" />
+          <Tab value="audit" label="Licence audit" />
+        </Tabs>
+      )}
+      {view !== 'hosted' && (
+        <Stack spacing={2}>
+          <LocalLicenseNotice summary={summary} />
+          {view === 'customers' && <CustomerClientsPanel catalog={licCatalog} plans={licPlans} createSignal={newCustomer} />}
+          {view === 'plans' && <PlansTab catalog={licCatalog} plans={licPlans} reload={loadLicensing} />}
+          {view === 'audit' && <AuditTab />}
+        </Stack>
+      )}
+      <Stack spacing={3} sx={{ display: view === 'hosted' ? 'flex' : 'none' }}>
         {created && <SuccessBanner created={created} onClose={() => setCreated(null)} />}
         {!catalog && loadError && <Alert severity="error">{loadError}</Alert>}
         <LocalLicenseNotice summary={summary} />
@@ -302,12 +390,15 @@ export default function TenantManagement() {
                   <TableCell>Client</TableCell>
                   <TableCell sx={{ display: { xs: 'none', xl: 'table-cell' } }}>Company</TableCell>
                   <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>Country</TableCell>
-                  <TableCell>Plan</TableCell>
-                  <TableCell sx={{ display: { xs: 'none', xl: 'table-cell' } }}>Modules</TableCell>
+                  <TableCell>{IS_LOCAL_EDITION ? 'Subscription Plan' : 'Plan'}</TableCell>
+                  {IS_LOCAL_EDITION && <TableCell>Subscription ID</TableCell>}
+                  {IS_LOCAL_EDITION && <TableCell sx={{ display: { xs: 'none', lg: 'table-cell' } }}>Installation ID</TableCell>}
+                  {IS_LOCAL_EDITION && <TableCell sx={{ display: { xs: 'none', md: 'table-cell' } }}>Start Date</TableCell>}
+                  <TableCell sx={{ display: { xs: 'none', xl: 'table-cell' } }}>{IS_LOCAL_EDITION ? 'Enabled Modules' : 'Modules'}</TableCell>
                   <TableCell align="right">Users</TableCell>
                   <TableCell align="right">Branches</TableCell>
-                  <TableCell>Status</TableCell>
-                  <TableCell>Expiry</TableCell>
+                  <TableCell>{IS_LOCAL_EDITION ? 'Subscription Status' : 'Status'}</TableCell>
+                  <TableCell>{IS_LOCAL_EDITION ? 'Expiry Date' : 'Expiry'}</TableCell>
                   <TableCell align="right">Actions</TableCell>
                 </TableRow>
               </TableHead>
@@ -316,6 +407,9 @@ export default function TenantManagement() {
                   const meta = STATUS_META[t.status] || STATUS_META.ACTIVE;
                   const life = lifecycleOf(t.status);
                   const soon = t.days_to_expiry != null && t.days_to_expiry >= 0 && t.days_to_expiry <= 30;
+                  // Windows edition: the workspace's current subscription (server: by dates + status).
+                  const sub = IS_LOCAL_EDITION && !t.is_platform ? t.subscription : null;
+                  const subMeta = sub ? SUBSCRIPTION_STATUS[sub.status] : null;
                   return (
                     <TableRow key={t.id} hover sx={{ opacity: t.status === 'INACTIVE' ? 0.7 : 1, cursor: 'pointer' }}
                       onClick={() => openWorkspace(t.id)}>
@@ -337,7 +431,7 @@ export default function TenantManagement() {
                       </TableCell>
                       <TableCell sx={{ display: { xs: 'none', md: 'table-cell' }, whiteSpace: 'nowrap' }}>{t.country ? countryName(catalog, t.country) : '—'}</TableCell>
                       <TableCell sx={{ whiteSpace: 'nowrap' }}>
-                        {t.is_platform ? '—' : planLabel(catalog, t.subscription_plan)}
+                        {t.is_platform ? '—' : (sub ? sub.plan : planLabel(catalog, t.subscription_plan))}
                         <Tooltip title={moduleNames(t)}>
                           <Typography variant="caption" color="text.secondary" component="div" noWrap>
                             {packageLabel(catalog, t.package)}
@@ -345,18 +439,49 @@ export default function TenantManagement() {
                           </Typography>
                         </Tooltip>
                       </TableCell>
+                      {IS_LOCAL_EDITION && (
+                        <TableCell sx={{ whiteSpace: 'nowrap', fontFamily: 'monospace', fontSize: 12 }} onClick={(e) => e.stopPropagation()}>
+                          {sub ? (
+                            <>
+                              {sub.subscription_id}
+                              <Tooltip title="Copy Subscription ID">
+                                <IconButton size="small" aria-label={`Copy Subscription ID of ${t.name}`} onClick={() => copy(sub.subscription_id)}><CopyIcon fontSize="inherit" /></IconButton>
+                              </Tooltip>
+                            </>
+                          ) : '—'}
+                        </TableCell>
+                      )}
+                      {IS_LOCAL_EDITION && (
+                        <TableCell sx={{ display: { xs: 'none', lg: 'table-cell' }, fontFamily: 'monospace', fontSize: 12, whiteSpace: 'nowrap' }}
+                          title={sub?.install_id || ''}>
+                          {sub ? (sub.install_id ? `${sub.install_id.slice(0, 8)}…` : <Typography variant="caption" color="warning.main">Not bound</Typography>) : '—'}
+                        </TableCell>
+                      )}
+                      {IS_LOCAL_EDITION && (
+                        <TableCell sx={{ display: { xs: 'none', md: 'table-cell' }, whiteSpace: 'nowrap' }}>
+                          {fmtDate(sub ? sub.starts_on : t.subscription_starts_on) || '—'}
+                        </TableCell>
+                      )}
                       <TableCell sx={{ display: { xs: 'none', xl: 'table-cell' } }}>
                         <Tooltip title={moduleNames(t)}><Chip size="small" variant="outlined" label={`${(t.modules || []).length} modules`} /></Tooltip>
                       </TableCell>
                       <TableCell align="right" sx={{ whiteSpace: 'nowrap', color: t.active_user_count >= t.max_users ? 'warning.main' : 'inherit' }}>
-                        {t.active_user_count}/{t.max_users}
+                        {t.active_user_count}/{t.max_users >= 100000 ? '∞' : t.max_users}
                       </TableCell>
                       <TableCell align="right" sx={{ whiteSpace: 'nowrap' }}>
                         {t.active_branch_count ?? t.branch_count}{t.max_branches ? `/${t.max_branches}` : ''}
                       </TableCell>
-                      <TableCell><Chip size="small" label={meta.label} color={meta.color} variant={t.status === 'INACTIVE' ? 'outlined' : 'filled'} /></TableCell>
+                      <TableCell>
+                        {subMeta ? <Chip size="small" label={subMeta.label} color={subMeta.color} /> : (
+                          <Chip size="small" label={meta.label} color={meta.color} variant={t.status === 'INACTIVE' ? 'outlined' : 'filled'} />
+                        )}
+                        {subMeta && t.status === 'INACTIVE' && (
+                          <Chip size="small" label={meta.label} color={meta.color} variant="outlined" sx={{ ml: 0.5 }} />
+                        )}
+                      </TableCell>
                       <TableCell sx={{ whiteSpace: 'nowrap', color: soon ? 'warning.main' : (t.status === 'EXPIRED' ? 'error.main' : 'inherit') }}>
-                        {t.subscription_expires_on ? fmtDate(t.subscription_expires_on) : '—'}
+                        {sub ? (sub.lifetime ? 'Never' : fmtDate(sub.expires_on))
+                          : (t.subscription_expires_on ? fmtDate(t.subscription_expires_on) : '—')}
                       </TableCell>
                       <TableCell align="right" sx={{ whiteSpace: 'nowrap' }} onClick={(e) => e.stopPropagation()}>
                         <Tooltip title="Profile, subscription, modules, users and branches">
@@ -397,7 +522,7 @@ export default function TenantManagement() {
                 })}
                 {!loading && !rows.length && (
                   <TableRow>
-                    <TableCell colSpan={11} align="center" sx={{ py: 4, color: 'text.secondary' }}>
+                    <TableCell colSpan={IS_LOCAL_EDITION ? 14 : 11} align="center" sx={{ py: 4, color: 'text.secondary' }}>
                       {filtered ? 'No client matches these filters.' : 'No clients yet — use “New client”.'}
                     </TableCell>
                   </TableRow>
@@ -412,7 +537,21 @@ export default function TenantManagement() {
         </Card>
       </Stack>
 
-      {wizard && catalog && <OnboardClientWizard catalog={catalog} onClose={() => setWizard(false)} onCreated={onCreated} />}
+      {wizard && catalog && (
+        <OnboardClientWizard catalog={catalog} onClose={() => { setWizard(false); setHandoff(null); }} onCreated={onCreated}
+          initialClient={handoff}
+          onSwitchEdition={IS_LOCAL_EDITION ? undefined : (_ed, c) => { setWizard(false); setWindowsClient(c || {}); }} />
+      )}
+      {!IS_LOCAL_EDITION && windowsClient && (
+        <NewLicenceDialog initialClient={windowsClient} onClose={() => setWindowsClient(null)}
+          onCreated={() => notify('Windows Local client and licence saved. Copy the key before closing.', 'success')}
+          onSwitchEdition={(_ed, c) => {
+            setWindowsClient(null);
+            setHandoff({ tenant_name: c.name || '', owner_name: c.owner_name || '', admin_email: c.email || '',
+              contact_phone: c.phone || '', country: c.country || '', address: c.address || '' });
+            setWizard(true);
+          }} />
+      )}
       {workspaceId && catalog && (
         <ClientWorkspaceDialog catalog={catalog} tenantId={workspaceId} initialTab={workspaceTab}
           onClose={() => setWorkspaceId(null)} onUpdated={updateRow} />

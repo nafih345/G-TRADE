@@ -173,3 +173,11 @@ def licensed_modules(modules):
         return modules
     from apps.licensing import enforcement
     return enforcement.filter_modules(modules)
+
+
+def licensed_settings_features(features):
+    """Settings sections the licence allows (None = every section). No-op on the cloud."""
+    if not is_local():
+        return features
+    from apps.licensing import enforcement
+    return enforcement.filter_settings_features(features)

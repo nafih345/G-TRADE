@@ -1018,7 +1018,8 @@ function openPrintDocument(title, css, bodyHtml) {
   if (!printWindow) return false;
   printWindow.document.open();
   printWindow.document.write(
-    `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>` +
+    // gtrade-print-kind: lets the desktop app's print preview start on the label printer.
+    `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="gtrade-print-kind" content="label"><title>${escapeHtml(title)}</title>` +
     `<style>${css}</style></head><body>${bodyHtml}</body></html>`
   );
   printWindow.document.close();

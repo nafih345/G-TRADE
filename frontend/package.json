@@ -33,7 +33,9 @@
     "test:brand": "node --import ./src/utils/__tests__/viteResolve.mjs --test src/utils/__tests__/brand.test.js",
     "test:inventory-cache": "node --test src/utils/__tests__/inventoryCache.test.js",
     "test:customer-branding": "node --test src/utils/__tests__/customerBranding.test.js",
-    "test:ui-scale": "node --import ./src/utils/__tests__/viteResolve.mjs --test src/utils/__tests__/uiScale.test.js"
+    "test:ui-scale": "node --import ./src/utils/__tests__/viteResolve.mjs --test src/utils/__tests__/uiScale.test.js",
+    "test:desktop-print": "node --test src/utils/__tests__/desktopPrint.test.js",
+    "test:vendor-licensing": "node --test src/utils/__tests__/vendorLicensing.test.js"
   },
   "dependencies": {
     "@emotion/react": "^11.11.4",

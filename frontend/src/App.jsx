@@ -53,11 +53,22 @@ const Administration = lazy(() => import('./pages/Administration'));
 const Reports = lazy(() => import('./pages/Reports'));
 const Settings = lazy(() => import('./pages/Settings'));
 const TenantManagement = lazy(() => import('./pages/TenantManagement'));
+// Vendor licence console (cloud). The Windows edition's Local Super Admin manages customer
+// subscriptions and keys inside Client Management; its old /superadmin/licences link redirects there.
+const LicenceManagement = lazy(() => import('./pages/LicenceManagement'));
 const AcceptInvite = lazy(() => import('./pages/AcceptInvite'));
 // Phase 2 — multi-company
 const CompanySelect = lazy(() => import('./pages/CompanySelect'));
 const OrganizationCompanies = lazy(() => import('./pages/OrganizationCompanies'));
 const ConsolidatedSummary = lazy(() => import('./pages/ConsolidatedSummary'));
+
+// Windows edition: the former Customer Licences page now lives in Client Management.
+function LocalLicencesRedirect() {
+  const { search } = useLocation();
+  const tab = new URLSearchParams(search).get('tab');
+  const view = { plans: 'plans', audit: 'audit' }[tab];
+  return <Navigate to={view ? `/superadmin/tenants?view=${view}` : '/superadmin/tenants'} replace />;
+}
 
 // A module the client isn't subscribed to, or this role has no access to (user.module_access),
 // can't be opened by typing its URL either. The server enforces writes on its own.
@@ -403,6 +414,11 @@ function MainLayout() {
                 <Route
                   path="/superadmin/tenants"
                   element={user.is_platform_admin ? <TenantManagement /> : <Navigate to="/" replace />}
+                />
+                <Route
+                  path="/superadmin/licences"
+                  element={!user.is_platform_admin ? <Navigate to="/" replace />
+                    : (IS_LOCAL_EDITION ? <LocalLicencesRedirect /> : <LicenceManagement />)}
                 />
                 {/* A setup link opened in a browser that is already signed in (another account) */}
                 <Route path="/accept-invite" element={<AcceptInvite />} />

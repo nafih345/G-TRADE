@@ -157,7 +157,16 @@ LOGGING = {
 # ---- local-edition apps -------------------------------------------------------------------------
 # Licensing exists only here: the cloud edition is governed by the platform console, and keeping
 # the app out of config.settings means cloud deploys never see its migrations.
+# The vendor licence console (apps.vendor_licensing: customers, plans, issuing, renewal) also runs
+# on the OWNER's Windows installation, so the Local Super Admin issues customer licences offline.
+# It can sign only where the owner provisioned the vendor signing key (`gtrade-ctl vendor-key
+# generate`: config\license\vendor-signing.dpapi, DPAPI + protected ACL) AND this build trusts its
+# public key. A customer installation has no key file: the console there can never issue anything,
+# and it verifies licences with the embedded public keys only. Never from the environment here.
 INSTALLED_APPS = [*INSTALLED_APPS, 'apps.licensing']
+GTRADE_LICENSE_SIGNING_KEY_ID = GTRADE_LICENSE_SIGNING_KEY = ''
+GTRADE_LICENSE_SIGNING_KEY_FILE = '' if RUNNING_TESTS else str(DATA_ROOT / 'config' / 'license' / 'vendor-signing.dpapi')
+GTRADE_LICENSE_VERIFY_KEYS = ''
 MIDDLEWARE = [*MIDDLEWARE, 'apps.licensing.middleware.LicenseEnforcementMiddleware']
 
 # Licence verification uses public keys only (apps/licensing/keys.py). The vendor's private signing
@@ -166,7 +175,14 @@ MIDDLEWARE = [*MIDDLEWARE, 'apps.licensing.middleware.LicenseEnforcementMiddlewa
 GTRADE_RELEASE_BUILD = (Path(__file__).resolve().parent.parent.parent / 'RELEASE').exists()
 GTRADE_LICENSE_DEV_MODE = os.environ.get('GTRADE_LICENSE_DEV_MODE') == '1'
 GTRADE_LICENSE_DEV_PUBKEYS = os.environ.get('GTRADE_LICENSE_DEV_PUBKEYS', '')
-GTRADE_LICENSE_SERVICE_URL = os.environ.get('GTRADE_LICENSE_SERVICE_URL', '')
+# The vendor's licence authority (cloud console, apps/vendor_licensing/authority_views.py): used only
+# when an administrator activates a key that is not yet bound to this installation, or clicks "Check
+# with vendor". Direct backend host (the Vercel /api proxy answers 429 while Render sleeps). A
+# gtrade.env value overrides it; an empty value disables online activation (installation-bound keys
+# and licence files keep working offline). Never the default under the test runner.
+PRODUCTION_LICENSE_SERVICE_URL = 'https://g-trade-backend.onrender.com/api/licence-authority'
+GTRADE_LICENSE_SERVICE_URL = os.environ.get('GTRADE_LICENSE_SERVICE_URL',
+                                            '' if RUNNING_TESTS else PRODUCTION_LICENSE_SERVICE_URL)
 GTRADE_LICENSE_SERVICE_CA = os.environ.get('GTRADE_LICENSE_SERVICE_CA', '')
 
 # The in-process ORM backup scheduler (L1) keeps running; L2 pg_dump backups are scheduled by

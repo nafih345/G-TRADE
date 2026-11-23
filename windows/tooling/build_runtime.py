@@ -37,6 +37,9 @@ CACHE = ROOT / 'windows' / 'out' / 'cache'
 
 BACKEND_EXCLUDE_DIRS = {'venv', '.venv', '__pycache__', 'media', 'logs', 'backups', 'static', 'dist', 'build',
                         'node_modules', 'staticfiles', '.pytest_cache'}
+# apps/vendor_licensing ships (2026-11-19): the owner's Windows installation issues customer licences
+# offline. It holds no key: signing needs the vendor key file that only the owner's installation has
+# (config\\license\\vendor-signing.dpapi) and whose public half this build trusts.
 BACKEND_EXCLUDE_FILES = ['db.sqlite3*', '*.bak*', '*.pyc', 'clear_all_database.py', 'backend.spec', 'launcher.py',
                          'build.sh', 'vercel.json', 'gunicorn.conf.py', '*.log',
                          # Developer / cloud configuration never ships (backend/.env holds the hosted
@@ -178,6 +181,9 @@ def build_app(out: Path, version: str, spa: Path | None) -> Path:
     if spa and spa.exists():
         copy_tree(spa, app / 'frontend')
     (app / 'VERSION').write_text(version, encoding='ascii')
+    # Release marker (config/settings_local.py GTRADE_RELEASE_BUILD): development licence keys and
+    # dev mode are refused on every installation built here, whatever its environment says.
+    (app / 'RELEASE').write_text(f'G OPTICALS {version} release build\n', encoding='ascii')
     # Unique per build: the installer only snapshots a build gtrade-ctl proved healthy (configerified-build).
     import datetime as _dt
     import secrets as _secrets

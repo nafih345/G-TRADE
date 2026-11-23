@@ -30,13 +30,34 @@ def b64u_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b'=').decode('ascii')
 
 
+def encode(payload: dict, prefix: str, signer) -> str:
+    """Signing side (vendor licence authority only; a customer installation has no private key, so
+    it can never call this usefully). signer(bytes) -> 64-byte Ed25519 signature. Canonical JSON,
+    byte-compatible with licensing_service/gtrade_licensing/format.py."""
+    if 'key_id' not in payload:
+        raise ValueError('payload needs key_id')
+    body = b64u_encode(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8'))
+    signed = f'{prefix}.{body}'.encode('ascii')
+    return f'{prefix}.{body}.{b64u_encode(signer(signed))}'
+
+
+def decode_unverified(blob: str) -> dict:
+    """Payload WITHOUT checking the signature: only for showing what a refused file claims to be."""
+    return split(blob, (blob or '').strip().split('.', 1)[0])[2]
+
+
+def normalize_key(text: str) -> str:
+    """A pasted licence key: drop whitespace and line breaks that e-mail / chat clients insert."""
+    return ''.join((text or '').split())
+
+
 def split(blob: str, prefix: str) -> tuple[bytes, bytes, dict]:
     blob = (blob or '').strip()
     if len(blob) > MAX_BLOB:
         raise LicenseFormatError('licence file too large')
     parts = blob.split('.')
     if len(parts) != 3 or parts[0] != prefix:
-        raise LicenseFormatError('not a G-TRADE licence file' if prefix == LICENSE_PREFIX else 'not a G-TRADE CRL')
+        raise LicenseFormatError('not a G OPTICALS licence key or file' if prefix == LICENSE_PREFIX else 'not a G OPTICALS revocation list')
     try:
         payload_bytes = b64u_decode(parts[1])
         signature = b64u_decode(parts[2])

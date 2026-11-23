@@ -7,6 +7,7 @@ import {
 import { Close as CloseIcon, Print as PrintIcon, Assessment as ReportIcon } from '@mui/icons-material';
 import { buildEyeTestReportHtml, reportFromExam, splitTimestamp } from '../../utils/eyeTestReport';
 import { fetchStoreProfile, readCachedProfile } from '../../utils/storeProfile';
+import { printFrame } from '../../utils/desktopPrint';
 
 const isUuid = (id) => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
 const backendIdOf = (exam) => (exam ? (exam.backendId || (isUuid(exam.id) ? exam.id : null)) : null);
@@ -58,12 +59,8 @@ export default function EyeTestReportDialog({ open, exam, visits = [], onClose }
     return buildEyeTestReportHtml(report, { store, paperSize });
   }, [current, server, store, paperSize]);
 
-  const handlePrint = () => {
-    const win = frameRef.current?.contentWindow;
-    if (!win) return;
-    win.focus();
-    win.print();
-  };
+  // Browsers print the frame in place; the desktop app prints it through its own preview.
+  const handlePrint = () => { printFrame(frameRef.current, { html }); };
 
   const visitOptions = visits.filter(Boolean);
   const keyOf = (v) => v?.backendId || v?.id;

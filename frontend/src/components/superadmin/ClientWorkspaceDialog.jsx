@@ -18,6 +18,8 @@ import ClientBranchesPanel from './ClientBranchesPanel';
 import ClientDataPanel from './ClientDataPanel';
 import ClientBackupsPanel from './ClientBackupsPanel';
 import { DeactivateDialog, ReactivateDialog } from './LifecycleDialogs';
+import HostedSubscriptionsPanel from './licensing/HostedSubscriptionsPanel';
+import { IS_LOCAL_EDITION } from '../../utils/edition';
 import {
   API, STATUS_META, fmtDate, fmtDateTime, isReauth, lifecycleOf, packageLabel, planLabel, splitErrors,
 } from './clientApi';
@@ -55,8 +57,9 @@ const ACTION_LABELS = {
   BACKUP_SCHEDULE_CHANGED: 'Backup schedule changed',
 };
 
-// Tab order; History stays last.
-export const WORKSPACE_TABS = { overview: 0, modules: 1, users: 2, branches: 3, data: 4, backups: 5, history: 6 };
+// Tab indexes (existing values unchanged). Windows edition: Subscription Plans is shown second but
+// keeps index 7, so links that open a tab by number keep working.
+export const WORKSPACE_TABS = { overview: 0, modules: 1, users: 2, branches: 3, data: 4, backups: 5, history: 6, subscription: 7 };
 
 const describe = (row, catalog) => {
   const d = row.details || {};
@@ -92,7 +95,7 @@ const toApi = (kind, value) => {
   return value ?? '';
 };
 
-function Overview({ catalog, tenant, onSave, saving, onLifecycle }) {
+function Overview({ catalog, tenant, onSave, saving, onLifecycle, onSubscriptions }) {
   const [form, setForm] = useState({});
   const [errors, setErrors] = useState({});
   useEffect(() => {
@@ -136,7 +139,35 @@ function Overview({ catalog, tenant, onSave, saving, onLifecycle }) {
             </Grid>
             <Grid item xs={12} sm={6}>{field('address', 'Address', { inputProps: { maxLength: 1000 } })}</Grid>
           </Grid>
-          {!tenant.is_platform && (
+          {!tenant.is_platform && IS_LOCAL_EDITION && (tenant.licence || tenant.subscription) && (
+            <>
+              <Alert severity="info" sx={{ mb: 2 }}
+                action={<Button size="small" color="inherit" onClick={onSubscriptions}>Subscription Plans</Button>}>
+                Plan, start and expiry come from subscription <b>{(tenant.subscription || tenant.licence).subscription_id || tenant.licence.lic_id}</b>.
+                {' '}Change, renew or bind it in Subscription Plans.
+              </Alert>
+              <Typography variant="subtitle2" fontWeight={700} gutterBottom>Limits</Typography>
+              <Grid container columnSpacing={2}>
+                <Grid item xs={6} sm={4}>
+                  {field('max_users', 'Max users (seats)', { type: 'number', inputProps: { min: 1, max: 10000 },
+                    helperText: `${tenant.active_user_count} active now` })}
+                </Grid>
+                <Grid item xs={6} sm={4}>
+                  {field('max_branches', 'Max branches', { type: 'number', inputProps: { min: 1, max: 1000 },
+                    helperText: `${tenant.active_branch_count ?? tenant.branch_count} active · blank = no limit` })}
+                </Grid>
+              </Grid>
+            </>
+          )}
+          {!tenant.is_platform && !IS_LOCAL_EDITION && tenant.licence && (
+            <Alert severity="info" sx={{ mb: 2 }}
+              action={<Button size="small" color="inherit" href="#/superadmin/licences">Licences</Button>}>
+              Subscription, seats, branches and modules are managed by licence <b>{tenant.licence.lic_id}</b>
+              {' '}({tenant.licence.plan}, {tenant.licence.lifetime ? 'lifetime' : `until ${fmtDate(tenant.licence.expires_on)}`}).
+              Renew or change the plan in Licences &amp; Plans.
+            </Alert>
+          )}
+          {!tenant.is_platform && !tenant.licence && !(IS_LOCAL_EDITION && tenant.subscription) && (
             <>
               <Typography variant="subtitle2" fontWeight={700} gutterBottom>Subscription &amp; limits</Typography>
               <Grid container columnSpacing={2}>
@@ -350,19 +381,25 @@ export default function ClientWorkspaceDialog({ catalog, tenantId, initialTab = 
           {data && <Chip size="small" variant="outlined" label={packageLabel(catalog, data.package)} />}
         </Stack>
         <Tabs value={tab} onChange={(_, v) => setTab(v)} variant="scrollable" sx={{ mt: 1 }}>
-          <Tab label="Overview" />
-          <Tab label="Modules & Permissions" />
-          <Tab label={data ? `Users (${data.users.length})` : 'Users'} />
-          <Tab label={data ? `Branches (${data.branches.length})` : 'Branches'} />
-          <Tab label="Data & Audit" />
-          <Tab label="Backups" />
-          <Tab label="History" />
+          <Tab label="Overview" value={0} />
+          {IS_LOCAL_EDITION && data && !data.is_platform && <Tab label="Subscription Plans" value={WORKSPACE_TABS.subscription} />}
+          <Tab label="Modules & Permissions" value={1} />
+          <Tab label={data ? `Users (${data.users.length})` : 'Users'} value={2} />
+          <Tab label={data ? `Branches (${data.branches.length})` : 'Branches'} value={3} />
+          <Tab label="Data & Audit" value={4} />
+          <Tab label="Backups" value={5} />
+          <Tab label="History" value={6} />
         </Tabs>
       </DialogTitle>
       <DialogContent dividers>
         {error && <Alert severity="error">{error}</Alert>}
         {!data && !error && <LinearProgress />}
-        {data && tab === 0 && <Overview catalog={catalog} tenant={data} onSave={save} saving={saving} onLifecycle={() => setLifecycle(true)} />}
+        {data && tab === 0 && <Overview catalog={catalog} tenant={data} onSave={save} saving={saving} onLifecycle={() => setLifecycle(true)}
+          onSubscriptions={() => setTab(WORKSPACE_TABS.subscription)} />}
+        {data && tab === WORKSPACE_TABS.subscription && IS_LOCAL_EDITION && !data.is_platform && (
+          <HostedSubscriptionsPanel tenant={data}
+            onChanged={() => axios.get(`${API}${tenantId}/`).then(({ data: d }) => changed(d)).catch(() => {})} />
+        )}
         {data && tab === 1 && <ModulesTab catalog={catalog} tenant={data} onSave={save} saving={saving} />}
         {data && tab === 2 && <ClientUsersPanel catalog={catalog} tenant={data} onChanged={changed} />}
         {data && tab === 3 && <ClientBranchesPanel tenant={data} onChanged={changed} />}

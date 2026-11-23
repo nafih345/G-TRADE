@@ -14,7 +14,7 @@ import {
 import { FIELD_GROUPS, LABEL_FIELDS, FIELD_BY_ID } from '../../../labels/labelFields';
 import { planBarcode, moduleWidthOptions, minSafeModuleMm, RECOMMENDED_MODULE_MM } from '../../../labels/renderLabel';
 import {
-  BARCODE_FORMATS, FONT_FAMILIES, THERMAL_PRESET_SIZES, A4_SHEET_PRESETS, LABEL_TYPES, elementTitle, sheetUsage, r2,
+  BARCODE_FORMATS, FONT_FAMILIES, THERMAL_PRESET_SIZES, A4_SHEET_PRESETS, LABEL_TYPES, elementTitle, sheetUsage, r2, thermalPageGrid, MAX_PAGE_ROWS, MAX_PAGE_COLS, PRINT_LAYOUT_MODES, printMode, printsAsSheet, sheetFor,
 } from '../../../labels/labelModel';
 import { getCurrencySymbol } from '../../../utils/localeFormat.js';
 
@@ -43,6 +43,11 @@ export function NumField({ value, onChange, min, max, step = 0.1, unit, label, w
 }
 
 const Row = ({ children }) => <Stack direction="row" spacing={1}>{children}</Stack>;
+// The saved pageGrid with the effective rows / cols filled in, so editing one keeps the other.
+const pageGridOf = (t) => {
+  const { mode, ...rest } = t.layout?.pageGrid || {}; // `mode` moved to layout.printMode
+  return { ...rest, ...thermalPageGrid(t) };
+};
 const H = ({ children }) => <Typography variant="overline" color="text.secondary" sx={{ display: 'block', lineHeight: 2 }}>{children}</Typography>;
 
 function TypographyControls({ style, onStyle }) {
@@ -118,8 +123,9 @@ function FieldSelect({ label, value, onChange, allowedFields, includeNone }) {
 function LabelSettings({ template, onTemplate, onResize }) {
   const isA4 = template.printer_type === 'a4';
   const L = template.layout;
-  const sheet = L.sheet || {};
-  const usage = isA4 ? sheetUsage(template) : null;
+  const sheetMode = printsAsSheet(template); // Multi-Label Sheet (A4 Grid)
+  const sheet = sheetFor(template);
+  const usage = sheetMode ? sheetUsage(template) : null;
   const setLayout = (patch) => onTemplate((t) => ({ ...t, layout: { ...t.layout, ...patch } }));
   const setSheet = (patch) => setLayout({ sheet: { ...sheet, ...patch } });
   const [scaleWithSize, setScaleWithSize] = useState(true);
@@ -183,7 +189,20 @@ function LabelSettings({ template, onTemplate, onResize }) {
         <NumField label="Safe margin" unit="mm" value={L.paddingMm} min={0} max={10} onChange={(v) => setLayout({ paddingMm: v })} helperText="Red dashed guide" />
         {!isA4 && <NumField label="Gap between labels" unit="mm" value={L.gapMm} min={0} max={30} onChange={(v) => setLayout({ gapMm: v })} helperText="Die-cut liner gap" />}
       </Row>
-      {isA4 && (
+      <H>Print layout</H>
+      <TextField select size="small" label="Print Layout Mode" value={printMode(template)}
+        onChange={(e) => onTemplate((t) => {
+          const { mode, ...pageGrid } = t.layout.pageGrid || {};
+          return { ...t, layout: { ...t.layout, printMode: e.target.value, ...(t.layout.pageGrid ? { pageGrid } : {}) } };
+        })}
+        inputProps={{ 'data-testid': 'print-layout-mode-template' }}
+        helperText={sheetMode
+          ? 'Labels are grouped on A4 pages; a page break only after each full sheet.'
+          : 'One sticker per page, sized to the label — for thermal roll printers.'}
+      >
+        {PRINT_LAYOUT_MODES.map((m) => <MenuItem key={m.id} value={m.id}>{m.label}</MenuItem>)}
+      </TextField>
+      {sheetMode && (
         <>
           <H>A4 sheet layout</H>
           <Row>
@@ -191,8 +210,8 @@ function LabelSettings({ template, onTemplate, onResize }) {
             <NumField label="Rows" value={sheet.rows} min={1} max={60} step={1} onChange={(v) => setSheet({ rows: Math.round(v) })} />
           </Row>
           <Row>
-            <NumField label="Top margin" unit="mm" value={sheet.marginTopMm} min={0} max={60} onChange={(v) => setSheet({ marginTopMm: v })} />
-            <NumField label="Left margin" unit="mm" value={sheet.marginLeftMm} min={0} max={60} onChange={(v) => setSheet({ marginLeftMm: v })} />
+            <NumField label="Top margin" unit="mm" value={sheet.marginTopMm} min={0} max={290} onChange={(v) => setSheet({ marginTopMm: v })} />
+            <NumField label="Left margin" unit="mm" value={sheet.marginLeftMm} min={0} max={200} onChange={(v) => setSheet({ marginLeftMm: v })} />
           </Row>
           <Row>
             <NumField label="Column gap" unit="mm" value={sheet.colGapMm} min={0} max={40} onChange={(v) => setSheet({ colGapMm: v })} />
@@ -200,6 +219,19 @@ function LabelSettings({ template, onTemplate, onResize }) {
           </Row>
           <Typography variant="caption" color={usage.usedW > 210.5 || usage.usedH > 297.5 ? 'error' : 'text.secondary'}>
             {usage.perSheet} labels per sheet · uses {r2(usage.usedW)} × {r2(usage.usedH)} mm of 210 × 297 mm
+            {!isA4 && !L.sheet ? ' · set automatically (edit to save your own)' : ''}
+          </Typography>
+        </>
+      )}
+      {!sheetMode && (
+        <>
+          <H>Part Used Sheet layout</H>
+          <Row>
+            <NumField label="Rows per page" value={thermalPageGrid(template).rows} min={1} max={MAX_PAGE_ROWS} step={1} onChange={(v) => setLayout({ pageGrid: { ...pageGridOf(template), rows: Math.max(1, Math.round(v)) } })} />
+            <NumField label="Columns per page" value={thermalPageGrid(template).cols} min={1} max={MAX_PAGE_COLS} step={1} onChange={(v) => setLayout({ pageGrid: { ...pageGridOf(template), cols: Math.max(1, Math.round(v)) } })} />
+          </Row>
+          <Typography variant="caption" color="text.secondary">
+            Each label prints on its own page. Rows × columns only count the Part Used Sheet start page, row and column on your roll / strip.
           </Typography>
         </>
       )}

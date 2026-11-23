@@ -18,8 +18,18 @@ class LicenseLimitError(Exception):
         self.message = message
 
 
+UNLIMITED_COMPANIES = 1000
+
+
 def _limit(verdict, name):
+    """The licence's cap for `name`, or None for no cap. A v2 (vendor console) licence says
+    "unlimited" explicitly and a 0 there is a real 0 (e.g. no extra clients); v1 licences keep their
+    original reading (0 / missing = no cap)."""
+    if name in (getattr(verdict, 'unlimited', None) or []):
+        return None
     value = (verdict.limits or {}).get(name)
+    if getattr(verdict, 'v2', False):
+        return value
     return None if value in (None, '', 0) and name != 'companies' else value
 
 
@@ -48,7 +58,7 @@ def check_users(tenant, adding=1):
         used = (get_user_model().objects.filter(tenant__in=_org_tenants(tenant=tenant), is_active=True)
                 .exclude(_platform_owner_q()).count())
     if used + adding > int(limit):
-        raise LicenseLimitError('max_users', f'Your G-TRADE licence allows {limit} active users and {used} are in use. '
+        raise LicenseLimitError('max_users', f'Your licence allows {limit} active users and {used} are in use. '
                                              'Deactivate a user or upgrade the licence.')
 
 
@@ -78,12 +88,15 @@ def check_clients(adding=1):
     v = state.current()
     _refuse_if_read_only(v)
     limit = _limit(v, 'clients')
-    if not limit:
+    if limit is None:
         return
     used = len(_client_org_ids())
     if used + adding > int(limit):
         plural = 's' if int(limit) != 1 else ''
-        raise LicenseLimitError('clients', f'Your G-TRADE licence allows {limit} client{plural} on this installation '
+        if int(limit) == 0:
+            raise LicenseLimitError('clients', 'Your licence does not include additional clients on this installation. '
+                                               'Ask your vendor to upgrade the plan.')
+        raise LicenseLimitError('clients', f'Your licence allows {limit} client{plural} on this installation '
                                            f'and {used} {"is" if used == 1 else "are"} in use. '
                                            'Upgrade the licence to add more.')
 
@@ -94,13 +107,15 @@ def client_summary():
     limit = _limit(v, 'clients')
     return {'status': v.status, 'read_only': v.read_only, 'message': v.message, 'edition': v.edition,
             'valid_until': v.valid_until, 'days_left': v.days_left,
-            'clients_used': len(_client_org_ids()), 'clients_limit': int(limit) if limit else None,
-            'limits': dict(v.limits or {})}
+            'clients_used': len(_client_org_ids()), 'clients_limit': int(limit) if limit is not None else None,
+            'limits': dict(v.limits or {}), 'platform_owner': bool(getattr(v, 'platform_owner', False))}
 
 
 def company_limit(org, fallback):
     v = state.current()
     _refuse_if_read_only(v)
+    if 'companies' in (getattr(v, 'unlimited', None) or []):
+        return UNLIMITED_COMPANIES
     limit = _limit(v, 'companies')
     return int(limit) if limit else fallback
 
@@ -122,6 +137,17 @@ def check_branches(tenant, adding=1):
             used = Branch.objects.filter(tenant__in=_org_tenants(tenant=tenant), is_active=True).count()
             if used + adding > int(total):
                 raise LicenseLimitError('branches', f'Your licence allows {total} active branches in total ({used} in use).')
+
+
+def filter_settings_features(features):
+    """Settings sections: licence ∩ company. None (= every section) from both sides stays None."""
+    v = state.current()
+    licensed = getattr(v, 'settings_features', None)
+    if licensed is None:
+        return features
+    if features is None:
+        return list(licensed)
+    return [f for f in features if f in set(licensed)]
 
 
 def filter_modules(modules):

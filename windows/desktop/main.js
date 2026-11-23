@@ -4,19 +4,31 @@
 // only through the pinned per-installation CA. It holds no database credentials or server secrets:
 // all it stores is the server address and the CA certificate (public).
 
-const { app, BrowserWindow, Menu, dialog, ipcMain, session, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, screen, session, shell } = require('electron');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const sec = require('./lib/security');
 const conn = require('./lib/connection');
 const uiScale = require('./lib/uiScale');
+const { mergePrinters } = require('./lib/printing');
+const { createPrintPreview, createPrintPrefs } = require('./lib/printPreview');
+const { createPrinterInventory } = require('./lib/printerInventory');
+const { runPrintSelfTest, exercisePreview } = require('./lib/printSelfTest');
 const { PRODUCT_NAME, LEGACY_USER_DATA_DIRNAME } = require('./lib/brand');
 
 const APP_ID = 'com.gtrade.erp';
 const PAGES = path.join(__dirname, 'pages');
+const PRELOAD = path.join(__dirname, 'preload.js');
 const STATUS_INTERVAL_MS = 20000;
-const smokeArg = process.argv.find((a) => a.startsWith('--smoke-test='));
-const SMOKE_OUT = smokeArg ? smokeArg.split('=').slice(1).join('=') : null;
+const argValue = (name) => {
+  const a = process.argv.find((x) => x.startsWith(`${name}=`));
+  return a ? a.slice(name.length + 1) : null;
+};
+const SMOKE_OUT = argValue('--smoke-test');
+// Print self-test of this build (lib/printSelfTest.js): no server connection, sample documents only.
+const PRINT_SELFTEST_OUT = argValue('--print-selftest');
+const PRINT_SELFTEST_PRINTER = argValue('--print-selftest-printer') || '';
 // Every "open in the user's browser" goes through this; a smoke run never opens a real browser.
 const openExternal = sec.createExternalOpener({ open: (url) => shell.openExternal(url), smoke: Boolean(SMOKE_OUT) });
 // Reserved TLD (RFC 2606): can never resolve, so even a regression could not load a real site.
@@ -29,6 +41,9 @@ let lastStatus = { state: 'checking', detail: '' };
 let statusTimer = null;
 let warnedTooOld = false;
 let currentScale = uiScale.DEFAULT_SCALE; // read from userData once the app is ready
+let printPreview = null; // lib/printPreview.js controller, created once the app is ready
+let testSavePath = null; // Save as PDF target in smoke / self-test runs (no file dialog)
+const printerInventory = createPrinterInventory();
 
 const userConnFile = () => path.join(app.getPath('userData'), 'connection.json');
 const windowStateFile = () => path.join(app.getPath('userData'), 'window-state.json');
@@ -37,8 +52,10 @@ const machineConfigFile = () => process.env.GTRADE_CLIENT_CONFIG || conn.MACHINE
 
 app.setAppUserModelId(APP_ID);
 // Keep the pre-rename userData folder (saved server connection + window state) unless a caller
-// chose one explicitly with --user-data-dir (tests do).
-if (!process.argv.some((a) => a.startsWith('--user-data-dir'))) {
+// chose one explicitly with --user-data-dir (tests do). The print self-test never touches it.
+if (PRINT_SELFTEST_OUT && !process.argv.some((a) => a.startsWith('--user-data-dir'))) {
+  app.setPath('userData', path.join(os.tmpdir(), 'gtrade-print-selftest'));
+} else if (!process.argv.some((a) => a.startsWith('--user-data-dir'))) {
   app.setPath('userData', path.join(app.getPath('appData'), LEGACY_USER_DATA_DIRNAME));
 }
 app.enableSandbox(); // every renderer sandboxed, including popups
@@ -63,9 +80,10 @@ const securePopupPrefs = {
 app.on('web-contents-created', (_e, contents) => {
   contents.on('will-attach-webview', (ev) => ev.preventDefault());
   contents.setWindowOpenHandler(({ url }) => {
-    // Bill/label/report printing opens a blank same-origin window and writes into it.
+    // Bill/label/report printing opens a blank same-origin window and writes into it. The pop-up
+    // gets the same preload as the main window, so its window.print() opens the app's preview.
     if (url === 'about:blank' || url === '' || (current && sec.sameOrigin(url, current.serverUrl))) {
-      return { action: 'allow', overrideBrowserWindowOptions: { autoHideMenuBar: true, webPreferences: securePopupPrefs } };
+      return { action: 'allow', overrideBrowserWindowOptions: { autoHideMenuBar: true, webPreferences: { ...securePopupPrefs, preload: PRELOAD } } };
     }
     openExternal(url);
     return { action: 'deny' };
@@ -97,9 +115,12 @@ function configureSession(ses) {
 
 // ---- IPC (every handler checks who is calling) --------------------------------------------------
 function senderKind(event) {
-  const url = event.senderFrame ? event.senderFrame.url : '';
+  const frame = event.senderFrame;
+  const url = frame ? frame.url : '';
   if (isLocalPage(url)) return 'local';
-  if (current && sec.sameOrigin(url, current.serverUrl)) return 'server';
+  // A print pop-up is an about:blank document that inherited the server's origin from its opener.
+  const where = !url || url === 'about:blank' ? (frame ? frame.origin : '') : url;
+  if (current && sec.sameOrigin(where, current.serverUrl)) return 'server';
   return null;
 }
 
@@ -124,8 +145,15 @@ function registerIpc() {
   handle('app:print', ['server'], (event, opts) => new Promise((resolve) => {
     event.sender.print(sec.sanitizePrintOptions(opts), (ok, reason) => resolve({ ok, reason: ok ? '' : String(reason || '') }));
   }));
-  handle('app:listPrinters', ['server', 'local'], async (event) =>
-    (await event.sender.getPrintersAsync()).map((p) => ({ name: p.name, displayName: p.displayName, isDefault: p.isDefault })));
+  // window.print() in any app window (preload.js) -> the app's print preview for that window.
+  handle('print:preview', ['server'], (event) => printPreview.open(event.sender));
+  printPreview.registerIpc((channel, fn) => handle(channel, ['local'], fn));
+  // Electron 44 no longer reports the default printer; Windows' own inventory does.
+  handle('app:listPrinters', ['server', 'local'], async (event) => {
+    const [list, inventory] = await Promise.all([event.sender.getPrintersAsync(), printerInventory.get()]);
+    return mergePrinters(list, inventory).printers.map((p) => ({ name: p.name, displayName: p.displayName, isDefault: p.isDefault,
+      virtual: p.virtual, offline: p.offline }));
+  });
   // Interface size (lib/uiScale.js): the page may read and change its own window's scale only.
   handle('ui:getScale', ['server', 'local'], () => uiScale.describe(currentScale));
   handle('ui:setScale', ['server', 'local'], (_e, value) => uiScale.describe(setScale(value)));
@@ -165,6 +193,25 @@ function registerIpc() {
     return { ok: true };
   });
   handle('conn:retry', ['local'], async () => { if (current) await useConnection(current); return lastStatus; });
+}
+
+// ---- printing ----------------------------------------------------------------------------------
+// window.print() everywhere -> lib/printPreview.js. Test runs answer "Save as PDF" with a fixed
+// path instead of a file dialog and never write the remembered-printer file.
+function setupPrinting() {
+  const testRun = Boolean(SMOKE_OUT || PRINT_SELFTEST_OUT);
+  printPreview = createPrintPreview({
+    electron: { BrowserWindow, dialog, shell, screen, app },
+    pagePath: path.join(PAGES, 'print-preview.html'),
+    preloadPath: path.join(__dirname, 'preload-preview.js'),
+    basePrefs: securePopupPrefs,
+    prefs: createPrintPrefs({ file: path.join(app.getPath('userData'), 'print-settings.json'), readJson: conn.readJson,
+      writeJsonAtomic: conn.writeJsonAtomic, persist: !testRun }),
+    inventory: printerInventory,
+    isPackaged: app.isPackaged,
+    chooseSavePath: testRun ? async () => testSavePath : null,
+    log: (...a) => console.warn('[print]', ...a),
+  });
 }
 
 // ---- status ------------------------------------------------------------------------------------
@@ -342,6 +389,19 @@ async function runSmoke() {
           wrongPasswordStatus: bad.status };
       })()`, true);
     }
+    // Print: window.print() on the live server page must open the app's preview (not the Windows
+    // dialog), render real pages and save them as a PDF. Only on the server's page: the shell's own
+    // offline/connect pages never print, and their print() is the native one.
+    if (current && sec.sameOrigin(result.url, current.serverUrl)) {
+      try {
+        result.print = await exercisePreview({ preview: printPreview, source: wc, setSavePath: (p) => { testSavePath = p; },
+          savePath: `${SMOKE_OUT}.print.pdf` });
+      } catch (err) {
+        result.print = { error: String(err && err.message || err) };
+      }
+    } else {
+      result.print = { skipped: 'not the server page' };
+    }
     const before = wc.getURL();
     await wc.executeJavaScript(`location.href = ${JSON.stringify(NAV_PROBE_URL)}`, true).catch(() => {});
     await new Promise((r) => setTimeout(r, 1500));
@@ -357,8 +417,34 @@ async function runSmoke() {
   app.exit(0);
 }
 
+// ---- print self-test (G-TRADE.exe --print-selftest=<out.json> [--print-selftest-printer=<name>]) ---
+async function runPrintSelfTestMode() {
+  let code = 1;
+  try {
+    const r = await runPrintSelfTest({
+      electron: { BrowserWindow, app }, preview: printPreview, pagesDir: PAGES, preloadPath: PRELOAD, basePrefs: securePopupPrefs,
+      outFile: PRINT_SELFTEST_OUT, printer: PRINT_SELFTEST_PRINTER,
+      setSavePath: (p) => { testSavePath = p; },
+      // Sample documents are served from 127.0.0.1; treat that origin as "the server" for this run.
+      setServerOrigin: (origin) => { current = { serverUrl: origin, caPem: '', caFingerprint: '', mode: 'selftest', source: 'selftest' }; },
+    });
+    code = r.ok ? 0 : 1;
+  } catch (err) {
+    try { fs.writeFileSync(PRINT_SELFTEST_OUT, JSON.stringify({ ok: false, error: String(err && err.stack || err) }, null, 2)); } catch { /* none */ }
+  }
+  app.exit(code);
+}
+
 // ---- lifecycle ---------------------------------------------------------------------------------
-if (!app.requestSingleInstanceLock()) {
+if (PRINT_SELFTEST_OUT) {
+  app.on('window-all-closed', () => { /* the self-test opens and closes windows; it exits itself */ });
+  app.whenReady().then(() => {
+    setupPrinting();
+    registerIpc();
+    configureSession(session.defaultSession);
+    return runPrintSelfTestMode();
+  });
+} else if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on('second-instance', () => {
@@ -367,6 +453,7 @@ if (!app.requestSingleInstanceLock()) {
   });
   app.whenReady().then(async () => {
     currentScale = uiScale.readScale(uiSettingsFile());
+    setupPrinting();
     registerIpc();
     buildMenu();
     configureSession(session.defaultSession);

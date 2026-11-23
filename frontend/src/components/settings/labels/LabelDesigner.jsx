@@ -22,7 +22,7 @@ import ManualBarcodeField from './ManualBarcodeField';
 import { NamePrompt, NewTemplateDialog, VersionsDialog, DeletedDialog } from './TemplateDialogs';
 import {
   createElement, alignElements, scaleElements, fitElementsToLabel, autoLayout, blankTemplate,
-  newElementId, r2, visibleTemplates, hiddenCount, labelTypeOf, LABEL_TYPES,
+  newElementId, r2, visibleTemplates, hiddenCount, labelTypeOf, LABEL_TYPES, sheetGrid,
 } from '../../../labels/labelModel';
 import { LABEL_FIELDS, SAMPLE_JOB, SAMPLE_SCENARIOS, SAMPLE_STORE } from '../../../labels/labelFields';
 import { renderLabelHtml, labelCss, hasUsableLogo, summarizeWarnings } from '../../../labels/renderLabel';
@@ -616,7 +616,7 @@ export default function LabelDesigner({ bundle, setBundle, reload, onPrintLabels
             <Tooltip title="Reset layout — discard unsaved changes"><span><IconButton size="small" onClick={discardChanges} disabled={!dirty || !savedJson}><Replay fontSize="small" /></IconButton></span></Tooltip>
             <Box sx={{ flex: 1 }} />
             <Typography variant="caption" color="text.secondary" sx={{ pr: 1 }}>
-              {draft.width_mm} × {draft.height_mm} mm · {draft.printer_type === 'a4' ? `A4, ${draft.layout.sheet?.cols}×${draft.layout.sheet?.rows}` : 'thermal'}
+              {draft.width_mm} × {draft.height_mm} mm · {sheetGrid(draft) ? `A4 grid, ${sheetGrid(draft).cols}×${sheetGrid(draft).rows} per page` : 'thermal roll, 1 per page'}
             </Typography>
           </Paper>
 

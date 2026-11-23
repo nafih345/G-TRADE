@@ -22,6 +22,7 @@ The result must equal the SHA-256 above.
 - **Up-front requirement checks:** Windows version, RAM and free disk space are checked before any file is copied.
 - **Backups:** verified daily backups with retention, a backup before every update, one-command off-PC copies, restore with an automatic safety backup, and automatic rollback of a failed update.
 - **Upgrade, repair and data-preserving uninstall.** Deleting the data needs an explicit tick plus the company name, and a final backup is taken first.
+- **Print preview:** Print opens the app's own preview with the real pages (paper size, margins, logo, tables), a printer list that separates paper printers from virtual ones, A4 / A5 / Letter fitting, receipt rolls cut to length, copies and **Save as PDF**. It replaces the Windows dialog that said "This app doesn't support print preview".
 - **Interface size:** the desktop app opens at 100 %; 75 / 80 / 90 / 100 % from the header or View menu, remembered per Windows user, with Reset to default. Printed bills, receipts, labels and PDFs keep their real size.
 - **Recovery tools:** `gtrade-ctl reset-password` for a lost administrator password, run on the server PC only; `gtrade-ctl repair`; and a diagnostics bundle without secrets.
 - **Licensing:** a 30-day evaluation, online or offline activation, and read-only mode, never lockout, when a licence lapses.

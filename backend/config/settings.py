@@ -97,6 +97,9 @@ INSTALLED_APPS = [
     'apps.accounts',
     'apps.financial',
     'apps.security',
+    # Vendor licence authority (plans, client licences, signed keys). Cloud console only:
+    # config.settings_local removes it, so a customer's Windows installation can never sign.
+    'apps.vendor_licensing',
 ]
 
 MIDDLEWARE = [
@@ -469,8 +472,18 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'login': os.environ.get('LOGIN_RATE_LIMIT', '20/min'),
         'reauth': os.environ.get('REAUTH_RATE_LIMIT', '10/min'),
+        # Public licence activation / check-in endpoints (apps/vendor_licensing/authority_views.py).
+        'licence_authority': os.environ.get('LICENCE_AUTHORITY_RATE_LIMIT', '30/min'),
     },
 }
+
+# ---- Vendor licence authority (apps/vendor_licensing/signing.py) ---------------------------------
+# The Ed25519 PRIVATE signing key comes only from the host's secret store, never from this
+# repository. Unset = licences cannot be issued (the console says so); nothing is generated.
+GTRADE_LICENSE_SIGNING_KEY_ID = os.environ.get('GTRADE_LICENSE_SIGNING_KEY_ID', '')
+GTRADE_LICENSE_SIGNING_KEY = os.environ.get('GTRADE_LICENSE_SIGNING_KEY', '')
+GTRADE_LICENSE_SIGNING_KEY_FILE = os.environ.get('GTRADE_LICENSE_SIGNING_KEY_FILE', '')
+GTRADE_LICENSE_VERIFY_KEYS = os.environ.get('GTRADE_LICENSE_VERIFY_KEYS', '')
 
 # ---- System Security & Backup (apps/security) ----------------------------------------------
 # Where backup archives are kept: 'filesystem' (BACKUP_DIR on this machine's disk) or 'database'

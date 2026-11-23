@@ -256,16 +256,34 @@ test('label type: stored value wins, name fallback for cached templates', () => 
   assert.equal(normalizeTemplate({ name: 'x', is_default: true, is_hidden: true }).is_hidden, false);
 });
 
-test('past used sheet: row + side -> labels skipped, and back', () => {
+test('part used sheet: page + row + side -> labels skipped, and back', () => {
   assert.equal(startSkipFor(dumbbell, FRESH_START), 0);
   assert.equal(startSkipFor(dumbbell, { enabled: true, row: 1, col: 2 }), 1); // right side of row 1
   assert.equal(startSkipFor(dumbbell, { enabled: true, row: 4, col: 1 }), 6);
   assert.equal(startSkipFor(dumbbell, { enabled: true, row: 99, col: 9 }), 37); // clamped to the last cell
   assert.equal(startSkipFor(dumbbell, { enabled: false, row: 4, col: 1 }), 0);
-  assert.deepEqual(startFromSkip(dumbbell, 7), { enabled: true, row: 4, col: 2 });
-  assert.deepEqual(startFromSkip(dumbbell, 0), { enabled: false, row: 1, col: 1 });
-  const roll = normalizeTemplate({ name: 'Rat-tail', printer_type: 'thermal', width_mm: 90, height_mm: 13 });
-  assert.equal(startSkipFor(roll, { enabled: true, row: 3, col: 2 }), 0); // thermal rolls never skip
+  assert.deepEqual(startFromSkip(dumbbell, 7), { enabled: true, page: 1, row: 4, col: 2 });
+  assert.deepEqual(startFromSkip(dumbbell, 0), { enabled: false, page: 1, row: 1, col: 1 });
+  // Start page: page 2, row 1, right side = one full sheet (38) + 1.
+  assert.equal(startSkipFor(dumbbell, { enabled: true, page: 2, row: 1, col: 2 }), 39);
+  assert.deepEqual(startFromSkip(dumbbell, 39), { enabled: true, page: 2, row: 1, col: 2 });
+  assert.equal(a4SheetCount(1, dumbbell, 39), 2);
+  // Thermal (e.g. Jewellery Retail 19 x 30 mm): every label is one page -> page N skips N-1.
+  // (Pinned to the roll mode: jewellery otherwise defaults to the A4 grid, tested below.)
+  const roll = normalizeTemplate({ name: 'Jewellery Retail 19 x 30 mm', printer_type: 'thermal', width_mm: 19, height_mm: 30, layout: { printMode: 'roll' } });
+  // Thermal saved designs get a page layout (default 10 rows x 1 col, 2 cols for jewellery),
+  // so row AND column are adjustable — page 2, row 3, column 2 is no longer stuck at row 1.
+  const jroll = { ...roll, label_type: 'jewellery' };
+  assert.equal(startSkipFor(jroll, { enabled: true, page: 2, row: 3, col: 2 }), 20 + 4 + 1);
+  assert.equal(startSkipFor(roll, { enabled: true, page: 1, row: 4, col: 2 }), 7); // jewellery name -> 2 cols
+  const plain = normalizeTemplate({ name: 'Optical 50 x 25', printer_type: 'thermal', width_mm: 50, height_mm: 25 });
+  assert.equal(startSkipFor(plain, { enabled: true, page: 2, row: 4, col: 2 }), 13); // 10 x 1: col clamps
+  assert.equal(startSkipFor(roll, { enabled: true, page: 1, row: 2, col: 3, pageRows: 5, pageCols: 3 }), 5);
+  assert.equal(startSkipFor({ ...roll, layout: { ...roll.layout, pageGrid: { rows: 4, cols: 2 } } }, { enabled: true, page: 2, row: 2, col: 1 }), 10);
+  assert.equal(startSkipFor(roll, { enabled: true, row: 1, col: 1 }), 0); // older value without page
+  assert.deepEqual(startFromSkip(jroll, 25), { enabled: true, page: 2, row: 3, col: 2 });
+  assert.deepEqual(startFromSkip(plain, 5, { pageRows: 2, pageCols: 2 }), { enabled: true, page: 2, row: 1, col: 2, pageRows: 2, pageCols: 2 });
+  assert.deepEqual(normalizeTemplate({ ...roll, layout: { pageGrid: { rows: 4, cols: 2 } } }).layout.pageGrid, { rows: 4, cols: 2 });
   assert.deepEqual(sheetSideLabels(2), ['Left side', 'Right side']);
   assert.equal(sheetSideLabels(5)[4], 'Column 5');
   assert.equal(a4SheetCount(38, dumbbell, startSkipFor(dumbbell, { enabled: true, row: 1, col: 2 })), 2);
@@ -282,4 +300,114 @@ test('template visibility: default + kept ids always listed', () => {
   assert.deepEqual(visibleTemplates(ts, { keepIds: ['d', null] }).map((t) => t.id), ['a', 'c', 'd']);
   assert.equal(visibleTemplates(ts, { showAll: true }).length, 4);
   assert.equal(hiddenCount(ts), 2);
+});
+
+test('part used roll: thermal roll print document feeds blank labels first', async () => {
+  const { buildPrintDocument } = await import('../printLabels.js');
+  const roll = normalizeTemplate({ name: 'Optical 19 x 30 mm', printer_type: 'thermal', width_mm: 19, height_mm: 30 });
+  const doc = buildPrintDocument(roll, ['<i>A</i>', '<i>B</i>'], { startSkip: 2 });
+  assert.equal((doc.body.match(/class="gl-page"/g) || []).length, 4);
+  assert.ok(doc.body.startsWith('<div class="gl-page"></div><div class="gl-page"></div>'));
+});
+
+// ---- Print Layout Mode: Multi-Label Sheet (A4 Grid) vs Single Sticker / Thermal Roll -----
+import { printMode, printsAsSheet, withPrintMode, printedPageCount, autoA4Sheet, sheetGrid as gridOf } from '../labelModel.js';
+import { buildPrintDocument } from '../printLabels.js';
+
+const count = (body, cls) => (body.match(new RegExp(`class="${cls}"`, 'g')) || []).length;
+const tenLabels = Array.from({ length: 10 }, (_, i) => `<i>L${i}</i>`);
+
+test('print layout mode: smart defaults by template type, saved and per-job overrides', () => {
+  const jewel = normalizeTemplate({ name: 'Jewellery Tag 22 x 13 mm', label_type: 'jewellery', printer_type: 'thermal', width_mm: 22, height_mm: 13 });
+  const std = normalizeTemplate({ name: 'Optical 50 x 25', printer_type: 'thermal', width_mm: 50, height_mm: 25 });
+  assert.equal(printMode(jewel), 'sheet');
+  assert.equal(printMode(std), 'roll');
+  assert.equal(printMode(dumbbell), 'sheet');
+  // Jewellery on A4: 2 across x 19 down = 38 per page, centred.
+  assert.deepEqual(gridOf(jewel), { rows: 19, cols: 2, perSheet: 38 });
+  const auto = autoA4Sheet(jewel);
+  assert.ok(auto.marginLeftMm > 0 && auto.marginTopMm > 0);
+  // Labels too tall for 19 rows: as many as physically fit, never past A4.
+  const tall = normalizeTemplate({ name: 'Jewellery Retail 19 x 30 mm', label_type: 'jewellery', printer_type: 'thermal', width_mm: 19, height_mm: 30 });
+  assert.equal(gridOf(tall).cols, 2);
+  assert.ok(gridOf(tall).rows * 30 <= 297 - 10);
+  // Saved mode wins (also the older pageGrid.mode); the print screen can switch per job.
+  assert.equal(printMode({ ...std, layout: { ...std.layout, printMode: 'sheet' } }), 'sheet');
+  assert.equal(printMode({ ...jewel, layout: { ...jewel.layout, pageGrid: { mode: 'roll' } } }), 'roll');
+  assert.ok(printsAsSheet(withPrintMode(std, 'sheet')));
+  assert.ok(!printsAsSheet(withPrintMode(jewel, 'roll')));
+  assert.equal(withPrintMode(jewel, ''), jewel);
+  assert.equal(normalizeTemplate({ ...std, layout: { printMode: 'sheet', sheet: { cols: 4, rows: 10 } } }).layout.sheet.cols, 4);
+  assert.equal(normalizeTemplate({ ...std, layout: { printMode: 'bogus' } }).layout.printMode, undefined);
+});
+
+test('A4 grid: 10 labels -> ONE A4 page, breaks only after full sheets, part-used offsets', () => {
+  const jewel = normalizeTemplate({ name: 'Jewellery Tag 22 x 13 mm', label_type: 'jewellery', printer_type: 'thermal', width_mm: 22, height_mm: 13 });
+  const doc = buildPrintDocument(jewel, tenLabels, {});
+  assert.equal(count(doc.body, 'gl-sheet'), 1);
+  assert.equal(count(doc.body, 'gl-cell'), 10);
+  assert.equal(count(doc.body, 'gl-page'), 0);
+  assert.match(doc.css, /@page \{ size: A4 portrait;/);
+  assert.match(doc.css, /grid-template-columns: repeat\(2, 22mm\)/);
+  // page-break only on the sheet container, never on cells.
+  assert.match(doc.css, /\.gl-sheet \{[^}]*page-break-after: always/);
+  assert.doesNotMatch(doc.css, /\.gl-cell \{[^}]*page-break/);
+  assert.equal(printedPageCount(jewel, 10), 1);
+  assert.equal(printedPageCount(jewel, 38), 1);
+  assert.equal(printedPageCount(jewel, 39), 2);
+  // Part used: start row 18, right side -> 35 used; 10 labels -> 3 on page 1, 7 on page 2.
+  const skip = startSkipFor(jewel, { enabled: true, page: 1, row: 18, col: 2 });
+  assert.equal(skip, 35);
+  const used = buildPrintDocument(jewel, tenLabels, { startSkip: skip });
+  assert.equal(count(used.body, 'gl-sheet'), 2);
+  assert.equal(printedPageCount(jewel, 10, skip), 2);
+  // A standard sticker switched to the A4 grid on the print screen.
+  const std = normalizeTemplate({ name: 'Optical 50 x 25', printer_type: 'thermal', width_mm: 50, height_mm: 25 });
+  const asSheet = buildPrintDocument(withPrintMode(std, 'sheet'), tenLabels, {});
+  assert.equal(count(asSheet.body, 'gl-sheet'), 1);
+  assert.match(asSheet.css, /@page \{ size: A4 portrait;/);
+});
+
+test('thermal roll: @page = label size, one sticker per page', () => {
+  const std = normalizeTemplate({ name: 'Optical 50 x 25', printer_type: 'thermal', width_mm: 50, height_mm: 25 });
+  const doc = buildPrintDocument(std, tenLabels, {});
+  assert.equal(count(doc.body, 'gl-page'), 10);
+  assert.equal(count(doc.body, 'gl-sheet'), 0);
+  assert.match(doc.css, /@page \{ size: 50mm 25mm; margin: 0/);
+  assert.equal(printedPageCount(std, 10, 2), 12);
+  // A jewellery template switched to the roll on the print screen.
+  const jewel = normalizeTemplate({ name: 'Jewellery Tag 22 x 13 mm', label_type: 'jewellery', printer_type: 'thermal', width_mm: 22, height_mm: 13 });
+  assert.equal(count(buildPrintDocument(withPrintMode(jewel, 'roll'), tenLabels, {}).body, 'gl-page'), 10);
+});
+
+test('start row / column: any custom value, auto Part Used / Fresh, skip formula', async () => {
+  const { applyStartPosition } = await import('../labelModel.js');
+  const jewel = normalizeTemplate({ name: 'Jewellery Tag 22 x 13 mm', label_type: 'jewellery', printer_type: 'thermal', width_mm: 22, height_mm: 13 });
+  // A4 grid (2 x 19): row 5, column 2 -> Part Used, skip = (5-1)*2 + (2-1) = 9.
+  let v = applyStartPosition(jewel, FRESH_START, { row: 5 });
+  assert.equal(v.enabled, true);
+  v = applyStartPosition(jewel, v, { col: 2 });
+  assert.deepEqual([v.row, v.col, startSkipFor(jewel, v)], [5, 2, 9]);
+  // 10 labels from row 5 col 2: 9 blank cells + 10 labels on page 1, one A4 page.
+  const doc = buildPrintDocument(jewel, tenLabels, { startSkip: startSkipFor(jewel, v) });
+  assert.equal(count(doc.body, 'gl-sheet'), 1);
+  assert.equal(count(doc.body, 'gl-cell'), 19);
+  assert.ok(doc.body.indexOf('<i>L0</i>') > doc.body.lastIndexOf('<div class="gl-cell"></div>'));
+  // Row past the sheet clamps to the last row; back to 1 / 1 -> Fresh Sheet.
+  assert.equal(applyStartPosition(jewel, v, { row: 99 }).row, 19);
+  const fresh = applyStartPosition(jewel, v, { row: 1, col: 1 });
+  assert.equal(fresh.enabled, false);
+  assert.equal(startSkipFor(jewel, fresh), 0);
+  // Thermal roll (1 column): column 3 is accepted and grows the strip layout.
+  const std = normalizeTemplate({ name: 'Optical 50 x 25', printer_type: 'thermal', width_mm: 50, height_mm: 25 });
+  const r = applyStartPosition(std, FRESH_START, { row: 12, col: 3 });
+  assert.deepEqual([r.enabled, r.row, r.col, r.pageRows, r.pageCols], [true, 12, 3, 12, 3]);
+  assert.equal(startSkipFor(std, r), 11 * 3 + 2);
+  // Overflow past page 1 continues on page 2 from row 1, column 1.
+  const late = applyStartPosition(jewel, FRESH_START, { row: 19, col: 2 }); // 37 used
+  const two = buildPrintDocument(jewel, tenLabels, { startSkip: startSkipFor(jewel, late) });
+  const pages = two.body.split('<div class="gl-sheet">').slice(1);
+  assert.equal(pages.length, 2);
+  assert.equal(count(pages[1], 'gl-cell'), 9);
+  assert.ok(pages[1].startsWith('<div class="gl-grid"><div class="gl-cell"><i>L1</i>'));
 });
