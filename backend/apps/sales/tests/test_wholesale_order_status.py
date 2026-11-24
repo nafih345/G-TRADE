@@ -305,6 +305,24 @@ class ModuleFeaturesSettingsTests(APITestCase):
         self.assertIn('wholesale_order_status', self.client.get('/api/auth/profile/').data['module_features'])
         self.assertEqual(self.client.patch(self.URL, {'nope': True}, format='json').status_code, 400)
 
+    def test_platform_admin_switches_it_in_client_management(self):
+        """Client Management → Default (the platform account) → Modules: the optional-feature
+        switch works there too; the platform's modules stay fixed."""
+        from django.contrib.auth import get_user_model
+        admin = get_user_model().objects.create_superuser(username='plat_cm', password='x', email='c@example.com')
+        self.client.force_authenticate(admin)
+        url = '/api/superadmin/tenants/1/'
+        res = self.client.patch(url, {'module_features': {'wholesale_order_status': True}}, format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertTrue(module_access.tenant_has_feature('wholesale_order_status', 1))
+        self.assertIn('wholesale_order_status', self.client.get('/api/auth/profile/').data['module_features'])
+        # Bill-to-Bill (default on) is untouched by switching another feature.
+        self.assertTrue(module_access.tenant_has_feature('bill_settlement', 1))
+        self.assertEqual(self.client.patch(url, {'modules': ['sales']}, format='json').status_code, 400)
+        res = self.client.patch(url, {'module_features': {'wholesale_order_status': False}}, format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertFalse(module_access.tenant_has_feature('wholesale_order_status', 1))
+
     def test_ordinary_admin_cannot_switch_it(self):
         from django.contrib.auth import get_user_model
         user = get_user_model().objects.create_user(username='shop_admin_os', password='x', role='ADMINISTRATOR')

@@ -20,6 +20,7 @@ import ClientBackupsPanel from './ClientBackupsPanel';
 import { DeactivateDialog, ReactivateDialog } from './LifecycleDialogs';
 import HostedSubscriptionsPanel from './licensing/HostedSubscriptionsPanel';
 import { IS_LOCAL_EDITION } from '../../utils/edition';
+import { useAuth } from '../../context/AuthContext';
 import {
   API, STATUS_META, fmtDate, fmtDateTime, isReauth, lifecycleOf, packageLabel, planLabel, splitErrors,
 } from './clientApi';
@@ -260,8 +261,9 @@ function ModulesTab({ catalog, tenant, onSave, saving }) {
   const save = async () => {
     setError('');
     // Settings off: the section pick is kept as it was (it only applies while Settings is on).
-    const body = { package: value.package, modules: value.modules };
-    if (value.modules.includes('settings')) body.settings_features = value.settings_features;
+    // The platform account keeps every module: only its optional features are saved.
+    const body = tenant.is_platform ? {} : { package: value.package, modules: value.modules };
+    if (!tenant.is_platform && value.modules.includes('settings')) body.settings_features = value.settings_features;
     if (featuresDirty) body.module_features = value.module_features;
     const fieldErrors = await onSave(body, ['modules', 'settings_features', 'module_features']);
     if (fieldErrors?.modules || fieldErrors?.settings_features || fieldErrors?.module_features) {
@@ -272,14 +274,14 @@ function ModulesTab({ catalog, tenant, onSave, saving }) {
   return (
     <Stack spacing={3}>
       <Box>
-        {tenant.is_platform && <Alert severity="info" sx={{ mb: 2 }}>The platform account always has every module.</Alert>}
+        {tenant.is_platform && <Alert severity="info" sx={{ mb: 2 }}>The platform account always has every module. Its optional features (such as Wholesale Order Status) can be switched below.</Alert>}
         {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
-        <ModuleAccessEditor catalog={catalog} value={value} onChange={setValue} disabled={tenant.is_platform || saving} />
-        {!tenant.is_platform && (
+        <ModuleAccessEditor catalog={catalog} value={value} onChange={setValue} disabled={tenant.is_platform || saving} featuresDisabled={saving} />
+        {(!tenant.is_platform || featuresDirty) && (
           <Stack direction="row" spacing={1} justifyContent="flex-end" sx={{ mt: 1.5 }}>
             <Button disabled={!dirty || saving} onClick={() => setValue(subscriptionOf(tenant))}>Discard</Button>
             <Button variant="contained" disabled={!dirty || saving} onClick={save}
-              startIcon={saving ? <CircularProgress size={16} color="inherit" /> : <SaveIcon />}>Save modules</Button>
+              startIcon={saving ? <CircularProgress size={16} color="inherit" /> : <SaveIcon />}>{tenant.is_platform ? 'Save features' : 'Save modules'}</Button>
           </Stack>
         )}
       </Box>
@@ -337,6 +339,7 @@ export default function ClientWorkspaceDialog({ catalog, tenantId, initialTab = 
   const [error, setError] = useState('');
   const [tab, setTab] = useState(initialTab);
   const [saving, setSaving] = useState(false);
+  const { refreshProfile } = useAuth() || {};
   const [lifecycle, setLifecycle] = useState(false);
   const [version, setVersion] = useState(0);
 
@@ -363,6 +366,9 @@ export default function ClientWorkspaceDialog({ catalog, tenantId, initialTab = 
       const { data: d } = await axios.patch(`${API}${tenantId}/`, body);
       changed(d);
       notify('Saved.', 'success');
+      // The platform account is the admin's own: refresh the profile so the menu shows / hides
+      // the feature's screens (e.g. Wholesale → Wholesale Order Status) without a reload.
+      if (d?.is_platform && body.module_features && typeof refreshProfile === 'function') refreshProfile();
       return null;
     } catch (err) {
       if (isReauth(err)) return null;

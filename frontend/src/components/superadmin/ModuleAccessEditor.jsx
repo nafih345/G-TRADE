@@ -31,7 +31,9 @@ const GROUPS = [
 
 // hidePackages: the Windows Local Hosted Workspaces Subscription step shows only the module switches
 // (no package / "Custom" picker); the package is still derived from the switches for the server.
-export default function ModuleAccessEditor({ catalog, value, onChange, disabled = false, compact = false, hidePackages = false }) {
+// featuresDisabled: the optional-feature switches can stay usable while the modules are locked
+// (the platform account: every module always on, its optional features still switchable).
+export default function ModuleAccessEditor({ catalog, value, onChange, disabled = false, featuresDisabled = disabled, compact = false, hidePackages = false }) {
   const { package: pkg, modules } = value;
   const sections = catalog.settings_features || [];
   const allSections = sections.map((f) => f.key);
@@ -73,7 +75,7 @@ export default function ModuleAccessEditor({ catalog, value, onChange, disabled 
   const featureValues = value.module_features || {};
   const showFeatures = value.module_features !== undefined;
   const flipFeature = (key, on) => {
-    if (disabled) return;
+    if (featuresDisabled) return;
     onChange({ ...value, module_features: { ...featureValues, [key]: on } });
   };
 
@@ -163,12 +165,12 @@ export default function ModuleAccessEditor({ catalog, value, onChange, disabled 
                         return (
                           <Grid item xs={12} md={compact ? 12 : 6} key={f.key}>
                             <Stack direction="row" alignItems="center" spacing={0.5}
-                              sx={{ border: 1, borderColor: on ? 'primary.light' : 'divider', borderRadius: 1.5, pl: 1.25, py: 0.25, opacity: disabled ? 0.7 : 1 }}>
+                              sx={{ border: 1, borderColor: on ? 'primary.light' : 'divider', borderRadius: 1.5, pl: 1.25, py: 0.25, opacity: featuresDisabled ? 0.7 : 1 }}>
                               <Box sx={{ flex: 1, minWidth: 0 }}>
                                 <Typography variant="body2" sx={{ fontSize: 13, fontWeight: 600 }}>{f.label}</Typography>
                                 {!compact && <Typography variant="caption" color="text.secondary" component="div">{f.description}</Typography>}
                               </Box>
-                              <Switch size="small" checked={on} disabled={disabled} onChange={(e) => flipFeature(f.key, e.target.checked)}
+                              <Switch size="small" checked={on} disabled={featuresDisabled} onChange={(e) => flipFeature(f.key, e.target.checked)}
                                 inputProps={{ 'aria-label': `${m.label}: ${f.label}` }} />
                             </Stack>
                           </Grid>

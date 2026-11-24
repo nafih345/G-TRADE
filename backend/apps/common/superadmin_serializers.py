@@ -369,9 +369,14 @@ class TenantUpdateSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         from apps.common import tenancy
-        if 'module_features' in attrs and self.instance.pk == tenancy.DEFAULT_TENANT_ID:
-            raise serializers.ValidationError(
-                {'module_features': ["Switch the platform account's own features in Settings → Business Settings."]})
+        # The platform account's optional features (e.g. Wholesale Order Status) may be switched here
+        # as well as in Settings → Business Settings; its modules stay fixed (it always has all).
+        if self.instance.pk == tenancy.DEFAULT_TENANT_ID and ({'package', 'modules'} & set(attrs)):
+            if (attrs.get('package', self.instance.package) != self.instance.package
+                    or list(attrs.get('modules', self.instance.modules) or []) != list(self.instance.modules or [])):
+                raise serializers.ValidationError({'modules': ['The platform account always has every module.']})
+            attrs.pop('package', None)
+            attrs.pop('modules', None)
         if 'settings_features' in attrs and self.instance.pk == tenancy.DEFAULT_TENANT_ID:
             raise serializers.ValidationError(
                 {'settings_features': ['The platform account always has every Settings section.']})
