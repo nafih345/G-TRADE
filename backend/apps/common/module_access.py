@@ -80,20 +80,28 @@ _FEATURE_PREFIXES = sorted(((prefix, f[0]) for f in SETTINGS_FEATURES for prefix
 # opt-in workflows (so every existing client keeps the behaviour it had), ON for features that
 # shipped switched on (fresh installs, upgrades and new clients get them with no seeding). A
 # feature also needs one of its parent modules.
-# (key, parent module(s), label, description, endpoint prefixes it owns, default)
+#
+# A FIXED feature is built into its module: on for every business that has the module (cloud and
+# Windows edition alike), never switchable per client, and left out of the consoles' switch
+# lists. Stored keys for it are ignored. Who may use it can still be decided per user
+# (USER_FEATURE_FLAGS).
+# (key, parent module(s), label, description, endpoint prefixes it owns, default, fixed)
 MODULE_FEATURES = (
     ('wholesale_order_status', 'wholesale', 'Wholesale Order Status',
      'Dealer-wise order tracking: billing an order deducts stock at once but posts it to Accounts '
      'only when it is marked Delivered; an undelivered bill is voided and its stock restored.',
-     ('/api/sales/wholesale/order-status/',), False),
+     ('/api/sales/wholesale/order-status/',), True, True),
     ('bill_settlement', ('accounts', 'financial'), 'Bill-to-Bill Settlement',
      'Receipt / Payment Voucher "Bill to Bill" mode (F1 party lookup, FIFO or manual allocation, '
      'on-account advances) and the Bill-to-Bill Settlement Statement.',
      ('/api/financial/settlements/receipt/', '/api/financial/settlements/payment/',
       '/api/financial/settlements/batch/', '/api/financial/settlements/statement/',
-      '/api/financial/settlements/voucher/', '/api/financial/settlements/party-ledger/'), True),
+      '/api/financial/settlements/voucher/', '/api/financial/settlements/party-ledger/'), True, True),
 )
 MODULE_FEATURE_KEYS = tuple(f[0] for f in MODULE_FEATURES)
+# Features a user may be refused individually: feature -> User boolean field (Administration →
+# Users / Client Management → Users). Platform admins always pass.
+USER_FEATURE_FLAGS = {'wholesale_order_status': 'can_use_wholesale_order_status'}
 
 
 def feature_parents(feature):
@@ -106,11 +114,32 @@ def feature_default(feature):
     return bool(feature[5]) if len(feature) > 5 else False
 
 
-def module_feature_catalog():
+def feature_fixed(feature):
+    return bool(feature[6]) if len(feature) > 6 else False
+
+
+SWITCHABLE_FEATURE_KEYS = tuple(f[0] for f in MODULE_FEATURES if not feature_fixed(f))
+
+
+def module_feature_catalog(include_fixed=False):
     """MODULE_FEATURES as dicts for the consoles / settings: 'module' is the first parent
-    (kept for older screens), 'modules' every parent, 'default' its state when never switched."""
+    (kept for older screens), 'modules' every parent, 'default' its state when never switched.
+    Fixed (built-in) features are left out unless asked for — there is nothing to switch."""
     return [{'key': f[0], 'module': feature_parents(f)[0], 'modules': list(feature_parents(f)), 'label': f[2],
-             'description': f[3], 'default': feature_default(f)} for f in MODULE_FEATURES]
+             'description': f[3], 'default': feature_default(f), 'fixed': feature_fixed(f)}
+            for f in MODULE_FEATURES if include_fixed or not feature_fixed(f)]
+
+
+def user_may_use_feature(user, key):
+    """The per-user permission of a feature in USER_FEATURE_FLAGS (True for the rest)."""
+    field = USER_FEATURE_FLAGS.get(key)
+    if not field:
+        return True
+    if user is None or not getattr(user, 'is_authenticated', False):
+        return False
+    if getattr(user, 'is_superuser', False):
+        return True
+    return bool(getattr(user, field, True))
 _MODULE_FEATURE_PREFIXES = sorted(((prefix, f[0]) for f in MODULE_FEATURES for prefix in f[4]),
                                   key=lambda r: -len(r[0]))
 MODULE_LABELS = {m[0]: m[1] for m in MODULES}
@@ -380,7 +409,8 @@ def normalize_module_features(raw):
     unknown = [k for k in raw if k not in MODULE_FEATURE_KEYS]
     if unknown:
         raise ValueError(f'Unknown module feature(s): {", ".join(map(str, unknown))}.')
-    return {k: bool(raw[k]) for k in MODULE_FEATURE_KEYS if k in raw}
+    # Built-in features are always on: a value sent for one (older consoles) is stored as on.
+    return {k: (True if k not in SWITCHABLE_FEATURE_KEYS else bool(raw[k])) for k in MODULE_FEATURE_KEYS if k in raw}
 
 
 def enabled_module_features(config):
@@ -392,14 +422,14 @@ def enabled_module_features(config):
         key = f[0]
         if not any(p in modules for p in feature_parents(f)):
             continue
-        if chosen is None or (isinstance(chosen, dict) and chosen.get(key, feature_default(f))):
+        if feature_fixed(f) or chosen is None or (isinstance(chosen, dict) and chosen.get(key, feature_default(f))):
             out.append(key)
     return out
 
 
 def module_features_for(user, config=None):
     """Module features a signed-in user may use: the tenant's features whose parent module the
-    user's role can open."""
+    user's role can open, and which the user's own feature permission allows."""
     if config is None:
         from apps.common.permissions import request_tenant_id
         tenant_id = request_tenant_id(user)
@@ -409,7 +439,7 @@ def module_features_for(user, config=None):
     access = effective_access(user, config)
     parents = {f[0]: feature_parents(f) for f in MODULE_FEATURES}
     return [k for k in enabled_module_features(config)
-            if any(access.get(p, NONE) != NONE for p in parents[k])]
+            if any(access.get(p, NONE) != NONE for p in parents[k]) and user_may_use_feature(user, k)]
 
 
 def tenant_has_feature(key, tenant_id=None):
@@ -438,9 +468,16 @@ def _check_module_feature(request):
     tenant_id = tenancy.current_tenant_id()
     if tenant_id is None:
         return
-    if feature in enabled_module_features(tenant_access_config(tenant_id)):
-        return
     label = next(f[2] for f in MODULE_FEATURES if f[0] == feature)
+    if feature in enabled_module_features(tenant_access_config(tenant_id)):
+        if not user_may_use_feature(getattr(request, 'user', None), feature):
+            if not getattr(getattr(request, 'user', None), 'is_authenticated', False):
+                raise exceptions.NotAuthenticated()
+            raise exceptions.PermissionDenied({
+                'detail': f'You do not have permission to use {label}. Ask an administrator to allow it '
+                          'for your user in Administration → Users.',
+                'code': 'feature_not_permitted'})
+        return
     raise exceptions.PermissionDenied({
         'detail': f'{label} is not enabled for this business. Ask the administrator to switch it on '
                   'in Client Management → Modules.',

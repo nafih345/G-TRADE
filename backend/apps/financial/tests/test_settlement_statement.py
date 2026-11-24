@@ -220,28 +220,15 @@ class BackfillTests(SettlementApiBase):
                          ('INV-OLD', D('900'), ['BR-2025-00007/1', 'BR-2025-00007/2']))
 
 
-class FeatureSwitchTests(SettlementApiBase):
-    def test_switching_bill_settlement_off_blocks_its_endpoints_only(self):
-        from apps.common import hot_cache, module_access, tenancy
+class BuiltInFeatureTests(SettlementApiBase):
+    def test_bill_settlement_is_always_on_with_accounts_or_financial(self):
+        from apps.common import module_access, tenancy
         from apps.common.models import Tenant
-        config = module_access.tenant_access_config(tenancy.DEFAULT_TENANT_ID)
-        self.assertIn('bill_settlement', module_access.enabled_module_features(config))   # on by default
         self.assertIn('bill_settlement', module_access.enabled_module_features(
-            {'modules': ['accounts'], 'module_features': {}}))
+            {'modules': ['accounts'], 'module_features': {'bill_settlement': False}}))
         self.assertNotIn('bill_settlement', module_access.enabled_module_features(
             {'modules': ['sales'], 'module_features': {}}))
-
+        # A stored "off" from an older console no longer blocks anything.
         Tenant.objects.filter(pk=tenancy.DEFAULT_TENANT_ID).update(module_features={'bill_settlement': False})
-        try:
-            hot_cache.clear()
-        except Exception:
-            pass
-        self.assertNotIn('bill_settlement', module_access.enabled_module_features(
-            module_access.tenant_access_config(tenancy.DEFAULT_TENANT_ID)))
-        cust = Customer.objects.create(name='Gate Test')
-        self.assertEqual(self.client.get(f'{API}/statement/').status_code, 403)
-        res = self.post('receipt', {'party_kind': 'customer', 'party': str(cust.pk), 'date': str(TODAY),
-                                    'idempotency_key': 'g-1', 'on_account': '10', 'payments': [{'method': 'Cash', 'amount': '10'}]})
-        self.assertEqual(res.status_code, 403)
-        # The party / due-bill lookups stay open (the Bank Book's pending settlements use them).
+        self.assertEqual(self.client.get(f'{API}/statement/').status_code, 200)
         self.assertEqual(self.client.get(f'{API}/parties/', {'voucher': 'RV'}).status_code, 200)

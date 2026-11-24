@@ -440,6 +440,7 @@ class ClientUserCreateSerializer(BranchAccessMixin):
     last_name = serializers.CharField(max_length=150, required=False, allow_blank=True, default='')
     email = serializers.EmailField(required=False, allow_blank=True, default='')
     phone = serializers.CharField(max_length=20, required=False, allow_blank=True, default='')
+    can_use_wholesale_order_status = serializers.BooleanField(required=False, default=True)
 
     def validate_username(self, value):
         value = value.strip()
@@ -466,6 +467,7 @@ class ClientUserUpdateSerializer(BranchAccessMixin):
     email = serializers.EmailField(required=False, allow_blank=True)
     phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
     is_active = serializers.BooleanField(required=False)
+    can_use_wholesale_order_status = serializers.BooleanField(required=False)
 
 
 class PasswordResetSerializer(serializers.Serializer):

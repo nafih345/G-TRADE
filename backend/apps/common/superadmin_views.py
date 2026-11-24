@@ -50,7 +50,7 @@ from apps.common.tenant_onboarding import (
 )
 
 USER_FIELDS = ('id', 'username', 'first_name', 'last_name', 'email', 'phone', 'role', 'is_active',
-               'is_superuser', 'date_joined', 'last_login')
+               'is_superuser', 'date_joined', 'last_login', 'can_use_wholesale_order_status')
 BRANCH_FIELDS = ('id', 'name', 'code', 'phone', 'email', 'address', 'city', 'state', 'country', 'pin_code',
                  'is_active', 'is_default')
 
@@ -610,7 +610,8 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
                 user = User.objects.create_user(
                     username=v['username'], password=v['password'], role=v['role'], tenant=tenant,
                     email=v['email'], first_name=v['first_name'], last_name=v['last_name'],
-                    phone=v['phone'] or None)
+                    phone=v['phone'] or None,
+                    can_use_wholesale_order_status=v.get('can_use_wholesale_order_status', True))
                 _save_branch_access(tenant, user.username, v)
                 log_event(tenant, 'USER_ADDED', request.user, username=user.username, role=user.role,
                           setup='invitation' if v['password'] is None else 'password')
@@ -658,7 +659,8 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
                 if is_active and not user.is_active:
                     Tenant.objects.select_for_update().filter(pk=tenant.pk).first()
                     check_seat_available(tenant)
-                for field in ('role', 'first_name', 'last_name', 'email', 'phone', 'is_active'):
+                for field in ('role', 'first_name', 'last_name', 'email', 'phone', 'is_active',
+                              'can_use_wholesale_order_status'):
                     if field not in v:
                         continue
                     value = (v[field] or None) if field == 'phone' else v[field]  # phone is nullable

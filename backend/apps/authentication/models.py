@@ -57,6 +57,11 @@ class User(AbstractUser):
     can_edit_purchase = models.BooleanField(default=True)
     can_edit_accounts = models.BooleanField(default=True)
 
+    # Feature permissions (Administration → Users / Client Management → Users). Wholesale Order
+    # Status is built into Wholesale for every business; this decides whether THIS user may open
+    # it (module_access.USER_FEATURE_FLAGS). Platform admins always may.
+    can_use_wholesale_order_status = models.BooleanField(default=True, db_default=True)
+
     objects = UserManager()
 
     def __str__(self):

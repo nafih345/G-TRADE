@@ -29,9 +29,16 @@ def switch_feature(on=True):
     Tenant.objects.filter(pk=tenancy.DEFAULT_TENANT_ID).update(module_features={'wholesale_order_status': on})
 
 
+def staff_user(username='os_staff', allowed=True):
+    from django.contrib.auth import get_user_model
+    return get_user_model().objects.create_user(username=username, password='x', role='ADMINISTRATOR',
+                                                can_use_wholesale_order_status=allowed)
+
+
 class OrderStatusFlowTests(APITestCase):
     def setUp(self):
         switch_feature(True)
+        self.client.force_authenticate(staff_user())
         self.wh = make_warehouse()
         self.dealer = Dealer.objects.create(dealer_code='DL-OS1', business_name='Status Optics', phone='9000000001')
         self.product = make_product('Frame OS', cost='40.00', stock=100)
@@ -243,92 +250,79 @@ class OrderStatusFlowTests(APITestCase):
         self.assertEqual(live('sales', 'wholesale_invoice', inv.pk).count(), 1)
         self.assertEqual(self._stock(), 90)
 
-    def test_switch_off_refuses_endpoints_and_stops_holding(self):
+    def test_stored_off_switch_is_ignored_it_is_built_in(self):
+        """Built into Wholesale: a stored "off" (older consoles) changes nothing."""
         switch_feature(False)
-        for res in (self.client.get(f'{STATUS}dealers/'), self.client.post(f'{STATUS}00000000-0000-0000-0000-000000000000/deliver/')):
+        self.assertEqual(self.client.get(f'{STATUS}dealers/').status_code, 200)
+        inv = self._bill(self._order())
+        self.assertEqual((inv.delivery_status, inv.is_posted_to_accounts), ('PENDING_DELIVERY', False))
+
+    def test_user_without_the_permission_is_refused(self):
+        self.client.force_authenticate(staff_user('os_blocked', allowed=False))
+        for res in (self.client.get(f'{STATUS}dealers/'),
+                    self.client.post(f'{STATUS}00000000-0000-0000-0000-000000000000/deliver/')):
             self.assertEqual(res.status_code, 403)
-            self.assertEqual(res.data['code'], 'feature_disabled')
-        order = self._order()
-        inv = self._bill(order)
-        self.assertEqual((inv.delivery_status, inv.is_posted_to_accounts), (None, True))
-        self.assertEqual(live('sales', 'wholesale_invoice', inv.pk).count(), 1)
+            self.assertEqual(res.data['code'], 'feature_not_permitted')
+        self.assertNotIn('wholesale_order_status', self.client.get('/api/auth/profile/').data['module_features'])
+        self.client.force_authenticate(None)
+        self.assertEqual(self.client.get(f'{STATUS}dealers/').status_code, 401)
 
 
 class ModuleFeatureRulesTests(APITestCase):
-    def test_feature_needs_switch_and_parent_module(self):
-        on = {'modules': ['wholesale'], 'module_features': {'wholesale_order_status': True}}
-        self.assertEqual(module_access.enabled_module_features(on), ['wholesale_order_status'])
-        self.assertEqual(module_access.enabled_module_features({**on, 'modules': ['sales']}), [])
-        self.assertEqual(module_access.enabled_module_features({**on, 'module_features': {}}), [])
-        self.assertEqual(module_access.enabled_module_features({**on, 'module_features': None}), ['wholesale_order_status'])
+    def test_built_in_features_follow_their_module_only(self):
+        for stored in ({'wholesale_order_status': False, 'bill_settlement': False}, {}, None):
+            cfg = {'modules': ['wholesale', 'accounts'], 'module_features': stored}
+            self.assertEqual(module_access.enabled_module_features(cfg), ['wholesale_order_status', 'bill_settlement'])
+        self.assertEqual(module_access.enabled_module_features({'modules': ['sales'], 'module_features': {}}), [])
+        self.assertEqual(module_access.enabled_module_features({'modules': ['financial'], 'module_features': {}}),
+                         ['bill_settlement'])
 
-    def test_platform_account_is_opt_in_too(self):
+    def test_every_business_has_them_on(self):
         from apps.common import tenancy
         from apps.common.models import Tenant
         Tenant.objects.filter(pk=tenancy.DEFAULT_TENANT_ID).update(module_features={})
-        self.assertFalse(module_access.tenant_has_feature('wholesale_order_status', tenancy.DEFAULT_TENANT_ID))
-        switch_feature(True)
         self.assertTrue(module_access.tenant_has_feature('wholesale_order_status', tenancy.DEFAULT_TENANT_ID))
+        self.assertTrue(module_access.tenant_has_feature('bill_settlement', tenancy.DEFAULT_TENANT_ID))
 
-    def test_normalize_refuses_unknown_keys(self):
-        self.assertEqual(module_access.normalize_module_features({'wholesale_order_status': 1}), {'wholesale_order_status': True})
+    def test_normalize_keeps_built_in_on_and_refuses_unknown_keys(self):
+        self.assertEqual(module_access.normalize_module_features({'wholesale_order_status': 0}), {'wholesale_order_status': True})
         with self.assertRaises(ValueError):
             module_access.normalize_module_features({'nope': True})
         with self.assertRaises(ValueError):
             module_access.normalize_module_features(['wholesale_order_status'])
 
-    def test_catalog_lists_module_features(self):
-        keys = [f['key'] for f in module_access.catalog()['module_features']]
-        self.assertEqual(keys, ['wholesale_order_status', 'bill_settlement'])
+    def test_consoles_have_no_switch_for_built_in_features(self):
+        self.assertEqual(module_access.catalog()['module_features'], [])
+        self.assertEqual([f['key'] for f in module_access.module_feature_catalog(include_fixed=True)],
+                         ['wholesale_order_status', 'bill_settlement'])
+
+    def test_migration_stores_both_on_for_existing_businesses(self):
+        import importlib
+        from django.apps import apps as django_apps
+        from apps.common import tenancy
+        from apps.common.models import Tenant
+        Tenant.objects.filter(pk=tenancy.DEFAULT_TENANT_ID).update(module_features={'wholesale_order_status': False})
+        importlib.import_module('apps.common.migrations.0014_builtin_module_features').switch_on(django_apps, None)
+        self.assertEqual(Tenant.objects.get(pk=tenancy.DEFAULT_TENANT_ID).module_features,
+                         {'wholesale_order_status': True, 'bill_settlement': True})
 
 
-class ModuleFeaturesSettingsTests(APITestCase):
-    """Settings → Business Settings → Optional features (/api/company/business-settings/module-features/)."""
-    URL = '/api/company/business-settings/module-features/'
+class UserFeaturePermissionTests(APITestCase):
+    """Administration → Users: the per-user Wholesale Order Status permission."""
 
-    def setUp(self):
-        switch_feature(False)
-
-    def test_platform_admin_switches_the_platform_accounts_feature(self):
+    def test_admin_grants_and_revokes_it(self):
         from django.contrib.auth import get_user_model
-        admin = get_user_model().objects.create_superuser(username='plat_os', password='x', email='p@example.com')
-        self.client.force_authenticate(admin)
-        res = self.client.get(self.URL)
+        owner = get_user_model().objects.create_user(username='os_owner', password='x', role='SUPER_ADMIN')
+        self.client.force_authenticate(owner)
+        res = self.client.post('/api/auth/users/', {'username': 'os_clerk', 'password': 'Clerk-Pass-2026!x',
+                                                    'role': 'SALES_EXECUTIVE', 'access_all_branches': True,
+                                                    'can_use_wholesale_order_status': False}, format='json')
+        self.assertEqual(res.status_code, 201, res.content)
+        clerk = get_user_model().objects.get(username='os_clerk')
+        self.assertFalse(clerk.can_use_wholesale_order_status)
+        row = next(u for u in res.data['users'] if u['username'] == 'os_clerk')
+        self.assertFalse(row['can_use_wholesale_order_status'])
+        res = self.client.patch(f'/api/auth/users/{clerk.pk}/', {'can_use_wholesale_order_status': True}, format='json')
         self.assertEqual(res.status_code, 200, res.content)
-        self.assertTrue(res.data['can_edit'])
-        self.assertEqual([(f['key'], f['enabled']) for f in res.data['features']],
-                         [('wholesale_order_status', False), ('bill_settlement', True)])
-        res = self.client.patch(self.URL, {'wholesale_order_status': True}, format='json')
-        self.assertEqual(res.status_code, 200, res.content)
-        self.assertTrue(res.data['features'][0]['enabled'])
-        self.assertTrue(module_access.tenant_has_feature('wholesale_order_status', 1))
-        self.assertIn('wholesale_order_status', self.client.get('/api/auth/profile/').data['module_features'])
-        self.assertEqual(self.client.patch(self.URL, {'nope': True}, format='json').status_code, 400)
-
-    def test_platform_admin_switches_it_in_client_management(self):
-        """Client Management → Default (the platform account) → Modules: the optional-feature
-        switch works there too; the platform's modules stay fixed."""
-        from django.contrib.auth import get_user_model
-        admin = get_user_model().objects.create_superuser(username='plat_cm', password='x', email='c@example.com')
-        self.client.force_authenticate(admin)
-        url = '/api/superadmin/tenants/1/'
-        res = self.client.patch(url, {'module_features': {'wholesale_order_status': True}}, format='json')
-        self.assertEqual(res.status_code, 200, res.content)
-        self.assertTrue(module_access.tenant_has_feature('wholesale_order_status', 1))
-        self.assertIn('wholesale_order_status', self.client.get('/api/auth/profile/').data['module_features'])
-        # Bill-to-Bill (default on) is untouched by switching another feature.
-        self.assertTrue(module_access.tenant_has_feature('bill_settlement', 1))
-        self.assertEqual(self.client.patch(url, {'modules': ['sales']}, format='json').status_code, 400)
-        res = self.client.patch(url, {'module_features': {'wholesale_order_status': False}}, format='json')
-        self.assertEqual(res.status_code, 200, res.content)
-        self.assertFalse(module_access.tenant_has_feature('wholesale_order_status', 1))
-
-    def test_ordinary_admin_cannot_switch_it(self):
-        from django.contrib.auth import get_user_model
-        user = get_user_model().objects.create_user(username='shop_admin_os', password='x', role='ADMINISTRATOR')
-        self.client.force_authenticate(user)
-        res = self.client.get(self.URL)
-        self.assertEqual(res.status_code, 200, res.content)
-        self.assertFalse(res.data['can_edit'])
-        self.assertEqual(self.client.patch(self.URL, {'wholesale_order_status': True}, format='json').status_code, 403)
-        self.assertFalse(module_access.tenant_has_feature('wholesale_order_status', 1))
+        clerk.refresh_from_db()
+        self.assertTrue(clerk.can_use_wholesale_order_status)

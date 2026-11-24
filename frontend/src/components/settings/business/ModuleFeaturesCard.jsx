@@ -48,6 +48,8 @@ export default function ModuleFeaturesCard() {
   };
 
   if (!state && !error) return null;
+  // Built-in features (Wholesale Order Status, Bill-to-Bill) are not listed: nothing left to switch.
+  if (state && !(state.features || []).length) return null;
   return (
     <Card sx={{ p: 3, mt: 3, borderRadius: 4, border: '1px solid', borderColor: 'divider' }}>
       <Typography variant="h6" fontWeight={800} sx={{ mb: 0.5 }}>Optional features</Typography>

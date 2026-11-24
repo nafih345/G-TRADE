@@ -23,7 +23,7 @@ import {
 } from './clientApi';
 
 const FIELDS = ['username', 'password', 'role', 'first_name', 'last_name', 'email', 'phone', 'is_active',
-  'branch_ids', 'default_branch_id', 'access_all_branches', 'max_users'];
+  'branch_ids', 'default_branch_id', 'access_all_branches', 'max_users', 'can_use_wholesale_order_status'];
 
 function PasswordField({ value, onChange, error, disabled, label = 'Password' }) {
   const [show, setShow] = useState(false);
@@ -86,6 +86,8 @@ function UserDialog({ catalog, tenant, usersUrl, user, onClose, onSaved, allowIn
     role: user?.role || (roles.some((r) => r.key === 'SALES_EXECUTIVE') ? 'SALES_EXECUTIVE' : roles[roles.length - 1]?.key),
     first_name: user?.first_name || '', last_name: user?.last_name || '',
     email: user?.email || '', phone: user?.phone || '', is_active: user ? user.is_active : true,
+    // Feature permission: Wholesale Order Status is built into Wholesale; this decides if THIS user may open it.
+    can_use_wholesale_order_status: user ? user.can_use_wholesale_order_status !== false : true,
     access_all_branches: Boolean(access.access_all_branches),
     branch_ids: access.branch_ids || (tenant.branches.length === 1 ? [String(tenant.branches[0].id)] : []),
     default_branch_id: access.default_branch_id || (tenant.branches.find((b) => b.is_default)?.id ?? null),
@@ -188,6 +190,16 @@ function UserDialog({ catalog, tenant, usersUrl, user, onClose, onSaved, allowIn
             </Grid>
           </Grid>
           <RoleAccessSummary catalog={catalog} role={form.role} />
+          <Typography variant="subtitle2" fontWeight={700} sx={{ mt: 1 }}>Feature permissions</Typography>
+          <FormControlLabel
+            control={<Switch checked={form.can_use_wholesale_order_status}
+              onChange={(e) => set('can_use_wholesale_order_status', e.target.checked)} />}
+            label={<Box>
+              <Typography variant="body2" fontWeight={600}>Wholesale Order Status</Typography>
+              <Typography variant="caption" color="text.secondary">
+                Track dealer orders and mark bills Delivered / Not Delivered (needs the role to open Wholesale Distribution).
+              </Typography>
+            </Box>} />
           <Typography variant="subtitle2" fontWeight={700} sx={{ mt: 1 }}>Branch access</Typography>
           <FormControlLabel control={<Switch checked={form.access_all_branches} onChange={(e) => set('access_all_branches', e.target.checked)} />}
             label="All branches" />

@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert, Autocomplete, Box, Button, Card, Checkbox, Chip, Divider, FormControlLabel, Grid, IconButton, InputAdornment, LinearProgress,
   MenuItem, Paper, Stack, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TextField,
-  ToggleButton, ToggleButtonGroup, Tooltip, Typography,
+  Switch, Tooltip, Typography,
 } from '@mui/material';
 import {
   Add as AddIcon, CheckCircle as CheckIcon, Delete as DeleteIcon, Print as PrintIcon, Refresh as RefreshIcon,
@@ -109,7 +109,9 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
     idempotencyKey: newIdempotencyKey(),
     date: today(),
     party: null,
-    mode: 'Normal',
+    // Receipt / Payment Vouchers open in Bill-to-Bill (built into Accounts and Financial); the
+    // inline switch turns it off for one voucher (an on-account / non bill-wise entry).
+    mode: isContra ? 'Normal' : 'Bill to Bill',
     reference: '',
     narration: '',
     isSaved: false,
@@ -489,7 +491,7 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
   // New / save
   // ---------------------------------------------------------------------------------------
   const handleNew = () => {
-    setVoucherState(prev => ({ ...createBlankVoucherState(), mode: prev.mode }));
+    setVoucherState(createBlankVoucherState());   // every new voucher starts in Bill-to-Bill again
     setAccountLines([blankAccountLine()]);
     setPaymentLines([blankPaymentLine()]);
     setBillParties([]);
@@ -756,12 +758,16 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
           <Grid item xs={12} sm={6} md={3}>
             {!isContra && billSettlementOn && (
               <Box>
-                <Typography variant="caption" fontWeight={700} color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>{voucherPrefix} Mode</Typography>
-                <ToggleButtonGroup size="small" exclusive value={voucherState.mode} disabled={locked}
-                  onChange={(e, newMode) => { if (newMode) setVoucherState(prev => ({ ...prev, mode: newMode })); }} sx={{ width: '100%' }}>
-                  <ToggleButton value="Normal" sx={{ flex: 1, fontWeight: 700, py: 0.5 }}>Normal</ToggleButton>
-                  <ToggleButton value="Bill to Bill" sx={{ flex: 1, fontWeight: 700, py: 0.5 }}>Bill to Bill</ToggleButton>
-                </ToggleButtonGroup>
+                <Tooltip title={isBill ? "Allocating against the party's pending bills. Switch off for an on-account / non bill-wise entry for this voucher only."
+                  : "Off for this voucher: a plain account entry. Switch on to settle the party's pending bills."}>
+                  <FormControlLabel sx={{ m: 0 }} disabled={locked}
+                    control={<Switch checked={voucherState.mode === 'Bill to Bill'} inputProps={{ 'aria-label': 'Bill-to-Bill' }}
+                      onChange={(e) => setVoucherState(prev => ({ ...prev, mode: e.target.checked ? 'Bill to Bill' : 'Normal' }))} />}
+                    label={<Box>
+                      <Typography variant="body2" fontWeight={800}>Bill-to-Bill {voucherState.mode === 'Bill to Bill' ? 'ON' : 'OFF'}</Typography>
+                      <Typography variant="caption" color="text.secondary">{voucherState.mode === 'Bill to Bill' ? 'Settle pending bills' : 'On-account / non bill-wise'}</Typography>
+                    </Box>} />
+                </Tooltip>
               </Box>
             )}
           </Grid>
