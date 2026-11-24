@@ -464,19 +464,21 @@ def _check_module_feature(request):
     feature = _module_feature_for(request.path)
     if not feature:
         return
+    label = next(f[2] for f in MODULE_FEATURES if f[0] == feature)
+    # A per-user feature is checked first — also for a signed-out caller, who has no tenant scope.
+    user = getattr(request, 'user', None)
+    if not user_may_use_feature(user, feature):
+        if not getattr(user, 'is_authenticated', False):
+            raise exceptions.NotAuthenticated()
+        raise exceptions.PermissionDenied({
+            'detail': f'You do not have permission to use {label}. Ask an administrator to allow it '
+                      'for your user in Administration → Users.',
+            'code': 'feature_not_permitted'})
     from apps.common import tenancy
     tenant_id = tenancy.current_tenant_id()
     if tenant_id is None:
         return
-    label = next(f[2] for f in MODULE_FEATURES if f[0] == feature)
     if feature in enabled_module_features(tenant_access_config(tenant_id)):
-        if not user_may_use_feature(getattr(request, 'user', None), feature):
-            if not getattr(getattr(request, 'user', None), 'is_authenticated', False):
-                raise exceptions.NotAuthenticated()
-            raise exceptions.PermissionDenied({
-                'detail': f'You do not have permission to use {label}. Ask an administrator to allow it '
-                          'for your user in Administration → Users.',
-                'code': 'feature_not_permitted'})
         return
     raise exceptions.PermissionDenied({
         'detail': f'{label} is not enabled for this business. Ask the administrator to switch it on '
