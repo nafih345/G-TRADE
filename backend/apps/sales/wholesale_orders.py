@@ -7,6 +7,10 @@ Life of the stock behind them (what Inventory → Stock Overview shows):
     Order edited (±Δ)            Ordered ±Δ, Available ∓Δ
     Order CANCELLED              Ordered −X, Available +X
     Order billed in the POS      Ordered −X, Sold +X, On hand −X (Available stays down)
+    Bill undelivered (*)         Sold −X, On hand +X; order closes as UNDELIVERED
+
+(*) Wholesale Order Status feature — see sales.wholesale_delivery (billing holds the bill out of
+Accounts until it is marked Delivered).
     Direct POS sale              Sold +X, On hand −X
 
 An order only *reserves*: `WholesaleOrder.reserved_items` ({product_id: units}) is rewritten on
@@ -30,7 +34,10 @@ from rest_framework.exceptions import ValidationError
 ORDER_CONFIRMED = 'CONFIRMED'
 ORDER_BILLED = 'BILLED'
 ORDER_CANCELLED = 'CANCELLED'
-ORDER_STATUSES = (ORDER_CONFIRMED, ORDER_BILLED, ORDER_CANCELLED)
+# Wholesale Order Status: the order's bill was cancelled as not delivered (sales.wholesale_delivery)
+# — closed, nothing reserved, the voided invoice stays linked for the record.
+ORDER_UNDELIVERED = 'UNDELIVERED'
+ORDER_STATUSES = (ORDER_CONFIRMED, ORDER_BILLED, ORDER_CANCELLED, ORDER_UNDELIVERED)
 
 QUOTE_OPEN = 'QUOTATION'
 QUOTE_ORDERED = 'CONVERTED_TO_ORDER'
@@ -207,9 +214,20 @@ def link_invoice_orders(invoice, request=None):
     order_id = _ref_id(details, 'linkedOrder') if bills else None
 
     # Orders this invoice billed before but no longer does (link removed, invoice cancelled /
-    # deleted / back to draft): open again, reserving their stock.
+    # deleted / back to draft): open again, reserving their stock — except a bill cancelled with
+    # Wholesale Order Status → "Not Delivered": its order closes as UNDELIVERED, keeping the link.
+    # (A held bill cancelled in the POS is voided too, but its order re-opens as before.)
+    from .wholesale_delivery import UNDELIVERED
+    undelivered = (getattr(invoice, 'delivery_status', None) == UNDELIVERED
+                   and bool(details.get('deliveryCancelled')))
     for stale in (WholesaleOrder.all_objects.select_for_update()
                   .filter(invoice_id=invoice.pk).exclude(pk=order_id)):
+        if undelivered:
+            if stale.status != ORDER_UNDELIVERED:
+                stale.status = ORDER_UNDELIVERED
+                stale.save(update_fields=['status', 'updated_at'])
+            sync_reservation(stale)
+            continue
         stale.status = ORDER_CONFIRMED
         stale.invoice = None
         stale.billed_at = None
@@ -222,6 +240,8 @@ def link_invoice_orders(invoice, request=None):
             raise ValidationError({'detail': 'The wholesale order linked to this bill no longer exists.'})
         if order.status == ORDER_CANCELLED:
             raise ValidationError({'detail': f'Order {order.order_number} was cancelled — it can\'t be billed.'})
+        if order.status == ORDER_UNDELIVERED:
+            raise ValidationError({'detail': f'Order {order.order_number} was closed as undelivered and can no longer be billed.'})
         if order.status == ORDER_BILLED and order.invoice_id and order.invoice_id != invoice.pk:
             billed_no = WholesaleOrder.all_objects.filter(pk=order.pk).values_list('invoice__invoice_number', flat=True).first()
             raise ValidationError({'detail': f'Order {order.order_number} is already billed on {billed_no or "another invoice"}.'})

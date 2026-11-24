@@ -77,3 +77,26 @@ export const canOpenSettingsSection = (user, section) => {
   const sections = user?.settings_features;
   return !Array.isArray(sections) || sections.includes(section);
 };
+
+// Opt-in module features (server: module_access.MODULE_FEATURES, e.g. 'wholesale_order_status'):
+// profile.module_features lists the ones this user may use — the client has the feature switched
+// on (Client Management) and the role can open its parent module. Features are opt-in, so a
+// profile without the field (cached before it existed) has none until the background refresh.
+// Features that ship switched on (server MODULE_FEATURES default=True): a profile cached before
+// the field existed keeps them on rather than hiding a screen the business already had.
+const DEFAULT_ON_FEATURES = ['bill_settlement'];
+export const canUseFeature = (user, feature) => (Array.isArray(user?.module_features)
+  ? user.module_features.includes(feature)
+  : DEFAULT_ON_FEATURES.includes(feature));
+
+// Route → module feature it needs (checked by App.jsx's ModuleGate after the module itself).
+const ROUTE_FEATURES = [
+  ['/wholesale/order-status', 'wholesale_order_status'],
+  ['/accounts/reports/settlement-statement', 'bill_settlement'],
+  ['/financial/settlements', 'bill_settlement'],
+];
+
+export const featureForPath = (pathname = '') => {
+  const hit = ROUTE_FEATURES.find(([prefix]) => pathname === prefix || pathname.startsWith(`${prefix}/`));
+  return hit ? hit[1] : null;
+};

@@ -1656,6 +1656,9 @@ class WholesaleOrderSerializer(_WholesaleDocSerializer):
     order_number = serializers.CharField(read_only=True)
     order_date = serializers.DateField(required=False)
     invoice_number = serializers.CharField(source='invoice.invoice_number', read_only=True, default=None)
+    # Wholesale Order Status: where the bill of this order stands (PENDING_DELIVERY / DELIVERED /
+    # UNDELIVERED; null = not delivery-tracked).
+    invoice_delivery_status = serializers.CharField(source='invoice.delivery_status', read_only=True, default=None)
 
     class Meta:
         model = WholesaleOrder
@@ -1673,6 +1676,9 @@ class WholesaleInvoiceSerializer(ModelSerializer):
     class Meta:
         model = WholesaleInvoice
         fields = '__all__'
+        # Delivery tracking is moved only by sales.wholesale_delivery (Wholesale Order Status).
+        read_only_fields = ('delivery_status', 'is_posted_to_accounts', 'delivered_on', 'delivery_note',
+                            'delivery_updated_at', 'delivery_updated_by')
 
 class WholesalePaymentCollectionSerializer(ModelSerializer):
     branch_name = serializers.CharField(source='branch.name', read_only=True, default=None)
@@ -1849,7 +1855,10 @@ class WholesaleOrderViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
             sync_reservation(serializer.save())
 
     def _cancel(self, order):
-        from .wholesale_orders import ORDER_BILLED, ORDER_CANCELLED, sync_reservation
+        from .wholesale_orders import ORDER_BILLED, ORDER_CANCELLED, ORDER_UNDELIVERED, sync_reservation
+        if order.status == ORDER_UNDELIVERED:
+            raise serializers.ValidationError({'detail': (
+                f'Order {order.order_number} is already closed as undelivered.')})
         if order.status == ORDER_BILLED:
             billed_on = order.invoice.invoice_number if order.invoice else 'an invoice'
             raise serializers.ValidationError({'detail': (
@@ -1880,6 +1889,134 @@ class WholesaleOrderViewSet(BranchScopedViewSetMixin, viewsets.ModelViewSet):
         exclude = request.query_params.get('exclude') or None
         wholesale, retail = open_reservations(exclude_wholesale_order=exclude if is_uuid(exclude) else None)
         return Response({'wholesale': wholesale, 'retail': retail})
+
+class WholesaleOrderStatusViewSet(BranchScopedViewSetMixin, viewsets.GenericViewSet):
+    """Wholesale Distribution -> Wholesale Order Status (module feature `wholesale_order_status`;
+    module_access refuses every request here while the client does not have it).
+
+      GET  dealers/?scope=active|all&search=   dealers / shops with orders, counts per stage
+      GET  orders/?dealer=&stage=&search=      a dealer's orders with their stage and bill
+      POST <order id>/deliver/                 {delivery_date?, note?}  Delivered / Post
+      POST <order id>/cancel-delivery/         {reason?}                Not Delivered / Cancel
+
+    Editing an order and Order to Sale use the ordinary Wholesale Orders / POS endpoints. The
+    rules live in sales.wholesale_delivery."""
+    show_unassigned_to_unrestricted = True
+    queryset = WholesaleOrder.objects.select_related('dealer', 'invoice').order_by('-order_date', '-created_at')
+    permission_classes = [permissions.AllowAny]
+
+    def _stage_q(self, stage):
+        from . import wholesale_delivery as wd
+        from .wholesale_orders import ORDER_BILLED, ORDER_CANCELLED, ORDER_CONFIRMED, ORDER_UNDELIVERED
+        return {
+            wd.STAGE_CONFIRMED: Q(status=ORDER_CONFIRMED),
+            wd.STAGE_PENDING: Q(status=ORDER_BILLED, invoice__delivery_status=wd.PENDING),
+            wd.STAGE_DELIVERED: Q(status=ORDER_BILLED, invoice__delivery_status=wd.DELIVERED),
+            wd.STAGE_BILLED: Q(status=ORDER_BILLED) & (Q(invoice__isnull=True) | Q(invoice__delivery_status__isnull=True)),
+            wd.STAGE_UNDELIVERED: Q(status=ORDER_UNDELIVERED),
+            wd.STAGE_CANCELLED: Q(status=ORDER_CANCELLED),
+        }.get(stage)
+
+    @action(detail=False, methods=['get'])
+    def dealers(self, request):
+        from django.db.models import Count, Max, Sum
+        from . import wholesale_delivery as wd
+        qs = self.get_queryset()
+        q = (request.query_params.get('search') or '').strip()
+        if q:
+            qs = qs.filter(Q(dealer__business_name__icontains=q) | Q(dealer__dealer_code__icontains=q)
+                           | Q(dealer__phone__icontains=q) | Q(dealer__city__icontains=q))
+        c, p = self._stage_q(wd.STAGE_CONFIRMED), self._stage_q(wd.STAGE_PENDING)
+        rows = (qs.order_by().values('dealer_id', 'dealer__business_name', 'dealer__dealer_code',
+                                     'dealer__phone', 'dealer__city')
+                .annotate(confirmed=Count('id', filter=c), confirmed_value=Sum('total_amount', filter=c),
+                          pending_delivery=Count('id', filter=p),
+                          pending_delivery_value=Sum('invoice__grand_total', filter=p),
+                          delivered=Count('id', filter=self._stage_q(wd.STAGE_DELIVERED)),
+                          undelivered=Count('id', filter=self._stage_q(wd.STAGE_UNDELIVERED)),
+                          total_orders=Count('id'), last_order_date=Max('order_date')))
+        out = []
+        for r in rows:
+            pending = r['confirmed'] + r['pending_delivery']
+            out.append({
+                'dealer': str(r['dealer_id']), 'dealer_name': r['dealer__business_name'],
+                'dealer_code': r['dealer__dealer_code'], 'phone': r['dealer__phone'], 'city': r['dealer__city'],
+                'confirmed': r['confirmed'], 'confirmed_value': str(r['confirmed_value'] or 0),
+                'pending_delivery': r['pending_delivery'],
+                'pending_delivery_value': str(r['pending_delivery_value'] or 0),
+                'delivered': r['delivered'], 'undelivered': r['undelivered'],
+                'pending_orders': pending, 'total_orders': r['total_orders'],
+                'last_order_date': r['last_order_date'],
+            })
+        if (request.query_params.get('scope') or 'active') != 'all':
+            out = [r for r in out if r['pending_orders']]
+        out.sort(key=lambda r: (-r['pending_orders'], (r['dealer_name'] or '').lower()))
+        return Response(out)
+
+    def _order_row(self, order):
+        from .wholesale_delivery import order_stage
+        from .wholesale_orders import line_units
+        items = [i for i in ((order.details or {}).get('items') or []) if isinstance(i, dict)]
+        inv = order.invoice
+        return {
+            'id': str(order.pk), 'order_number': order.order_number, 'order_date': order.order_date,
+            'expected_delivery': order.expected_delivery, 'dealer': str(order.dealer_id),
+            'dealer_name': order.dealer.business_name if order.dealer_id else '',
+            'status': order.status, 'stage': order_stage(order, inv),
+            'item_count': len(items), 'units': sum(line_units(i) for i in items),
+            'total_amount': str(order.total_amount or 0), 'notes': (order.details or {}).get('notes') or '',
+            'billed_at': order.billed_at,
+            'invoice': None if inv is None else {
+                'id': str(inv.pk), 'invoice_number': inv.invoice_number, 'invoice_date': inv.invoice_date,
+                'grand_total': str(inv.grand_total or 0), 'paid_amount': str(inv.paid_amount or 0),
+                'due_amount': str(inv.due_amount or 0), 'status': inv.status,
+                'delivery_status': inv.delivery_status, 'is_posted_to_accounts': inv.is_posted_to_accounts,
+                'delivered_on': inv.delivered_on, 'delivery_note': inv.delivery_note,
+                'delivery_updated_at': inv.delivery_updated_at, 'delivery_updated_by': inv.delivery_updated_by,
+            },
+        }
+
+    @action(detail=False, methods=['get'])
+    def orders(self, request):
+        params = {k: v for k, v in request.query_params.items() if k != 'status'}
+        qs = _wholesale_doc_filters(self.get_queryset(), params, 'order_number', 'order_date')
+        stages = [s for s in (request.query_params.get('stage') or '').upper().split(',') if s]
+        if stages:
+            cond = Q(pk__in=[])
+            for st in stages:
+                q = self._stage_q(st)
+                if q is None:
+                    raise serializers.ValidationError({'stage': f'Unknown stage {st}.'})
+                cond |= q
+            qs = qs.filter(cond)
+        return Response([self._order_row(o) for o in qs[:1000]])
+
+    def _result(self, order_id, changed, message, **extra):
+        order = self.get_queryset().get(pk=order_id)
+        return Response({'order': self._order_row(order), 'changed': changed, 'message': message, **extra})
+
+    @action(detail=True, methods=['post'])
+    def deliver(self, request, pk=None):
+        from .wholesale_delivery import mark_delivered
+        order = self.get_object()  # branch-scoped: a caller only acts on orders they can see
+        data = request.data if isinstance(request.data, dict) else {}
+        _o, inv, changed = mark_delivered(order.pk, delivery_date=data.get('delivery_date'),
+                                          note=data.get('note') or '', user=request.user)
+        msg = (f'{order.order_number} delivered - invoice {inv.invoice_number} posted to Accounts.' if changed
+               else f'Invoice {inv.invoice_number} was already delivered and posted.')
+        return self._result(order.pk, changed, msg)
+
+    @action(detail=True, methods=['post'], url_path='cancel-delivery')
+    def cancel_delivery(self, request, pk=None):
+        from .wholesale_delivery import cancel_delivery
+        order = self.get_object()
+        data = request.data if isinstance(request.data, dict) else {}
+        _o, inv, changed, received = cancel_delivery(order.pk, reason=data.get('reason') or '',
+                                                     user=request.user, request=request)
+        msg = (f'{order.order_number} marked not delivered - invoice {inv.invoice_number} cancelled and its stock restored.'
+               if changed else f'Invoice {inv.invoice_number} was already cancelled as undelivered.')
+        return self._result(order.pk, changed, msg, received_kept=str(received or 0))
+
 
 def _inherit_branch(view, serializer, parent):
     """Stamp kwargs for a document that follows its source document's branch (challan -> order,
@@ -1929,10 +2066,15 @@ class WholesaleInvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, views
 
     # Every save deducts / restores stock to match the invoice (sales.wholesale_stock), in the
     # same transaction — a refused shortfall leaves neither the invoice nor the stock changed.
-    def _sync_stock(self, invoice):
+    def _sync_stock(self, invoice, was_billing=False):
+        from .wholesale_delivery import prepare_invoice_save
         from .wholesale_orders import link_invoice_orders
         from .wholesale_stock import sync_wholesale_invoice_stock
         invoice = WholesaleInvoice.all_objects.select_for_update().get(pk=invoice.pk)
+        # Wholesale Order Status: the save that bills an order may hold the bill out of Accounts
+        # until delivery (or void a held bill cancelled here) — decided before the stock moves,
+        # because the movement's reason (and so its COGS) follows that state.
+        prepare_invoice_save(invoice, was_billing=was_billing)
         sync_wholesale_invoice_stock(invoice, self.request, enforce_stock=self._enforce_stock())
         # A bill made from a Wholesale Order closes it (and re-opens it if the bill is
         # cancelled / drafted / deleted) in this same transaction.
@@ -1950,12 +2092,18 @@ class WholesaleInvoiceViewSet(EditApprovalMixin, BranchScopedViewSetMixin, views
             self._sync_stock(serializer.save(**self._branch_stamp_kwargs(serializer)))
 
     def perform_update(self, serializer):
+        from .wholesale_delivery import guard_invoice_change
+        from .wholesale_orders import _invoice_bills
         with transaction.atomic():
-            self._sync_stock(serializer.save())
+            old = WholesaleInvoice.all_objects.select_for_update().get(pk=serializer.instance.pk)
+            guard_invoice_change(old)
+            self._sync_stock(serializer.save(), was_billing=_invoice_bills(old))
 
     def perform_destroy(self, instance):
+        from .wholesale_delivery import guard_invoice_change
         with transaction.atomic():
             invoice = WholesaleInvoice.all_objects.select_for_update().get(pk=instance.pk)
+            guard_invoice_change(invoice)
             invoice.is_deleted = True   # nothing held any more: restore it all
             from .wholesale_stock import sync_wholesale_invoice_stock
             sync_wholesale_invoice_stock(invoice, self.request, enforce_stock=False)

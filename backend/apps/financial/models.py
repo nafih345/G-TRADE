@@ -483,3 +483,73 @@ class PendingBankSettlement(BaseUUIDModel):
 
     def __str__(self):
         return f"{self.number} {self.get_direction_display()} {self.party_name} ₹{self.amount} [{self.status}]"
+
+
+class BillSettlement(BaseUUIDModel):
+    """One bill-to-bill Receipt / Payment Voucher (one party): the settlement record the
+    Bill-to-Bill Settlement Statement reads. Written in the same transaction as the voucher.
+
+    It is a record, not the source of the dues: a bill's balance still lives on its own document
+    (retail Invoice / WholesaleInvoice paid figures, or for supplier bills the live PV journals'
+    metadata), exactly as settlements.open_bills reads it. `number` is the BR- settlement number
+    of a receipt (its sales receipts are BR-…/1, /2 …) or the PV journal's entry number."""
+    VOUCHER_CHOICES = [('RV', 'Receipt Voucher'), ('PV', 'Payment Voucher')]
+    STATUS_CHOICES = [('POSTED', 'Posted'), ('REVERSED', 'Reversed')]
+
+    number = models.CharField(max_length=40, db_index=True)
+    voucher_type = models.CharField(max_length=2, choices=VOUCHER_CHOICES)
+    date = models.DateField(db_index=True)
+    party_kind = models.CharField(max_length=20)          # customer / dealer / supplier
+    party_id = models.CharField(max_length=64, db_index=True)
+    party_name = models.CharField(max_length=200, blank=True, default='')
+    party_code = models.CharField(max_length=60, blank=True, default='')
+    total_amount = models.DecimalField(max_digits=14, decimal_places=2)            # money received / paid
+    allocated_amount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    on_account_amount = models.DecimalField(max_digits=14, decimal_places=2, default=0)  # advance, no bill
+    # Pay-mode lines as entered: [{method, amount, bank_account, bank_name, ref_no, ref_date, cheque_number}]
+    payments = models.JSONField(default=list, blank=True)
+    narration = models.CharField(max_length=500, blank=True, default='')
+    journal_entry = models.ForeignKey(JournalEntry, on_delete=models.SET_NULL, null=True, blank=True,
+                                      related_name='bill_settlements')
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='POSTED', db_index=True)
+    # 'voucher' = saved by the voucher screen; 'backfill' = rebuilt from older vouchers (no due snapshot).
+    origin = models.CharField(max_length=10, default='voucher')
+    branch = models.ForeignKey(Branch, on_delete=models.SET_NULL, null=True, blank=True, related_name='bill_settlements')
+
+    class Meta:
+        ordering = ['-date', '-created_at']
+        indexes = [models.Index(fields=['voucher_type', 'date'], name='fin_billset_vt_date'),
+                   models.Index(fields=['party_kind', 'party_id'], name='fin_billset_party')]
+        constraints = [
+            models.UniqueConstraint(fields=['tenant', 'voucher_type', 'number'], name='financial_billsettlement_number_tenant'),
+        ]
+
+    def __str__(self):
+        return f"{self.number} {self.party_name} ₹{self.total_amount} [{self.status}]"
+
+
+class BillAllocation(BaseUUIDModel):
+    """How much of one bill a BillSettlement settled, with the bill's due before and after."""
+    STATUS_CHOICES = [('CLOSED', 'Closed'), ('PARTIAL', 'Partial')]
+
+    settlement = models.ForeignKey(BillSettlement, on_delete=models.CASCADE, related_name='allocations')
+    bill_kind = models.CharField(max_length=20)            # invoice / wholesale_invoice / purchase_invoice
+    bill_id = models.CharField(max_length=64, db_index=True)
+    bill_number = models.CharField(max_length=60)
+    bill_ref = models.CharField(max_length=80, blank=True, default='')   # supplier's own bill no
+    bill_date = models.DateField(null=True, blank=True)
+    bill_total = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    previous_paid = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    previous_due = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    allocated_amount = models.DecimalField(max_digits=14, decimal_places=2)
+    new_due = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    settlement_status = models.CharField(max_length=10, choices=STATUS_CHOICES, blank=True, default='')
+    receipt_numbers = models.JSONField(default=list, blank=True)   # RV: the sales receipts made for this bill
+    narration = models.CharField(max_length=120, blank=True, default='')
+    position = models.PositiveSmallIntegerField(default=0)
+
+    class Meta:
+        ordering = ['settlement', 'position']
+
+    def __str__(self):
+        return f"{self.bill_number} ₹{self.allocated_amount} [{self.settlement_status}]"

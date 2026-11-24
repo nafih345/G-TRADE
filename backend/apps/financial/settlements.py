@@ -20,6 +20,14 @@ settlement never books anything the source documents don't also know about:
 
 Every save runs in one transaction with the bills row-locked and their dues recomputed, and is
 keyed by the screen's idempotency key so a retried / double-clicked save posts once.
+
+Money received / paid beyond the ticked bills can be kept On Account (an advance): a customer
+receipt with no bill (books to Customer Advances, like an order advance), a dealer collection with
+no bill ("On account" against the dealer ledger) or an extra supplier-ledger debit on the PV.
+
+Each save also writes a BillSettlement (+ BillAllocation rows: due before / after, Closed / Partial)
+in the same transaction: the record the Bill-to-Bill Settlement Statement reads
+(settlement_statement.py). It never drives a balance.
 """
 from decimal import Decimal
 
@@ -31,7 +39,7 @@ from rest_framework import serializers
 from .accounting_catalog import payment_role
 from .cheques import CHEQUE_METHOD, ChequeBook, ChequeInputSerializer
 from .mapping import resolve_role
-from .models import ChartOfAccount, JournalEntry, JournalSequence, PostingFailure
+from .models import BillAllocation, BillSettlement, ChartOfAccount, JournalEntry, JournalSequence, PostingFailure
 from .party_ledgers import party_account
 from .services import AccountingError, audit, create_journal, money
 
@@ -304,11 +312,16 @@ class SettlementInputSerializer(serializers.Serializer):
     date = serializers.DateField()
     narration = serializers.CharField(required=False, allow_blank=True, default='', max_length=500)
     idempotency_key = serializers.CharField(max_length=100)
-    allocations = AllocationSerializer(many=True)
+    allocations = AllocationSerializer(many=True, required=False)
+    # Received / paid beyond the bills, kept on the party's account as an advance.
+    on_account = serializers.DecimalField(max_digits=14, decimal_places=2, min_value=ZERO, required=False, default=ZERO)
     payments = PayLineSerializer(many=True)
 
     def validate(self, attrs):
-        if not attrs['allocations']:
+        attrs['allocations'] = attrs.get('allocations') or []
+        on_account = money(attrs.get('on_account') or ZERO)
+        attrs['on_account'] = on_account
+        if not attrs['allocations'] and on_account <= 0:
             raise serializers.ValidationError('Select at least one bill and enter the amount against it.')
         if not attrs['payments']:
             raise serializers.ValidationError('Enter at least one payment (Cash / Bank).')
@@ -317,9 +330,10 @@ class SettlementInputSerializer(serializers.Serializer):
             raise serializers.ValidationError('A bill appears more than once in this voucher.')
         allocated = sum((a['amount'] for a in attrs['allocations']), ZERO)
         paid = sum((p['amount'] for p in attrs['payments']), ZERO)
-        if allocated != paid:
+        if allocated + on_account != paid:
+            extra = f" + ₹{on_account:,.2f} on account" if on_account else ''
             raise serializers.ValidationError(
-                f"The bills total ₹{allocated:,.2f} but the payment modes total ₹{paid:,.2f}. They must match.")
+                f"The bills total ₹{allocated:,.2f}{extra} but the payment modes total ₹{paid:,.2f}. They must match.")
         return attrs
 
 
@@ -358,9 +372,12 @@ def _checked_bills(kind, party_id, data, branch_ids=None):
     return bills
 
 
-def _pair(allocations, payments):
-    """Spread the pay-mode lines over the bills in order: [(allocation, payment, amount)]."""
+def _pair(allocations, payments, on_account=ZERO):
+    """Spread the pay-mode lines over the bills in order: [(allocation, payment, amount)]. The
+    on-account remainder comes last, as an allocation whose bill is None."""
     pairs, pays = [], [[p, p['amount']] for p in payments]
+    if on_account and on_account > 0:
+        allocations = list(allocations) + [{'bill': None, 'amount': on_account, 'narration': 'On account'}]
     i = 0
     for a in allocations:
         left = a['amount']
@@ -378,6 +395,49 @@ def _pair(allocations, payments):
 def _next_number(prefix, date):
     from apps.common.sequences import bump_sequence
     return f"{prefix}-{date.year}-{bump_sequence(JournalSequence, {'prefix': prefix, 'year': date.year}):05d}"
+
+
+# ---------------------------------------------------------------------------
+# Settlement record (read by the Settlement Statement)
+# ---------------------------------------------------------------------------
+
+def _pay_record(pay, bank_account=None):
+    cheque = pay.get('cheque') or {}
+    return {'method': pay['method'], 'amount': str(money(pay['amount'])),
+            'bank_account': str(bank_account.pk) if bank_account is not None else None,
+            'bank_name': bank_account.name if bank_account is not None else '',
+            'ref_no': pay.get('ref_no') or '', 'ref_date': pay['ref_date'].isoformat() if pay.get('ref_date') else None,
+            'cheque_number': cheque.get('cheque_number') or '',
+            'cheque_date': cheque['cheque_date'].isoformat() if cheque.get('cheque_date') else None,
+            'cheque_bank': cheque.get('bank_name') or ''}
+
+
+def _record_settlement(voucher, number, data, party_kind, party, bills, pay_records, *, journal=None,
+                       receipts=None, branch=None, user=None):
+    """Write the BillSettlement + its allocations (due before / after each bill)."""
+    row = _party_row(party_kind, party)
+    allocated = sum((a['amount'] for a in data['allocations']), ZERO)
+    on_account = data.get('on_account') or ZERO
+    settlement = BillSettlement.objects.create(
+        number=number, voucher_type=voucher, date=data['date'], party_kind=party_kind, party_id=str(party.pk),
+        party_name=row['name'][:200], party_code=(row['code'] or '')[:60], total_amount=allocated + on_account,
+        allocated_amount=allocated, on_account_amount=on_account, payments=pay_records,
+        narration=(data.get('narration') or '').strip()[:500], journal_entry=journal, branch=branch,
+        created_by=user if getattr(user, 'pk', None) else None)
+    receipts = receipts or {}
+    rows = []
+    for n, a in enumerate(data['allocations'], start=1):
+        bill = bills[str(a['bill'])]
+        new_due = bill['due'] - a['amount']
+        rows.append(BillAllocation(
+            tenant_id=settlement.tenant_id, settlement=settlement, position=n,
+            bill_kind=bill['kind'], bill_id=bill['id'], bill_number=bill['number'][:60], bill_ref=(bill['ref'] or '')[:80],
+            bill_date=bill['date'], bill_total=bill['total'], previous_paid=bill['paid'], previous_due=bill['due'],
+            allocated_amount=a['amount'], new_due=max(new_due, ZERO),
+            settlement_status='CLOSED' if new_due <= 0 else 'PARTIAL',
+            receipt_numbers=receipts.get(bill['id'], []), narration=(a.get('narration') or '')[:120]))
+    BillAllocation.objects.bulk_create(rows)
+    return settlement
 
 
 # ---------------------------------------------------------------------------
@@ -453,30 +513,40 @@ def _settle_receipt(data, user=None, book=None, branch=None, branch_ids=None):
                          bank_account=bank_of[id(pay)] or resolve_role(payment_role(pay['method'])),
                          party_kind=kind, party_id=party.pk, party_name=_party_row(kind, party)['name'])
 
+        on_account = data.get('on_account') or ZERO
+        receipts = {}   # bill id -> [receipt numbers made for it]
         if kind == 'customer':
             from apps.sales.models import Invoice, Payment
             from apps.sales.views import _shift_invoice_paid
             invoices = {str(i.pk): i for i in Invoice.objects.filter(pk__in=[a['bill'] for a in data['allocations']])}
-            for n, (a, pay, amount) in enumerate(_pair(data['allocations'], data['payments']), start=1):
-                inv = invoices[str(a['bill'])]
+            for n, (a, pay, amount) in enumerate(_pair(data['allocations'], data['payments'], on_account), start=1):
+                inv = invoices[str(a['bill'])] if a['bill'] is not None else None
+                # No bill = on account: an unattached receipt books to Customer Advances.
                 Payment.objects.create(
-                    receipt_no=f"{number}/{n}", branch=inv.branch, invoice=inv, customer=party,
-                    customer_name=inv.customer_name or party.name, amount=amount, method=pay['method'],
+                    receipt_no=f"{number}/{n}", branch=inv.branch if inv else branch, invoice=inv, customer=party,
+                    customer_name=(inv.customer_name if inv else '') or party.name, amount=amount, method=pay['method'],
                     payment_date=data['date'], status='Completed', bank_account=bank_of[id(pay)],
                     notes=' · '.join(x for x in (f"Receipt Voucher {number}", _pay_note(pay), a['narration'], narration) if x),
                 )
-                _shift_invoice_paid(inv.pk, amount)
+                if inv is not None:
+                    _shift_invoice_paid(inv.pk, amount)
+                    receipts.setdefault(str(inv.pk), []).append(f"{number}/{n}")
         else:
             from apps.sales.models import Dealer, WholesaleInvoice, WholesalePaymentCollection
-            for n, (a, pay, amount) in enumerate(_pair(data['allocations'], data['payments']), start=1):
+            for n, (a, pay, amount) in enumerate(_pair(data['allocations'], data['payments'], on_account), start=1):
+                on_bill = a['bill'] is not None
                 WholesalePaymentCollection.objects.create(
-                    receipt_number=f"{number}/{n}", dealer=party, invoice_number=bills[str(a['bill'])]['number'],
+                    receipt_number=f"{number}/{n}", dealer=party,
+                    invoice_number=bills[str(a['bill'])]['number'] if on_bill else '',
                     payment_date=data['date'], payment_method=pay['method'], amount_paid=amount,
                     bank_account=bank_of[id(pay)],
                     reference_note=' · '.join(x for x in (f"RV {number}", _pay_note(pay), a['narration'], narration) if x)[:200],
                     # P1 Task 5: a collection belongs to the branch of the bill it settles.
-                    branch_id=WholesaleInvoice.all_objects.filter(pk=a['bill']).values_list('branch_id', flat=True).first(),
+                    branch_id=(WholesaleInvoice.all_objects.filter(pk=a['bill']).values_list('branch_id', flat=True).first()
+                               if on_bill else getattr(branch, 'pk', None)),
                 )
+                if on_bill:
+                    receipts.setdefault(str(a['bill']), []).append(f"{number}/{n}")
             for a in data['allocations']:
                 inv = WholesaleInvoice.objects.get(pk=a['bill'])
                 paid = money(inv.paid_amount) + a['amount']
@@ -485,13 +555,16 @@ def _settle_receipt(data, user=None, book=None, branch=None, branch_ids=None):
                 WholesaleInvoice.objects.filter(pk=inv.pk).update(
                     paid_amount=paid, due_amount=due, status='Paid' if due <= 0 else 'Partial',
                     updated_at=timezone.now())
-            total = sum((a['amount'] for a in data['allocations']), ZERO)
+            total = sum((a['amount'] for a in data['allocations']), ZERO) + on_account
             Dealer.objects.filter(pk=party.pk).update(outstanding_balance=F('outstanding_balance') - total)
 
-        total = sum((a['amount'] for a in data['allocations']), ZERO)
+        total = sum((a['amount'] for a in data['allocations']), ZERO) + on_account
+        _record_settlement('RV', number, data, kind, party, bills,
+                           [_pay_record(p, bank_of[id(p)]) for p in data['payments']],
+                           receipts=receipts, branch=branch, user=user)
         audit('BILL_RECEIPT', 'settlement', number,
               f"Bill-to-bill receipt {number} ₹{total} from {_party_row(kind, party)['name']}",
-              after={'party_kind': kind, 'party': str(party.pk),
+              after={'party_kind': kind, 'party': str(party.pk), 'on_account': str(on_account),
                      'allocations': [{'bill': bills[str(a['bill'])]['number'], 'amount': str(a['amount'])}
                                      for a in data['allocations']]},
               user=user)
@@ -521,7 +594,8 @@ def post_bill_payment(data, user=None, book=None, branch=None, branch_ids=None):
         Supplier.objects.select_for_update().filter(pk=supplier.pk).first()
         bills = _checked_bills('supplier', supplier.pk, data, branch_ids)
         accounts = _Accounts()
-        lines, allocations, cheque_pays = [], [], []
+        lines, allocations, cheque_pays, pay_records = [], [], [], []
+        on_account = data.get('on_account') or ZERO
         for a in data['allocations']:
             bill = bills[str(a['bill'])]
             lines.append({'account': bill['account_id'], 'debit': a['amount'], 'credit': ZERO,
@@ -529,21 +603,25 @@ def post_bill_payment(data, user=None, book=None, branch=None, branch_ids=None):
                                                          a['narration']) if x)})
             allocations.append({'kind': 'purchase_invoice', 'id': bill['id'], 'number': bill['number'],
                                 'amount': str(a['amount'])})
+        if on_account > 0:
+            lines.append({'account': supplier_payable(supplier, accounts), 'debit': on_account, 'credit': ZERO,
+                          'memo': 'On account (advance to supplier)'})
         for pay in data['payments']:
             bank = _bank(pay)
             acc = bank or accounts.role(payment_role(pay['method']))
+            pay_records.append(_pay_record(pay, acc))
             lines.append({'account': acc, 'debit': ZERO, 'credit': pay['amount'],
                           'memo': ' '.join(x for x in (pay['method'], _pay_note(pay)) if x)})
             if pay.get('cheque'):
                 cheque_pays.append((pay, acc))
-        total = sum((a['amount'] for a in data['allocations']), ZERO)
+        total = sum((a['amount'] for a in data['allocations']), ZERO) + on_account
         try:
             entry = create_journal(
                 lines=lines, date=data['date'], voucher_type_code='PV',
                 narration=data['narration'].strip() or f"Payment Voucher — {supplier.name} (Bill to Bill)",
                 source_module='financial', source_event='voucher', source_number=supplier.name[:80],
                 reference_type='PAYMENT_VOUCHER', user=user, idempotency_key=key,
-                metadata={'bill_allocations': allocations,
+                metadata={'bill_allocations': allocations, 'on_account': str(on_account),
                           'party': {'kind': 'supplier', 'id': str(supplier.pk), 'name': supplier.name,
                                     'code': supplier.supplier_code or ''}},
             )
@@ -557,6 +635,8 @@ def post_bill_payment(data, user=None, book=None, branch=None, branch_ids=None):
                      bank_account=acc, party_kind='supplier', party_id=supplier.pk, party_name=supplier.name)
         if own_book:
             book.save()
+        _record_settlement('PV', entry.entry_number, data, 'supplier', supplier, bills, pay_records,
+                           journal=entry, branch=branch or entry.branch, user=user)
     audit('VOUCHER_CREATED', 'journal', entry.pk, f"{entry.entry_number} bill-to-bill ₹{entry.total_amount}", user=user)
     return entry, True
 
@@ -567,9 +647,10 @@ def on_voucher_reversed(entry):
     from apps.purchasing.models import Supplier
     meta = entry.metadata or {}
     party = meta.get('party') or {}
-    if not meta.get('bill_allocations') or party.get('kind') != 'supplier':
+    if 'bill_allocations' not in meta or party.get('kind') != 'supplier':
         return
-    total = sum((money(a.get('amount')) for a in meta['bill_allocations']), ZERO)
+    BillSettlement.objects.filter(journal_entry=entry).update(status='REVERSED', updated_at=timezone.now())
+    total = sum((money(a.get('amount')) for a in meta['bill_allocations']), ZERO) + money(meta.get('on_account'))
     Supplier.objects.filter(pk=party.get('id')).update(outstanding_balance=F('outstanding_balance') + total)
 
 
@@ -579,9 +660,9 @@ def post_bill_batch(voucher, items, user=None, branch=None, branch_ids=None):
     book = ChequeBook(voucher, user=user, branch=branch)
     with transaction.atomic():
         if voucher == 'RV':
-            done = [_settle_receipt(d, user, book=book, branch_ids=branch_ids) for d in items]
+            done = [_settle_receipt(d, user, book=book, branch=branch, branch_ids=branch_ids) for d in items]
         else:
-            done = [post_bill_payment(d, user, book=book, branch_ids=branch_ids) for d in items]
+            done = [post_bill_payment(d, user, book=book, branch=branch, branch_ids=branch_ids) for d in items]
         book.save()
     duplicate = not any(created for _, created in done)
     # After commit: the receipts' journals now exist.

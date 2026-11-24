@@ -73,6 +73,7 @@ const describe = (row, catalog) => {
       if (k === 'modules') return `modules: ${(v.to || []).join(', ')}`;
       if (k === 'role_permissions') return 'role permissions';
       if (k === 'settings_features') return `settings sections: ${v.to ? v.to.join(', ') : 'all'}`;
+      if (k === 'module_features') return `module features: ${Object.keys(v.to || {}).filter((f) => v.to[f]).join(', ') || 'none'}`;
       if (k === 'sections') return `scope: ${(v || []).length ? v.join(', ') : 'full client'}`;
       if (typeof v !== 'object' || v === null) return `${k.replace(/_/g, ' ')}: ${v}`;
       if (k === 'package') return `package: ${packageLabel(catalog, v.from)} → ${packageLabel(catalog, v.to)}`;
@@ -239,14 +240,21 @@ function Overview({ catalog, tenant, onSave, saving, onLifecycle, onSubscription
   );
 }
 
-const subscriptionOf = (t) => ({ package: t.package, modules: t.modules, settings_features: t.settings_features ?? null });
+const subscriptionOf = (t) => ({
+  package: t.package, modules: t.modules, settings_features: t.settings_features ?? null,
+  module_features: { ...(t.module_features || {}) },
+});
+const featuresKey = (f) => JSON.stringify(Object.keys(f || {}).sort().filter((k) => f[k]));
 
 function ModulesTab({ catalog, tenant, onSave, saving }) {
   const [value, setValue] = useState(() => subscriptionOf(tenant));
   const sectionsKey = (tenant.settings_features ?? []).join();
-  useEffect(() => { setValue(subscriptionOf(tenant)); }, [tenant.package, tenant.modules, sectionsKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const tenantFeatures = featuresKey(tenant.module_features);
+  useEffect(() => { setValue(subscriptionOf(tenant)); }, [tenant.package, tenant.modules, sectionsKey, tenantFeatures]); // eslint-disable-line react-hooks/exhaustive-deps
+  const featuresDirty = featuresKey(value.module_features) !== tenantFeatures;
   const dirty = value.package !== tenant.package || value.modules.join() !== tenant.modules.join()
-    || JSON.stringify(value.settings_features ?? null) !== JSON.stringify(tenant.settings_features ?? null);
+    || JSON.stringify(value.settings_features ?? null) !== JSON.stringify(tenant.settings_features ?? null)
+    || featuresDirty;
   const [error, setError] = useState('');
 
   const save = async () => {
@@ -254,8 +262,11 @@ function ModulesTab({ catalog, tenant, onSave, saving }) {
     // Settings off: the section pick is kept as it was (it only applies while Settings is on).
     const body = { package: value.package, modules: value.modules };
     if (value.modules.includes('settings')) body.settings_features = value.settings_features;
-    const fieldErrors = await onSave(body, ['modules', 'settings_features']);
-    if (fieldErrors?.modules || fieldErrors?.settings_features) setError(fieldErrors.modules || fieldErrors.settings_features);
+    if (featuresDirty) body.module_features = value.module_features;
+    const fieldErrors = await onSave(body, ['modules', 'settings_features', 'module_features']);
+    if (fieldErrors?.modules || fieldErrors?.settings_features || fieldErrors?.module_features) {
+      setError(fieldErrors.modules || fieldErrors.settings_features || fieldErrors.module_features);
+    }
   };
 
   return (

@@ -142,7 +142,11 @@ def _move(inv, product, branch, warehouse, delta, enforce_stock):
     from apps.inventory.models import StockAdjustment
     from apps.inventory.stock_utils import adjust_branch_stock
     qty = abs(int(delta))
-    reason = (SALE_REASON if delta > 0 else REVERSAL_REASON).format(no=inv.invoice_number)
+    # Delivery-tracked bills (Wholesale Order Status) use their own reasons: their COGS waits for
+    # the delivery (sales.wholesale_delivery.stock_reasons).
+    from .wholesale_delivery import stock_reasons
+    sub_reason, add_reason = stock_reasons(inv)
+    reason = (sub_reason if delta > 0 else add_reason).format(no=inv.invoice_number)
     ledger = None
     if warehouse is not None:
         adj = StockAdjustment.objects.create(

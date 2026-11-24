@@ -11,6 +11,9 @@ The platform console (apps/common/superadmin_views.py) sets, per tenant:
 
   * `settings_features` — with Settings on, which of its sections (SETTINGS_FEATURES) the client
     gets; the others are hidden and their endpoints refuse writes from Settings.
+  * `module_features` — opt-in switches inside a module (MODULE_FEATURES), e.g. Wholesale
+    Distribution → Wholesale Order Status. {key: bool}; a missing key is OFF. The feature's
+    endpoints (FEATURE_PREFIXES) refuse reads and writes while it is off.
 
 effective_access(user) folds both into {module: level}; the profile API sends it to the browser
 (sidebar + route guard) and check_api_access() enforces it on every API write: a POST / PUT /
@@ -70,6 +73,46 @@ SETTINGS_FEATURES = (
 SETTINGS_FEATURE_KEYS = tuple(f[0] for f in SETTINGS_FEATURES)
 # Longest prefix first: path → the section that owns it.
 _FEATURE_PREFIXES = sorted(((prefix, f[0]) for f in SETTINGS_FEATURES for prefix in f[3]), key=lambda r: -len(r[0]))
+# Opt-in features inside a module, switched per client in Client Management (cloud: the platform
+# admin; Windows edition: the Local Super Admin for client companies), and for the platform
+# account / the Windows installation's own company in Settings → Business Settings. Stored in
+# Tenant.module_features as {key: bool}; a missing key takes the feature's default — OFF for
+# opt-in workflows (so every existing client keeps the behaviour it had), ON for features that
+# shipped switched on (fresh installs, upgrades and new clients get them with no seeding). A
+# feature also needs one of its parent modules.
+# (key, parent module(s), label, description, endpoint prefixes it owns, default)
+MODULE_FEATURES = (
+    ('wholesale_order_status', 'wholesale', 'Wholesale Order Status',
+     'Dealer-wise order tracking: billing an order deducts stock at once but posts it to Accounts '
+     'only when it is marked Delivered; an undelivered bill is voided and its stock restored.',
+     ('/api/sales/wholesale/order-status/',), False),
+    ('bill_settlement', ('accounts', 'financial'), 'Bill-to-Bill Settlement',
+     'Receipt / Payment Voucher "Bill to Bill" mode (F1 party lookup, FIFO or manual allocation, '
+     'on-account advances) and the Bill-to-Bill Settlement Statement.',
+     ('/api/financial/settlements/receipt/', '/api/financial/settlements/payment/',
+      '/api/financial/settlements/batch/', '/api/financial/settlements/statement/',
+      '/api/financial/settlements/voucher/', '/api/financial/settlements/party-ledger/'), True),
+)
+MODULE_FEATURE_KEYS = tuple(f[0] for f in MODULE_FEATURES)
+
+
+def feature_parents(feature):
+    """The parent module keys of a MODULE_FEATURES row (one key or a tuple of them)."""
+    parent = feature[1]
+    return tuple(parent) if isinstance(parent, (tuple, list)) else (parent,)
+
+
+def feature_default(feature):
+    return bool(feature[5]) if len(feature) > 5 else False
+
+
+def module_feature_catalog():
+    """MODULE_FEATURES as dicts for the consoles / settings: 'module' is the first parent
+    (kept for older screens), 'modules' every parent, 'default' its state when never switched."""
+    return [{'key': f[0], 'module': feature_parents(f)[0], 'modules': list(feature_parents(f)), 'label': f[2],
+             'description': f[3], 'default': feature_default(f)} for f in MODULE_FEATURES]
+_MODULE_FEATURE_PREFIXES = sorted(((prefix, f[0]) for f in MODULE_FEATURES for prefix in f[4]),
+                                  key=lambda r: -len(r[0]))
 MODULE_LABELS = {m[0]: m[1] for m in MODULES}
 OPERATIONAL = tuple(m[0] for m in MODULES if m[3] == 'operations')
 CORE = tuple(m[0] for m in MODULES if m[3] == 'core')
@@ -328,6 +371,82 @@ def settings_features_for(user, config=None):
     return enabled_settings_features(config)
 
 
+def normalize_module_features(raw):
+    """Stored module_features: {key: bool} for known keys only (unknown keys refused)."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError('Module features must be an object of {feature: true/false}.')
+    unknown = [k for k in raw if k not in MODULE_FEATURE_KEYS]
+    if unknown:
+        raise ValueError(f'Unknown module feature(s): {", ".join(map(str, unknown))}.')
+    return {k: bool(raw[k]) for k in MODULE_FEATURE_KEYS if k in raw}
+
+
+def enabled_module_features(config):
+    """Feature keys the tenant has on (each also needs its parent module)."""
+    chosen = config.get('module_features')
+    modules = config.get('modules') or []
+    out = []
+    for f in MODULE_FEATURES:
+        key = f[0]
+        if not any(p in modules for p in feature_parents(f)):
+            continue
+        if chosen is None or (isinstance(chosen, dict) and chosen.get(key, feature_default(f))):
+            out.append(key)
+    return out
+
+
+def module_features_for(user, config=None):
+    """Module features a signed-in user may use: the tenant's features whose parent module the
+    user's role can open."""
+    if config is None:
+        from apps.common.permissions import request_tenant_id
+        tenant_id = request_tenant_id(user)
+        if not tenant_id:
+            return []
+        config = tenant_access_config(tenant_id)
+    access = effective_access(user, config)
+    parents = {f[0]: feature_parents(f) for f in MODULE_FEATURES}
+    return [k for k in enabled_module_features(config)
+            if any(access.get(p, NONE) != NONE for p in parents[k])]
+
+
+def tenant_has_feature(key, tenant_id=None):
+    """Is a module feature on for this (default: the current) tenant? Used by business logic
+    that changes behaviour with the feature (not only by the API gate)."""
+    from apps.common import tenancy
+    tenant_id = tenant_id or tenancy.current_tenant_id()
+    if not tenant_id:
+        return False
+    return key in enabled_module_features(tenant_access_config(tenant_id))
+
+
+def _module_feature_for(path):
+    for prefix, feature in _MODULE_FEATURE_PREFIXES:
+        if path.startswith(prefix):
+            return feature
+    return None
+
+
+def _check_module_feature(request):
+    """A module feature switched off refuses its endpoints, reads and writes alike (403)."""
+    feature = _module_feature_for(request.path)
+    if not feature:
+        return
+    from apps.common import tenancy
+    tenant_id = tenancy.current_tenant_id()
+    if tenant_id is None:
+        return
+    if feature in enabled_module_features(tenant_access_config(tenant_id)):
+        return
+    label = next(f[2] for f in MODULE_FEATURES if f[0] == feature)
+    raise exceptions.PermissionDenied({
+        'detail': f'{label} is not enabled for this business. Ask the administrator to switch it on '
+                  'in Client Management → Modules.',
+        'code': 'feature_disabled'})
+
+
 def _feature_for(path):
     for prefix, feature in _FEATURE_PREFIXES:
         if path.startswith(prefix):
@@ -365,9 +484,10 @@ def tenant_access_config(tenant_id):
     from apps.common.models import Tenant
 
     def load():
-        row = Tenant.objects.filter(pk=tenant_id).values('modules', 'role_permissions', 'settings_features').first()
+        row = Tenant.objects.filter(pk=tenant_id).values(
+            'modules', 'role_permissions', 'settings_features', 'module_features').first()
         if row is None:
-            return {'modules': [], 'role_permissions': {}, 'settings_features': []}
+            return {'modules': [], 'role_permissions': {}, 'settings_features': [], 'module_features': {}}
         platform = tenant_id == tenancy.DEFAULT_TENANT_ID
         from apps.common.edition import is_local, licensed_modules, licensed_settings_features
         modules = list(MODULE_KEYS) if platform else list(row['modules'] or [])
@@ -377,9 +497,13 @@ def tenant_access_config(tenant_id):
             # the licence's module list and Settings sections win (licence AND company).
             modules = licensed_modules(modules)
             features = licensed_settings_features(features)
+        # Module features are opt-in everywhere — the platform account too, since switching one
+        # on changes how that business's documents post. The stored switches decide.
+        module_features = dict(row['module_features'] or {})
         return {'modules': modules,
                 'role_permissions': dict(row['role_permissions'] or {}),
-                'settings_features': features}
+                'settings_features': features,
+                'module_features': module_features}
 
     return hot_cache.get_or_load(f'tenant:access:{tenant_id}', load)
 
@@ -449,6 +573,7 @@ def _check_read(request):
 def check_api_access(request):
     """Refuse an API request the tenant's modules / the user's role don't allow (403): every
     module-gated write, plus reads of the accounting tiers' endpoints (READ_RULES)."""
+    _check_module_feature(request)
     if request.method in _SAFE or request.path in READ_ONLY_POSTS:
         _check_read(request)
         return
@@ -514,6 +639,7 @@ def catalog():
         'packages': [{'key': k, 'label': l, 'description': d, 'modules': list(m) if m else None}
                      for k, l, d, m in PACKAGES],
         'settings_features': [{'key': k, 'label': l, 'description': d} for k, l, d, _p in SETTINGS_FEATURES],
+        'module_features': module_feature_catalog(),
         # Modules are independent; the one rule is a single accounting tier per client.
         'exclusive': [list(ACCOUNTING_TIERS)],
         'levels': list(LEVELS),

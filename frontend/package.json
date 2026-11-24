@@ -16,6 +16,7 @@
     "test:eye-test": "node --test src/utils/__tests__/eyeTestBill.test.js",
     "test:eye-report": "node --test src/utils/__tests__/eyeTestReport.test.js",
     "test:cheques": "node --test src/utils/__tests__/cheques.test.js",
+    "test:bill-settlement": "node --test src/utils/__tests__/billSettlement.test.js",
     "test:purchase-labels": "node --test src/utils/__tests__/purchaseLabels.test.js",
     "test:pricing": "node --test src/utils/__tests__/pricingRules.test.js",
     "test:currency": "node --test src/utils/__tests__/currency.test.js",

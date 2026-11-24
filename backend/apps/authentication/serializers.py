@@ -17,7 +17,7 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = ('id', 'username', 'email', 'first_name', 'last_name', 'role', 'role_display', 'phone', 'is_active',
                   'tenant', 'is_platform_admin', 'workspace', 'module_access',
-                  'settings_features', 'edit_permissions', 'can_view_cost',
+                  'settings_features', 'module_features', 'edit_permissions', 'can_view_cost',
                   'active_company', 'organization', 'is_org_admin', 'company_count')
         read_only_fields = ('id', 'is_active', 'tenant')
 
@@ -78,6 +78,8 @@ class UserSerializer(serializers.ModelSerializer):
 
     # Settings page sections this user may open (Tenant.settings_features ∩ Settings access).
     settings_features = serializers.SerializerMethodField()
+    # Opt-in module features this user can use (Tenant.module_features ∩ parent module access).
+    module_features = serializers.SerializerMethodField()
 
     def get_module_access(self, obj):
         from apps.common.module_access import effective_access
@@ -101,6 +103,10 @@ class UserSerializer(serializers.ModelSerializer):
             return can_view_cost(obj)
         except Exception:   # no tenant settings row reachable (e.g. mid-onboarding): hide
             return False
+
+    def get_module_features(self, obj):
+        from apps.common.module_access import module_features_for
+        return module_features_for(obj)
 
     def get_settings_features(self, obj):
         from apps.common.module_access import settings_features_for

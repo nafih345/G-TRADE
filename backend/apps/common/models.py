@@ -61,6 +61,10 @@ class Tenant(models.Model):
     # With the Settings module on: which of its sections the client gets (SETTINGS_FEATURES
     # keys). Null = every section.
     settings_features = models.JSONField(null=True, blank=True, default=None)
+    # Opt-in features inside a module (module_access.MODULE_FEATURES), {key: bool}. A missing key
+    # is OFF — existing clients keep their behaviour until the feature is switched on. Nullable so
+    # a code-only rollback (which does not know the column) can still create tenants; NULL = {}.
+    module_features = models.JSONField(default=dict, blank=True, null=True)
     # Seat limit: how many *active* user accounts the client may have (its owner included).
     max_users = models.PositiveIntegerField(default=5)
     # Which generation of default masters (branch, warehouse, chart of accounts, templates, …)

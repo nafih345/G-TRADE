@@ -166,6 +166,20 @@ export const AuthProvider = ({ children }) => {
       .finally(() => setLoading(false));
   }, [token]);
 
+  // Re-read the signed-in user's profile now (e.g. after a module feature is switched in
+  // Settings, so the sidebar and route guard follow without signing in again).
+  const refreshProfile = async () => {
+    try {
+      const { data } = await axios.get('/api/auth/profile/');
+      const profile = withRoleLabel(data);
+      localStorage.setItem('user_profile', JSON.stringify(profile));
+      setUser(profile);
+      return profile;
+    } catch {
+      return null;
+    }
+  };
+
   /**
    * Authenticate against the backend (/api/auth/login/). The backend only issues tokens to
    * roles in settings.LOGIN_ENABLED_ROLES (currently Super Admin only) and answers anything
@@ -365,7 +379,7 @@ export const AuthProvider = ({ children }) => {
   return (
     <AuthContext.Provider value={{
       user, token, loading, login, verifyTwoFactor, logout, openWorkspace, exitWorkspace,
-      companies, pickCompany, switchCompany, continueInCurrentCompany,
+      companies, pickCompany, switchCompany, continueInCurrentCompany, refreshProfile,
     }}>
       {children}
     </AuthContext.Provider>

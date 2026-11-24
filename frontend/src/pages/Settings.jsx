@@ -27,6 +27,7 @@ import StoreProfileSettings from '../components/settings/store/StoreProfileSetti
 import BusinessLocalizationSettings from '../components/settings/business/BusinessLocalizationSettings';
 import SystemSecuritySettings from '../components/settings/security/SystemSecuritySettings';
 import PricingRulesSettings from '../components/settings/pricing/PricingRulesSettings';
+import ModuleFeaturesCard from '../components/settings/business/ModuleFeaturesCard';
 import { GREEN, greenButtonSx } from '../components/settings/store/storeUi';
 import { STORE_PROFILE_EVENT } from '../utils/storeProfile';
 import { useAuth } from '../context/AuthContext';
@@ -407,6 +408,7 @@ export default function Settings() {
           />
         </Card>
       )}
+      {activeTab === 3 && <ModuleFeaturesCard />}
 
       <ConfirmActionDialog
         open={pendingTab !== null}

@@ -250,7 +250,7 @@ class TenantSerializer(serializers.ModelSerializer):
                   'owner_name', 'country', 'address',
                   'contact_email', 'contact_phone', 'primary_admin', 'user_count', 'active_user_count',
                   'max_users', 'branch_count', 'active_branch_count', 'max_branches',
-                  'package', 'modules', 'settings_features',
+                  'package', 'modules', 'settings_features', 'module_features',
                   'subscription_plan', 'subscription_starts_on', 'subscription_expires_on', 'days_to_expiry',
                   'deactivation_category', 'deactivation_reason', 'deactivation_effective_date',
                   'deactivation_until', 'deactivated_at', 'deactivated_by', 'subscription')
@@ -299,6 +299,8 @@ class TenantUpdateSerializer(serializers.Serializer):
     package = serializers.CharField(required=False)
     modules = ModulesField(required=False)
     settings_features = serializers.ListField(child=serializers.CharField(), required=False, allow_null=True)
+    # Opt-in features inside a module ({key: bool}); merged over what the tenant has.
+    module_features = serializers.DictField(child=serializers.BooleanField(), required=False)
     max_users = serializers.IntegerField(required=False, min_value=1, max_value=10000)
     role_permissions = serializers.DictField(required=False)
     multi_branch_enabled = serializers.BooleanField(required=False)
@@ -349,6 +351,14 @@ class TenantUpdateSerializer(serializers.Serializer):
         except ValueError as e:
             raise serializers.ValidationError(str(e))
 
+    def validate_module_features(self, value):
+        try:
+            merged = dict(self.instance.module_features or {}) if self.instance is not None else {}
+            merged.update(module_access.normalize_module_features(value))
+            return merged
+        except ValueError as e:
+            raise serializers.ValidationError(str(e))
+
     def validate_max_users(self, value):
         from apps.common.tenant_onboarding import active_user_count
         used = active_user_count(self.instance)
@@ -359,6 +369,9 @@ class TenantUpdateSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         from apps.common import tenancy
+        if 'module_features' in attrs and self.instance.pk == tenancy.DEFAULT_TENANT_ID:
+            raise serializers.ValidationError(
+                {'module_features': ["Switch the platform account's own features in Settings → Business Settings."]})
         if 'settings_features' in attrs and self.instance.pk == tenancy.DEFAULT_TENANT_ID:
             raise serializers.ValidationError(
                 {'settings_features': ['The platform account always has every Settings section.']})

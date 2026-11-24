@@ -13,6 +13,9 @@ import {
   FileDownload as CsvIcon,
 } from '@mui/icons-material';
 import { apiError, finGet } from '../financial/financialApi';
+import SettlementBreakdownDialog from '../financial/SettlementBreakdownDialog';
+import { useAuth } from '../../context/AuthContext';
+import { canUseFeature } from '../../utils/moduleAccess';
 import { useBranch } from '../../context/BranchContext';
 import { useStoreProfile, companyFromProfile } from '../../utils/storeProfile';
 import { formatDate, formatMoney } from '../../utils/localeFormat';
@@ -99,6 +102,8 @@ function SideTable({ label, list }) {
 
 function VoucherDetails({ row, meta }) {
   const cell = { py: 0.4, fontSize: 12.5 };
+  const { user } = useAuth();
+  const [breakdown, setBreakdown] = useState(false);
   if (meta.split) {
     return (
       <Box sx={{ px: 2, py: 1.5, bgcolor: '#f8fafc', borderTop: '1px dashed #cbd5e1' }}>
@@ -165,6 +170,14 @@ function VoucherDetails({ row, meta }) {
             <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
               Bills settled: {row.bills.map(b => `${b.number} (${money(b.amount)})`).join(', ')}
             </Typography>
+          )}
+          {row.bills.length > 0 && canUseFeature(user, 'bill_settlement') && (
+            <>
+              <Button size="small" variant="outlined" sx={{ mt: 1, fontWeight: 700 }} onClick={(e) => { e.stopPropagation(); setBreakdown(true); }}>
+                View Settlement Breakdown
+              </Button>
+              <SettlementBreakdownDialog open={breakdown} query={{ journal: row.voucher_no }} onClose={() => setBreakdown(false)} />
+            </>
           )}
         </Grid>
       </Grid>

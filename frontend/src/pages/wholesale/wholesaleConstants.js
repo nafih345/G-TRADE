@@ -358,8 +358,17 @@ export function invoiceFromApi(row, dealersById = {}) {
     amountReceived: parseFloat(row.paid_amount) || 0,
     dueAmount: parseFloat(row.due_amount) || 0,
     backendId: row.id,
+    // Wholesale Order Status (server-only): PENDING_DELIVERY / DELIVERED / UNDELIVERED, or null.
+    deliveryStatus: row.delivery_status || null,
+    postedToAccounts: row.is_posted_to_accounts !== false,
   };
 }
+
+// The server decides whether a bill is held until delivery (Wholesale Order Status).
+const deliveryOf = (row) => ({
+  deliveryStatus: row?.delivery_status || null,
+  postedToAccounts: row?.is_posted_to_accounts !== false,
+});
 
 export const newInvoiceNo = () => `WINV-${Math.floor(100000 + Math.random() * 900000)}`;
 
@@ -370,13 +379,13 @@ export async function saveInvoiceToBackend(axios, inv) {
   if (!isUuid(inv.customer?.id)) throw new Error('Dealer is not registered on the server');
   if (inv.backendId) {
     const res = await axios.patch(`${WHOLESALE_API}/invoices/${inv.backendId}/`, invoiceToApi(inv));
-    return { ...inv, backendId: res.data.id, pendingSync: false };
+    return { ...inv, ...deliveryOf(res.data), backendId: res.data.id, pendingSync: false };
   }
   let attempt = { ...inv };
   for (let i = 0; i < 3; i += 1) {
     try {
       const res = await axios.post(`${WHOLESALE_API}/invoices/`, invoiceToApi(attempt));
-      return { ...attempt, backendId: res.data.id, pendingSync: false };
+      return { ...attempt, ...deliveryOf(res.data), backendId: res.data.id, pendingSync: false };
     } catch (e) {
       const clash = e?.response?.status === 400 && e.response.data?.invoice_number;
       if (!clash || i === 2) throw e;

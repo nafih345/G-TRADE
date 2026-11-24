@@ -74,6 +74,7 @@ import { CASH_PAID, CASH_UNPAID, needsBank } from '../utils/paymentModes';
 import { downloadPdfInvoice } from '../utils/printInvoice';
 import { useAuth } from '../context/AuthContext';
 import { describeApiError } from '../utils/apiWriteGuard';
+import { notify } from '../utils/notify';
 import {
   LS_KEYS, PRICE_LIST_OPTIONS, PRICE_TIER_LABEL, DELIVERY_TYPES, ORDER_STATUSES, ORDER_STATUS_COLORS,
   DEFAULT_SCHEMES, DEMO_SALES_REPS, INITIAL_DEMO_CUSTOMERS,
@@ -1790,9 +1791,14 @@ export default function WholesaleSales() {
 
     if (synced) window.dispatchEvent(new Event('optical_stock_updated'));
 
+    // Wholesale Order Status: a bill made from an order may be held until delivery — stock is
+    // already out, but nothing reaches Accounts (nor the dealer's balance) until it is delivered.
+    const heldForDelivery = completedInvoice.deliveryStatus === 'PENDING_DELIVERY';
+
     // 2. Update Dealer Ledger — locally for instant UI feedback, and best-effort against the
-    // real Dealer record (PATCH outstanding_balance) so it stays correct system-wide.
-    const newOutstanding = parseFloat(dealer.outstanding || 0) + completedInvoice.dueAmount;
+    // real Dealer record (PATCH outstanding_balance) so it stays correct system-wide. A bill held
+    // for delivery moves the balance when it is delivered (server side), not now.
+    const newOutstanding = parseFloat(dealer.outstanding || 0) + (heldForDelivery ? 0 : completedInvoice.dueAmount);
     const updatedCustomers = customers.map(c => {
       if (c.id === dealer.id || c.code === dealer.code) {
         // `customers` predates ensureBackendDealer's re-keying, so carry the server id over.
@@ -1804,7 +1810,7 @@ export default function WholesaleSales() {
     writeLS(LS_KEYS.customers, updatedCustomers);
     const currentUpdatedCust = updatedCustomers.find(c => c.id === dealer.id || c.code === dealer.code);
     if (currentUpdatedCust) setSelectedCustomer(currentUpdatedCust);
-    if (isUuid(dealer.id)) {
+    if (isUuid(dealer.id) && !heldForDelivery) {
       try { await axios.patch(`${WHOLESALE_API}/dealers/${dealer.id}/`, { outstanding_balance: newOutstanding }); } catch (e) {}
     }
 
@@ -1832,6 +1838,23 @@ export default function WholesaleSales() {
     }
 
     // 5. Open Completion / Print
+
+    // Held for delivery: back to Wholesale Order Status, where it is marked Delivered / Post or
+    // Not Delivered (the print, if asked for, still goes out first).
+    if (heldForDelivery) {
+      const orderNo = completedInvoice.linkedOrder?.orderNumber || '';
+      if (printAfterSaveRef.current) {
+        printAfterSaveRef.current = false;
+        const opened = await printBill({ doc: completedInvoice, documentType: 'WHOLESALE_BILL' });
+        if (!opened) showToast('Print pop-up was blocked — reprint the bill from Wholesale Reports.', 'warning');
+      }
+      resetSaleForm();
+      notify(`Invoice #${invoiceNo} saved${orderNo ? ` for ${orderNo}` : ''} — stock deducted. It posts to Accounts when you mark it Delivered in Wholesale Order Status.`, 'success');
+      const q = new URLSearchParams({ dealer: String(dealer.id) });
+      if (completedInvoice.linkedOrder?.id) q.set('order', String(completedInvoice.linkedOrder.id));
+      navigate(`/wholesale/order-status?${q}`);
+      return;
+    }
 
     setPrintableInvoice(completedInvoice);
     setCompletionOpen(true);

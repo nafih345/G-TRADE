@@ -496,7 +496,7 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
             if changes:
                 # One audit row per kind of change, so the history can be filtered by event type.
                 groups = (
-                    ('MODULES_CHANGED', {'package', 'modules', 'settings_features'}),
+                    ('MODULES_CHANGED', {'package', 'modules', 'settings_features', 'module_features'}),
                     ('PERMISSIONS_CHANGED', {'role_permissions'}),
                     ('SUBSCRIPTION_CHANGED', {'subscription_plan', 'subscription_starts_on',
                                               'subscription_expires_on', 'max_branches'}),

@@ -1247,6 +1247,117 @@ def settlement_batch_view(request, voucher):
 
 
 # ---------------------------------------------------------------------------
+# Bill-to-Bill Settlement Statement — see settlement_statement.py
+# ---------------------------------------------------------------------------
+
+def _xlsx_response(content, filename):
+    from django.http import HttpResponse
+    resp = HttpResponse(content, content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    resp['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return resp
+
+
+def _company_name():
+    from apps.company.store_profile import get_company
+    company = get_company()
+    return (company.display_name or company.name) if company else ''
+
+
+@api_view(['GET'])
+@permission_classes([FinancePermission])
+def settlement_statement_view(request):
+    """GET /financial/settlements/statement/?voucher=RV|PV&party_kind=&party=&date_from=&date_to=
+    &search=&status=POSTED|REVERSED (&export=xlsx): bill-to-bill vouchers with their payment
+    source breakdown and the bills each one settled."""
+    from . import settlement_statement as ss
+    p = request.query_params
+    try:
+        voucher = (p.get('voucher') or '').upper() or None
+        party_kind = p.get('party_kind') or None
+        if party_kind and party_kind not in ('customer', 'dealer', 'supplier'):
+            raise AccountingError('party_kind must be customer, dealer or supplier.')
+        status_filter = (p.get('status') or '').upper() or None
+        date_from, date_to = _date_param(request, 'date_from'), _date_param(request, 'date_to')
+        data = ss.settlement_list(voucher=voucher, party_kind=party_kind, party_id=p.get('party') or None,
+                                  date_from=date_from, date_to=date_to, search=p.get('search') or '',
+                                  status=status_filter, branch_ids=settlement_branches(request))
+    except (AccountingError, ValueError) as exc:
+        return _error(exc)
+    if (p.get('export') or '').lower() == 'xlsx':
+        header = ['Voucher No', 'Type', 'Date', 'Party', 'Party Code', 'Payment Modes', 'Payment Detail', 'Total',
+                  'On Account', 'Bill No', 'Bill Date', 'Bill Amount', 'Due Before', 'Settled', 'Remaining Due',
+                  'Bill Status', 'Voucher Status']
+        lines = []
+        for r in data['results']:
+            pay = '; '.join(f"{x['method']} {x['amount']}{' (' + x['detail'] + ')' if x['detail'] else ''}" for x in r['payments'])
+            first = [r['number'], r['voucher'], r['date'], r['party_name'], r['party_code'], r['pay_modes'], pay,
+                     r['total'], r['on_account']]
+            if not r['bills']:
+                lines.append(first + ['', '', '', '', '', '', '', r['status']])
+            for i, b in enumerate(r['bills']):
+                lines.append((first if i == 0 else [r['number']] + [''] * 8)
+                             + [b['bill_number'], b['bill_date'], b['bill_total'], b['previous_due'], b['settled'],
+                                b['remaining_due'], b['status'], r['status']])
+        meta = [f"Period: {date_from or '…'} to {date_to or '…'}"]
+        content = ss.to_xlsx('Bill-to-Bill Settlement Statement', meta, header, lines, _company_name(),
+                             money_cols=(7, 8, 11, 12, 13, 14))
+        return _xlsx_response(content, f"settlement_statement_{date_from or ''}_{date_to or ''}.xlsx")
+    return Response(data)
+
+
+@_report
+def settlement_voucher_view(request):
+    """GET /financial/settlements/voucher/?number=BR-…|PV-… or ?journal=<entry number>: one
+    voucher's settlement breakdown ("View Settlement Breakdown")."""
+    from . import settlement_statement as ss
+    p = request.query_params
+    number, journal = (p.get('number') or '').strip(), (p.get('journal') or '').strip()
+    if not number and not journal:
+        raise AccountingError('Give the voucher number or journal number.')
+    data = ss.settlement_detail(number or None, journal or None, branch_ids=settlement_branches(request))
+    if data is None:
+        raise AccountingError(f"{number or journal} is not a bill-to-bill settlement voucher "
+                              "(no bills were settled by it).")
+    return data
+
+
+@api_view(['GET'])
+@permission_classes([FinancePermission])
+def settlement_party_ledger_view(request):
+    """GET /financial/settlements/party-ledger/?party_kind=&party=&date_from=&date_to= (&export=xlsx):
+    a party's bills and receipts / payments with a running balance and bill ↔ voucher mapping."""
+    from . import settlement_statement as ss
+    p = request.query_params
+    try:
+        import uuid
+        try:
+            party = uuid.UUID(str(p.get('party')))
+        except (ValueError, TypeError):
+            raise AccountingError('party must be a valid id.')
+        date_from, date_to = _date_param(request, 'date_from'), _date_param(request, 'date_to')
+        data = ss.party_ledger(p.get('party_kind'), party, date_from, date_to, branch_ids=settlement_branches(request))
+    except (AccountingError, ValueError) as exc:
+        return _error(exc)
+    if (p.get('export') or '').lower() == 'xlsx':
+        header = ['Date', 'Type', 'Document No', 'Ref', 'Description', 'Bill Amount', 'Paid / Received', 'Balance Due',
+                  'Settled By / Settles']
+        lines = [['', 'OPENING', '', '', 'Opening balance', '', '', data['opening_balance'], '']]
+        for r in data['rows']:
+            link = r['settled_by'] if r['type'] == 'BILL' else r['settles']
+            text = '; '.join(f"{x.get('number') or x.get('bill_number')} {x['amount']}" for x in link)
+            lines.append([r['date'], r['type'], r['number'], r['ref'], r['description'], r['bill_amount'],
+                          r['paid_amount'], r['balance'], text])
+        lines.append(['', 'CLOSING', '', '', 'Closing balance', data['total_billed'], data['total_paid'],
+                      data['closing_balance'], ''])
+        party_label = f"{data['party']['name']} ({data['party']['code']})" if data['party']['code'] else data['party']['name']
+        meta = [party_label, f"Period: {date_from or '…'} to {date_to or '…'}",
+                f"Outstanding (open bills): {data['outstanding_bills']}"]
+        content = ss.to_xlsx('Party Settlement Ledger', meta, header, lines, _company_name(), money_cols=(5, 6, 7))
+        return _xlsx_response(content, f"party_ledger_{data['party']['code'] or 'party'}.xlsx")
+    return Response(data)
+
+
+# ---------------------------------------------------------------------------
 # Cheque Register
 # ---------------------------------------------------------------------------
 

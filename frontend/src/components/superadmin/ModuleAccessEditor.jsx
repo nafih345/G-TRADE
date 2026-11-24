@@ -9,6 +9,10 @@
 // With the Settings module on, its sections (catalog.settings_features — the Settings page tabs)
 // get their own switches; value.settings_features null means every section. Switching the last
 // section off switches Settings itself off.
+//
+// Module features (catalog.module_features, e.g. Wholesale Distribution → Wholesale Order Status)
+// are opt-in switches shown under their parent module while it is on; value.module_features is
+// {key: bool} and a missing key is off. Callers that don't pass it simply don't show them.
 import React from 'react';
 import {
   Box, Stack, Typography, Switch, Chip, Card, CardActionArea, Grid, Tooltip,
@@ -63,6 +67,14 @@ export default function ModuleAccessEditor({ catalog, value, onChange, disabled 
     }
     const ordered = allSections.filter((k) => picked.includes(k));
     onChange({ ...value, settings_features: ordered.length === allSections.length ? null : ordered });
+  };
+
+  const moduleFeatures = catalog.module_features || [];
+  const featureValues = value.module_features || {};
+  const showFeatures = value.module_features !== undefined;
+  const flipFeature = (key, on) => {
+    if (disabled) return;
+    onChange({ ...value, module_features: { ...featureValues, [key]: on } });
   };
 
   // The accounting tiers: one per client, so each says which one it replaces.
@@ -134,6 +146,38 @@ export default function ModuleAccessEditor({ catalog, value, onChange, disabled 
                   );
                 })}
               </Grid>
+              {showFeatures && items.map((m) => {
+                // A feature with several parents (Bill-to-Bill: Accounts or Financial) shows under each.
+                const feats = moduleFeatures.filter((f) => (f.modules || [f.module]).includes(m.key));
+                if (!feats.length || !modules.includes(m.key)) return null;
+                return (
+                  <Box key={`features-${m.key}`} sx={{ mt: 1, ml: { sm: 2 }, pl: 1.5, borderLeft: 2, borderColor: 'primary.light' }}
+                    role="group" aria-label={`${m.label} features`}>
+                    <Typography variant="caption" fontWeight={700} color="text.secondary" component="div" sx={{ mb: 0.5 }}>
+                      {m.label} — optional features
+                    </Typography>
+                    <Grid container spacing={0.75}>
+                      {feats.map((f) => {
+                        // Never switched = the feature's default (on for features that ship enabled).
+                        const on = Boolean(featureValues[f.key] ?? f.default);
+                        return (
+                          <Grid item xs={12} md={compact ? 12 : 6} key={f.key}>
+                            <Stack direction="row" alignItems="center" spacing={0.5}
+                              sx={{ border: 1, borderColor: on ? 'primary.light' : 'divider', borderRadius: 1.5, pl: 1.25, py: 0.25, opacity: disabled ? 0.7 : 1 }}>
+                              <Box sx={{ flex: 1, minWidth: 0 }}>
+                                <Typography variant="body2" sx={{ fontSize: 13, fontWeight: 600 }}>{f.label}</Typography>
+                                {!compact && <Typography variant="caption" color="text.secondary" component="div">{f.description}</Typography>}
+                              </Box>
+                              <Switch size="small" checked={on} disabled={disabled} onChange={(e) => flipFeature(f.key, e.target.checked)}
+                                inputProps={{ 'aria-label': `${m.label}: ${f.label}` }} />
+                            </Stack>
+                          </Grid>
+                        );
+                      })}
+                    </Grid>
+                  </Box>
+                );
+              })}
               {items.some((m) => m.key === SETTINGS) && modules.includes(SETTINGS) && sections.length > 0 && (
                 <Box sx={{ mt: 1, ml: { sm: 2 }, pl: 1.5, borderLeft: 2, borderColor: 'primary.light' }}
                   role="group" aria-label="Settings sections">

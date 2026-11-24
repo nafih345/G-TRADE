@@ -678,3 +678,75 @@ def _branch_context_payload(request, get_allowed_branch_ids):
         'default_branch': _branch_payload(default_branch),
         'branches': [_branch_payload(b) for b in branches],
     })
+
+
+class ModuleFeaturesView(APIView):
+    """/api/company/business-settings/module-features/ — the opt-in module features
+    (module_access.MODULE_FEATURES, e.g. Wholesale Order Status) of the company being worked in.
+
+    GET: each feature with whether it is on. PATCH {key: bool}, for the installation's / platform's
+    own company only:
+      * Windows edition: the installation admin (edition.installation_admin), for a company of the
+        installation's own organization — switched with no internet connection;
+      * hosted: the platform admin, for the platform account (tenant #1).
+    Client companies get their switches in Client Management (platform / Local Super Admin)."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def _context(self, request):
+        from apps.common import edition, module_access, tenancy
+        from apps.common.models import Tenant
+        tenant_id = tenancy.current_tenant_id()
+        tenant = Tenant.objects.filter(pk=tenant_id).first() if tenant_id else None
+        if tenant is None:
+            can_edit = False
+        elif edition.is_local():
+            can_edit = edition.installation_admin(request.user)
+            if can_edit and tenant.pk != tenancy.DEFAULT_TENANT_ID:
+                from apps.common.organizations import tenant_org_id
+                can_edit = tenant_org_id(tenant.pk) == tenant_org_id(tenancy.DEFAULT_TENANT_ID)
+        else:
+            from apps.common.permissions import is_platform_admin
+            can_edit = tenant.pk == tenancy.DEFAULT_TENANT_ID and is_platform_admin(request.user)
+        return tenant, can_edit, module_access
+
+    def _payload(self, tenant, can_edit, module_access):
+        config = module_access.tenant_access_config(tenant.pk) if tenant else {'modules': [], 'module_features': {}}
+        enabled = set(module_access.enabled_module_features(config))
+        return {
+            'can_edit': can_edit,
+            'managed_in': None if can_edit else 'Client Management',
+            'features': [dict(f, module_enabled=any(m in (config.get('modules') or []) for m in f['modules']),
+                              enabled=f['key'] in enabled)
+                         for f in module_access.module_feature_catalog()],
+        }
+
+    def get(self, request):
+        tenant, can_edit, ma = self._context(request)
+        return Response(self._payload(tenant, can_edit, ma))
+
+    def patch(self, request):
+        from apps.common import hot_cache
+        tenant, can_edit, ma = self._context(request)
+        if not can_edit:
+            return Response({'detail': 'Module features are switched on by the platform administrator in '
+                                       'Client Management → Modules.', 'code': 'feature_managed'},
+                            status=status.HTTP_403_FORBIDDEN)
+        try:
+            wanted = ma.normalize_module_features(request.data if isinstance(request.data, dict) else None)
+        except ValueError as e:
+            return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        merged = {**(tenant.module_features or {}), **wanted}
+        if merged != (tenant.module_features or {}):
+            before = dict(tenant.module_features or {})
+            tenant.module_features = merged
+            tenant.save(update_fields=['module_features'])
+            hot_cache.clear()
+            try:
+                from apps.common.tenant_onboarding import log_event
+                log_event(tenant, 'MODULES_CHANGED', request.user,
+                          changes={'module_features': {'from': before, 'to': merged}})
+            except Exception:  # the audit trail is best-effort here; the switch itself is saved
+                logger.exception('module-features: audit log failed')
+        return Response(self._payload(tenant, can_edit, ma))
+
+    put = patch

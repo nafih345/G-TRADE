@@ -24,7 +24,7 @@ const moneyFormatKey = () => {
 import BackendStatusBanner from './components/BackendStatusBanner';
 import WorkspaceBanner from './components/WorkspaceBanner';
 import Login from './pages/Login';
-import { moduleForPath, canOpenModule } from './utils/moduleAccess';
+import { moduleForPath, canOpenModule, featureForPath, canUseFeature } from './utils/moduleAccess';
 
 // Lazy loaded page components for maximum performance & fast route loading. Dashboard is lazy
 // too: it is the only startup screen using recharts, and eager import made the sign-in page
@@ -38,6 +38,7 @@ const WholesaleSales = lazy(() => import('./pages/WholesaleSales'));
 const WholesaleReports = lazy(() => import('./pages/WholesaleReports'));
 const WholesaleDealers = lazy(() => import('./pages/WholesaleDealers'));
 const WholesaleOrders = lazy(() => import('./pages/WholesaleOrders'));
+const WholesaleOrderStatus = lazy(() => import('./pages/WholesaleOrderStatus'));
 const AccountsCOA = lazy(() => import('./pages/AccountsCOA'));
 const AccountsVouchers = lazy(() => import('./pages/AccountsVouchers'));
 const AccountsProfitLoss = lazy(() => import('./pages/AccountsProfitLoss'));
@@ -75,7 +76,8 @@ function LocalLicencesRedirect() {
 function ModuleGate({ user, children }) {
   const { pathname } = useLocation();
   const module = moduleForPath(pathname);
-  if (module && !canOpenModule(user, module)) {
+  const feature = featureForPath(pathname);
+  if ((module && !canOpenModule(user, module)) || (feature && !canUseFeature(user, feature))) {
     return (
       <Box sx={{ p: 6, textAlign: 'center' }}>
         <Typography variant="h6" fontWeight={700} gutterBottom>This module isn’t available</Typography>
@@ -316,6 +318,7 @@ function MainLayout() {
                 <Route path="/wholesale/price-lists" element={<WholesaleSales />} />
                 <Route path="/wholesale/quotations" element={<WholesaleOrders key="quotation" kind="quotation" />} />
                 <Route path="/wholesale/orders" element={<WholesaleOrders key="order" kind="order" />} />
+                <Route path="/wholesale/order-status" element={<WholesaleOrderStatus />} />
                 <Route path="/wholesale/challans" element={<WholesaleSales />} />
                 <Route path="/wholesale/dispatch" element={<WholesaleSales />} />
                 <Route path="/wholesale/invoices" element={<WholesaleSales />} />
@@ -364,6 +367,7 @@ function MainLayout() {
                 <Route path="/accounts/reports/customer-outstanding" element={<AccountsVouchers />} />
                 <Route path="/accounts/reports/supplier-outstanding" element={<AccountsVouchers />} />
                 <Route path="/accounts/reports/activity" element={<AccountsVouchers />} />
+                <Route path="/accounts/reports/settlement-statement" element={<AccountsVouchers />} />
                 <Route path="/accounts/transactions" element={<AccountsVouchers />} />
                 <Route path="/accounts/statements" element={<AccountsVouchers />} />
                 <Route path="/accounts/profit-loss" element={<AccountsProfitLoss />} />
@@ -390,6 +394,7 @@ function MainLayout() {
                 <Route path="/financial/bankbook" element={<FinancialManagement />} />
                 <Route path="/financial/cheques" element={<FinancialManagement />} />
                 <Route path="/financial/statements" element={<FinancialManagement />} />
+                <Route path="/financial/settlements" element={<FinancialManagement />} />
                 <Route path="/financial/trial-balance" element={<FinancialManagement />} />
                 <Route path="/financial/profit-loss" element={<FinancialManagement />} />
                 <Route path="/financial/balance-sheet" element={<FinancialManagement />} />

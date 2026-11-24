@@ -29,7 +29,7 @@ import { useAuth } from '../context/AuthContext';
 import { useBranch } from '../context/BranchContext';
 import GreensolLogo from './GreensolLogo';
 import { confirmLeave } from '../utils/navigationGuard';
-import { canOpenModule } from '../utils/moduleAccess';
+import { canOpenModule, canUseFeature } from '../utils/moduleAccess';
 import { fetchPendingEditCount } from '../utils/editPermissions';
 import { IS_LOCAL_EDITION } from '../utils/edition';
 
@@ -73,6 +73,8 @@ const menuItems = [
     subItems: [
       { text: 'Wholesale POS', path: '/wholesale/pos' },
       { text: 'Wholesale Orders', path: '/wholesale/orders' },
+      // Module feature (Client Management → Wholesale Distribution); hidden while it is off.
+      { text: 'Wholesale Order Status', path: '/wholesale/order-status', feature: 'wholesale_order_status' },
       { text: 'Quotations', path: '/wholesale/quotations' },
       { text: 'Wholesale Dealers / Customers', path: '/wholesale/dealers' },
       { text: 'Wholesale Reports', path: '/wholesale/reports' }
@@ -132,6 +134,7 @@ const menuItems = [
       { text: 'Cashbook', path: '/financial/cashbook' },
       { text: 'Bank Book', path: '/financial/bankbook' },
       { text: 'Cheque Register', path: '/financial/cheques' },
+      { text: 'Settlement Statement', path: '/financial/settlements', feature: 'bill_settlement' },
       { text: 'Trial Balance', path: '/financial/trial-balance' },
       { text: 'Profit & Loss', path: '/financial/profit-loss' },
       { text: 'Balance Sheet', path: '/financial/balance-sheet' },
@@ -169,7 +172,8 @@ const menuItems = [
           { text: 'Expense Report', path: '/accounts/reports/expenses' },
           { text: 'Customer Outstanding', path: '/accounts/reports/customer-outstanding' },
           { text: 'Supplier Outstanding', path: '/accounts/reports/supplier-outstanding' },
-          { text: 'Accounts Activity', path: '/accounts/reports/activity' }
+          { text: 'Accounts Activity', path: '/accounts/reports/activity' },
+          { text: 'Settlement Statement', path: '/accounts/reports/settlement-statement', feature: 'bill_settlement' }
         ]
       }
     ]
@@ -287,11 +291,15 @@ export default function Sidebar({ open, toggleSidebar, isMobile = false }) {
 
   const filteredMenu = menuItems
     .map(item => {
-      // Drop sub-items flagged multiBranchOnly when Multi-Branch Mode is OFF (spec section 1).
-      if (item.subItems && !multiBranchEnabled) {
-        return { ...item, subItems: item.subItems.filter(s => !s.multiBranchOnly) };
-      }
-      return item;
+      if (!item.subItems) return item;
+      // Drop sub-items flagged multiBranchOnly when Multi-Branch Mode is OFF (spec section 1), and
+      // sub-items of a module feature the client / role doesn't have (user.module_features).
+      return {
+        ...item,
+        subItems: item.subItems.filter(s => (multiBranchEnabled || !s.multiBranchOnly)
+          && (!s.feature || canUseFeature(user, s.feature)))
+          .map(s => (s.children ? { ...s, children: s.children.filter(c => !c.feature || canUseFeature(user, c.feature)) } : s)),
+      };
     })
     .filter(item => {
     if (item.platformOnly && !user?.is_platform_admin) return false;

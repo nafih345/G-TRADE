@@ -196,10 +196,15 @@ def build_wholesale_invoice(inv, previous=None):
     total = money(inv.grand_total)
     if inv.is_deleted or status in ('cancelled', 'canceled', 'draft', 'void') or total <= 0:
         return None
+    # Wholesale Order Status: a bill held until delivery (or voided as undelivered) books nothing;
+    # once delivered it is booked on the delivery day (sales.wholesale_delivery).
+    if not getattr(inv, 'is_posted_to_accounts', True):
+        return None
     tax = min(_wholesale_tax(inv), total)
     dealer = getattr(inv.dealer, 'business_name', '') if inv.dealer_id else ''
+    day = getattr(inv, 'delivered_on', None) if getattr(inv, 'delivery_status', None) == 'DELIVERED' else None
     return {
-        'date': _date(inv.invoice_date), 'branch': inv.branch, 'voucher_type_code': 'SV',
+        'date': _date(day or inv.invoice_date), 'branch': inv.branch, 'voucher_type_code': 'SV',
         'source_number': inv.invoice_number, 'reference_type': 'WHOLESALE',
         'narration': f"Wholesale Invoice {inv.invoice_number} — {dealer}".strip(' —'),
         'lines': [
@@ -495,6 +500,9 @@ def build_opening_stock_batch(batch, previous=None):
 
 
 WHOLESALE_SALE_PREFIX = 'wholesale pos sale'
+# sales.wholesale_delivery reasons (kept as literals: posting rules never import the sales app).
+WHOLESALE_PENDING_DELIVERY_PREFIX = 'wholesale invoice - pending delivery'
+WHOLESALE_DELIVERY_CANCELLED_PREFIX = 'wholesale delivery cancelled'
 
 
 def build_branch_transfer_event(event, previous=None):
@@ -534,6 +542,22 @@ def build_stock_adjustment(adj, previous=None):
     # The Wholesale POS takes sold stock out through a SUB adjustment — that is cost of goods
     # sold, not a loss — and a cancel / return / edit puts it back with an ADD "… reversal".
     is_sale = reason.lower().startswith(WHOLESALE_SALE_PREFIX)
+    entry_date = adj.created_at
+    # Wholesale Order Status (sales.wholesale_delivery): stock taken by a bill held until delivery
+    # books nothing until that bill is DELIVERED — then it is COGS, dated the delivery day. A bill
+    # cancelled as undelivered never posted, so putting its stock back books nothing either.
+    low = reason.lower()
+    if low.startswith(WHOLESALE_DELIVERY_CANCELLED_PREFIX):
+        return None
+    if low.startswith(WHOLESALE_PENDING_DELIVERY_PREFIX):
+        from django.apps import apps as django_apps
+        WholesaleInvoice = django_apps.get_model('sales', 'WholesaleInvoice')
+        inv = (WholesaleInvoice.all_objects.filter(invoice_number=adj.reference)
+               .only('delivery_status', 'delivered_on').first()) if adj.reference else None
+        if inv is None or inv.delivery_status != 'DELIVERED':
+            return None
+        is_sale = True
+        entry_date = inv.delivered_on or adj.created_at
     if adj.adjustment_type == 'ADD':
         lines = [_line('INVENTORY', debit=value, memo=f"{adj.quantity} × {name} added"),
                  _line('COGS' if is_sale else 'STOCK_GAIN', credit=value, memo=reason or 'Stock adjustment')]
@@ -541,7 +565,7 @@ def build_stock_adjustment(adj, previous=None):
         lines = [_line('COGS' if is_sale else 'STOCK_LOSS', debit=value, memo=reason or 'Stock adjustment'),
                  _line('INVENTORY', credit=value, memo=f"{adj.quantity} × {name} removed")]
     return {
-        'date': _date(adj.created_at), 'branch': adj.branch, 'voucher_type_code': 'IA',
+        'date': _date(entry_date), 'branch': adj.branch, 'voucher_type_code': 'IA',
         'source_number': reason[:80], 'reference_type': 'STOCK_ADJUSTMENT',
         'narration': f"Stock adjustment ({adj.adjustment_type}) {adj.quantity} × {name}: {reason}"[:500],
         'metadata': meta, 'lines': lines,

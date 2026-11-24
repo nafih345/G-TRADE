@@ -5,7 +5,8 @@ from .views import (
     CustomerViewSet, InvoiceViewSet, PaymentViewSet, EyeExaminationViewSet, AppointmentViewSet,
     ServiceViewSet, send_whatsapp_automated_bg,
     DealerViewSet, WholesalePriceListViewSet, WholesaleQuotationViewSet, WholesaleOrderViewSet,
-    WholesaleDeliveryChallanViewSet, WholesaleInvoiceViewSet, WholesalePaymentCollectionViewSet, WholesaleReturnViewSet
+    WholesaleDeliveryChallanViewSet, WholesaleInvoiceViewSet, WholesalePaymentCollectionViewSet, WholesaleReturnViewSet,
+    WholesaleOrderStatusViewSet,
 )
 
 router = DefaultRouter()
@@ -24,6 +25,7 @@ router.register('wholesale/customers', DealerViewSet, basename='wholesale-custom
 router.register('wholesale/dealers', DealerViewSet, basename='wholesale-dealer')
 router.register('wholesale/price-lists', WholesalePriceListViewSet)
 router.register('wholesale/quotations', WholesaleQuotationViewSet)
+router.register('wholesale/order-status', WholesaleOrderStatusViewSet, basename='wholesale-order-status')
 router.register('wholesale/orders', WholesaleOrderViewSet)
 router.register('wholesale/challans', WholesaleDeliveryChallanViewSet)
 router.register('wholesale/invoices', WholesaleInvoiceViewSet)

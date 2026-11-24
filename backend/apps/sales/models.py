@@ -719,6 +719,22 @@ class WholesaleInvoice(BaseUUIDModel):
     # from the client (BranchScopedViewSetMixin).
     branch = models.ForeignKey('company.Branch', on_delete=models.SET_NULL, null=True, blank=True,
                                db_index=True, related_name='+')
+    # Wholesale Order Status (sales.wholesale_delivery). A bill made from a Wholesale Order while
+    # the client has that feature takes its stock at once but is held out of Accounts until it is
+    # delivered: PENDING_DELIVERY -> DELIVERED (posted) or UNDELIVERED (voided, stock restored).
+    # NULL = not delivery-tracked (direct sales, bills from before the feature): posted as saved.
+    # All of these are set by the server only (read-only in the serializer).
+    delivery_status = models.CharField(max_length=20, null=True, blank=True, db_index=True,
+                                       choices=[('PENDING_DELIVERY', 'Invoiced (Pending Delivery)'),
+                                                ('DELIVERED', 'Delivered / Posted'),
+                                                ('UNDELIVERED', 'Cancelled / Undelivered')])
+    # False while the bill is held (pending delivery, or voided undelivered): the accounting
+    # integration books nothing for it. True for every other bill.
+    is_posted_to_accounts = models.BooleanField(default=True, db_default=True)
+    delivered_on = models.DateField(null=True, blank=True)
+    delivery_note = models.TextField(blank=True, default='', db_default='')
+    delivery_updated_at = models.DateTimeField(null=True, blank=True)
+    delivery_updated_by = models.CharField(max_length=150, blank=True, default='', db_default='')
 
     class Meta:
         constraints = [

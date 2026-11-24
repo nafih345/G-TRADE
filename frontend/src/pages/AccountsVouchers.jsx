@@ -15,6 +15,9 @@ import OutstandingReport from '../components/accounts/OutstandingReport';
 import AccountsActivityReport from '../components/accounts/AccountsActivityReport';
 import TransactionReport from '../components/accounts/TransactionReport';
 import FinancialStatements from '../components/financial/FinancialStatements';
+import SettlementStatement from '../components/financial/SettlementStatement';
+import { useAuth } from '../context/AuthContext';
+import { canUseFeature } from '../utils/moduleAccess';
 import useVoucherMasters from '../components/accounts/useVoucherMasters';
 import { apiError, finPost } from '../components/financial/financialApi';
 import { notify } from '../utils/notify';
@@ -34,6 +37,7 @@ const ACCOUNTS_REPORT_TABS = [
   { path: '/accounts/reports/customer-outstanding', label: 'Customer Outstanding', render: () => <OutstandingReport key="receivable" side="receivable" /> },
   { path: '/accounts/reports/supplier-outstanding', label: 'Supplier Outstanding', render: () => <OutstandingReport key="payable" side="payable" /> },
   { path: '/accounts/reports/activity', label: 'Accounts Activity', render: () => <AccountsActivityReport /> },
+  { path: '/accounts/reports/settlement-statement', label: 'Settlement Statement', feature: 'bill_settlement', render: () => <SettlementStatement /> },
 ];
 
 function ReportView({ tab }) {
@@ -91,6 +95,7 @@ const ACCOUNTS_SECTIONS = [
 export default function AccountsVouchers() {
   const { pathname } = useLocation();
   const navigate = useNavigate();
+  const { user } = useAuth();
   const section = ACCOUNTS_SECTIONS.find(s => pathname.startsWith(s.path));
   if (section) {
     return (
@@ -104,7 +109,7 @@ export default function AccountsVouchers() {
     );
   }
   const isReports = pathname.startsWith('/accounts/reports');
-  const tabs = isReports ? ACCOUNTS_REPORT_TABS : ACCOUNTS_VOUCHER_TABS;
+  const tabs = (isReports ? ACCOUNTS_REPORT_TABS : ACCOUNTS_VOUCHER_TABS).filter(t => !t.feature || canUseFeature(user, t.feature));
   const tab = tabs.find(t => pathname.startsWith(t.path)) || tabs[0];
 
   return (

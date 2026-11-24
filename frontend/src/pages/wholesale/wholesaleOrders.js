@@ -11,7 +11,7 @@
 import { computeLineTotals, resolvePriceForDealer } from './wholesaleConstants.js';
 import { pricedLine, parseTaxPercent, round2 } from '../../utils/wholesalePricing.js';
 
-export const ORDER_STATUS = { CONFIRMED: 'CONFIRMED', BILLED: 'BILLED', CANCELLED: 'CANCELLED' };
+export const ORDER_STATUS = { CONFIRMED: 'CONFIRMED', BILLED: 'BILLED', CANCELLED: 'CANCELLED', UNDELIVERED: 'UNDELIVERED' };
 export const QUOTE_STATUS = {
   OPEN: 'QUOTATION', ORDERED: 'CONVERTED_TO_ORDER', BILLED: 'CONVERTED_TO_SALE', CANCELLED: 'CANCELLED',
 };
@@ -20,6 +20,7 @@ export const STATUS_META = {
   CONFIRMED: { label: 'Confirmed', color: 'primary' },
   BILLED: { label: 'Billed', color: 'success' },
   CANCELLED: { label: 'Cancelled', color: 'default' },
+  UNDELIVERED: { label: 'Undelivered', color: 'error' },
   QUOTATION: { label: 'Open', color: 'warning' },
   CONVERTED_TO_ORDER: { label: 'Ordered', color: 'primary' },
   CONVERTED_TO_SALE: { label: 'Billed', color: 'success' },
@@ -194,9 +195,40 @@ export function docFromApi(kind, row) {
     orderNumber: row.converted_order_number || '',
     quotationRef: row.quotation_ref || d.quotationNumber || '',
     billedAt: row.billed_at || null,
+    // Wholesale Order Status: where this order's bill stands (null = not delivery-tracked).
+    invoiceDeliveryStatus: row.invoice_delivery_status || null,
     createdAt: row.created_at,
   };
 }
+
+// ---- Wholesale Order Status (server: apps/sales/wholesale_delivery.py) -----------------------
+// Stages the Order Status screen shows, derived on the server from order + bill.
+export const ORDER_STAGES = {
+  CONFIRMED: { label: 'Confirmed', short: 'Confirmed', color: 'primary', hint: 'Stock reserved — not billed yet' },
+  INVOICED_PENDING_DELIVERY: { label: 'Invoiced (Pending Delivery)', short: 'Pending Delivery', color: 'warning', hint: 'Stock deducted — not posted to Accounts yet' },
+  DELIVERED_POSTED: { label: 'Delivered / Posted', short: 'Delivered', color: 'success', hint: 'Delivered and posted to Accounts' },
+  BILLED: { label: 'Billed', short: 'Billed', color: 'success', hint: 'Billed and posted when it was billed (no delivery tracking)' },
+  UNDELIVERED: { label: 'Cancelled / Undelivered', short: 'Undelivered', color: 'error', hint: 'Bill voided, stock restored, never posted' },
+  CANCELLED: { label: 'Cancelled', short: 'Cancelled', color: 'default', hint: 'Order cancelled before billing' },
+};
+
+// Stage filters on the Order Status screen: [key, label, server stage list].
+export const STAGE_FILTERS = [
+  ['PENDING', 'Pending', 'CONFIRMED,INVOICED_PENDING_DELIVERY'],
+  ['CONFIRMED', 'Confirmed', 'CONFIRMED'],
+  ['INVOICED', 'Pending Delivery', 'INVOICED_PENDING_DELIVERY'],
+  ['DELIVERED', 'Delivered', 'DELIVERED_POSTED,BILLED'],
+  ['UNDELIVERED', 'Undelivered', 'UNDELIVERED'],
+  ['ALL', 'All', ''],
+];
+
+// Which actions a stage allows on the Order Status screen.
+export const stageActions = (stage) => ({
+  edit: stage === 'CONFIRMED',
+  toSale: stage === 'CONFIRMED',
+  deliver: stage === 'INVOICED_PENDING_DELIVERY',
+  cancelDelivery: stage === 'INVOICED_PENDING_DELIVERY',
+});
 
 export const isOpenDoc = (doc) => (doc?.kind === 'quotation'
   ? doc.status === QUOTE_STATUS.OPEN : doc?.status === ORDER_STATUS.CONFIRMED);

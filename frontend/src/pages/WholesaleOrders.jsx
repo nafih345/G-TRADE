@@ -12,7 +12,7 @@
 //
 // Server: apps/sales/wholesale_orders.py. Helpers: pages/wholesale/wholesaleOrders.js.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Box, Paper, Typography, Stack, Button, TextField, InputAdornment, Table, TableHead, TableBody,
   TableRow, TableCell, TableContainer, IconButton, Tooltip, Chip, Grid, CircularProgress, Alert,
@@ -57,7 +57,7 @@ const errText = (e, fallback) => (typeof e?.response?.data?.detail === 'string' 
 
 const STATUS_FILTERS = {
   order: [['OPEN', 'Pending', ORDER_STATUS.CONFIRMED], ['BILLED', 'Billed', ORDER_STATUS.BILLED],
-    ['CANCELLED', 'Cancelled', ORDER_STATUS.CANCELLED], ['ALL', 'All', '']],
+    ['CANCELLED', 'Cancelled', `${ORDER_STATUS.CANCELLED},${ORDER_STATUS.UNDELIVERED}`], ['ALL', 'All', '']],
   quotation: [['OPEN', 'Open', QUOTE_STATUS.OPEN], ['DONE', 'Converted', `${QUOTE_STATUS.ORDERED},${QUOTE_STATUS.BILLED}`],
     ['CANCELLED', 'Cancelled', QUOTE_STATUS.CANCELLED], ['ALL', 'All', '']],
 };
@@ -75,6 +75,7 @@ export default function WholesaleOrders({ kind = 'order' }) {
   const meta = DOC_KINDS[kind];
   const isOrder = kind === 'order';
   const navigate = useNavigate();
+  const location = useLocation();
   const { user } = useAuth();
   const canOverride = canOverridePrice(user);
 
@@ -105,6 +106,8 @@ export default function WholesaleOrders({ kind = 'order' }) {
   const [pickQty, setPickQty] = useState({}); // productId -> typed qty in the picker
   const [reservations, setReservations] = useState({ wholesale: {}, retail: {} });
   const [saving, setSaving] = useState(false);
+  // Opened from Wholesale Order Status (?edit=<id>&from=status): go back there on save / discard.
+  const [returnTo, setReturnTo] = useState('');
   const [newDealerOpen, setNewDealerOpen] = useState(false);
   const [newDealer, setNewDealer] = useState(NEW_DEALER_DEFAULTS);
   const [savingDealer, setSavingDealer] = useState(false);
@@ -196,7 +199,35 @@ export default function WholesaleOrders({ kind = 'order' }) {
     setEditor(null);
     setLines([]);
     setDealer(null);
+    if (returnTo) {
+      const back = returnTo;
+      setReturnTo('');
+      navigate(back);
+    }
   };
+
+  // Deep link ?edit=<order id> (Wholesale Order Status → Edit): read the order fresh and open it.
+  useEffect(() => {
+    if (!isOrder) return;
+    const params = new URLSearchParams(location.search);
+    const editId = params.get('edit');
+    if (!editId) return;
+    const from = params.get('from');
+    navigate(location.pathname, { replace: true });
+    axios.get(`${WHOLESALE_API}/orders/${editId}/`, { __silentError: true })
+      .then(({ data }) => {
+        const doc = docFromApi('order', data);
+        if (from === 'status') setReturnTo(`/wholesale/order-status?dealer=${encodeURIComponent(doc.dealerId)}&order=${encodeURIComponent(doc.id)}`);
+        if (!isOpenDoc(doc)) {
+          notify(`${doc.number} is ${(STATUS_META[doc.status]?.label || doc.status).toLowerCase()} — it can no longer be edited.`, 'warning');
+          if (from === 'status') navigate(`/wholesale/order-status?dealer=${encodeURIComponent(doc.dealerId)}`);
+          return;
+        }
+        openEditor(doc);
+      })
+      .catch((e) => notify(errText(e, 'Could not load the order.'), 'error'));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.search, isOrder]);
 
   // ---- product picker ----
   const avail = useCallback((p) => availableUnits(p, reservations), [reservations]);
@@ -684,7 +715,15 @@ export default function WholesaleOrders({ kind = 'order' }) {
                     <TableCell sx={CELL_SX} align="right">{d.items.length}</TableCell>
                     <TableCell sx={CELL_SX} align="right">{d.items.reduce((a, l) => a + lineUnits(l), 0)}</TableCell>
                     <TableCell sx={{ ...CELL_SX, fontWeight: 800 }} align="right">{inr(d.total)}</TableCell>
-                    <TableCell sx={CELL_SX}><Chip size="small" color={st.color} label={st.label} sx={{ fontWeight: 800 }} /></TableCell>
+                    <TableCell sx={CELL_SX}>
+                      <Chip size="small" color={st.color} label={st.label} sx={{ fontWeight: 800 }} />
+                      {d.invoiceDeliveryStatus === 'PENDING_DELIVERY' && (
+                        <Typography variant="caption" color="warning.main" fontWeight={700} sx={{ display: 'block' }}>Pending delivery</Typography>
+                      )}
+                      {d.invoiceDeliveryStatus === 'DELIVERED' && (
+                        <Typography variant="caption" color="success.main" fontWeight={700} sx={{ display: 'block' }}>Delivered</Typography>
+                      )}
+                    </TableCell>
                     <TableCell sx={{ ...CELL_SX, fontFamily: 'monospace' }}>
                       {isOrder ? (d.invoiceNumber || (d.quotationRef ? `from ${d.quotationRef}` : '—')) : (d.orderNumber || d.invoiceNumber || '—')}
                     </TableCell>

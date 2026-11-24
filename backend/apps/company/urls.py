@@ -2,7 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     CompanyViewSet, BranchViewSet, WarehouseViewSet, NotificationViewSet,
-    BusinessSettingsView, UserBranchAccessViewSet, BranchStockViewSet,
+    BusinessSettingsView, ModuleFeaturesView, UserBranchAccessViewSet, BranchStockViewSet,
     StockTransferViewSet, branch_context,
 )
 from .store_profile import BranchLogoView, StoreProfileView
@@ -47,5 +47,6 @@ urlpatterns = [
     path('pricing-rules/approve/', PricingApproveView.as_view(), name='pricing-approve'),
     path('branch-context/', branch_context, name='branch-context'),
     path('business-settings/', BusinessSettingsView.as_view(), name='business-settings'),
+    path('business-settings/module-features/', ModuleFeaturesView.as_view(), name='module-features'),
     path('', include(router.urls)),
 ]

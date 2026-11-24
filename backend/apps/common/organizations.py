@@ -381,7 +381,7 @@ def create_company(actor, *, name, branch_name='', copy_from=None, sections=()):
                 contact_email=home.contact_email, contact_phone=home.contact_phone,
                 package=home.package, modules=list(home.modules or []),
                 role_permissions=dict(home.role_permissions or {}), settings_features=home.settings_features,
-                max_users=home.max_users)
+                module_features=dict(home.module_features or {}), max_users=home.max_users)
         except IntegrityError:
             raise OrganizationError('name', 'That company name was just taken. Try another.')
         ensure_tenant_defaults(tenant, branch_name=branch_name, fresh=True)

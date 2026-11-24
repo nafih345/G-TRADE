@@ -1,17 +1,22 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Alert, Autocomplete, Box, Button, Card, Checkbox, Chip, Divider, Grid, IconButton, InputAdornment, LinearProgress,
+  Alert, Autocomplete, Box, Button, Card, Checkbox, Chip, Divider, FormControlLabel, Grid, IconButton, InputAdornment, LinearProgress,
   MenuItem, Paper, Stack, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TextField,
   ToggleButton, ToggleButtonGroup, Tooltip, Typography,
 } from '@mui/material';
 import {
   Add as AddIcon, CheckCircle as CheckIcon, Delete as DeleteIcon, Print as PrintIcon, Refresh as RefreshIcon,
   Search as SearchIcon, Warning as WarningIcon, PlaylistAdd as LoadIcon, ClearAll as ClearIcon, Edit as EditIcon,
+  LowPriority as FifoIcon, ReceiptLong as BreakdownIcon,
 } from '@mui/icons-material';
 import { apiError, finGet, finPatch, finPost, newIdempotencyKey } from './financialApi';
 import VoucherSearchDialog from './VoucherSearchDialog';
 import PaymentModeDetails from '../common/PaymentModeDetails';
 import ChequeDetailsDialog, { DaysLeftChip } from './ChequeDetailsDialog';
+import SettlementBreakdownDialog from './SettlementBreakdownDialog';
+import { useAuth } from '../../context/AuthContext';
+import { canUseFeature } from '../../utils/moduleAccess';
+import { fifoAllocate } from '../../utils/billSettlement';
 import {
   CHEQUE_MODE, blankCheque, chequeDaysLeft, chequeEditPayload, chequeFromRow, chequePayload, validateCheque,
 } from '../../utils/cheques';
@@ -55,6 +60,9 @@ const focusSoon = (selector) => setTimeout(() => {
  * against them and post through /financial/settlements/receipt|payment/ (one party) or
  * /settlements/batch/ (several: one number per party, all saved or none). The server re-validates
  * the dues and books the settlement the same way the source documents' own receipts are booked.
+ * Total Receiving / Paying Amount (under the Amount column, or typed in the payment lines) spreads
+ * the money oldest-bill-first (Auto FIFO); ticking / typing a row switches to Manual allocation. The
+ * Unallocated counter must reach 0 unless the excess is kept On Account (single party only).
  *
  * F1 opens the selector for the focused field: the account popup on a grid row's Account Code /
  * Name, the party popup on the party field (anywhere else it opens the one for the current mode).
@@ -119,10 +127,20 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
   const [saving, setSaving] = useState(false);
   const [chequeEdit, setChequeEdit] = useState(null);   // { lineId, row }: a posted voucher's cheque being corrected
   const [chequeEditSaving, setChequeEditSaving] = useState(false);
+  // Total Receiving / Paying Amount (bill-to-bill). Source 'total' = typed in the summary field;
+  // 'payments' = followed from the payment lines. allocMode 'auto' = FIFO, 'manual' = rows edited.
+  const [receiving, setReceiving] = useState('');
+  const [receivingSource, setReceivingSource] = useState('');
+  const [allocMode, setAllocMode] = useState('auto');
+  const [onAccount, setOnAccount] = useState(false);
+  const [savedNumbers, setSavedNumbers] = useState([]);
+  const [breakdown, setBreakdown] = useState(null);
+  const { user } = useAuth();
+  const billSettlementOn = canUseFeature(user, 'bill_settlement');
   const rootRef = useRef(null);
   const returnFocusRef = useRef(null);
 
-  const isBill = !isContra && voucherState.mode === 'Bill to Bill';
+  const isBill = !isContra && billSettlementOn && voucherState.mode === 'Bill to Bill';
   const locked = voucherState.isSaved;
   // Receipt / Payment Vouchers record each Cheque line's details in the Cheque Register.
   const tracksCheques = isReceipt || isPayment;
@@ -135,7 +153,12 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
   const totalAccountAmount = useMemo(() => round2(tickedLines.reduce((s, l) => s + num(l.amount), 0)), [tickedLines]);
   const selectedBills = useMemo(() => billRows.filter(r => r.selected && num(r.amount) > 0), [billRows]);
   const totalAllocated = useMemo(() => round2(selectedBills.reduce((s, r) => s + num(r.amount), 0)), [selectedBills]);
-  const voucherTotal = isBill ? totalAllocated : totalAccountAmount;
+  const receivingNum = round2(num(receiving));
+  const hasReceiving = isBill && receiving !== '' && receivingNum > 0;
+  // Money received / paid that is not on any bill yet.
+  const unallocated = hasReceiving ? round2(receivingNum - totalAllocated) : 0;
+  const onAccountAmount = onAccount && unallocated > 0 ? unallocated : 0;
+  const voucherTotal = isBill ? (hasReceiving ? receivingNum : totalAllocated) : totalAccountAmount;
   const cashAmount = useMemo(() => round2(paymentLines.filter(p => p.payMode === 'Cash').reduce((s, p) => s + num(p.amount), 0)), [paymentLines]);
   const totalPaidAmount = useMemo(() => round2(paymentLines.reduce((s, p) => s + num(p.amount), 0)), [paymentLines]);
   const bankAmount = round2(totalPaidAmount - cashAmount);
@@ -148,7 +171,14 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
     if (!voucherState.date) out.push('Enter the voucher date.');
     if (isBill) {
       if (!billParties.length) out.push(`Select the ${billPartyLabel.toLowerCase()} (F1).`);
-      else if (!selectedBills.length) out.push('Tick at least one bill and enter the amount against it.');
+      else if (!selectedBills.length && !(onAccountAmount > 0)) out.push('Tick at least one bill and enter the amount against it.');
+      if (hasReceiving && unallocated < -0.004) {
+        out.push(`The bills take ${money(totalAllocated)}, more than the ${isReceipt ? 'Total Receiving' : 'Total Paying'} Amount ${money(receivingNum)}.`);
+      }
+      if (hasReceiving && unallocated > 0.004 && !onAccount) {
+        out.push(`Unallocated ${money(unallocated)}: allocate it to bills or tick "Keep as Advance / On Account".`);
+      }
+      if (onAccountAmount > 0 && billParties.length > 1) out.push('An On Account advance can be kept for one party at a time.');
       billRows.forEach(r => {
         if (num(r.amount) < 0) out.push(`${r.number}: amount cannot be negative.`);
         if (num(r.amount) - num(r.due) > 0.005) out.push(`${r.number}: ${money(r.amount)} is more than its due ${money(r.due)}.`);
@@ -191,7 +221,7 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
     }
     return out;
   }, [voucherState.date, isBill, billParties, selectedBills, billRows, accountLines, tickedLines, paymentLines, voucherTotal, isBalanced,
-      totalPaidAmount, cashAccount, defaultBankId]); // eslint-disable-line react-hooks/exhaustive-deps
+      totalPaidAmount, cashAccount, defaultBankId, hasReceiving, unallocated, onAccount, onAccountAmount, receivingNum, totalAllocated]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const isValid = problems.length === 0;
 
@@ -285,16 +315,39 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
     setBillParties(parties);
     setBillDates(dates);
     setBillRows([]);
+    setReceiving('');
+    setReceivingSource('');
+    setAllocMode('auto');
+    setOnAccount(false);
     loadDueBills(parties, { focusFirst: true, dates });
   };
 
-  const setBill = (id, patch) => setBillRows(prev => prev.map(r => (r.id === id ? { ...r, ...patch } : r)));
-  const toggleBill = (row, checked) => setBill(row.id, checked
-    ? { selected: true, amount: num(row.amount) > 0 ? row.amount : String(num(row.due)) }
-    : { selected: false, amount: '' });
-  const toggleAllBills = (checked) => setBillRows(prev => prev.map(r => (checked
-    ? { ...r, selected: true, amount: num(r.amount) > 0 ? r.amount : String(num(r.due)) }
-    : { ...r, selected: false, amount: '' })));
+  // Any hand edit of a row = Manual allocation (the total no longer re-spreads over the bills).
+  const setBill = (id, patch) => { setAllocMode('manual'); setBillRows(prev => prev.map(r => (r.id === id ? { ...r, ...patch } : r))); };
+  // Ticking a bill gives it its due, capped by what is still unallocated when a total was entered.
+  const toggleBill = (row, checked) => {
+    if (!checked) { setBill(row.id, { selected: false, amount: '' }); return; }
+    const room = hasReceiving ? round2(unallocated + num(row.amount)) : num(row.due);
+    const amount = num(row.amount) > 0 ? num(row.amount) : Math.min(num(row.due), Math.max(room, 0) || num(row.due));
+    setBill(row.id, { selected: true, amount: String(round2(amount)) });
+  };
+  const toggleAllBills = (checked) => {
+    setAllocMode('manual');
+    setBillRows(prev => prev.map(r => (checked
+      ? { ...r, selected: true, amount: num(r.amount) > 0 ? r.amount : String(num(r.due)) }
+      : { ...r, selected: false, amount: '' })));
+  };
+  const applyFifo = (amount = receivingNum) => {
+    setAllocMode('auto');
+    setBillRows(prev => fifoAllocate(prev, amount));
+  };
+  // Typed in the Total Receiving / Paying field: FIFO over the bills, and a single payment line follows it.
+  const changeReceiving = (value) => {
+    setReceiving(value);
+    setReceivingSource(value === '' ? '' : 'total');
+    if (value !== '') applyFifo(num(value));
+    setPaymentLines(prev => (prev.length === 1 ? [{ ...prev[0], amount: value }] : prev));
+  };
 
   // ---------------------------------------------------------------------------------------
   // Payment lines
@@ -359,6 +412,19 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
     }
     setChequeEditSaving(false);
   };
+  // The payment lines drive the Total Receiving / Paying Amount until it is typed directly.
+  useEffect(() => {
+    if (!isBill || locked || receivingSource === 'total') return;
+    if (totalPaidAmount <= 0) {
+      if (receivingSource === 'payments') { setReceiving(''); setReceivingSource(''); }
+      return;
+    }
+    if (round2(num(receiving)) === totalPaidAmount && receivingSource === 'payments') return;
+    setReceiving(String(totalPaidAmount));
+    setReceivingSource('payments');
+    if (allocMode === 'auto') setBillRows(prev => fifoAllocate(prev, totalPaidAmount));
+  }, [totalPaidAmount, isBill]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Delete a payment row; the last row is reset to a blank Cash line instead of removed.
   const removePaymentLine = (id) => setPaymentLines(prev => (prev.length <= 1 ? [blankPaymentLine()] : prev.filter(p => p.id !== id)));
   const fillBalance = () => {
@@ -430,6 +496,11 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
     setBillDates({ from: '', to: '' });
     setBillRows([]);
     setBillsError('');
+    setReceiving('');
+    setReceivingSource('');
+    setAllocMode('auto');
+    setOnAccount(false);
+    setSavedNumbers([]);
   };
 
   const handleReset = () => {
@@ -490,13 +561,15 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
   // One settlement per party, in the order the parties were picked. The pay-mode lines are spread
   // over them in order (Cash first, then Bank, ...), so every party's own total still reconciles.
   const buildSettlements = () => {
+    const single = billParties.length === 1;
     const groups = billParties
       .map(party => ({ party, bills: selectedBills.filter(r => r.partyKey === `${party.kind}:${party.id}`) }))
-      .filter(g => g.bills.length);
+      .filter(g => g.bills.length || (single && onAccountAmount > 0));
     const pays = paymentLines.filter(p => num(p.amount) > 0).map(p => ({ line: p, left: round2(num(p.amount)) }));
     let i = 0;
     return groups.map(({ party, bills }) => {
-      let left = round2(bills.reduce((t, r) => t + num(r.amount), 0));
+      const extra = single ? onAccountAmount : 0;
+      let left = round2(bills.reduce((t, r) => t + num(r.amount), 0) + extra);
       const payments = [];
       while (left > 0.004 && i < pays.length) {
         const take = round2(Math.min(left, pays[i].left));
@@ -513,6 +586,7 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
         narration: [voucherState.reference.trim() && `Ref ${voucherState.reference.trim()}`, voucherState.narration].filter(Boolean).join(' · '),
         idempotency_key: groups.length > 1 ? `${voucherState.idempotencyKey}:${party.id}` : voucherState.idempotencyKey,
         allocations: bills.map(r => ({ bill: r.id, amount: round2(num(r.amount)).toFixed(2), narration: r.narration || '' })),
+        on_account: round2(extra).toFixed(2),
         payments,
       };
     });
@@ -538,13 +612,15 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
       }
       const number = numbers.join(', ');
       setVoucherState(prev => ({ ...prev, isSaved: true, voucherNo: number }));
+      setSavedNumbers(numbers.filter(Boolean));
       if (duplicate) showToast(`${number} was already saved — nothing was posted twice.`, 'info');
       else if (isReceipt && failed.length) {
         showToast(`${number} saved, but ${failed.length} receipt(s) could not be booked yet: ${failed[0].error} (see Accounting Integration).`, 'warning');
       } else {
         const who = items.length > 1 ? ` for ${items.length} parties` : '';
         const detail = isReceipt && journals.length && journals.length <= 4 ? ` (${journals.join(', ')})` : '';
-        showToast(`${voucherTitle} ${number} posted against ${selectedBills.length} bill(s)${who}${detail}.`, 'success');
+        const advance = onAccountAmount > 0 ? ` + ${money(onAccountAmount)} on account` : '';
+        showToast(`${voucherTitle} ${number} posted against ${selectedBills.length} bill(s)${advance}${who}${detail}.`, 'success');
       }
       onPosted?.();
       loadDueBills(billParties);
@@ -586,6 +662,7 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
   ];
 
   const allBillsTicked = billRows.length > 0 && billRows.every(r => r.selected);
+  const totalDue = round2(billRows.reduce((t, r) => t + num(r.due), 0));
   const allLinesTicked = accountLines.length > 0 && accountLines.every(l => l.selected);
   const multiParty = billParties.length > 1;
   const partyFieldText = !billParties.length ? ''
@@ -623,6 +700,12 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
             sx={{ backgroundColor: voucherColorHex, fontWeight: 800, '&:hover': { backgroundColor: voucherColorHex } }}>
             Save
           </Button>
+          {locked && isBill && savedNumbers.length > 0 && (
+            <Button variant="outlined" size="small" startIcon={<BreakdownIcon />} onClick={() => setBreakdown({ number: savedNumbers[0] })}
+              sx={{ fontWeight: 700 }}>
+              {savedNumbers.length > 1 ? `Settlement Breakdown (${savedNumbers.length})` : 'Settlement Breakdown'}
+            </Button>
+          )}
           <Button variant="outlined" size="small" startIcon={<PrintIcon />} disabled={!locked} onClick={() => window.print()}>Print</Button>
           <Button variant="outlined" size="small" startIcon={<RefreshIcon />} onClick={handleReset}>Refresh</Button>
         </Stack>
@@ -671,7 +754,7 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
             )}
           </Grid>
           <Grid item xs={12} sm={6} md={3}>
-            {!isContra && (
+            {!isContra && billSettlementOn && (
               <Box>
                 <Typography variant="caption" fontWeight={700} color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>{voucherPrefix} Mode</Typography>
                 <ToggleButtonGroup size="small" exclusive value={voucherState.mode} disabled={locked}
@@ -813,76 +896,123 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
           </Box>
           <Box sx={{ height: 4 }}>{billsLoading && <LinearProgress />}</Box>
           {billsError && <Alert severity="error" sx={{ m: 2 }}>{billsError}</Alert>}
-          <TableContainer component={Paper} elevation={0} sx={{ overflowX: 'auto', maxHeight: 460 }}>
-            <Table sx={{ minWidth: 1000 }} size="small" stickyHeader>
+          <TableContainer component={Paper} elevation={0} sx={{ maxHeight: 460 }}>
+            {/* Fits one screen: account details ride in the bill number's tooltip, so no sideways scroll. */}
+            <Table size="small" stickyHeader sx={{ '& .MuiTableCell-root': { px: 1 } }}>
               <TableHead>
                 <TableRow>
-                  {multiParty && <TableCell sx={{ fontWeight: 700, bgcolor: '#f1f5f9' }}>Party</TableCell>}
-                  <TableCell sx={{ fontWeight: 700, bgcolor: '#f1f5f9' }}>Account Code</TableCell>
-                  <TableCell sx={{ fontWeight: 700, bgcolor: '#f1f5f9' }}>Account Name</TableCell>
-                  <TableCell sx={{ fontWeight: 700, bgcolor: '#f1f5f9' }}>Main Account</TableCell>
-                  <TableCell sx={{ fontWeight: 700, bgcolor: '#f1f5f9', minWidth: 170 }}>Narration</TableCell>
                   <TableCell padding="checkbox" sx={{ bgcolor: '#f1f5f9' }}>
                     <Checkbox size="small" checked={allBillsTicked} indeterminate={!allBillsTicked && billRows.some(r => r.selected)}
                       disabled={locked || !billRows.length} onChange={(e) => toggleAllBills(e.target.checked)} inputProps={{ 'aria-label': 'Select all bills' }} />
                   </TableCell>
-                  <TableCell sx={{ fontWeight: 700, bgcolor: '#f1f5f9' }}>Ref No / Bill No</TableCell>
-                  <TableCell sx={{ fontWeight: 700, bgcolor: '#f1f5f9' }}>Bill Date</TableCell>
-                  <TableCell sx={{ fontWeight: 700, bgcolor: '#f1f5f9' }} align="right">Bill Total</TableCell>
-                  <TableCell sx={{ fontWeight: 700, bgcolor: '#f1f5f9' }} align="right">Due Amount</TableCell>
-                  <TableCell sx={{ fontWeight: 700, bgcolor: '#f1f5f9', width: 160 }} align="right">{isReceipt ? 'Amount to Receive' : 'Amount to Pay'}</TableCell>
+                  {multiParty && <TableCell sx={{ fontWeight: 700, bgcolor: '#f1f5f9' }}>Party</TableCell>}
+                  <TableCell sx={{ fontWeight: 700, bgcolor: '#f1f5f9' }}>Bill No &amp; Date</TableCell>
+                  <TableCell sx={{ fontWeight: 700, bgcolor: '#f1f5f9' }} align="right">Net Bill Amount</TableCell>
+                  <TableCell sx={{ fontWeight: 700, bgcolor: '#f1f5f9' }} align="right">Previously Paid</TableCell>
+                  <TableCell sx={{ fontWeight: 700, bgcolor: '#f1f5f9' }} align="right">Balance Due</TableCell>
+                  <TableCell sx={{ fontWeight: 700, bgcolor: '#f1f5f9', width: 150 }} align="right">{isReceipt ? 'Amount to Receive' : 'Amount to Pay'}</TableCell>
+                  <TableCell sx={{ fontWeight: 700, bgcolor: '#f1f5f9' }} align="right">Balance After</TableCell>
+                  <TableCell sx={{ fontWeight: 700, bgcolor: '#f1f5f9' }}>Status</TableCell>
+                  <TableCell sx={{ fontWeight: 700, bgcolor: '#f1f5f9', minWidth: 120 }}>Narration</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
                 {billRows.map((r) => {
                   const over = num(r.amount) - num(r.due) > 0.005;
+                  const after = round2(num(r.due) - num(r.amount));
+                  const status = num(r.amount) <= 0 ? null : after <= 0.004 ? 'Closed' : 'Partial';
                   return (
                     <TableRow key={r.id} selected={r.selected}>
-                      {multiParty && <TableCell sx={{ fontWeight: 700, whiteSpace: 'nowrap' }}>{r.partyName}</TableCell>}
-                      <TableCell sx={{ fontFamily: 'monospace', fontWeight: 700, color: 'primary.main' }}>{r.account_code}</TableCell>
-                      <TableCell>{r.account_name}</TableCell>
-                      <TableCell><Chip label={r.main_account || '—'} size="small" variant="outlined" sx={{ fontWeight: 600 }} /></TableCell>
-                      <TableCell>
-                        <TextField size="small" fullWidth value={r.narration} disabled={locked} placeholder="Narration..." sx={cellInput}
-                          onChange={(e) => setBill(r.id, { narration: e.target.value })} />
-                      </TableCell>
                       <TableCell padding="checkbox">
                         <Checkbox size="small" checked={r.selected} disabled={locked} onChange={(e) => toggleBill(r, e.target.checked)}
                           inputProps={{ 'aria-label': `Select ${r.number}` }} />
                       </TableCell>
-                      <TableCell sx={{ fontWeight: 700 }}>
-                        {r.number}
+                      {multiParty && <TableCell sx={{ fontWeight: 700, whiteSpace: 'nowrap', maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis' }} title={r.partyName}>{r.partyName}</TableCell>}
+                      <TableCell sx={{ whiteSpace: 'nowrap' }}>
+                        <Tooltip title={`${r.account_code} · ${r.account_name}${r.main_account ? ` (${r.main_account})` : ''}`}>
+                          <Typography variant="body2" fontWeight={800} component="span">{r.number}</Typography>
+                        </Tooltip>
                         {r.ref ? <Typography component="span" variant="caption" color="text.secondary"> · {r.ref}</Typography> : null}
+                        <Typography variant="caption" color="text.secondary" display="block">{formatDate(r.date)}{r.due_date ? ` · due ${formatDate(r.due_date)}` : ''}</Typography>
                       </TableCell>
-                      <TableCell>{formatDate(r.date)}</TableCell>
                       <TableCell align="right">{money(r.total)}</TableCell>
+                      <TableCell align="right" sx={{ color: 'text.secondary' }}>{money(r.paid)}</TableCell>
                       <TableCell align="right" sx={{ fontWeight: 800 }}>{money(r.due)}</TableCell>
                       <TableCell align="right">
                         <TextField type="number" size="small" value={r.amount} disabled={locked} error={over}
                           inputProps={{ min: 0, max: num(r.due), step: '0.01', 'data-vf': `bill-amount-${r.id}` }}
                           onChange={(e) => setBill(r.id, { amount: e.target.value, selected: num(e.target.value) > 0 })}
-                          sx={{ width: 150, '& .MuiInputBase-input': { textAlign: 'right', fontWeight: 700, py: 0.75 } }} />
+                          sx={{ width: 140, '& .MuiInputBase-input': { textAlign: 'right', fontWeight: 700, py: 0.75 } }} />
+                      </TableCell>
+                      <TableCell align="right" sx={{ fontWeight: 700, color: after > 0.004 ? 'warning.dark' : 'success.main' }}>{money(Math.max(after, 0))}</TableCell>
+                      <TableCell>
+                        {status
+                          ? <Chip size="small" label={status} color={status === 'Closed' ? 'success' : 'warning'} sx={{ height: 20, fontWeight: 700 }} />
+                          : <Typography variant="caption" color="text.secondary">Open</Typography>}
+                      </TableCell>
+                      <TableCell>
+                        <TextField size="small" fullWidth value={r.narration} disabled={locked} placeholder="Narration..." sx={cellInput}
+                          onChange={(e) => setBillRows(prev => prev.map(x => (x.id === r.id ? { ...x, narration: e.target.value } : x)))} />
                       </TableCell>
                     </TableRow>
                   );
                 })}
                 {!billRows.length && !billsLoading && (
                   <TableRow>
-                    <TableCell colSpan={multiParty ? 11 : 10} align="center" sx={{ py: 4, color: 'text.secondary' }}>
+                    <TableCell colSpan={multiParty ? 10 : 9} align="center" sx={{ py: 4, color: 'text.secondary' }}>
                       {billParties.length ? `No outstanding bills loaded${datesText ? ` (${datesText.toLowerCase()})` : ''}. Press "Load Due Bills".` : `Select the ${billPartyLabel.toLowerCase()} (F1) to load their outstanding bills.`}
                     </TableCell>
                   </TableRow>
                 )}
               </TableBody>
+              {billParties.length > 0 && (
+                <TableBody sx={{ position: 'sticky', bottom: 0, zIndex: 2, bgcolor: '#f8fafc', '& .MuiTableCell-root': { borderTop: '2px solid #cbd5e1', fontWeight: 800 } }}>
+                  <TableRow>
+                    <TableCell />
+                    {multiParty && <TableCell />}
+                    <TableCell>Total · {billRows.length} bill(s)</TableCell>
+                    <TableCell align="right">{money(billRows.reduce((t, r) => t + num(r.total), 0))}</TableCell>
+                    <TableCell align="right">{money(billRows.reduce((t, r) => t + num(r.paid), 0))}</TableCell>
+                    <TableCell align="right">{money(totalDue)}</TableCell>
+                    <TableCell align="right">
+                      <Tooltip title="Type the amount received / paid: it is spread over the bills oldest first (FIFO). Edit any row to allocate by hand.">
+                        <TextField type="number" size="small" value={receiving} disabled={locked}
+                          label={isReceipt ? 'Total Receiving Amount' : 'Total Paying Amount'} InputLabelProps={{ shrink: true }}
+                          inputProps={{ min: 0, step: '0.01', 'data-vf': 'bill-total-receiving' }}
+                          onChange={(e) => changeReceiving(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); applyFifo(); focusSoon('[data-vf="pay-amount-0"]'); } }}
+                          sx={{ width: 150, bgcolor: '#fff', '& .MuiInputBase-input': { textAlign: 'right', fontWeight: 800, py: 0.75 } }} />
+                      </Tooltip>
+                    </TableCell>
+                    <TableCell align="right">{money(Math.max(round2(totalDue - totalAllocated), 0))}</TableCell>
+                    <TableCell colSpan={2}>
+                      {hasReceiving && (
+                        <Chip size="small" label={`Unallocated: ${money(unallocated)}`}
+                          color={Math.abs(unallocated) < 0.005 ? 'success' : unallocated > 0 && onAccount ? 'warning' : 'error'} sx={{ fontWeight: 800 }} />
+                      )}
+                    </TableCell>
+                  </TableRow>
+                </TableBody>
+              )}
             </Table>
           </TableContainer>
-          {billRows.length > 0 && (
-            <Stack direction="row" spacing={3} sx={{ px: 3, py: 1.25, borderTop: '1px solid #e2e8f0', bgcolor: '#f8fafc' }} flexWrap="wrap">
+          {billParties.length > 0 && (
+            <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap" useFlexGap sx={{ px: 2, py: 1, borderTop: '1px solid #e2e8f0', bgcolor: '#f8fafc' }}>
               {multiParty && <Typography variant="body2" fontWeight={700}>Parties: {billParties.length}</Typography>}
-              <Typography variant="body2" fontWeight={700}>Bills: {billRows.length}</Typography>
               {datesText && <Typography variant="body2" fontWeight={700} color="text.secondary">{datesText}</Typography>}
-              <Typography variant="body2" fontWeight={700}>Total Due: {money(billRows.reduce((s, r) => s + num(r.due), 0))}</Typography>
-              <Typography variant="body2" fontWeight={800} color="primary.main">Selected: {selectedBills.length} · {money(totalAllocated)}</Typography>
+              <Typography variant="body2" fontWeight={800} color="primary.main">Allocated: {selectedBills.length} bill(s) · {money(totalAllocated)}</Typography>
+              <Chip size="small" variant="outlined" label={allocMode === 'auto' ? 'Auto FIFO (oldest first)' : 'Manual allocation'} sx={{ fontWeight: 700 }} />
+              <Button size="small" variant="outlined" startIcon={<FifoIcon />} disabled={locked || !hasReceiving || !billRows.length}
+                onClick={() => applyFifo()} sx={{ fontWeight: 700 }}>
+                Auto-allocate FIFO
+              </Button>
+              <Tooltip title={multiParty ? 'Available with one party selected' : `${isReceipt ? 'Received' : 'Paid'} beyond the ticked bills stays on the party's account as an advance.`}>
+                <span>
+                  <FormControlLabel sx={{ m: 0 }} disabled={locked || multiParty}
+                    control={<Checkbox size="small" checked={onAccount} onChange={(e) => setOnAccount(e.target.checked)} />}
+                    label={<Typography variant="body2" fontWeight={700}>Keep as Advance / On Account{onAccountAmount > 0 ? ` (${money(onAccountAmount)})` : ''}</Typography>} />
+                </span>
+              </Tooltip>
             </Stack>
           )}
         </Card>
@@ -918,11 +1048,11 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
               </TableRow>
             </TableHead>
             <TableBody>
-              {paymentLines.map((line) => (
+              {paymentLines.map((line, lineIndex) => (
                 <React.Fragment key={line.id}>
                 <TableRow sx={isChequeLine(line) ? { '& > td': { borderBottom: 'none' } } : undefined}>
                   <TableCell align="right">
-                    <TextField type="number" size="small" value={line.amount} disabled={locked} inputProps={{ min: 0, step: '0.01' }}
+                    <TextField type="number" size="small" value={line.amount} disabled={locked} inputProps={{ min: 0, step: '0.01', 'data-vf': `pay-amount-${lineIndex}` }}
                       onChange={(e) => setPayment(line.id, { amount: e.target.value })}
                       sx={{ width: 140, '& .MuiInputBase-input': { textAlign: 'right', fontWeight: 700, py: 0.75 } }} />
                   </TableCell>
@@ -1045,9 +1175,17 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
           <Grid item xs={12} md={8}>
             <Stack direction="row" spacing={2.5} alignItems="center" flexWrap="wrap" gap={1}>
               <Box>
-                <Typography variant="caption" color="text.secondary" fontWeight={700}>{isBill ? 'TOTAL ALLOCATED' : 'VOUCHER TOTAL'}</Typography>
+                <Typography variant="caption" color="text.secondary" fontWeight={700}>{isBill ? (hasReceiving ? (isReceipt ? 'TOTAL RECEIVING' : 'TOTAL PAYING') : 'TOTAL ALLOCATED') : 'VOUCHER TOTAL'}</Typography>
                 <Typography variant="h6" fontWeight={850} color="primary.main">{money(voucherTotal)}</Typography>
               </Box>
+              {hasReceiving && (
+                <Box>
+                  <Typography variant="caption" color="text.secondary" fontWeight={700}>{onAccountAmount > 0 ? 'ON ACCOUNT' : 'UNALLOCATED'}</Typography>
+                  <Typography variant="subtitle1" fontWeight={800} color={Math.abs(unallocated) < 0.005 ? 'success.main' : onAccountAmount > 0 ? 'warning.dark' : 'error.main'}>
+                    {money(onAccountAmount > 0 ? onAccountAmount : unallocated)}
+                  </Typography>
+                </Box>
+              )}
               <Divider orientation="vertical" flexItem />
               <Box>
                 <Typography variant="caption" color="text.secondary" fontWeight={700}>CASH</Typography>
@@ -1111,6 +1249,7 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
         onClose={() => closeSearch()}
         onSelect={(parties, { dates }) => { closeSearch('[data-vf="party"]'); selectParties(parties, dates); }}
       />
+      <SettlementBreakdownDialog open={!!breakdown} query={breakdown} onClose={() => setBreakdown(null)} />
       <ChequeDetailsDialog
         open={!!chequeEdit}
         row={chequeEdit?.row}
