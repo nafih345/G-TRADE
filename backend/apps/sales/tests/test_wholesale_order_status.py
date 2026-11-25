@@ -250,12 +250,28 @@ class OrderStatusFlowTests(APITestCase):
         self.assertEqual(live('sales', 'wholesale_invoice', inv.pk).count(), 1)
         self.assertEqual(self._stock(), 90)
 
-    def test_stored_off_switch_is_ignored_it_is_built_in(self):
-        """Built into Wholesale: a stored "off" (older consoles) changes nothing."""
+    def test_client_switch_off_bills_orders_directly_and_closes_the_screen(self):
+        """enable_wholesale_order_status OFF: stock and Accounts at billing; Order Status refused."""
         switch_feature(False)
-        self.assertEqual(self.client.get(f'{STATUS}dealers/').status_code, 200)
+        res = self.client.get(f'{STATUS}dealers/')
+        self.assertEqual((res.status_code, res.data['code']), (403, 'feature_disabled'))
+        profile = self.client.get('/api/auth/profile/').data
+        self.assertFalse(profile['enable_wholesale_order_status'])
+        self.assertNotIn('wholesale_order_status', profile['module_features'])
         inv = self._bill(self._order())
-        self.assertEqual((inv.delivery_status, inv.is_posted_to_accounts), ('PENDING_DELIVERY', False))
+        self.assertEqual((inv.delivery_status, inv.is_posted_to_accounts), (None, True))
+        self.assertEqual(live('sales', 'wholesale_invoice', inv.pk).count(), 1)
+        self.assertEqual(self._stock(), 90)
+
+    def test_switching_off_is_refused_while_bills_wait_for_delivery(self):
+        from apps.common import tenancy
+        order = self._order()
+        self._bill(order)
+        self.assertTrue(module_access.module_feature_switch_off_error(
+            tenancy.DEFAULT_TENANT_ID, {'wholesale_order_status': True}, {'wholesale_order_status': False}))
+        self.assertEqual(self._deliver(order, delivered_on=str(TODAY)).status_code, 200)
+        self.assertIsNone(module_access.module_feature_switch_off_error(
+            tenancy.DEFAULT_TENANT_ID, {'wholesale_order_status': True}, {'wholesale_order_status': False}))
 
     def test_user_without_the_permission_is_refused(self):
         self.client.force_authenticate(staff_user('os_blocked', allowed=False))
@@ -269,42 +285,62 @@ class OrderStatusFlowTests(APITestCase):
 
 
 class ModuleFeatureRulesTests(APITestCase):
-    def test_built_in_features_follow_their_module_only(self):
-        for stored in ({'wholesale_order_status': False, 'bill_settlement': False}, {}, None):
-            cfg = {'modules': ['wholesale', 'accounts'], 'module_features': stored}
-            self.assertEqual(module_access.enabled_module_features(cfg), ['wholesale_order_status', 'bill_settlement'])
-        self.assertEqual(module_access.enabled_module_features({'modules': ['sales'], 'module_features': {}}), [])
-        self.assertEqual(module_access.enabled_module_features({'modules': ['financial'], 'module_features': {}}),
-                         ['bill_settlement'])
+    def test_order_status_is_a_per_client_switch_off_by_default(self):
+        cfg = lambda stored: {'modules': ['wholesale', 'accounts'], 'module_features': stored}
+        self.assertEqual(module_access.enabled_module_features(cfg({})), ['bill_settlement'])
+        self.assertEqual(module_access.enabled_module_features(cfg({'wholesale_order_status': False})), ['bill_settlement'])
+        self.assertEqual(module_access.enabled_module_features(cfg({'wholesale_order_status': True})),
+                         ['wholesale_order_status', 'bill_settlement'])
+        # Needs the Wholesale module; Bill-to-Bill stays built in.
+        self.assertEqual(module_access.enabled_module_features(
+            {'modules': ['accounts'], 'module_features': {'wholesale_order_status': True, 'bill_settlement': False}}),
+            ['bill_settlement'])
 
-    def test_every_business_has_them_on(self):
-        from apps.common import tenancy
-        from apps.common.models import Tenant
-        Tenant.objects.filter(pk=tenancy.DEFAULT_TENANT_ID).update(module_features={})
-        self.assertTrue(module_access.tenant_has_feature('wholesale_order_status', tenancy.DEFAULT_TENANT_ID))
-        self.assertTrue(module_access.tenant_has_feature('bill_settlement', tenancy.DEFAULT_TENANT_ID))
-
-    def test_normalize_keeps_built_in_on_and_refuses_unknown_keys(self):
-        self.assertEqual(module_access.normalize_module_features({'wholesale_order_status': 0}), {'wholesale_order_status': True})
+    def test_normalize_keeps_switch_values_and_refuses_unknown_keys(self):
+        self.assertEqual(module_access.normalize_module_features({'wholesale_order_status': 0}), {'wholesale_order_status': False})
+        self.assertEqual(module_access.normalize_module_features({'bill_settlement': 0}), {'bill_settlement': True})
         with self.assertRaises(ValueError):
             module_access.normalize_module_features({'nope': True})
         with self.assertRaises(ValueError):
             module_access.normalize_module_features(['wholesale_order_status'])
 
-    def test_consoles_have_no_switch_for_built_in_features(self):
-        self.assertEqual(module_access.catalog()['module_features'], [])
-        self.assertEqual([f['key'] for f in module_access.module_feature_catalog(include_fixed=True)],
-                         ['wholesale_order_status', 'bill_settlement'])
+    def test_consoles_list_the_order_status_switch(self):
+        self.assertEqual([f['key'] for f in module_access.catalog()['module_features']], ['wholesale_order_status'])
 
-    def test_migration_stores_both_on_for_existing_businesses(self):
-        import importlib
-        from django.apps import apps as django_apps
+
+class ClientManagementSwitchTests(APITestCase):
+    """Super Admin → Client Management: enable_wholesale_order_status on create and edit."""
+
+    def setUp(self):
+        from django.contrib.auth import get_user_model
         from apps.common import tenancy
         from apps.common.models import Tenant
-        Tenant.objects.filter(pk=tenancy.DEFAULT_TENANT_ID).update(module_features={'wholesale_order_status': False})
-        importlib.import_module('apps.common.migrations.0014_builtin_module_features').switch_on(django_apps, None)
-        self.assertEqual(Tenant.objects.get(pk=tenancy.DEFAULT_TENANT_ID).module_features,
-                         {'wholesale_order_status': True, 'bill_settlement': True})
+        platform = Tenant.objects.get(pk=tenancy.DEFAULT_TENANT_ID)
+        self.client.force_authenticate(get_user_model().objects.create_superuser(
+            'os_platform', password='x', tenant=platform))
+
+    def test_onboard_stores_the_switch_and_defaults_off(self):
+        from apps.common.tenant_onboarding import onboard_tenant
+        plain, _ = onboard_tenant(name='OS Plain', admin_username='os_plain', password='Plain-Pass-2026!x')
+        self.assertEqual(plain.module_features, {})
+        self.assertFalse(module_access.tenant_feature_enabled_flags(plain.pk)['enable_wholesale_order_status'])
+        on, _ = onboard_tenant(name='OS On', admin_username='os_on', password='On-Pass-2026!x',
+                               module_features={'wholesale_order_status': True})
+        self.assertTrue(module_access.tenant_feature_enabled_flags(on.pk)['enable_wholesale_order_status'])
+
+    def test_edit_client_toggles_it_by_name(self):
+        from apps.common.models import Tenant
+        from apps.common.tenant_onboarding import onboard_tenant
+        tenant, _ = onboard_tenant(name='OS Edit', admin_username='os_edit', password='Edit-Pass-2026!x')
+        url = f'/api/superadmin/tenants/{tenant.pk}/'
+        self.assertFalse(self.client.get(url).data['enable_wholesale_order_status'])
+        res = self.client.patch(url, {'enable_wholesale_order_status': True}, format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertTrue(res.data['enable_wholesale_order_status'])
+        self.assertEqual(Tenant.objects.get(pk=tenant.pk).module_features, {'wholesale_order_status': True})
+        res = self.client.patch(url, {'module_features': {'wholesale_order_status': False}}, format='json')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertFalse(res.data['enable_wholesale_order_status'])
 
 
 class UserFeaturePermissionTests(APITestCase):

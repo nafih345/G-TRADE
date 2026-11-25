@@ -87,10 +87,15 @@ _FEATURE_PREFIXES = sorted(((prefix, f[0]) for f in SETTINGS_FEATURES for prefix
 # (USER_FEATURE_FLAGS).
 # (key, parent module(s), label, description, endpoint prefixes it owns, default, fixed)
 MODULE_FEATURES = (
+    # Per-client switch (Client Management → Modules → Wholesale Distribution; the platform
+    # account / Windows own company: Settings → Business Settings). OFF for a new client: its
+    # wholesale bills deduct stock and post to Accounts at once. Existing clients were stored ON
+    # (common 0014). Switching it off is refused while bills are held for delivery.
     ('wholesale_order_status', 'wholesale', 'Wholesale Order Status',
-     'Dealer-wise order tracking: billing an order deducts stock at once but posts it to Accounts '
-     'only when it is marked Delivered; an undelivered bill is voided and its stock restored.',
-     ('/api/sales/wholesale/order-status/',), True, True),
+     'Enables order confirmation, delivery tracking, and deferred account posting for wholesale '
+     'orders: billing an order deducts stock at once but posts it to Accounts only when it is '
+     'marked Delivered; an undelivered bill is voided and its stock restored.',
+     ('/api/sales/wholesale/order-status/',), False, False),
     ('bill_settlement', ('accounts', 'financial'), 'Bill-to-Bill Settlement',
      'Receipt / Payment Voucher "Bill to Bill" mode (F1 party lookup, FIFO or manual allocation, '
      'on-account advances) and the Bill-to-Bill Settlement Statement.',
@@ -411,6 +416,31 @@ def normalize_module_features(raw):
         raise ValueError(f'Unknown module feature(s): {", ".join(map(str, unknown))}.')
     # Built-in features are always on: a value sent for one (older consoles) is stored as on.
     return {k: (True if k not in SWITCHABLE_FEATURE_KEYS else bool(raw[k])) for k in MODULE_FEATURE_KEYS if k in raw}
+
+
+def tenant_feature_enabled_flags(tenant_id):
+    """{'enable_<feature>': bool} for the per-client switches the API exposes by name
+    (currently enable_wholesale_order_status)."""
+    enabled = set(enabled_module_features(tenant_access_config(tenant_id))) if tenant_id else set()
+    return {'enable_wholesale_order_status': 'wholesale_order_status' in enabled}
+
+
+def module_feature_switch_off_error(tenant_id, before, after):
+    """Why a tenant's module_features change can't be saved, or None. Wholesale Order Status
+    can't be switched off while bills are held for delivery: they would never reach Accounts."""
+    if not tenant_id:
+        return None
+    key = 'wholesale_order_status'
+    was = key in enabled_module_features({**tenant_access_config(tenant_id), 'module_features': before})
+    now = key in enabled_module_features({**tenant_access_config(tenant_id), 'module_features': after})
+    if not was or now:
+        return None
+    from apps.sales.wholesale_delivery import held_bill_count
+    held = held_bill_count(tenant_id)
+    if held:
+        return (f'{held} wholesale bill(s) are still waiting for delivery. Mark them Delivered or Not '
+                'Delivered in Wholesale Order Status before switching it off.')
+    return None
 
 
 def enabled_module_features(config):

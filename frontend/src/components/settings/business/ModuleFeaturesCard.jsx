@@ -48,7 +48,7 @@ export default function ModuleFeaturesCard() {
   };
 
   if (!state && !error) return null;
-  // Built-in features (Wholesale Order Status, Bill-to-Bill) are not listed: nothing left to switch.
+  // Built-in features (Bill-to-Bill) are not listed: nothing to switch. Wholesale Order Status is.
   if (state && !(state.features || []).length) return null;
   return (
     <Card sx={{ p: 3, mt: 3, borderRadius: 4, border: '1px solid', borderColor: 'divider' }}>

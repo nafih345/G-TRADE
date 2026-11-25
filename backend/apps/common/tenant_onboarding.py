@@ -142,7 +142,8 @@ def apply_company_profile(tenant, company_profile, preferences):
 def onboard_tenant(*, name, admin_username, password, admin_email='', contact_phone='',
                    branch_name='', code=None, package=module_access.FULL_SUITE, modules=None,
                    settings_features=None, max_users=5, actor='', profile=None, subscription=None,
-                   company_profile=None, preferences=None, branch_details=None, admin_name=''):
+                   company_profile=None, preferences=None, branch_details=None, admin_name='',
+                   module_features=None):
     """Create the tenant, its Super Admin and its default masters in one transaction; returns
     (tenant, admin).
 
@@ -171,6 +172,10 @@ def onboard_tenant(*, name, admin_username, password, admin_email='', contact_ph
         settings_features = module_access.normalize_settings_features(settings_features)
     except ValueError as e:
         raise OnboardingError('settings_features', str(e))
+    try:
+        module_features = module_access.normalize_module_features(module_features)
+    except ValueError as e:
+        raise OnboardingError('module_features', str(e))
     if not isinstance(max_users, int) or max_users < 1:
         raise OnboardingError('max_users', 'Allow at least one user (the client’s admin).')
     check_available(name, admin_username, code)
@@ -195,7 +200,7 @@ def onboard_tenant(*, name, admin_username, password, admin_email='', contact_ph
         tenant = Tenant.objects.create(name=name, code=tenant_code, organization=organization,
                                        contact_email=admin_email, contact_phone=contact_phone,
                                        package=package, modules=modules, settings_features=settings_features,
-                                       max_users=max_users, **(profile or {}), **(subscription or {}))
+                                       module_features=module_features, max_users=max_users, **(profile or {}), **(subscription or {}))
         # role SUPER_ADMIN is the tenant's own top role; never is_superuser / is_staff — those
         # open Django admin, which is not tenant-scoped, and is_superuser also marks the
         # platform owner (see apps.common.permissions.IsPlatformAdmin).

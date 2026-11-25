@@ -411,7 +411,8 @@ class TenantAdminViewSet(TenantDataBackupMixin, mixins.ListModelMixin, mixins.Re
                     package=v['package'], modules=v['modules'], settings_features=v['settings_features'],
                     max_users=v['max_users'], actor=request.user, profile=v['tenant_profile'],
                     subscription=v['subscription'], company_profile=v['company_profile'],
-                    preferences=v['preferences'], branch_details=v['branch_details'], admin_name=v['admin_name'])
+                    preferences=v['preferences'], branch_details=v['branch_details'], admin_name=v['admin_name'],
+                    module_features=v['module_features'])
                 if v['logo']:
                     from apps.billing.models import BillingSettings
                     with tenancy.use_tenant(tenant.pk):

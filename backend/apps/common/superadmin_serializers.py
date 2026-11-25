@@ -110,6 +110,10 @@ class TenantOnboardSerializer(serializers.Serializer):
     modules = ModulesField(required=False, default=list)
     settings_features = serializers.ListField(child=serializers.CharField(), required=False, allow_null=True,
                                               default=None)
+    # Optional features inside a module ({key: bool}, e.g. Wholesale Distribution → Wholesale
+    # Order Status); enable_wholesale_order_status is the same switch by name.
+    module_features = serializers.DictField(child=serializers.BooleanField(), required=False, default=dict)
+    enable_wholesale_order_status = serializers.BooleanField(required=False, allow_null=True, default=None)
     max_users = serializers.IntegerField(required=False, default=5, min_value=1, max_value=10000)
     max_branches = serializers.IntegerField(required=False, allow_null=True, default=None, min_value=1,
                                             max_value=1000)
@@ -146,6 +150,14 @@ class TenantOnboardSerializer(serializers.Serializer):
             attrs['settings_features'] = module_access.normalize_settings_features(attrs.get('settings_features'))
         except ValueError as e:
             errors['settings_features'] = [str(e)]
+        try:
+            features = dict(attrs.get('module_features') or {})
+            alias = attrs.pop('enable_wholesale_order_status', None)
+            if alias is not None:
+                features['wholesale_order_status'] = alias
+            attrs['module_features'] = module_access.normalize_module_features(features)
+        except ValueError as e:
+            errors['module_features'] = [str(e)]
         if attrs['invite_admin']:
             attrs['password'] = None  # set by the admin through the invitation link
         elif not attrs['password']:
@@ -242,6 +254,8 @@ class TenantSerializer(serializers.ModelSerializer):
     active_branch_count = serializers.SerializerMethodField()
     days_to_expiry = serializers.SerializerMethodField()
     subscription = serializers.SerializerMethodField()
+    # Is the Wholesale Order Status workflow on for this client (switch + Wholesale module)?
+    enable_wholesale_order_status = serializers.SerializerMethodField()
 
     class Meta:
         model = Tenant
@@ -251,6 +265,7 @@ class TenantSerializer(serializers.ModelSerializer):
                   'contact_email', 'contact_phone', 'primary_admin', 'user_count', 'active_user_count',
                   'max_users', 'branch_count', 'active_branch_count', 'max_branches',
                   'package', 'modules', 'settings_features', 'module_features',
+                  'enable_wholesale_order_status',
                   'subscription_plan', 'subscription_starts_on', 'subscription_expires_on', 'days_to_expiry',
                   'deactivation_category', 'deactivation_reason', 'deactivation_effective_date',
                   'deactivation_until', 'deactivated_at', 'deactivated_by', 'subscription')
@@ -259,6 +274,13 @@ class TenantSerializer(serializers.ModelSerializer):
     def get_subscription(self, obj):
         # Windows Local Hosted Workspaces: the current subscription (by dates and status), or None.
         return self.context.get('subscriptions', {}).get(obj.pk)
+
+    def get_enable_wholesale_order_status(self, obj):
+        # From the row itself (no extra query per client in the list).
+        from apps.common import tenancy
+        modules = list(module_access.MODULE_KEYS) if obj.pk == tenancy.DEFAULT_TENANT_ID else list(obj.modules or [])
+        return 'wholesale_order_status' in module_access.enabled_module_features(
+            {'modules': modules, 'module_features': obj.module_features})
 
     def get_primary_admin(self, obj):
         return self.context.get('admins', {}).get(obj.pk)
@@ -301,6 +323,8 @@ class TenantUpdateSerializer(serializers.Serializer):
     settings_features = serializers.ListField(child=serializers.CharField(), required=False, allow_null=True)
     # Opt-in features inside a module ({key: bool}); merged over what the tenant has.
     module_features = serializers.DictField(child=serializers.BooleanField(), required=False)
+    # The Wholesale Order Status switch by name (same as module_features.wholesale_order_status).
+    enable_wholesale_order_status = serializers.BooleanField(required=False)
     max_users = serializers.IntegerField(required=False, min_value=1, max_value=10000)
     role_permissions = serializers.DictField(required=False)
     multi_branch_enabled = serializers.BooleanField(required=False)
@@ -387,6 +411,15 @@ class TenantUpdateSerializer(serializers.Serializer):
             errors = validate_subscription(attrs, self.instance)
             if errors:
                 raise serializers.ValidationError(errors)
+        if 'enable_wholesale_order_status' in attrs:
+            merged = dict(attrs.get('module_features', self.instance.module_features or {}) or {})
+            merged['wholesale_order_status'] = attrs.pop('enable_wholesale_order_status')
+            attrs['module_features'] = merged
+        if 'module_features' in attrs:
+            refusal = module_access.module_feature_switch_off_error(
+                self.instance.pk, dict(self.instance.module_features or {}), attrs['module_features'])
+            if refusal:
+                raise serializers.ValidationError({'module_features': [refusal]})
         if 'package' in attrs or 'modules' in attrs:
             if self.instance.pk == tenancy.DEFAULT_TENANT_ID:
                 raise serializers.ValidationError({'modules': ['The platform account always has every module.']})

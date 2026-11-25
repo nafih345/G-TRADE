@@ -167,7 +167,7 @@ export default function ModuleAccessEditor({ catalog, value, onChange, disabled 
                             <Stack direction="row" alignItems="center" spacing={0.5}
                               sx={{ border: 1, borderColor: on ? 'primary.light' : 'divider', borderRadius: 1.5, pl: 1.25, py: 0.25, opacity: featuresDisabled ? 0.7 : 1 }}>
                               <Box sx={{ flex: 1, minWidth: 0 }}>
-                                <Typography variant="body2" sx={{ fontSize: 13, fontWeight: 600 }}>{f.label}</Typography>
+                                <Typography variant="body2" sx={{ fontSize: 13, fontWeight: 600 }}>Enable {f.label}</Typography>
                                 {!compact && <Typography variant="caption" color="text.secondary" component="div">{f.description}</Typography>}
                               </Box>
                               <Switch size="small" checked={on} disabled={featuresDisabled} onChange={(e) => flipFeature(f.key, e.target.checked)}

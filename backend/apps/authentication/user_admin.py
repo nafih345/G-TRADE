@@ -94,6 +94,8 @@ def _payload(request, tenant):
     catalog = module_access.catalog()
     return {
         'id': tenant.pk, 'name': tenant.name, 'max_users': tenant.max_users,
+        # The per-user Wholesale Order Status permission is only shown while the client has it on.
+        **module_access.tenant_feature_enabled_flags(tenant.pk),
         'users': users, 'branches': branches,
         'catalog': {
             'roles': catalog['roles'],

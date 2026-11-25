@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert, Autocomplete, Box, Button, Card, Checkbox, Chip, Divider, FormControlLabel, Grid, IconButton, InputAdornment, LinearProgress,
   MenuItem, Paper, Stack, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TextField,
-  Switch, Tooltip, Typography,
+  Switch, ToggleButton, ToggleButtonGroup, Tooltip, Typography,
 } from '@mui/material';
 import {
   Add as AddIcon, CheckCircle as CheckIcon, Delete as DeleteIcon, Print as PrintIcon, Refresh as RefreshIcon,
@@ -758,16 +758,27 @@ export default function StandardVoucherForm({ voucherType, accounts, cashOrBankA
           <Grid item xs={12} sm={6} md={3}>
             {!isContra && billSettlementOn && (
               <Box>
-                <Tooltip title={isBill ? "Allocating against the party's pending bills. Switch off for an on-account / non bill-wise entry for this voucher only."
-                  : "Off for this voucher: a plain account entry. Switch on to settle the party's pending bills."}>
-                  <FormControlLabel sx={{ m: 0 }} disabled={locked}
-                    control={<Switch checked={voucherState.mode === 'Bill to Bill'} inputProps={{ 'aria-label': 'Bill-to-Bill' }}
-                      onChange={(e) => setVoucherState(prev => ({ ...prev, mode: e.target.checked ? 'Bill to Bill' : 'Normal' }))} />}
-                    label={<Box>
-                      <Typography variant="body2" fontWeight={800}>Bill-to-Bill {voucherState.mode === 'Bill to Bill' ? 'ON' : 'OFF'}</Typography>
-                      <Typography variant="caption" color="text.secondary">{voucherState.mode === 'Bill to Bill' ? 'Settle pending bills' : 'On-account / non bill-wise'}</Typography>
-                    </Box>} />
-                </Tooltip>
+                <Typography variant="caption" fontWeight={700} color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
+                  {voucherPrefix} Mode
+                </Typography>
+                <ToggleButtonGroup
+                  exclusive fullWidth size="small" disabled={locked}
+                  value={voucherState.mode === 'Bill to Bill' ? 'Bill to Bill' : 'Normal'}
+                  onChange={(e, val) => { if (val) setVoucherState(prev => ({ ...prev, mode: val })); }}
+                  aria-label={`${voucherPrefix} mode`}
+                  sx={{
+                    '& .MuiToggleButton-root': { textTransform: 'none', fontWeight: 600, fontSize: '0.75rem', py: 0.5, color: 'text.secondary' },
+                    '& .MuiToggleButton-root.Mui-selected': { fontWeight: 800, color: 'text.primary', bgcolor: '#e2e8f0' },
+                    '& .MuiToggleButton-root.Mui-selected:hover': { bgcolor: '#cbd5e1' },
+                  }}
+                >
+                  <ToggleButton value="Normal">
+                    <Tooltip title="Plain account entry (on-account / non bill-wise)"><span>Normal</span></Tooltip>
+                  </ToggleButton>
+                  <ToggleButton value="Bill to Bill">
+                    <Tooltip title="Settle the party's pending bills"><span>Bill to Bill</span></Tooltip>
+                  </ToggleButton>
+                </ToggleButtonGroup>
               </Box>
             )}
           </Grid>

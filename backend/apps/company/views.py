@@ -736,6 +736,9 @@ class ModuleFeaturesView(APIView):
         except ValueError as e:
             return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         merged = {**(tenant.module_features or {}), **wanted}
+        refusal = ma.module_feature_switch_off_error(tenant.pk, dict(tenant.module_features or {}), merged)
+        if refusal:
+            return Response({'detail': refusal, 'code': 'feature_in_use'}, status=status.HTTP_400_BAD_REQUEST)
         if merged != (tenant.module_features or {}):
             before = dict(tenant.module_features or {})
             tenant.module_features = merged

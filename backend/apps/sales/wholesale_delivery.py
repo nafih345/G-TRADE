@@ -65,6 +65,14 @@ def feature_enabled(tenant_id=None):
     return tenant_has_feature(FEATURE, tenant_id)
 
 
+def held_bill_count(tenant_id):
+    """Wholesale bills of a tenant still held for delivery (not yet posted to Accounts)."""
+    from apps.common import tenancy
+    from .models import WholesaleInvoice
+    with tenancy.use_tenant(tenant_id):
+        return WholesaleInvoice.objects.filter(delivery_status=PENDING).count()
+
+
 def stock_reasons(inv):
     """(take-out reason, put-back reason) templates for a wholesale bill's stock movements."""
     from .wholesale_stock import REVERSAL_REASON, SALE_REASON

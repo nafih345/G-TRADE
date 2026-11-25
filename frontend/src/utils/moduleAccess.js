@@ -84,7 +84,7 @@ export const canOpenSettingsSection = (user, section) => {
 // profile without the field (cached before it existed) has none until the background refresh.
 // Features that ship switched on (server MODULE_FEATURES default=True): a profile cached before
 // the field existed keeps them on rather than hiding a screen the business already had.
-const DEFAULT_ON_FEATURES = ['bill_settlement', 'wholesale_order_status'];
+const DEFAULT_ON_FEATURES = ['bill_settlement'];
 export const canUseFeature = (user, feature) => (Array.isArray(user?.module_features)
   ? user.module_features.includes(feature)
   : DEFAULT_ON_FEATURES.includes(feature));

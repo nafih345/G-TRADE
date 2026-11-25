@@ -92,6 +92,9 @@ export default function OnboardClientWizard({ catalog, onClose, onCreated, onSwi
     && (licCatalog?.plans || []).some((p) => p.edition === 'WINDOWS_LOCAL');
   const [subscription, setSubscription] = useState(() => ({
     package: 'FULL_SUITE', settings_features: null,
+    // Optional features inside a module (Wholesale Distribution → Wholesale Order Status): off
+    // for a new client until switched on here.
+    module_features: {},
     modules: [...(catalog.packages.find((p) => p.key === 'FULL_SUITE')?.modules || [])],
   }));
   const [errors, setErrors] = useState({});
@@ -198,6 +201,7 @@ export default function OnboardClientWizard({ catalog, onClose, onCreated, onSwi
       subscription_starts_on: form.subscription_starts_on || null,
       package: subscription.package, modules: subscription.modules,
       ...(subscription.modules.includes('settings') ? { settings_features: subscription.settings_features } : {}),
+      module_features: subscription.module_features || {},
       ...(planned ? { licence_plan_id: licence.plan_id, licence_starts_on: licence.starts_on || null } : {}),
       // The server sets the workspace plan / start / expiry from the chosen subscription.
       ...(localSubs ? { licence_plan_id: hostedSub.plan_id, licence_starts_on: hostedSub.starts_on || null,
@@ -417,8 +421,8 @@ export default function OnboardClientWizard({ catalog, onClose, onCreated, onSwi
               </Grid>
             </Grid>
             <Typography variant="subtitle2" fontWeight={700} sx={{ mt: 0.5, mb: 1 }}>Enabled Modules</Typography>
-            {(errors.modules || errors.settings_features) && (
-              <Alert severity="error" sx={{ mb: 1.5 }}>{errors.modules || errors.settings_features}</Alert>
+            {(errors.modules || errors.settings_features || errors.module_features) && (
+              <Alert severity="error" sx={{ mb: 1.5 }}>{errors.modules || errors.settings_features || errors.module_features}</Alert>
             )}
             <ModuleAccessEditor catalog={catalog} value={subscription} disabled={saving} hidePackages
               onChange={(v) => { setSubscription(v); setErrors((x) => ({ ...x, modules: undefined })); }} />
@@ -452,8 +456,8 @@ export default function OnboardClientWizard({ catalog, onClose, onCreated, onSwi
               </Grid>
             </Grid>
             <Typography variant="subtitle2" fontWeight={700} sx={{ mt: 0.5, mb: 1 }}>Enabled modules</Typography>
-            {(errors.modules || errors.settings_features) && (
-              <Alert severity="error" sx={{ mb: 1.5 }}>{errors.modules || errors.settings_features}</Alert>
+            {(errors.modules || errors.settings_features || errors.module_features) && (
+              <Alert severity="error" sx={{ mb: 1.5 }}>{errors.modules || errors.settings_features || errors.module_features}</Alert>
             )}
             <ModuleAccessEditor catalog={catalog} value={subscription} disabled={saving}
               onChange={(v) => { setSubscription(v); setErrors((x) => ({ ...x, modules: undefined })); }} />

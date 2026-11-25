@@ -17,7 +17,8 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = ('id', 'username', 'email', 'first_name', 'last_name', 'role', 'role_display', 'phone', 'is_active',
                   'tenant', 'is_platform_admin', 'workspace', 'module_access',
-                  'settings_features', 'module_features', 'edit_permissions', 'can_view_cost',
+                  'settings_features', 'module_features', 'enable_wholesale_order_status',
+                  'edit_permissions', 'can_view_cost',
                   'active_company', 'organization', 'is_org_admin', 'company_count')
         read_only_fields = ('id', 'is_active', 'tenant')
 
@@ -80,6 +81,9 @@ class UserSerializer(serializers.ModelSerializer):
     settings_features = serializers.SerializerMethodField()
     # Opt-in module features this user can use (Tenant.module_features ∩ parent module access).
     module_features = serializers.SerializerMethodField()
+    # Is the Wholesale Order Status workflow on for the signed-in user's business (client-level
+    # switch; the user's own permission is in module_features)?
+    enable_wholesale_order_status = serializers.SerializerMethodField()
 
     def get_module_access(self, obj):
         from apps.common.module_access import effective_access
@@ -107,6 +111,11 @@ class UserSerializer(serializers.ModelSerializer):
     def get_module_features(self, obj):
         from apps.common.module_access import module_features_for
         return module_features_for(obj)
+
+    def get_enable_wholesale_order_status(self, obj):
+        from apps.common.module_access import tenant_feature_enabled_flags
+        from apps.common.permissions import request_tenant_id
+        return tenant_feature_enabled_flags(request_tenant_id(obj))['enable_wholesale_order_status']
 
     def get_settings_features(self, obj):
         from apps.common.module_access import settings_features_for

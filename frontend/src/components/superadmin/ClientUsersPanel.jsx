@@ -190,6 +190,9 @@ function UserDialog({ catalog, tenant, usersUrl, user, onClose, onSaved, allowIn
             </Grid>
           </Grid>
           <RoleAccessSummary catalog={catalog} role={form.role} />
+          {/* Only while the client has Wholesale Order Status switched on (Client Management →
+              Modules); otherwise there is nothing to permit. */}
+          {tenant.enable_wholesale_order_status !== false && (<>
           <Typography variant="subtitle2" fontWeight={700} sx={{ mt: 1 }}>Feature permissions</Typography>
           <FormControlLabel
             control={<Switch checked={form.can_use_wholesale_order_status}
@@ -200,6 +203,7 @@ function UserDialog({ catalog, tenant, usersUrl, user, onClose, onSaved, allowIn
                 Track dealer orders and mark bills Delivered / Not Delivered (needs the role to open Wholesale Distribution).
               </Typography>
             </Box>} />
+          </>)}
           <Typography variant="subtitle2" fontWeight={700} sx={{ mt: 1 }}>Branch access</Typography>
           <FormControlLabel control={<Switch checked={form.access_all_branches} onChange={(e) => set('access_all_branches', e.target.checked)} />}
             label="All branches" />
